@@ -256,6 +256,12 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
     }
 }
 
+/// Whether leaving `field` out of a full write is a [`FormError::Missing`].
+/// The OpenAPI request schemas mark exactly these `required`.
+pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
+    !field.nullable && !matches!(field.ty, FieldType::Bool)
+}
+
 /// Parse one form value from a raw string.
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
@@ -267,14 +273,15 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
 pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlValue, FormError> {
     let Some(raw) = raw else {
-        return Ok(match field.ty {
-            _ if field.nullable => SqlValue::Null,
-            FieldType::Bool => SqlValue::Bool(false),
-            _ => {
-                return Err(FormError::Missing {
-                    field: field.name.to_owned(),
-                });
-            }
+        if absent_is_missing(field) {
+            return Err(FormError::Missing {
+                field: field.name.to_owned(),
+            });
+        }
+        return Ok(if field.nullable {
+            SqlValue::Null
+        } else {
+            SqlValue::Bool(false)
         });
     };
     if field.nullable && raw.is_empty() {
@@ -1546,10 +1553,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// Pass the optional `pk_value` when validating an UPDATE so the
     /// row being edited isn't reported as its own conflict.
     ///
-    /// v0.38 — tri-dialect via `&crate::sql::Pool`. Identifier quoting
-    /// routes through `dialect.quote_ident` (double-quotes on PG/SQLite,
-    /// backticks on MySQL) and placeholders through
-    /// `dialect.placeholder(n)` (`$N` on PG, `?` on sqlite/mysql).
+    /// Partial unique indexes are skipped; the database still enforces them.
     ///
     /// # Errors
     /// Returns the accumulated [`FormErrors`] when any composite
@@ -1562,9 +1566,9 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     ) -> Result<(), FormErrors> {
         let mut errors = FormErrors::default();
         let pk_field = T::SCHEMA.primary_key();
-        let dialect = pool.dialect();
         for idx in T::SCHEMA.indexes {
-            if !idx.unique || idx.columns.len() < 2 {
+            // A partial index allows duplicates outside its predicate.
+            if !idx.unique || idx.columns.len() < 2 || idx.where_clause.is_some() {
                 continue;
             }
             // Resolve `(column, value)` pairs from this form for every
@@ -1588,48 +1592,29 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             if !all_present {
                 continue;
             }
-            // Build `SELECT COUNT(*) FROM <table> WHERE c1 = ? AND c2 = ?
-            // [...] [AND pk <> ?]` with dialect-aware quoting + placeholders.
-            //
-            // `COUNT(*)` (not `SELECT 1 … LIMIT 1`) because the result is
-            // decoded as `(i64,)`: PG types the literal `1` as `INT4`, so
-            // `SELECT 1` fails to decode into `i64` on Postgres (the
-            // SQLite-only test never caught it). `COUNT(*)` is `bigint` on
-            // PG / MySQL / SQLite alike, so `(i64,)` decodes everywhere.
-            let table_q = dialect.quote_ident(T::SCHEMA.table);
-            let mut sql = format!("SELECT COUNT(*) FROM {table_q} WHERE ");
-            let mut binds: Vec<crate::core::SqlValue> = Vec::new();
-            let mut sep = "";
-            for (i, (col, val)) in bound.iter().enumerate() {
-                sql.push_str(sep);
-                sep = " AND ";
-                let col_q = dialect.quote_ident(col);
-                let ph = dialect.placeholder(i + 1);
-                sql.push_str(&format!("{col_q} = {ph}"));
-                binds.push(val.clone());
-            }
-            let extra_pk_idx = bound.len() + 1;
+            let mut predicates: Vec<crate::core::WhereExpr> = bound
+                .into_iter()
+                .map(|(col, val)| {
+                    crate::core::WhereExpr::Predicate(crate::core::Filter::new(
+                        col,
+                        crate::core::Op::Eq,
+                        val,
+                    ))
+                })
+                .collect();
             if let (Some(pk_field), Some(pk_v)) = (pk_field, pk_value) {
-                let pk_col = dialect.quote_ident(pk_field.column);
-                let ph = dialect.placeholder(extra_pk_idx);
-                sql.push_str(&format!(" AND {pk_col} <> {ph}"));
-                binds.push(pk_v.clone());
+                predicates.push(crate::core::WhereExpr::Predicate(crate::core::Filter::new(
+                    pk_field.column,
+                    crate::core::Op::Ne,
+                    pk_v.clone(),
+                )));
             }
-            // #561 — was a 3-arm `match pool` each doing the same
-            // bind-loop via per-backend `bind_sql_value_inline*` helpers
-            // then `fetch_optional`. The executor's `raw_query_pool` plus
-            // the canonical `bind_match!` macros already handle every
-            // backend's bind shape — collapse to one call. `SELECT COUNT(*)`
-            // returns exactly one row whose `(i64,)` count answers the
-            // existence check (`> 0`).
-            let exists = crate::sql::raw_query_pool::<(i64,)>(&sql, binds, pool)
-                .await
-                .map(|rows| rows.first().is_some_and(|(n,)| *n > 0))
-                .map_err(|e| match e {
-                    crate::sql::ExecError::Driver(err) => err,
-                    other => crate::sql::sqlx::Error::Protocol(format!("{other}")),
-                });
-            match exists {
+            // Through the ORM, like the serializer's check (#2011).
+            let select = crate::core::SelectQuery::new(T::SCHEMA)
+                .where_clause(crate::core::WhereExpr::And(predicates));
+            let hits =
+                crate::sql::count_rows_pool(pool, &crate::core::CountQuery::exists(select)).await;
+            match hits.map(|n| n > 0) {
                 Ok(true) => {
                     let label = idx.columns.join(", ");
                     let msg = format!("a row with the same ({label}) already exists");

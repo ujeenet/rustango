@@ -76,8 +76,9 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 ```rust
 let csp = CspBuilder::new()
     .default_src(&["'self'"])
-    .script_src(&["'self'", "https://cdn.example.com"])
-    .style_src(&["'self'", "'unsafe-inline'"])    // for inline <style>
+    // The placeholder becomes a per-request nonce; the bundled admin uses it.
+    .script_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'", "https://cdn.example.com"])
+    .style_src(&["'self'", "'nonce-__RUSTANGO_NONCE__'"])
     .img_src(&["'self'", "data:", "https:"])
     .font_src(&["'self'", "data:"])
     .connect_src(&["'self'", "wss://realtime.example.com"])
@@ -255,13 +256,13 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — extra origins allowed beside the request's own Host. The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because templates autoescape and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
+`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. That setting governs the layer only: the `template_views` CBVs mint their cookie through `forms::csrf::ensure_token`, which follows `session::secure_cookies()` (the boot policy, else `Secure` on the prod tier). `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — extra origins allowed beside the request's own Host. The Origin check runs even when it is empty: a foreign `Origin` gets `403`, and over TLS so does a POST with no `Origin`. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because templates autoescape and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
 **The auto-admin.** When you call `.with_session_auth(...)`, CSRF is mounted on every admin mutation automatically — create, update, delete, bulk actions, audit cleanup — and every admin form renders its token for you. There is nothing to wire up and no way to opt out.
 
-The condition is deliberate rather than incidental: CSRF defends credentials the browser attaches on its own, so it is the session cookie that makes it meaningful. An admin built without `with_session_auth` has no rustango-managed credential to forge with, and its mutations are reachable directly by anyone who can reach the route — that is an authentication gap, not a CSRF one, and CSRF would not narrow it. If you put your own cookie auth in front of such an admin, mount `csrf::layer()` yourself.
+The condition is deliberate rather than incidental: CSRF defends credentials the browser attaches on its own, so it is the session cookie that makes it meaningful. An admin built without `with_session_auth` has no rustango-managed credential to forge with, and its mutations are reachable directly by anyone who can reach the route — that is an authentication gap, not a CSRF one, and CSRF would not narrow it. That holds only while nothing in front of it is a browser-attached credential. HTTP Basic (`protect_with_basic_auth`) or your own cookie auth is one, so cross-site POSTs ride it — and mounting `csrf::layer()` yourself does not fix it, because the admin renders form tokens only under `with_session_auth`, so every POST 403s. Use `with_session_auth` for a browser-facing admin.
 
 Until [#1395](https://github.com/ujeenet/rustango/issues/1395) this paragraph claimed the protection was unconditional while the only guarded route was `POST /login`. Every other admin mutation accepted a cross-site POST riding the administrator's session — audit cleanup among them, so the same request class could erase its own trace.
 
@@ -570,15 +571,49 @@ Before signing, the query params are sorted into a fixed order, so an attacker c
 
 A webhook is an HTTP callback another service sends you (a payment succeeded, a push happened). Always check its signature so you know it really came from that service and the body wasn't changed. `verify_signature` handles the common formats.
 
+Stripe and Slack do not sign the body alone: they sign a timestamp joined to it, and that timestamp is what stops a replay. Build that string yourself and check the timestamp, as below. Stripe signs `"{t}.{body}"` with your whole `whsec_…` secret as the key; Slack signs `"v0:{ts}:{body}"` and sends `v0=<hex>`.
+
 ```rust
+use axum::{body::Bytes, http::HeaderMap, http::StatusCode};
 use rustango::webhook::{verify_signature, SignatureFormat};
 
-async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    let signature = headers.get("stripe-signature")
+/// Stripe sends `Stripe-Signature: t=<unix>,v1=<hex>[,v1=<hex>]`
+/// and signs `"{t}.{body}"`, not the body alone.
+fn verify_stripe(secret: &[u8], header: &str, body: &[u8], now: i64, tolerance: i64) -> bool {
+    let mut ts = None;
+    let mut sigs = Vec::new();
+    for part in header.split(',') {
+        match part.split_once('=') {
+            Some(("t", t)) => ts = Some(t),
+            Some(("v1", sig)) => sigs.push(sig),
+            _ => {}
+        }
+    }
+    let Some(ts) = ts else { return false };
+    let Ok(t) = ts.parse::<i64>() else {
+        return false;
+    };
+    if (now - t).abs() > tolerance {
+        return false; // stale or future-dated: a replay
+    }
+    let mut signed = format!("{ts}.").into_bytes();
+    signed.extend_from_slice(body);
+    sigs.iter()
+        .any(|sig| verify_signature(SignatureFormat::HexSha256, secret, &signed, sig))
+}
+
+async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> StatusCode {
+    let Ok(secret) = std::env::var("STRIPE_WEBHOOK_SECRET") else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    let header = headers
+        .get("stripe-signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
-    if !verify_signature(SignatureFormat::HexSha256, secret, &body, signature) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    if !verify_stripe(secret.as_bytes(), header, &body, now, 300) {
         return StatusCode::UNAUTHORIZED;
     }
     // ... process the verified payload
@@ -586,11 +621,11 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> impl IntoResp
 }
 ```
 
-| Format | Used by |
-|---|---|
-| `HexSha256WithPrefix` | GitHub (`sha256=<hex>`) |
-| `HexSha256` | Slack, raw HMAC providers |
-| `Base64Sha256` | Stripe, AWS SNS |
+| Format | Signs | Used by |
+|---|---|---|
+| `HexSha256WithPrefix` | body, `sha256=<hex>` | GitHub (`X-Hub-Signature-256`) |
+| `HexSha256` | whatever bytes you pass, raw hex | Stripe `v1=` / Slack `v0=` values over the strings above |
+| `Base64Sha256` | body, standard base64 | Shopify (`X-Shopify-Hmac-Sha256`) |
 
 The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
 

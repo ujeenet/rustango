@@ -292,7 +292,7 @@ async fn list_pk_columns(
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_fks(
+pub(super) async fn list_fks(
     pool: &Pool,
     schema: &str,
     table: &str,
@@ -363,6 +363,54 @@ pub(super) async fn index_columns(
     }
     .map_err(MigrateError::Driver)?;
     Ok(rows)
+}
+
+/// Whether index `name` exists, whatever it is on: an expression key has no
+/// column for [`index_columns`] to read.
+#[cfg_attr(
+    not(all(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
+pub(super) async fn index_exists(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+    name: &str,
+) -> Result<bool, MigrateError> {
+    let n: i64 =
+        match pool {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(pg) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_class i JOIN pg_namespace n ON n.oid = i.relnamespace \
+                 WHERE i.relkind IN ('i', 'I') AND n.nspname = $1 AND i.relname = $2",
+            )
+            .bind(schema)
+            .bind(name)
+            .fetch_one(pg)
+            .await,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(my) => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS \
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
+                )
+                .bind(table)
+                .bind(name)
+                .fetch_one(my)
+                .await
+            }
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(sq) => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+                )
+                .bind(name)
+                .fetch_one(sq)
+                .await
+            }
+        }
+        .map_err(MigrateError::Driver)?;
+    Ok(n > 0)
 }
 
 #[cfg_attr(

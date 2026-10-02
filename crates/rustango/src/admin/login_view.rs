@@ -73,7 +73,11 @@ async fn login_response(
     error: Option<&str>,
 ) -> Response {
     use crate::forms::csrf;
-    let (token, set_cookie) = csrf::ensure_token(headers, csrf::CSRF_COOKIE);
+    // Under `protect_with_csrf` the outer layer already chose the token (#2131).
+    let (token, set_cookie) = match super::session::current_csrf_token() {
+        Some(token) => (token, None),
+        None => csrf::ensure_token(headers, csrf::CSRF_COOKIE),
+    };
     let html = render_login_form(state, error, &csrf::csrf_input_html(&token)).await;
     let mut resp = Html(html).into_response();
     if let Some(cookie) = set_cookie {
@@ -946,10 +950,11 @@ pub(crate) async fn require_session(
 fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
     let username = crate::text::html_escape(&session.username);
     let logout_path = crate::text::html_escape(logout_path);
+    let nonce = crate::csp_nonce::nonce_attr();
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\
-         <style>body{{font-family:system-ui;max-width:42em;margin:4em auto;padding:0 1em;line-height:1.5}}\
+         <style{nonce}>body{{font-family:system-ui;max-width:42em;margin:4em auto;padding:0 1em;line-height:1.5}}\
          h1{{font-size:1.4em}}\
          .meta{{color:#666;font-size:.9em}}\
          </style></head><body>\
@@ -1160,5 +1165,25 @@ mod prefix_tests {
             .unwrap();
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains(r#"action="/adm/logout""#), "{body}");
+    }
+
+    /// #1703 — its inline style carries the request's CSP nonce.
+    #[tokio::test]
+    async fn forbidden_page_style_carries_the_nonce() {
+        let session = AdminSession {
+            user_id: 1,
+            username: "u".into(),
+            is_superuser: false,
+        };
+        let res =
+            crate::csp_nonce::scoped("N0nce", async { forbidden_page(&session, "/logout") }).await;
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        crate::testkit::assert_strict_csp_html(
+            &String::from_utf8_lossy(&body),
+            "N0nce",
+            "403 page",
+        );
     }
 }

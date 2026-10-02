@@ -28,7 +28,7 @@ Recent releases added a batch of features that aren't yet woven into every secti
 - **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validate now, mutate the prepared write set, commit when ready.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — a custom-manager extension trait emitted next to the model, so you can hang your own query shortcuts off it. It also lets one physical table carry several "personalities" through per-trait methods. See `inheritance.rs:98-127`.
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — emits an empty marker trait next to the model. It adds no methods: put your query shortcuts on your own extension trait over `QuerySet<Foo>`, as `crates/rustango/src/manager.rs` shows.
 - **`manage makemigrations --merge`** (#346, v0.42) — a merge node that reunites divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
 
 The CHANGELOG carries the full ticket index for each release.
@@ -864,8 +864,8 @@ let featured = Author::objects()
 
 **Caveats:**
 
-- **`IN (SELECT …)` projection narrowing**: PG strictly requires the inner SELECT to project exactly one column for the `<col> IN (…)` form. **Rustango** doesn't ship `.values("col")`-style projection narrowing yet (issue #62), so the inner queryset always projects every model column — which makes `in_subquery` only work today against tables whose model has a single column. For the multi-column case, reach for `exists(inner.where_(<outer col>.eq_expr(outer_ref(...))))` — it has the same semantics and doesn't depend on the projection shape.
-- **Scalar `subquery(...)` requires a one-column-one-row inner**: the SQL emitted is `SET col = (SELECT …)` — if the inner produces more than one row, the database errors at runtime. Constrain via `.limit(1)` and either narrow projection (once it lands) or design the inner around a uniqueness invariant.
+- **`IN (SELECT …)` projection narrowing**: PG strictly requires the inner SELECT to project exactly one column for the `<col> IN (…)` form. Narrow the inner queryset with `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` projects only `author_id` on every backend. A plain `QuerySet::compile()` projects every model column, so pass it only for a single-column model.
+- **Scalar `subquery(...)` requires a one-column-one-row inner**: the SQL emitted is `SET col = (SELECT …)` — if the inner produces more than one row, the database errors at runtime. Constrain via `.limit(1)` and either narrow the projection with `values_list_flat` or design the inner around a uniqueness invariant.
 - **Subquery compile-time validation lives on the inner queryset**: column typos surface at the inner `queryset.compile()?` call, not at the outer query's `compile()`. Build the inner first and propagate `?`.
 
 ### When to drop to raw SQL instead
@@ -915,7 +915,7 @@ You rarely write `GROUP BY` yourself — **Rustango** infers it from the query's
 | **Window-only** | `.aggregate().annotate("rn", row_number()…)` | (no `GROUP BY` — window funcs are per-row) |
 | **Explicit override** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — explicit wins |
 
-The classifier `AggregateExpr::is_aggregating()` distinguishes the row-collapsing variants (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus recursive `Filtered` / `Coalesced` wrappers) from `Window`, which is per-row. Only the aggregating variants trigger Shape 3 inference.
+The classifier `AggregateExpr::is_aggregating()` distinguishes the row-collapsing variants (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` / `AnyValue` / `ArrayAgg` / `StringAgg` / `JsonbAgg` / `RelatedAggregate` — plus recursive `Filtered` / `Coalesced` wrappers) from `Window`, which is per-row. Only the aggregating variants trigger Shape 3 inference.
 
 ```rust
 use rustango::core::aggregates::{count_all, sum};
@@ -1007,7 +1007,7 @@ The writer applies the dialect's int/float cast (`::bigint`, `CAST(... AS SIGNED
 
 ### Window functions
 
-Compute running totals, rankings, and row-over-row deltas without collapsing rows. Eight functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE frames. Every backend **Rustango** supports (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) ships native `OVER (…)` syntax, so emission is uniform.
+Compute running totals, rankings, and row-over-row deltas without collapsing rows. Fourteen functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `sum_over`, `avg_over`, `min_over`, `max_over`, `count_over`, `count_column_over`) plus ROWS/RANGE frames. Every backend **Rustango** supports (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) ships native `OVER (…)` syntax, so emission is uniform.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1075,6 +1075,12 @@ let q = Post::objects()
 | `lead(col, offset, default)` | `LEAD(col, offset, default?)` | column + offset + optional default |
 | `first_value(col)` | `FIRST_VALUE(col)` | column |
 | `last_value(col)` | `LAST_VALUE(col)` | column |
+| `sum_over(col)` | `SUM(col)` | column |
+| `avg_over(col)` | `AVG(col)` | column |
+| `min_over(col)` | `MIN(col)` | column |
+| `max_over(col)` | `MAX(col)` | column |
+| `count_column_over(col)` | `COUNT(col)` | column |
+| `count_over()` | `COUNT(*)` | — |
 
 Each returns a `WindowBuilder` with three chainable modifiers:
 
@@ -1570,14 +1576,15 @@ pub struct Post {
 Use:
 
 ```rust
-post.soft_delete_on(&pool).await?;     // sets deleted_at = NOW()
-post.restore_on(&pool).await?;          // sets deleted_at = NULL
+post.soft_delete(&pool).await?;        // sets deleted_at = NOW()
+post.restore(&pool).await?;            // sets deleted_at = NULL
+post.force_delete(&pool).await?;       // real DELETE
 
 // Default queries DO include soft-deleted rows. Filter explicitly:
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-The admin's "Delete" button auto-routes to `soft_delete_on` for any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` opts back in. Making exclusion the default is tracked in [#820](https://github.com/ujeenet/rustango/issues/820).
+These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
 
 ---
 

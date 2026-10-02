@@ -129,9 +129,10 @@ Praktische Konsequenzen:
 
 ## Der eingebaute Katalog
 
-Jeder Eintrag ist ein `tower::Layer` mit einem passenden
-`…RouterExt`-Einzeiler, sofern nicht anders vermerkt. Bring den
-`…RouterExt`-Trait des Moduls in den Scope, um die Methode zu erhalten.
+Die meisten Einträge sind Config-Structs, die ihr `…RouterExt`-Einzeiler
+installiert, keine `tower::Layer` — die wenigen, die `.layer(…)` annehmen, stehen
+im Abschnitt oben. Bring den `…RouterExt`-Trait des Moduls in den Scope, um die
+Methode zu erhalten.
 
 | Thema | Layer | Verdrahten mit |
 | --- | --- | --- |
@@ -392,9 +393,9 @@ jedes Formular. Das `| safe` ist Pflicht: Tera escapt `.html` automatisch, ohne
 es trägt das Formular kein `_csrf`-Feld und jedes POST endet in 403. Das
 Login-Formular des Admins macht genau das — siehe
 `crates/rustango/src/admin/templates/login.html`. Überschreibe die Cookie-/Header-Namen oder das `Secure`-Flag mit
-`csrf::with_config(CsrfConfig)`; für SPA-Setups füge
-`.with_trusted_origins([...])` hinzu, um die Defense-in-Depth-Prüfung des
-Origin-Headers zusätzlich zum Token zu aktivieren. Für Append-only-Collector-
+`csrf::with_config(CsrfConfig)`; die Prüfung des
+Origin-Headers läuft immer und akzeptiert den eigenen Host der Anfrage; eine SPA
+auf einem anderen Origin fügst du mit `.with_trusted_origins([...])` hinzu. Für Append-only-Collector-
 Endpoints, die über `navigator.sendBeacon` (z. B. Analytics) angesprochen werden
 und keinen Token-Header senden können, überspringt
 `CsrfConfig::exempt_prefix("/path")` die Durchsetzung für ein schmales

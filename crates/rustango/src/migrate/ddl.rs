@@ -479,7 +479,7 @@ fn write_check_constraint(s: &mut String, dialect: &dyn Dialect, field: &FieldSc
 /// Auto<DateTime<Utc>>` would emit `BIGSERIAL DEFAULT now()`, and
 /// Postgres rejects two defaults on one column.
 fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
-    if field.auto && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) {
+    if field.is_serial() {
         return dialect.serial_type(field.ty).to_owned();
     }
     // Case-insensitive text only means something for `String`.

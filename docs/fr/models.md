@@ -264,7 +264,7 @@ pub author: ForeignKey<Author>,
 
 `ForeignKey<T>` prend par défaut `i64` comme type de clé ; si la PK du parent est d'un
 type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
-`#[rustango(o2o)]` ; le plusieurs-à-plusieurs est une table séparée — voir
+`#[rustango(o2o = "parent_table")]` ; le plusieurs-à-plusieurs est une table séparée — voir
 [cookbook ORM → Plusieurs-à-plusieurs](orm.md#plusieurs-à-plusieurs). Chargez les lignes liées de manière anticipée avec
 `select_related` (également dans le guide ORM).
 
@@ -284,7 +284,7 @@ type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 | `auto_now_add` | `#[rustango(auto_now_add)]` | réglé à l'heure actuelle à l'**insertion** (sur un `Auto<DateTime<Utc>>`) |
 | `auto_now` | `#[rustango(auto_now)]` | réglé à l'heure actuelle à **chaque save** |
 | `column = "…"` | `#[rustango(column = "account_no")]` | renomme la colonne SQL |
-| `null` / `Option<T>` | `pub note: Option<String>` | colonne nullable |
+| `Option<T>` | `pub note: Option<String>` | colonne nullable (il n'y a pas d'attribut `null`) |
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | validation de plage à l'écriture |
 | `blank` / `editable` | `#[rustango(editable = false)]` | comportement formulaire/admin |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | COMMENT de colonne |
@@ -319,7 +319,7 @@ Déclarés sur le **modèle** :
 ```
 
 - **`index(...)`** — un index btree par défaut ; choisissez une méthode pour PostgreSQL
-  avec `index(columns = "body", method = "gin")` (aussi `gist`, `brin`, `hash`,
+  avec `index("body", method = "gin")` (aussi `gist`, `brin`, `hash`,
   `bloom`, `spgist`).
 - **`unique_together` / `index_together`** — unicité / index non unique multi-colonnes.
 - **Index partiels** — `unique_when(...)` / `index_when(...)` ajoutent une condition
@@ -403,11 +403,11 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `default_permissions` | `"add, change, delete, view"` | auto-permissions à créer |
 | `default_related_name` | `"posts"` | nom de l'accesseur inverse sur le parent |
 | `base_manager_name` | `"all_objects"` | nom du manager de base (non filtré) |
-| `manager(ext = "Trait")` | chemin de trait | génère un trait d'extension de manager personnalisé |
+| `manager(ext = "Trait")` | chemin de trait | émet un trait marqueur vide (sans méthodes) |
 | `manager_fn` | `"published"` | ajoute un accesseur de manager en plus de `objects()` |
 | `get_latest_by` | `"created_at"` | colonne par défaut pour `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | ordre des lignes enfants relatif au parent |
-| `index(...)` | `columns`, `method`, `name` | index secondaire (btree/gin/gist/brin/hash/bloom/spgist) |
+| `index(...)` | `"cols"`, then `unique`, `name`, `method` | index secondaire (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | contrainte d'unicité composite |
 | `index_together` | `"a, b"` | index composite non unique |
 | `unique_when(...)` / `index_when(...)` | colonnes + `condition` | index partiel (conditionnel) |
@@ -422,6 +422,13 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `required_db_features` / `required_db_vendor` | liste / fournisseur | contraintes de validation de déploiement |
 | `db_table_comment` | `"…"` | COMMENT de table |
 | `admin(...)` | options admin | configuration de l'UI admin (voir [admin.md](admin.md)) |
+| `fk_composite(...)` / `generic_fk(...)` | spécification | FK composite / FK générique (content-type) |
+| `m2m(...)` / `generic_m2m(...)` | spécification | relation plusieurs-à-plusieurs / plusieurs-à-plusieurs générique |
+| `managed` | `true` / `false` | `false` = la table vous appartient ; les migrations l'ignorent |
+| `view` | indicateur | le modèle lit une vue de la base |
+| `permissions` | indicateur / `true` / `false` | active (ou désactive) les permissions générées |
+| `extra_permissions` | `"codename:Label, …"` | codenames de permission supplémentaires |
+| `verbose_name` / `verbose_name_plural` | `"Label"` | nom lisible du modèle dans l'admin/les formulaires |
 
 ### Au niveau du champ (sur un champ)
 
@@ -431,7 +438,6 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `column` | `"name"` | renomme la colonne SQL |
 | `max_length` | `N` | `VARCHAR(N)` + validation de longueur |
 | `default` | `"sql literal"` | DEFAULT de colonne |
-| `null` | indicateur | nullable (ou utilisez `Option<T>`) |
 | `unique` | indicateur | contrainte d'unicité |
 | `index` / `index(...)` | indicateur, ou `unique`, `name`, `method` | index mono-colonne sur ce champ |
 | `choices` | `"v:Label, …"` | valeurs énumérées |
@@ -444,12 +450,12 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK |
 | `auto_now` | indicateur | réglé à l'heure actuelle à chaque save |
 | `auto_now_add` | indicateur | réglé à l'heure actuelle à l'insertion |
+| `soft_delete` | indicateur | marque l'horodatage de suppression douce (`Option<DateTime<Utc>>`) |
 | `auto_uuid` | indicateur | UUID v4 côté Rust (sur `Auto<Uuid>`) |
 | `default_uuid_v7` | indicateur | UUID v7 triable côté Rust |
 | `fk` + `on` | `"table"`, `"col"` | colonne de clé étrangère |
-| `cascade` | indicateur | `ON DELETE CASCADE` |
-| `o2o` | indicateur | relation un-à-un |
-| `fk_composite(...)` / `generic_fk(...)` | spécification | FK composite / FK générique (content-type) |
+| `on_delete` | `"cascade"` / `"restrict"` / `"set_null"` / `"set_default"` / `"no_action"` | action `ON DELETE` de la FK |
+| `o2o` | `"table"` | FK un-à-un vers cette table |
 | `generated_as` | `"expr"` | colonne calculée (générée) par la base de données |
 | `citext` | indicateur | texte insensible à la casse (CITEXT PostgreSQL) |
 | `vector(dims = N)` | `N` | dimension pgvector |

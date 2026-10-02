@@ -579,6 +579,10 @@ async fn migrate_with_ledger_body(
                     apply_one(pool, &mig, ledger).await?;
                     Outcome::Ran
                 }
+                ReconcileAction::RunOutside(existing) => {
+                    apply_one(pool, &outside_tables(&mig, &existing), ledger).await?;
+                    Outcome::RanPartial { skipped: existing }
+                }
             })
         }
         .await;
@@ -848,21 +852,31 @@ fn preview_migration(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.snapshot, dialect, None)?;
+                let step = render_step(change, &mig.forward, &mig.snapshot, dialect, None)?;
                 // The runner looks these names up live; a migrate-built FK has this one.
-                if let (Some((table, column)), Some(_)) =
-                    (&step.dropped_column, dialect.foreign_key_names_sql())
-                {
-                    let fk = before
-                        .table(table)
-                        .and_then(|t| t.field(column))
-                        .and_then(|f| f.fk.as_ref());
-                    if fk.is_some() {
-                        let name = ddl::fk_constraint_name(table, column);
-                        statements.extend(dialect.drop_foreign_key_sql(table, &name));
+                if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
+                    let has_fk = before
+                        .table(&fk.table)
+                        .and_then(|t| t.field(&fk.column))
+                        .is_some_and(|f| f.fk.is_some());
+                    if has_fk {
+                        let name = ddl::fk_constraint_name(&fk.table, &fk.column);
+                        statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
                     }
                 }
+                // Apply drops the name it finds in the catalog; this is the usual one.
+                if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
+                    let name = ddl::unique_constraint_name(&u.table, &u.column);
+                    statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+                }
                 statements.extend(step.batch.immediate);
+                if let Some(rebuild) = &step.batch.rebuild {
+                    statements.extend(rebuild.statements(dialect));
+                    statements.push(format!(
+                        "-- re-create the indexes and triggers of {}",
+                        rebuild.table()
+                    ));
+                }
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
@@ -904,17 +918,17 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_in_schema(
-                    std::slice::from_ref(change),
+                let step = render_step(
+                    change,
+                    &mig.forward,
                     &mig.snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
+                )?;
+                for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
-                deferred_fks.extend(batch.deferred_fks);
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -1351,17 +1365,17 @@ async fn unapply_atomic(
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_in_schema(
-                    std::slice::from_ref(change),
+                let step = render_step(
+                    change,
+                    inverted,
                     snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
+                )?;
+                for stmt in pg_statements(&mut tx, &step).await? {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
-                deferred_fks.extend(batch.deferred_fks);
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -1394,17 +1408,18 @@ async fn unapply_loose(
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_in_schema(
-                    std::slice::from_ref(change),
+                let step = render_step(
+                    change,
+                    inverted,
                     snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
-                    sqlx::query(&stmt).execute(pool).await?;
+                )?;
+                let mut conn = pool.acquire().await?;
+                for stmt in pg_statements(&mut conn, &step).await? {
+                    sqlx::query(&stmt).execute(&mut *conn).await?;
                 }
-                deferred_fks.extend(batch.deferred_fks);
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
@@ -1434,17 +1449,18 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = super::diff::render_changes_split_in_schema(
-                    std::slice::from_ref(change),
+                let step = render_step(
+                    change,
+                    &mig.forward,
                     &mig.snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
-                )
-                .map_err(MigrateError::Validation)?;
-                for stmt in batch.immediate {
-                    sqlx::query(&stmt).execute(pool).await?;
+                )?;
+                let mut conn = pool.acquire().await?;
+                for stmt in pg_statements(&mut conn, &step).await? {
+                    sqlx::query(&stmt).execute(&mut *conn).await?;
                 }
-                deferred_fks.extend(batch.deferred_fks);
+                deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
@@ -1525,6 +1541,17 @@ async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(
     );
     crate::sql::raw_execute_pool(pool, &create_sql, ::std::vec::Vec::new()).await?;
     Ok(())
+}
+
+/// `ledger`'s names, creating it first: on PG a read before a tenant schema
+/// has its ledger finds `public`'s, and the cached plan keeps it (#2143).
+pub(crate) async fn ledger_names(
+    _: LockHeld,
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<HashSet<String>, MigrateError> {
+    create_ledger_locked(pool, ledger).await?;
+    applied_set_pool_with_ledger(pool, ledger).await
 }
 
 /// The statement that records a migration as applied — one column list
@@ -1847,6 +1874,10 @@ async fn reconcile_and_apply(
                     std::borrow::Cow::Owned(without_tables(mig, &existing)),
                     Outcome::RanPartial { skipped: existing },
                 ),
+                ReconcileAction::RunOutside(existing) => (
+                    std::borrow::Cow::Owned(outside_tables(mig, &existing)),
+                    Outcome::RanPartial { skipped: existing },
+                ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
             apply_one_pool(pool, &effective, ledger).await?;
@@ -1870,6 +1901,9 @@ enum ReconcileAction {
     /// already exist (created by the retired `ensure_*` DDL of an older
     /// build). Only the framework's own system chain uses this.
     RunPartial(Vec<String>),
+    /// Apply only the schema ops on other tables: a squash whose tables
+    /// already exist still carries changes to tables it does not create.
+    RunOutside(Vec<String>),
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1940,6 +1974,45 @@ async fn reconcile(
         }
         let existing = count_existing_tables(pool, &targets).await;
         if existing == targets.len() {
+            // Its changes to other tables: run them if none ran, fake if all did.
+            let outside: Vec<&super::SchemaChange> = mig
+                .forward
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Schema(c) if !targets.iter().any(|t| t == c.table()) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let (present, absent) = applied_counts(pool, &outside).await?;
+            if present > 0 && absent > 0 {
+                return Err(MigrateError::Validation(format!(
+                    "cannot reconcile squash `{}`: its tables exist and {present} of its other \
+                     changes are applied, {absent} are not. The database is in a partial \
+                     state — resolve it by hand (see `migrate --fake <name>`).",
+                    mig.name
+                )));
+            }
+            if absent > 0 {
+                if mig
+                    .forward
+                    .iter()
+                    .any(|op| !matches!(op, Operation::Schema(_)))
+                {
+                    return Err(MigrateError::Validation(format!(
+                        "cannot reconcile squash `{}`: its tables exist but its other changes \
+                         do not, and whether its data operations ran is unknown. Resolve it \
+                         by hand (see `migrate --fake <name>`).",
+                        mig.name
+                    )));
+                }
+                tracing::info!(
+                    migration = %mig.name,
+                    tables = %targets.join(", "),
+                    "reconciling squash — its tables already exist (cross-ledger); \
+                     running only its changes to other tables"
+                );
+                return Ok(ReconcileAction::RunOutside(targets));
+            }
             tracing::info!(
                 migration = %mig.name,
                 tables = %targets.join(", "),
@@ -2032,6 +2105,73 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
     }
 }
 
+/// How many of `changes` the live schema shows applied and not applied;
+/// a change it cannot tell counts as neither.
+async fn applied_counts(
+    pool: &crate::sql::Pool,
+    changes: &[&super::SchemaChange],
+) -> Result<(usize, usize), MigrateError> {
+    use super::SchemaChange as SC;
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    let (mut present, mut absent) = (0, 0);
+    for change in changes {
+        let applied = match change {
+            SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. } => {
+                Some(table_exists_here(pool, t).await)
+            }
+            SC::DropTable(t) | SC::DropM2MTable { through: t } => {
+                Some(!table_exists_here(pool, t).await)
+            }
+            SC::AddColumn { table, column } => Some(
+                super::ensure::live_columns(pool, table)
+                    .await?
+                    .contains(column),
+            ),
+            SC::DropColumn { table, column } => Some(
+                !super::ensure::live_columns(pool, table)
+                    .await?
+                    .contains(column),
+            ),
+            SC::CreateIndex { name, table, .. } => Some(
+                !super::inspectdb::index_columns(pool, &schema, table, name)
+                    .await?
+                    .is_empty(),
+            ),
+            SC::DropIndex { name, table } => Some(
+                super::inspectdb::index_columns(pool, &schema, table, name)
+                    .await?
+                    .is_empty(),
+            ),
+            _ => None,
+        };
+        match applied {
+            Some(true) => present += 1,
+            Some(false) => absent += 1,
+            None => {}
+        }
+    }
+    Ok((present, absent))
+}
+
+/// `mig` with only its schema ops on tables outside `existing`.
+fn outside_tables(mig: &Migration, existing: &[String]) -> Migration {
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| match op {
+            Operation::Schema(c) => !existing.iter().any(|e| e == c.table()),
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
+}
+
 /// The migrations in `all` that still need to be considered, given the
 /// `applied` ledger set.
 ///
@@ -2059,10 +2199,13 @@ fn pending_migrations(all: &[Migration], applied: &HashSet<String>) -> Vec<Migra
 /// alongside its `CreateTable`s, and it is the created tables that tell us
 /// whether the end state is already present.
 fn create_table_targets(mig: &Migration) -> Vec<String> {
+    use super::diff::SchemaChange as SC;
     mig.forward
         .iter()
         .filter_map(|op| match op {
-            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
+            Operation::Schema(SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. }) => {
+                Some(t.clone())
+            }
             _ => None,
         })
         .collect()
@@ -2541,15 +2684,29 @@ struct Step {
     /// SQLite's retry for an AddColumn on a table with rows (#2017).
     #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     retry: Option<super::ensure::FilledTableRetry>,
-    /// A dropped column whose FKs MySQL must drop first (1828) (#1981).
+    /// Live FKs on a column to drop by catalog name before the step.
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+    drop_fks: Option<ColumnRef>,
+    /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
-    dropped_column: Option<(String, String)>,
+    drop_unique: Option<ColumnRef>,
 }
 
-/// Render `change`, which moves the schema to `after`; FK targets are
-/// pinned to `schema`, the creation schema (#1718).
+/// A column whose FKs or UNIQUE the runner finds by name in the catalog:
+/// a dropped column's FKs, which MySQL keeps (1828) (#1981), one being
+/// replaced (#1557), or an index under an altered column (#1676).
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+struct ColumnRef {
+    table: String,
+    column: String,
+    /// Declared indexes that stay.
+    keep: Vec<String>,
+}
+
+/// Render `change`, one of `ops`, which together move the schema to `after`.
 fn render_step(
     change: &super::SchemaChange,
+    ops: &[Operation],
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -2561,27 +2718,135 @@ fn render_step(
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
         .map_err(MigrateError::Validation)?;
-    let dropped_column = match change {
-        super::SchemaChange::DropColumn { table, column } => Some((table.clone(), column.clone())),
+    use super::SchemaChange as SC;
+    let at_column = |table: &str, column: &str| ColumnRef {
+        table: table.to_owned(),
+        column: column.to_owned(),
+        keep: super::diff::declared_indexes(after, table),
+    };
+    let has_fk = |table: &str, column: &str| {
+        after
+            .table(table)
+            .and_then(|t| t.field(column))
+            .is_some_and(|f| f.fk.is_some())
+    };
+    let drop_fks = match change {
+        SC::DropColumn { table, column } | SC::AlterFkOnDelete { table, column, .. } => {
+            Some(at_column(table, column))
+        }
+        // MySQL re-adds it after the MODIFY or the index drop (3780, 1553).
+        SC::AlterColumnType { table, column, .. }
+        | SC::AlterColumnMaxLength { table, column, .. }
+        | SC::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } if dialect.modifies_whole_column() && has_fk(table, column) => {
+            Some(at_column(table, column))
+        }
         _ => None,
     };
+    let drop_unique = match change {
+        SC::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } => Some(at_column(table, column)),
+        _ => None,
+    };
+    // The changes SQLite makes by rebuilding the table.
+    let rebuilt = match change {
+        SC::DropColumn { table, .. }
+        | SC::AlterFkOnDelete { table, .. }
+        | SC::AlterColumnType { table, .. }
+        | SC::AlterColumnNullable { table, .. }
+        | SC::AlterColumnDefault { table, .. }
+        | SC::AlterColumnMaxLength { table, .. }
+        | SC::AlterColumnUnique { table, .. }
+        | SC::AddCheckConstraint { table, .. }
+        | SC::DropCheckConstraint { table, .. }
+        | SC::AddCompositeFk { table, .. }
+        | SC::DropCompositeFk { table, .. } => Some(table.as_str()),
+        _ => None,
+    };
+    // The ops after `change`, which is borrowed from `ops`.
+    let later = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[i + 1..]);
+    // A rebuild takes the table's shape at this op, not at the end (#2121).
+    let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
+        Some(table) if later.iter().any(|op| touches_table(op, table)) => {
+            let mut at = after.clone();
+            let shape =
+                super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
+            at.tables.retain(|t| t.name != table);
+            at.tables.push(shape);
+            at.checks.retain(|c| {
+                !later.iter().any(|op| {
+                    matches!(op, Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
+                })
+            });
+            Some(at)
+        }
+        _ => None,
+    };
+    let mut batch = render(at.as_ref().unwrap_or(after)).map_err(MigrateError::Validation)?;
+    // A rebuild already leaves every column the later ops drop.
+    batch.rebuild = batch.rebuild.map(|r| {
+        let dropped: Vec<&str> = later
+            .iter()
+            .filter_map(|op| match op {
+                Operation::Schema(super::SchemaChange::DropColumn { table, column })
+                    if table == r.table() =>
+                {
+                    Some(column.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        dropped.into_iter().fold(r, |r, c| r.dropping(c))
+    });
     Ok(Step {
-        batch: render(after).map_err(MigrateError::Validation)?,
+        batch,
         retry,
-        dropped_column,
+        drop_fks,
+        drop_unique,
     })
+}
+
+/// Whether `op` changes `table` or renames it.
+fn touches_table(op: &Operation, table: &str) -> bool {
+    matches!(op, Operation::Schema(c) if c.table() == table)
+}
+
+/// Whether any of `ops` rebuilds a table, so FK enforcement must go off.
+#[cfg(feature = "sqlite")]
+fn rebuilds(ops: &[Operation], after: &SchemaSnapshot) -> Result<bool, MigrateError> {
+    for op in ops {
+        if let Operation::Schema(change) = op {
+            if render_step(change, ops, after, &crate::sql::Sqlite, None)?
+                .batch
+                .rebuild
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Run `step` on SQLite, retrying an ADD COLUMN refused for a non-constant
 /// DEFAULT, as `ensure` does. Returns the deferred FK statements.
 #[cfg(feature = "sqlite")]
 async fn run_step_sqlite(
-    conn: &mut sqlx::SqliteConnection,
+    tx: &mut super::rebuild::RebuildTx<'_>,
     step: Step,
 ) -> Result<Vec<String>, MigrateError> {
     let Step { batch, retry, .. } = step;
     for (i, stmt) in batch.immediate.iter().enumerate() {
-        let Err(e) = sqlx::query(stmt).execute(&mut *conn).await else {
+        let Err(e) = sqlx::query(stmt).execute(&mut **tx).await else {
             continue;
         };
         // The ADD COLUMN is the first statement; nothing ran before it.
@@ -2591,46 +2856,163 @@ async fn run_step_sqlite(
         };
         tracing::warn!(target: "rustango::migrate", "column {}", retry.warning);
         for stmt in &retry.batch.immediate {
-            sqlx::query(stmt).execute(&mut *conn).await?;
+            sqlx::query(stmt).execute(&mut **tx).await?;
         }
         return Ok(retry.batch.deferred_fks);
+    }
+    if let Some(rebuild) = &batch.rebuild {
+        rebuild.run(tx).await?;
     }
     Ok(batch.deferred_fks)
 }
 
-/// `step`'s statements on MySQL: the FKs of a dropped column first, by
-/// their deployed names, which renames and old 64-byte names don't match.
+/// `step`'s statements on `$conn`, after dropping its live FKs by their
+/// catalog names, which renames and old 64-byte names don't match.
+#[cfg(any(feature = "mysql", feature = "postgres"))]
+macro_rules! step_statements {
+    ($conn:expr, $step:expr, $dialect:expr) => {{
+        use crate::sql::Dialect as _;
+        let (step, dialect): (&Step, _) = ($step, $dialect);
+        let mut out = Vec::new();
+        if let (Some(fk), Some(sql)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
+            let names: Vec<String> = sqlx::query_scalar(sql)
+                .bind(&fk.table)
+                .bind(&fk.column)
+                .fetch_all(&mut *$conn)
+                .await?;
+            out.extend(
+                names
+                    .iter()
+                    .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+            );
+        }
+        if let (Some(u), Some(sql)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
+            let names: Vec<String> = sqlx::query_scalar(sql)
+                .bind(&u.table)
+                .bind(&u.column)
+                .fetch_all(&mut *$conn)
+                .await?;
+            out.extend(
+                names
+                    .iter()
+                    .filter(|n| !u.keep.contains(n))
+                    .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
+            );
+        }
+        out.extend(step.batch.immediate.iter().cloned());
+        Ok(out)
+    }};
+}
+
 #[cfg(feature = "mysql")]
 async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
     step: &Step,
 ) -> Result<Vec<String>, sqlx::Error> {
-    use crate::sql::Dialect as _;
-    let dialect = crate::sql::MySql;
-    let mut out = Vec::new();
-    if let (Some((table, column)), Some(sql)) =
-        (&step.dropped_column, dialect.foreign_key_names_sql())
-    {
-        let names: Vec<String> = sqlx::query_scalar(sql)
-            .bind(table)
-            .bind(column)
-            .fetch_all(&mut *conn)
-            .await?;
-        out.extend(
-            names
-                .iter()
-                .filter_map(|n| dialect.drop_foreign_key_sql(table, n)),
-        );
+    step_statements!(conn, step, crate::sql::MySql)
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_statements(
+    conn: &mut sqlx::PgConnection,
+    step: &Step,
+) -> Result<Vec<String>, sqlx::Error> {
+    step_statements!(conn, step, crate::sql::Postgres)
+}
+
+/// Where a migration's transaction records it in the ledger.
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy)]
+enum LedgerWrite<'a> {
+    Insert(&'a str),
+    Delete(&'a str),
+}
+
+/// Run `ops` on SQLite in one transaction, FK enforcement off around it
+/// when one of them rebuilds a table.
+#[cfg(feature = "sqlite")]
+async fn atomic_sqlite(
+    sq: &sqlx::SqlitePool,
+    name: &str,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+    ledger: LedgerWrite<'_>,
+) -> Result<(), MigrateError> {
+    let rebuilds = rebuilds(ops, after)?;
+    // FK enforcement can only change outside a transaction, so it is off for
+    // the whole migration; a RunSQL would lose its ON DELETE actions.
+    if rebuilds && ops.iter().any(|op| matches!(op, Operation::Data(_))) {
+        return Err(MigrateError::Validation(format!(
+            "migration `{name}` rebuilds a SQLite table, which runs with FOREIGN KEY \
+             enforcement off; move its RunSQL to a migration of its own or set `atomic: false`"
+        )));
     }
-    out.extend(step.batch.immediate.iter().cloned());
-    Ok(out)
+    let mut conn = super::rebuild::RebuildConn::acquire(sq, rebuilds).await?;
+    let result: Result<(), MigrateError> = async {
+        let mut tx = conn.begin().await?;
+        let mut deferred_fks: Vec<String> = Vec::new();
+        for op in ops {
+            match op {
+                Operation::Schema(change) => {
+                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None)?;
+                    deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
+                }
+                Operation::Data(d) => {
+                    sqlx::query(&d.sql).execute(&mut *tx).await?;
+                }
+                Operation::Callback(c) => return Err(callback_in_atomic(name, c)),
+            }
+        }
+        for stmt in deferred_fks {
+            sqlx::query(&stmt).execute(&mut *tx).await?;
+        }
+        match ledger {
+            // `encode_datetime`, not a bare `DateTime<Utc>`: sqlx-sqlite
+            // has its own RFC3339 formatter with a variable-width
+            // fraction, which is a second spelling of the same instant.
+            LedgerWrite::Insert(ledger) => {
+                sqlx::query(&ledger_insert_sql(&crate::sql::Sqlite, ledger))
+                    .bind(name)
+                    .bind(crate::sql::encode_datetime(chrono::Utc::now()))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            LedgerWrite::Delete(ledger) => {
+                sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await
+    }
+    .await;
+    // The migration's own error wins over a failed restore.
+    let finished = conn.finish().await;
+    result?;
+    Ok(finished?)
 }
 
 /// Run `step` for the non-atomic runners, on any backend.
 async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String>, MigrateError> {
     match pool {
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => run_step_sqlite(&mut *sq.acquire().await?, step).await,
+        crate::sql::Pool::Sqlite(sq) => {
+            // A rebuild is several statements; it gets a transaction of its own.
+            let mut conn =
+                super::rebuild::RebuildConn::acquire(sq, step.batch.rebuild.is_some()).await?;
+            let result: Result<Vec<String>, MigrateError> = async {
+                let mut tx = conn.begin().await?;
+                let deferred = run_step_sqlite(&mut tx, step).await?;
+                tx.commit().await?;
+                Ok(deferred)
+            }
+            .await;
+            let finished = conn.finish().await;
+            let deferred = result?;
+            finished?;
+            Ok(deferred)
+        }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut conn = my.acquire().await?;
@@ -2639,10 +3021,11 @@ async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String
             }
             Ok(step.batch.deferred_fks)
         }
-        #[allow(unreachable_patterns)]
-        _ => {
-            for stmt in &step.batch.immediate {
-                crate::sql::raw_execute_pool(pool, stmt, ::std::vec::Vec::new()).await?;
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut conn = pg.acquire().await?;
+            for stmt in pg_statements(&mut conn, &step).await? {
+                sqlx::query(&stmt).execute(&mut *conn).await?;
             }
             Ok(step.batch.deferred_fks)
         }
@@ -2662,7 +3045,15 @@ async fn apply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let schema = super::ensure::creation_schema(pool).await?;
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let dialect = pool.dialect();
     match pool {
         #[cfg(feature = "postgres")]
@@ -2672,12 +3063,17 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_step(change, &mig.snapshot, dialect, schema.as_deref())?.batch;
-                        for stmt in batch.immediate {
+                        let step = render_step(
+                            change,
+                            &mig.forward,
+                            &mig.snapshot,
+                            dialect,
+                            schema.as_deref(),
+                        )?;
+                        for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
-                        deferred_fks.extend(batch.deferred_fks);
+                        deferred_fks.extend(step.batch.deferred_fks);
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -2762,7 +3158,13 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let step = render_step(change, &mig.snapshot, dialect, schema.as_deref())?;
+                        let step = render_step(
+                            change,
+                            &mig.forward,
+                            &mig.snapshot,
+                            dialect,
+                            schema.as_deref(),
+                        )?;
                         let stmts = mysql_statements(&mut tx, &step)
                             .await
                             .map_err(|e| stuck!(e))?;
@@ -2806,37 +3208,14 @@ async fn apply_atomic_pool(
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            // SQLite supports the same BEGIN/COMMIT/ROLLBACK shape as
-            // PG/MySQL, with `?` placeholders. Mirror the PG arm.
-            let mut tx = sq.begin().await?;
-            let mut deferred_fks: Vec<String> = Vec::new();
-            for op in &mig.forward {
-                match op {
-                    Operation::Schema(change) => {
-                        let step = render_step(change, &mig.snapshot, dialect, schema.as_deref())?;
-                        deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
-                    }
-                    Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
-                    }
-                    Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
-                }
-            }
-            for stmt in deferred_fks {
-                sqlx::query(&stmt).execute(&mut *tx).await?;
-            }
-            // `encode_datetime`, not a bare `DateTime<Utc>`: sqlx-sqlite
-            // has its own RFC3339 formatter with a variable-width
-            // fraction, which is a second spelling of the same instant.
-            // Everything else in the crate reaches this encoder through
-            // the executor's binders; a typed `sqlx::query` here has to
-            // name it.
-            sqlx::query(&ledger_insert_sql(&crate::sql::Sqlite, ledger))
-                .bind(&mig.name)
-                .bind(crate::sql::encode_datetime(chrono::Utc::now()))
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
+            atomic_sqlite(
+                sq,
+                &mig.name,
+                &mig.forward,
+                &mig.snapshot,
+                LedgerWrite::Insert(ledger),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -2856,7 +3235,13 @@ async fn apply_nonatomic_pool(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.snapshot, pool.dialect(), schema.as_deref())?;
+                let step = render_step(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    pool.dialect(),
+                    schema.as_deref(),
+                )?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {
@@ -3229,6 +3614,10 @@ async fn unapply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let schema = super::ensure::creation_schema(pool).await?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -3238,12 +3627,17 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?.batch;
-                        for stmt in batch.immediate {
+                        let step = render_step(
+                            change,
+                            inverted,
+                            snapshot,
+                            pool.dialect(),
+                            schema.as_deref(),
+                        )?;
+                        for stmt in pg_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
-                        deferred_fks.extend(batch.deferred_fks);
+                        deferred_fks.extend(step.batch.deferred_fks);
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
@@ -3277,8 +3671,13 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let step =
-                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
+                        let step = render_step(
+                            change,
+                            inverted,
+                            snapshot,
+                            pool.dialect(),
+                            schema.as_deref(),
+                        )?;
                         for stmt in mysql_statements(&mut tx, &step).await? {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -3301,29 +3700,14 @@ async fn unapply_atomic_pool(
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            let mut tx = sq.begin().await?;
-            let mut deferred_fks: Vec<String> = Vec::new();
-            for op in inverted {
-                match op {
-                    Operation::Schema(change) => {
-                        let step =
-                            render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
-                        deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
-                    }
-                    Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
-                    }
-                    Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
-                }
-            }
-            for stmt in deferred_fks {
-                sqlx::query(&stmt).execute(&mut *tx).await?;
-            }
-            sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
-                .bind(&target.name)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
+            atomic_sqlite(
+                sq,
+                &target.name,
+                inverted,
+                snapshot,
+                LedgerWrite::Delete(ledger),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -3402,7 +3786,13 @@ async fn unapply_nonatomic_pool(
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, snapshot, pool.dialect(), schema.as_deref())?;
+                let step = render_step(
+                    change,
+                    inverted,
+                    snapshot,
+                    pool.dialect(),
+                    schema.as_deref(),
+                )?;
                 deferred_fks.extend(run_step_pool(pool, step).await?);
             }
             Operation::Data(d) => {

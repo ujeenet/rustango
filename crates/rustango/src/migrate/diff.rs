@@ -34,6 +34,7 @@ fn default_exclusion_method() -> String {
 /// `{"AddColumn": {"table": "foo", "column": "bar"}}`. This is what
 /// a migration file stores under `Operation::Schema`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
     DropTable(String /* table name */),
@@ -101,6 +102,14 @@ pub enum SchemaChange {
         table: String,
         column: String,
         unique: bool,
+    },
+    /// Change an FK column's `ON DELETE` action; `None` is NO ACTION.
+    /// The FK is dropped and re-added; SQLite rebuilds the table (#1557).
+    AlterFkOnDelete {
+        table: String,
+        column: String,
+        from: Option<String>,
+        to: Option<String>,
     },
     /// Create a `CREATE [UNIQUE] INDEX` on a model table.
     CreateIndex {
@@ -228,6 +237,7 @@ impl SchemaChange {
             | Self::AlterColumnMaxLength { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
+            | Self::AlterFkOnDelete { table: t, .. }
             | Self::CreateIndex { table: t, .. }
             | Self::DropIndex { table: t, .. }
             | Self::AddCheckConstraint { table: t, .. }
@@ -255,7 +265,10 @@ impl SchemaChange {
                 Self::CreateTable(t) => snapshot.table(t).is_some_and(|s| {
                     s.fields.iter().any(fk_to) || s.composite_fks.iter().any(|c| c.to == table)
                 }),
-                Self::AddColumn { table: t, column } => snapshot
+                Self::AddColumn { table: t, column }
+                | Self::AlterFkOnDelete {
+                    table: t, column, ..
+                } => snapshot
                     .table(t)
                     .and_then(|s| s.field(column))
                     .is_some_and(fk_to),
@@ -438,14 +451,13 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             changes.push(create_m2m(mt));
         }
     }
-    // New composite FK constraints (added on existing tables, or on
-    // brand-new tables — we emit them either way and let `render`
-    // route through `deferred_fks` so referenced tables exist first).
+    // New composite FKs on existing tables. A new table's come with its
+    // `CreateTable`; emitting them here too added each one twice (#1983).
     for ct in &current.tables {
-        let prev_fks: &[_] = prev
-            .table(&ct.name)
-            .map(|t| t.composite_fks.as_slice())
-            .unwrap_or(&[]);
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        let prev_fks = pt.composite_fks.as_slice();
         for cf in &ct.composite_fks {
             if !prev_fks.iter().any(|p| p.name == cf.name) {
                 changes.push(add_composite_fk(&ct.name, cf));
@@ -486,7 +498,7 @@ fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
     }
 }
 
-fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     SchemaChange::CreateM2MTable {
         through: mt.through.clone(),
         src_table: mt.src_table.clone(),
@@ -496,7 +508,10 @@ fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
     }
 }
 
-fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+pub(super) fn add_composite_fk(
+    table: &str,
+    cf: &super::snapshot::CompositeFkSnapshot,
+) -> SchemaChange {
     SchemaChange::AddCompositeFk {
         table: table.to_owned(),
         name: cf.name.clone(),
@@ -536,6 +551,11 @@ fn dropped_tables_child_first<'a>(
     out
 }
 
+/// What an FK points at, without its `ON DELETE` action.
+fn fk_identity(r: &RelationSnapshot) -> (&str, &str, &str) {
+    (&r.kind, &r.to, &r.on)
+}
+
 fn push_alter_changes(
     table: &str,
     pf: &FieldSnapshot,
@@ -567,13 +587,7 @@ fn push_alter_changes(
     if !leaving_string {
         out.extend(max_length);
     }
-    if pf.nullable != cf.nullable {
-        out.push(SchemaChange::AlterColumnNullable {
-            table: table.to_owned(),
-            column: cf.column.clone(),
-            nullable: cf.nullable,
-        });
-    }
+    // The default first: a SQLite rebuild to NOT NULL fills NULLs with it.
     if pf.default != cf.default {
         out.push(SchemaChange::AlterColumnDefault {
             table: table.to_owned(),
@@ -582,12 +596,30 @@ fn push_alter_changes(
             to: cf.default.clone(),
         });
     }
+    if pf.nullable != cf.nullable {
+        out.push(SchemaChange::AlterColumnNullable {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            nullable: cf.nullable,
+        });
+    }
     if pf.unique != cf.unique {
         out.push(SchemaChange::AlterColumnUnique {
             table: table.to_owned(),
             column: cf.column.clone(),
             unique: cf.unique,
         });
+    }
+    // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
+    if let (Some(p), Some(c)) = (&pf.fk, &cf.fk) {
+        if fk_identity(p) == fk_identity(c) && p.on_delete != c.on_delete {
+            out.push(SchemaChange::AlterFkOnDelete {
+                table: table.to_owned(),
+                column: cf.column.clone(),
+                from: p.on_delete.clone(),
+                to: c.on_delete.clone(),
+            });
+        }
     }
     // primary_key, min, max, fk, auto changes still reach
     // `detect_unsupported_field_changes` and surface as the v0.3.1
@@ -652,41 +684,12 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.max, cf.max
         ));
     }
-    // FK identity and FK action are compared separately, because only
-    // the identity has ever been representable in a snapshot.
-    //
-    // `on_delete` was added to `RelationSnapshot` in #1549. Every
-    // snapshot written before it has `on_delete: None`, so a plain
-    // `pf.fk != cf.fk` reports "fk changed" for every FK that declares
-    // an action the moment the upgrade lands — and all three
-    // `make_migrations` entry points reject a non-empty result. An
-    // upgrade with zero model changes then fails outright, listing
-    // framework tables the user never wrote, with advice that cannot be
-    // followed: there is no `AlterField`/`AlterFk` operation to author.
-    //
-    // Eleven framework FKs declare `cascade` (ten of them in `tenancy`),
-    // and `fold_in_framework_tables` puts them in every project's
-    // snapshot, so this reached every existing tenancy app.
-    //
-    // `None → Some(_)` is therefore the upgrade, not a change. A real
-    // action change — `Some(a) → Some(b)` — is still reported, which is
-    // strictly more than was detectable before #1549, when the value was
-    // discarded and no action change was visible at all.
-    let fk_identity = |r: Option<&crate::migrate::RelationSnapshot>| {
-        r.map(|r| (r.kind.clone(), r.to.clone(), r.on.clone()))
-    };
-    if fk_identity(pf.fk.as_ref()) != fk_identity(cf.fk.as_ref()) {
+    // Identity only: an `on_delete` change is an `AlterFkOnDelete` op (#1557).
+    if pf.fk.as_ref().map(fk_identity) != cf.fk.as_ref().map(fk_identity) {
         out.push(format!(
             "`{table}.{col}` fk changed: {:?} → {:?}",
             pf.fk, cf.fk
         ));
-    } else if let (Some(p), Some(c)) = (pf.fk.as_ref(), cf.fk.as_ref()) {
-        if p.on_delete.is_some() && p.on_delete != c.on_delete {
-            out.push(format!(
-                "`{table}.{col}` fk on_delete changed: {:?} → {:?}",
-                p.on_delete, c.on_delete
-            ));
-        }
     }
     if pf.auto != cf.auto {
         out.push(format!(
@@ -723,6 +726,8 @@ pub fn render_changes(
         mut immediate,
         deferred_fks,
         warnings: _,
+        // Postgres never rebuilds.
+        rebuild: _,
     } = render_changes_split(changes, current)?;
     immediate.extend(deferred_fks);
     Ok(immediate)
@@ -737,6 +742,7 @@ pub fn render_changes(
 /// migration have run — otherwise an early `CreateTable` would emit
 /// its FK ALTER referencing a table that hasn't been created yet.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct RenderedBatch {
     /// DDL to execute now, in the order it appears here.
     pub immediate: Vec<String>,
@@ -749,6 +755,23 @@ pub struct RenderedBatch {
     /// INDEX, add an application-level uniqueness check". Issue #265
     /// / T1.3. Empty when there's nothing to flag.
     pub warnings: Vec<String>,
+    /// A SQLite table rebuild that runs after `immediate`, for a change
+    /// the engine cannot `ALTER` in place.
+    pub rebuild: Option<super::rebuild::TableRebuild>,
+}
+
+impl RenderedBatch {
+    /// One rebuild per batch: a second would silently replace the first.
+    fn set_rebuild(&mut self, rebuild: super::rebuild::TableRebuild) -> Result<(), String> {
+        if self.rebuild.is_some() {
+            return Err(format!(
+                "rebuilding `{}` needs a batch of its own; render SQLite changes one at a time",
+                rebuild.table()
+            ));
+        }
+        self.rebuild = Some(rebuild);
+        Ok(())
+    }
 }
 
 /// Same as [`render_changes`] but keeps FK ALTER constraints in a
@@ -785,7 +808,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None, false)
+    render_changes_split_inner(changes, current, dialect, None, false, false)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -797,7 +820,7 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, false)
+    render_changes_split_inner(changes, current, dialect, schema, false, true)
 }
 
 /// As [`render_changes_split_in_schema`] for tables with no rows, where a
@@ -808,7 +831,7 @@ pub(crate) fn render_changes_split_for_empty(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, true)
+    render_changes_split_inner(changes, current, dialect, schema, true, true)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -826,43 +849,105 @@ fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &st
     }
 }
 
-/// Reject `AlterColumn*` operations on dialects whose DDL we
-/// don't yet render natively.
-///
-/// History: the `AlterColumnType / Nullable / Default / MaxLength
-/// / Unique` arms emit hand-rolled Postgres syntax — `ALTER TABLE
-/// "<t>" ALTER COLUMN "<c>" TYPE / SET NOT NULL / DROP DEFAULT /
-/// ...`. Before this guard those arms ignored the `dialect`
-/// parameter and emitted PG SQL on MySQL / SQLite, which then
-/// failed at apply time with a cryptic database error (MySQL
-/// rejects `ALTER COLUMN` — wants `MODIFY COLUMN`; SQLite has no
-/// `ALTER COLUMN` at all, only `ALTER TABLE … RENAME COLUMN`).
-///
-/// Until we ship native MySQL `MODIFY COLUMN` + SQLite
-/// table-rebuild rendering (tracked in #559), surface the gap
-/// loudly at preview / apply time so operators can swap to a
-/// manual `RunSQL` operation before hitting the wall in prod. The
-/// PG path is unchanged.
-fn guard_alter_column_dialect(
-    dialect: &dyn crate::sql::Dialect,
-    op: &'static str,
+/// An `AlterColumn*` on MySQL or SQLite (#1676). MySQL restates the whole
+/// column with `MODIFY COLUMN`; SQLite rebuilds the table into `current`.
+fn alter_column_elsewhere(
+    change: &SchemaChange,
     table: &str,
-    column: &str,
+    f: &FieldSnapshot,
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+    unique_names: &UniqueNames,
+    out: &mut RenderedBatch,
 ) -> Result<(), String> {
-    if dialect.name() == "postgres" {
-        return Ok(());
+    let unique = match change {
+        SchemaChange::AlterColumnUnique { unique, .. } => Some(*unique),
+        _ => None,
+    };
+    if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table) {
+        let mut rebuild = rebuild?;
+        // An AddColumn's unique index would come back from the catalog,
+        // under whatever name a rename left it.
+        if unique == Some(false) {
+            rebuild = rebuild.dropping_unique(&f.column, declared_indexes(current, table));
+        }
+        if !f.nullable && f.generated_as.is_none() {
+            if let Some(expr) = &f.default {
+                let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                let col = dialect.quote_ident(&f.column);
+                rebuild = rebuild.copy_as(&f.column, format!("COALESCE({col}, {value})"));
+            }
+        }
+        return out.set_rebuild(rebuild);
     }
-    Err(format!(
-        "{op} for `{table}.{column}` is not yet supported on dialect `{dialect_name}`. \
-         The arm currently emits Postgres-specific DDL (ALTER COLUMN ... TYPE / SET NOT NULL / \
-         SET DEFAULT / ADD CONSTRAINT UNIQUE) which would fail at apply time. \
-         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the dialect-correct \
-         DDL for your migration. Tracked in #559 (per-dialect ALTER COLUMN rendering).",
-        op = op,
-        table = table,
-        column = column,
-        dialect_name = dialect.name(),
-    ))
+    // MySQL refuses to change an FK column's type (3780) or drop its index
+    // (1553) under the FK; the runner drops it, and it comes back here.
+    let under_fk = matches!(
+        change,
+        SchemaChange::AlterColumnType { .. }
+            | SchemaChange::AlterColumnMaxLength { .. }
+            | SchemaChange::AlterColumnUnique { unique: false, .. }
+    );
+    if let Some(rel) = f.fk.as_ref().filter(|_| under_fk) {
+        out.deferred_fks
+            .push(field_fk_sql(table, &f.column, rel, dialect, schema));
+    }
+    match unique {
+        Some(true) => {
+            let name = unique_names.get(table, &f.column)?;
+            out.immediate
+                .push(dialect.add_unique_constraint_sql(table, &name, &f.column));
+        }
+        // The runner drops it by its name in the catalog.
+        Some(false) => {}
+        None => {
+            if !f.nullable && f.default.is_some() {
+                out.immediate.push(fill_nulls_sql(table, f, dialect));
+            }
+            out.immediate.push(format!(
+                "ALTER TABLE {} MODIFY COLUMN {}",
+                dialect.quote_ident(table),
+                column_definition(f, dialect)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The indexes `current` declares on `table`, which a UNIQUE drop keeps.
+pub(crate) fn declared_indexes(current: &SchemaSnapshot, table: &str) -> Vec<String> {
+    current
+        .indexes
+        .iter()
+        .filter(|i| i.table == table)
+        .map(|i| i.name.clone())
+        .collect()
+}
+
+/// `<column> <type> [DEFAULT …] [NOT NULL] [COMMENT …]`, as CREATE TABLE
+/// writes it, for MySQL's `MODIFY COLUMN`; PK and CHECK stay where they are.
+fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let mut sql = format!(
+        "{} {}",
+        dialect.quote_ident(&f.column),
+        sql_type_with_dialect(f, dialect)
+    );
+    if let Some(expr) = &f.generated_as {
+        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
+    } else if let Some(expr) = &f.default {
+        let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
+        let _ = write!(sql, " DEFAULT {rendered}");
+    }
+    if !f.nullable {
+        sql.push_str(" NOT NULL");
+    }
+    if let Some(comment) = &f.db_comment {
+        if let Some(inline) = dialect.write_inline_column_comment(comment) {
+            sql.push_str(&inline);
+        }
+    }
+    sql
 }
 
 /// Who holds each UNIQUE name in `current`. Two columns that shorten to
@@ -926,6 +1011,8 @@ fn render_changes_split_inner(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
     empty_tables: bool,
+    // The runner drops a UNIQUE by its catalog name; offline, the usual one.
+    by_catalog: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
@@ -963,11 +1050,34 @@ fn render_changes_split_inner(
                         dialect.quote_ident(&name)
                     ));
                 }
+                // SQLite's DROP COLUMN refuses a column in a table-level UNIQUE (#1982).
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.set_rebuild(rebuild?.dropping(column))?;
+                    continue;
+                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
                     dialect.quote_ident(column),
                 ));
+            }
+            SchemaChange::AlterFkOnDelete { table, column, .. } => {
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.set_rebuild(rebuild?)?;
+                    continue;
+                }
+                let rel = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .and_then(|f| f.fk.as_ref())
+                    .ok_or_else(|| {
+                        format!("AlterFkOnDelete for `{table}.{column}` but no FK in the snapshot")
+                    })?;
+                // The runner drops the live FK by its catalog name first.
+                out.deferred_fks
+                    .push(field_fk_sql(table, column, rel, dialect, schema));
             }
             SchemaChange::AddColumn { table, column } => {
                 let t = current.table(table).ok_or_else(|| {
@@ -1041,13 +1151,42 @@ fn render_changes_split_inner(
                 out.immediate
                     .push(format!("DROP TABLE {}{cascade}", dialect.quote_ident(name)));
             }
+            SchemaChange::AlterColumnType { table, column, .. }
+            | SchemaChange::AlterColumnNullable { table, column, .. }
+            | SchemaChange::AlterColumnDefault { table, column, .. }
+            | SchemaChange::AlterColumnMaxLength { table, column, .. }
+            | SchemaChange::AlterColumnUnique { table, column, .. }
+                if dialect.alters_by_rebuild() || dialect.modifies_whole_column() =>
+            {
+                // VARCHAR(n) and TEXT are one affinity there, and n is never enforced (#1220).
+                if dialect.alters_by_rebuild()
+                    && matches!(change, SchemaChange::AlterColumnMaxLength { .. })
+                {
+                    continue;
+                }
+                let f = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .ok_or_else(|| {
+                        format!("altering `{table}.{column}` but the snapshot has no such column")
+                    })?;
+                alter_column_elsewhere(
+                    change,
+                    table,
+                    f,
+                    current,
+                    dialect,
+                    schema,
+                    &unique_names,
+                    &mut out,
+                )?;
+            }
             SchemaChange::AlterColumnType {
                 table,
                 column,
                 from: _,
                 to,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnType", table, column)?;
                 let pg_to = pg_type_for_ty_name(to);
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
@@ -1058,7 +1197,6 @@ fn render_changes_split_inner(
                 column,
                 nullable,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
                 // Option<T> → T with a default: fill the NULLs first, or
                 // SET NOT NULL fails on them (#1881).
                 let field = current.table(table).and_then(|t| t.field(column));
@@ -1079,39 +1217,25 @@ fn render_changes_split_inner(
                 column,
                 from: _,
                 to,
-            } => {
-                guard_alter_column_dialect(dialect, "AlterColumnDefault", table, column)?;
-                match to {
-                    Some(expr) => {
-                        // Empty-string default → the literal `''`, not nothing
-                        // (#1161), so we don't emit `SET DEFAULT ` (invalid).
-                        let rendered: &str = if expr.is_empty() { "''" } else { expr };
-                        out.immediate.push(format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
-                        ));
-                    }
-                    None => out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
-                    )),
+            } => match to {
+                Some(expr) => {
+                    // Empty-string default → the literal `''`, not nothing
+                    // (#1161), so we don't emit `SET DEFAULT ` (invalid).
+                    let rendered: &str = if expr.is_empty() { "''" } else { expr };
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
+                    ));
                 }
-            }
+                None => out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                )),
+            },
             SchemaChange::AlterColumnMaxLength {
                 table,
                 column,
                 from: _,
                 to,
             } => {
-                // SQLite gives `VARCHAR(n)` and `TEXT` the same TEXT
-                // affinity and never enforces the length, so this
-                // change has no storage effect there. Emitting nothing
-                // is the honest rendering; the guard below used to
-                // reject it, failing a migration over DDL that would
-                // have been a no-op (#1220). MySQL *does* enforce the
-                // length and still needs `MODIFY COLUMN` (#559).
-                if dialect.name() == "sqlite" {
-                    continue;
-                }
-                guard_alter_column_dialect(dialect, "AlterColumnMaxLength", table, column)?;
                 let pg_to = match to {
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
@@ -1127,16 +1251,16 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
-                guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
-                let name = unique_names.get(table, column)?;
+                // The runner drops the name it finds in the catalog (#2133).
                 if *unique {
+                    let name = unique_names.get(table, column)?;
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
-                } else {
+                } else if !by_catalog {
                     out.immediate.push(format!(
                         "ALTER TABLE {} DROP CONSTRAINT {}",
                         dialect.quote_ident(table),
-                        dialect.quote_ident(&name),
+                        dialect.quote_ident(&unique_names.get(table, column)?),
                     ));
                 }
             }
@@ -1253,7 +1377,8 @@ fn render_changes_split_inner(
                 out.immediate.push(format!(
                     "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols}){include_suffix}{where_suffix}",
                     dialect.quote_ident(name),
-                    dialect.quote_ident(table),
+                    // In the table's schema, not whatever `search_path` finds first.
+                    fk_target(dialect, schema, table),
                     using,
                 ));
             }
@@ -1283,17 +1408,27 @@ fn render_changes_split_inner(
                     dialect.quote_ident(name)
                 ));
             }
-            SchemaChange::AddCheckConstraint { name, table, expr } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT CHECK` \
-                         syntax — CHECK constraints must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the CHECK \
-                         inline, or use an application-level invariant. Tracked in #559."
-                    ));
+            // SQLite takes CHECKs and composite FKs only in `CREATE TABLE` (#2127).
+            SchemaChange::AddCheckConstraint { table, .. }
+            | SchemaChange::DropCheckConstraint { table, .. }
+            | SchemaChange::AddCompositeFk { table, .. }
+            | SchemaChange::DropCompositeFk { table, .. }
+                if dialect.alters_by_rebuild() =>
+            {
+                // A drop on a table this migration drops goes with the table.
+                let dropped = matches!(
+                    change,
+                    SchemaChange::DropCheckConstraint { .. } | SchemaChange::DropCompositeFk { .. }
+                ) && current.table(table).is_none();
+                if dropped {
+                    continue;
                 }
+                if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
+                {
+                    out.set_rebuild(rebuild?)?;
+                }
+            }
+            SchemaChange::AddCheckConstraint { name, table, expr } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
                     dialect.quote_ident(table),
@@ -1433,16 +1568,6 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
-                if dialect.name() == "sqlite" {
-                    return Err(format!(
-                        "AddCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN \
-                         KEY` syntax — composite FKs must be declared inside the original \
-                         CREATE TABLE statement. Workaround: emit a hand-written \
-                         `Operation::Data` (RunSQL) that rebuilds the table with the FK \
-                         inline. Tracked in #559."
-                    ));
-                }
                 let from_cols = from
                     .iter()
                     .map(|c| dialect.quote_ident(c))
@@ -1520,7 +1645,16 @@ fn create_table_sql_from_snapshot_with_dialect(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> String {
-    let mut sql = format!("CREATE TABLE {} (", dialect.quote_ident(&t.name));
+    create_table_sql_as(t, &t.name, dialect)
+}
+
+/// `CREATE TABLE <name>` in `t`'s shape; constraint names still follow `t.name`.
+pub(super) fn create_table_sql_as(
+    t: &TableSnapshot,
+    name: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let mut sql = format!("CREATE TABLE {} (", dialect.quote_ident(name));
     let mut first = true;
     for f in &t.fields {
         if !first {
@@ -2077,22 +2211,117 @@ mod sql_type_tests {
     fn sqlite_drop_column_keeps_another_tables_unique_index() {
         use crate::migrate::SchemaChange;
         let mut snap = clashing_uniques();
-        snap.tables.remove(0);
+        snap.tables[0].fields.clear();
         let drop = [SchemaChange::DropColumn {
             table: "a_b".into(),
             column: "c".into(),
         }];
         let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
-        assert_eq!(out.immediate, vec![r#"ALTER TABLE "a_b" DROP COLUMN "c""#]);
-        let out =
-            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
-        assert_eq!(out.immediate[0], r#"DROP INDEX IF EXISTS "a_b_c_key""#);
+        assert!(out.immediate.is_empty(), "{:?}", out.immediate);
+        assert_eq!(out.rebuild.as_ref().map(|r| r.table()), Some("a_b"));
+        snap.tables.remove(1);
+        let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate, [r#"DROP INDEX IF EXISTS "a_b_c_key""#]);
     }
 
-    // -------- guard_alter_column_dialect (#559 protection) --------
+    /// SQLite changes an FK action by rebuilding; PG and MySQL re-add the FK
+    /// after the runner drops the live one (#1557).
+    #[test]
+    fn alter_fk_on_delete_renders_per_dialect() {
+        use crate::migrate::{RelationSnapshot, SchemaChange};
+        let mut child = TableSnapshot {
+            name: "c".into(),
+            model: "c".into(),
+            fields: vec![FieldSnapshot {
+                name: "p_id".into(),
+                column: "p_id".into(),
+                fk: Some(RelationSnapshot {
+                    kind: "fk".into(),
+                    to: "p".into(),
+                    on: "id".into(),
+                    on_delete: Some("CASCADE".into()),
+                }),
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        child.fields.insert(0, fs("i64", true));
+        let snap = SchemaSnapshot {
+            tables: vec![child],
+            ..SchemaSnapshot::default()
+        };
+        let alter = [SchemaChange::AlterFkOnDelete {
+            table: "c".into(),
+            column: "p_id".into(),
+            from: None,
+            to: Some("CASCADE".into()),
+        }];
+        let pg = render_changes_split_with_dialect(&alter, &snap, &crate::sql::Postgres).unwrap();
+        assert!(pg.immediate.is_empty() && pg.rebuild.is_none());
+        assert_eq!(
+            pg.deferred_fks,
+            [
+                r#"ALTER TABLE "c" ADD CONSTRAINT "c_p_id_fkey" FOREIGN KEY ("p_id") REFERENCES "p" ("id") ON DELETE CASCADE"#
+            ]
+        );
+        #[cfg(feature = "sqlite")]
+        {
+            let sq = render_changes_split_with_dialect(&alter, &snap, &crate::sql::Sqlite).unwrap();
+            assert!(sq.immediate.is_empty() && sq.deferred_fks.is_empty());
+            let twice = [alter[0].clone(), alter[0].clone()];
+            assert!(render_changes_split_with_dialect(&twice, &snap, &crate::sql::Sqlite).is_err());
+            let stmts = sq
+                .rebuild
+                .expect("a rebuild")
+                .statements(&crate::sql::Sqlite);
+            assert!(stmts[0].starts_with(r#"CREATE TABLE "_rustango_rebuild_c""#));
+            assert!(stmts[0].contains("ON DELETE CASCADE"), "{}", stmts[0]);
+            assert_eq!(
+                stmts[stmts.len() - 2..],
+                [
+                    r#"DROP TABLE "c""#,
+                    r#"ALTER TABLE "_rustango_rebuild_c" RENAME TO "c""#
+                ]
+            );
+        }
+    }
+
+    // -------- AlterColumn* per dialect (#1676) --------
 
     fn empty_snap() -> SchemaSnapshot {
         SchemaSnapshot::default()
+    }
+
+    /// `t(id, c)` with `c` NOT NULL DEFAULT 7.
+    fn alter_snap() -> SchemaSnapshot {
+        SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "t".into(),
+                fields: vec![
+                    FieldSnapshot {
+                        primary_key: true,
+                        ..fs("i64", true)
+                    },
+                    FieldSnapshot {
+                        name: "c".into(),
+                        column: "c".into(),
+                        default: Some("7".into()),
+                        ..fs("i64", false)
+                    },
+                ],
+                composite_fks: vec![],
+            }],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    fn not_null() -> Vec<SchemaChange> {
+        vec![SchemaChange::AlterColumnNullable {
+            table: "t".into(),
+            column: "c".into(),
+            nullable: false,
+        }]
     }
 
     #[test]
@@ -2110,54 +2339,38 @@ mod sql_type_tests {
         assert!(out.immediate[0].contains("ALTER COLUMN \"c\" TYPE"));
     }
 
+    /// MySQL restates the whole column, NULLs filled first.
     #[cfg(feature = "mysql")]
     #[test]
-    fn alter_column_type_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnType {
-            table: "t".into(),
-            column: "c".into(),
-            from: "i32".into(),
-            to: "i64".into(),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnType must reject MySQL until native rendering ships");
-        assert!(err.contains("AlterColumnType"));
-        assert!(err.contains("`t.c`"));
-        assert!(err.contains("mysql"));
-        assert!(err.contains("#559"));
-        // Workaround pointer present.
-        assert!(err.contains("RunSQL"));
+    fn alter_column_is_a_modify_on_mysql() {
+        let out = render_changes_split_with_dialect(&not_null(), &alter_snap(), &crate::sql::MySql)
+            .unwrap();
+        assert_eq!(
+            out.immediate,
+            [
+                "UPDATE `t` SET `c` = 7 WHERE `c` IS NULL",
+                "ALTER TABLE `t` MODIFY COLUMN `c` BIGINT DEFAULT 7 NOT NULL"
+            ]
+        );
     }
 
+    /// SQLite rebuilds, copying NULLs as the default.
     #[cfg(feature = "sqlite")]
     #[test]
-    fn alter_column_nullable_errors_on_sqlite() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnNullable {
-            table: "t".into(),
-            column: "c".into(),
-            nullable: false,
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AlterColumnNullable must reject SQLite until rebuild path ships");
-        assert!(err.contains("AlterColumnNullable"));
-        assert!(err.contains("sqlite"));
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_default_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnDefault {
-            table: "t".into(),
-            column: "c".into(),
-            from: None,
-            to: Some("'hi'".into()),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnDefault must reject MySQL");
-        assert!(err.contains("AlterColumnDefault"));
+    fn alter_column_is_a_rebuild_on_sqlite() {
+        let out =
+            render_changes_split_with_dialect(&not_null(), &alter_snap(), &crate::sql::Sqlite)
+                .unwrap();
+        assert!(out.immediate.is_empty());
+        let stmts = out
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(
+            stmts[1].contains(r#"SELECT "x", COALESCE("c", 7) FROM "t""#),
+            "{}",
+            stmts[1]
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -2183,38 +2396,6 @@ mod sql_type_tests {
             batch.immediate,
             batch.deferred_fks,
         );
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_max_length_still_errors_on_mysql() {
-        // The control for the SQLite no-op: MySQL *does* enforce
-        // VARCHAR length, so silently emitting nothing there would
-        // leave the column wrong. It must keep pointing at #559.
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnMaxLength {
-            table: "t".into(),
-            column: "c".into(),
-            from: Some(50),
-            to: Some(100),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("MySQL enforces VARCHAR length and cannot no-op");
-        assert!(err.contains("AlterColumnMaxLength"), "{err}");
-    }
-
-    #[cfg(feature = "mysql")]
-    #[test]
-    fn alter_column_unique_errors_on_mysql() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AlterColumnUnique {
-            table: "t".into(),
-            column: "c".into(),
-            unique: true,
-        }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("AlterColumnUnique must reject MySQL");
-        assert!(err.contains("AlterColumnUnique"));
     }
 
     // -------- CreateM2MTable (#559 tri-dialect) --------
@@ -2405,34 +2586,63 @@ mod sql_type_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
+    /// Offline renders drop a UNIQUE by its usual name; the runner's by the catalog's (#2133).
     #[test]
-    fn add_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::AddCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
-            expr: "views >= 0".into(),
+    fn unique_drop_is_rendered_offline_only() {
+        let drop = vec![SchemaChange::AlterColumnUnique {
+            table: "t".into(),
+            column: "c".into(),
+            unique: false,
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AddCheckConstraint must reject SQLite");
-        assert!(err.contains("AddCheckConstraint"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ALTER TABLE ADD CONSTRAINT CHECK"));
+        let snap = alter_snap();
+        let offline = render_changes(&drop, &snap).unwrap();
+        assert_eq!(
+            offline,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT "t_c_key""#.to_string()]
+        );
+        let runner =
+            render_changes_split_in_schema(&drop, &snap, &crate::sql::Postgres, None).unwrap();
+        assert!(runner.immediate.is_empty(), "{:?}", runner.immediate);
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn drop_check_constraint_sqlite_rejects() {
-        let snap = empty_snap();
-        let changes = vec![SchemaChange::DropCheckConstraint {
-            name: "ck_post_views_nonneg".into(),
-            table: "posts".into(),
+    fn check_constraints_rebuild_on_sqlite() {
+        let mut snap = alter_snap();
+        snap.checks.push(super::super::snapshot::CheckSnapshot {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
+        });
+        let add = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+            expr: "c >= 0".into(),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("DropCheckConstraint must reject SQLite");
-        assert!(err.contains("DropCheckConstraint"));
-        assert!(err.contains("sqlite"));
+        let batch = render_changes_split_with_dialect(&add, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(
+            sql[0].contains(r#"CONSTRAINT "ck_t_c" CHECK (c >= 0)"#),
+            "{sql:?}"
+        );
+        snap.checks.clear();
+        let drop = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_t_c".into(),
+            table: "t".into(),
+        }];
+        let batch = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        let sql = batch
+            .rebuild
+            .expect("a rebuild")
+            .statements(&crate::sql::Sqlite);
+        assert!(!sql[0].contains("CHECK"), "{sql:?}");
+        // Its table is dropped in the same migration: nothing to rebuild.
+        let gone =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert!(gone.rebuild.is_none() && gone.immediate.is_empty());
     }
 
     /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
@@ -2572,20 +2782,6 @@ mod sql_type_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn add_composite_fk_sqlite_rejects() {
-        let err = render_changes_split_with_dialect(
-            &make_add_composite_fk(),
-            &empty_snap(),
-            &crate::sql::Sqlite,
-        )
-        .expect_err("AddCompositeFk must reject SQLite");
-        assert!(err.contains("AddCompositeFk"));
-        assert!(err.contains("sqlite"));
-        assert!(err.contains("ADD CONSTRAINT FOREIGN KEY"));
-    }
-
     #[test]
     fn drop_composite_fk_postgres_uses_ansi_quoting() {
         let snap = empty_snap();
@@ -2625,19 +2821,6 @@ mod sql_type_tests {
             !out.immediate[0].contains("IF EXISTS"),
             "MySQL parses no `IF EXISTS` on a constraint drop"
         );
-    }
-
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn drop_composite_fk_sqlite_rejects() {
-        let changes = vec![SchemaChange::DropCompositeFk {
-            table: "child".into(),
-            name: "fk_x".into(),
-        }];
-        let err = render_changes_split_with_dialect(&changes, &empty_snap(), &crate::sql::Sqlite)
-            .expect_err("DropCompositeFk must reject SQLite");
-        assert!(err.contains("DropCompositeFk"));
-        assert!(err.contains("sqlite"));
     }
 
     #[cfg(feature = "sqlite")]

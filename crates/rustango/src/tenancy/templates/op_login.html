@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <title>Sign in — {{ brand_name | default(value='Rustango Operator Console') }}</title>
   {% include "_theme_tokens.html" %}
-  {% if brand_css %}<style>:root { {{ brand_css | safe }} }</style>{% endif %}
-  <style>
+  {% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}
+  <style nonce="{{ csp_nonce }}">
     body {
       margin: 0;
       font-family: var(--font-family-base);

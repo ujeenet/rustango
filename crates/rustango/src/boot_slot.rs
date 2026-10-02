@@ -6,7 +6,7 @@ use std::sync::{PoisonError, RwLock};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Default,
-    #[cfg_attr(not(feature = "config"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "config", feature = "manage")), allow(dead_code))]
     Settings,
     Explicit,
 }
@@ -42,7 +42,7 @@ impl<T: Send + Sync + 'static> BootSlot<T> {
 
     /// Install from settings. `false`, keeping the current value, when
     /// app code already installed one.
-    #[cfg_attr(not(feature = "config"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "config", feature = "manage")), allow(dead_code))]
     pub(crate) fn set_from_settings(&self, v: T) -> bool {
         self.set(v, Source::Settings)
     }

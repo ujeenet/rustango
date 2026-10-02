@@ -183,8 +183,8 @@ pub trait Cache: Send + Sync + 'static {
     /// Fetch many keys at once. Missing and expired keys are left out
     /// of the map. The order is not defined.
     ///
-    /// The default runs one `get` per key. `RedisCache` overrides with
-    /// `MGET` and `DatabaseCache` with a single `IN (…)` query.
+    /// The default runs one `get` per key. No shipped backend overrides
+    /// it yet, so it is one round trip per key everywhere.
     async fn get_many(&self, keys: &[&str]) -> Result<HashMap<String, String>, CacheError> {
         let mut out = HashMap::with_capacity(keys.len());
         for k in keys {
@@ -196,8 +196,7 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Store many key/value pairs under one shared TTL. The default
-    /// loops over `set`. Backends with a pipeline (Redis `MSET`, or a
-    /// bulk insert) should override it.
+    /// loops over `set`; no shipped backend overrides it yet.
     async fn set_many(
         &self,
         entries: &[(&str, &str)],
@@ -210,7 +209,7 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Delete every listed key. Missing keys are ignored. The default
-    /// loops over `delete`; backends with `DEL k1 k2` override it.
+    /// loops over `delete`; no shipped backend overrides it yet.
     async fn delete_many(&self, keys: &[&str]) -> Result<(), CacheError> {
         for k in keys {
             self.delete(k).await?;

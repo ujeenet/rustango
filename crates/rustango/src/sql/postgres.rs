@@ -87,6 +87,34 @@ impl Dialect for Postgres {
         ))
     }
 
+    /// `to_regclass` resolves the table through `search_path`, as the DDL does.
+    fn foreign_key_names_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT c.conname::text FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             AND a.attname = $2 AND cardinality(c.conkey) = 1",
+        )
+    }
+
+    /// A renamed column keeps its UNIQUE constraint's old name (#2133).
+    fn unique_index_names_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT c.conname::text FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
+             WHERE c.contype = 'u' AND c.conrelid = to_regclass(quote_ident($1)) \
+             AND a.attname = $2 AND cardinality(c.conkey) = 1",
+        )
+    }
+
+    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
     fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
         let escaped = comment.replace('\'', "''");
         Some(format!(

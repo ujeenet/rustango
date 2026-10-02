@@ -27,7 +27,7 @@ async fn list_or_create(
         .order_by(&[("id", false)])
         .fetch_on(tenant.conn())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     Ok(Json(rows.into_iter().map(AuthorOut::from).collect()))
 }
 
@@ -39,7 +39,7 @@ async fn retrieve(
         .filter("id", id)
         .fetch_on(tenant.conn())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     row.into_iter()
         .next()
         .map(|a| Json(AuthorOut::from(a)))
@@ -136,7 +136,7 @@ async fn show_edit_form(
         .filter("id", id)
         .fetch_on(tenant.conn())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let a = rows.pop().ok_or((StatusCode::NOT_FOUND, format!("author {id} not found")))?;
     Ok(edit_form(id, &a, None))
 }

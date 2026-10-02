@@ -263,8 +263,12 @@ mod openapi_auto_derive {
     fn option_field_is_nullable_and_not_required() {
         let v = schema_value::<WithOptional>();
         assert_eq!(v["properties"]["title"]["type"], "string");
-        assert_eq!(v["properties"]["maybe_body"]["type"], "string");
-        assert_eq!(v["properties"]["maybe_body"]["nullable"], true);
+        // OpenAPI 3.1 spells nullable as a type list (#1922).
+        assert_eq!(
+            v["properties"]["maybe_body"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert!(v["properties"]["maybe_body"].get("nullable").is_none());
         // `required` should contain `title` but not `maybe_body`.
         let req: Vec<&str> = v["required"]
             .as_array()

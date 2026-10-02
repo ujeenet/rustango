@@ -28,7 +28,7 @@ Jüngste Releases haben eine Reihe von Features hinzugefügt, die noch nicht in 
 - **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — Erweiterungs-Trait für benutzerdefinierte Manager, emittiert neben dem Model. (Damit lassen sich auch mehrere "Persönlichkeiten" auf derselben physischen Tabelle abbilden, über per-Trait-Methoden. Siehe `inheritance.rs:98-127`.)
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — emittiert ein leeres Marker-Trait neben dem Model. Es fügt keine Methoden hinzu: Query-Shortcuts gehören in dein eigenes Erweiterungs-Trait über `QuerySet<Foo>`, wie `crates/rustango/src/manager.rs` zeigt.
 - **`manage makemigrations --merge`** (#346, v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
@@ -864,8 +864,8 @@ let featured = Author::objects()
 
 **Vorbehalte:**
 
-- **`IN (SELECT …)`-Projektionsverengung**: PG erfordert strikt, dass der innere SELECT genau eine Spalte für die `<col> IN (…)`-Form projiziert. **Rustango** liefert noch keine `.values("col")`-artige Projektionsverengung (Issue #62), sodass das innere Queryset immer jede Model-Spalte projiziert — was `in_subquery` heute nur gegen Tabellen funktionieren lässt, deren Model eine einzige Spalte hat. Für den Mehr-Spalten-Fall greif zu `exists(inner.where_(<outer col>.eq_expr(outer_ref(...))))` — es hat dieselbe Semantik und hängt nicht von der Projektionsform ab.
-- **Skalares `subquery(...)` erfordert ein Ein-Spalte-eine-Zeile-Inneres**: das emittierte SQL ist `SET col = (SELECT …)` — produziert das Innere mehr als eine Zeile, wirft die Datenbank zur Laufzeit einen Fehler. Beschränke per `.limit(1)` und entweder verenge die Projektion (sobald sie landet) oder gestalte das Innere um eine Eindeutigkeits-Invariante.
+- **`IN (SELECT …)`-Projektionsverengung**: PG erfordert strikt, dass der innere SELECT genau eine Spalte für die `<col> IN (…)`-Form projiziert. Verenge das innere Queryset mit `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` projiziert auf jedem Backend nur `author_id`. Ein einfaches `QuerySet::compile()` projiziert jede Model-Spalte, übergib es also nur bei einem einspaltigen Model.
+- **Skalares `subquery(...)` erfordert ein Ein-Spalte-eine-Zeile-Inneres**: das emittierte SQL ist `SET col = (SELECT …)` — produziert das Innere mehr als eine Zeile, wirft die Datenbank zur Laufzeit einen Fehler. Beschränke per `.limit(1)` und entweder verenge die Projektion mit `values_list_flat` oder gestalte das Innere um eine Eindeutigkeits-Invariante.
 - **Kompilierzeit-Validierung der Unterabfrage lebt auf dem inneren Queryset**: Spalten-Tippfehler tauchen beim inneren `queryset.compile()?`-Aufruf auf, nicht beim `compile()` der äußeren Abfrage. Baue das Innere zuerst und propagiere `?`.
 
 ### Wann man stattdessen auf rohes SQL zurückfällt
@@ -915,7 +915,7 @@ Du schreibst `GROUP BY` selten selbst — **Rustango** inferiert es aus der Form
 | **Nur Fenster** | `.aggregate().annotate("rn", row_number()…)` | (kein `GROUP BY` — Fensterfunktionen sind pro Zeile) |
 | **Explizite Überschreibung** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — explizit gewinnt |
 
-Der Klassifizierer `AggregateExpr::is_aggregating()` unterscheidet die zeilen-kollabierenden Varianten (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus rekursive `Filtered` / `Coalesced`-Wrapper) von `Window`, das pro Zeile ist. Nur die aggregierenden Varianten lösen die Form-3-Inferenz aus.
+Der Klassifizierer `AggregateExpr::is_aggregating()` unterscheidet die zeilen-kollabierenden Varianten (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` / `AnyValue` / `ArrayAgg` / `StringAgg` / `JsonbAgg` / `RelatedAggregate` — plus rekursive `Filtered` / `Coalesced`-Wrapper) von `Window`, das pro Zeile ist. Nur die aggregierenden Varianten lösen die Form-3-Inferenz aus.
 
 ```rust
 use rustango::core::aggregates::{count_all, sum};
@@ -1007,7 +1007,7 @@ Der Writer wendet den Int/Float-Cast des Dialekts (`::bigint`, `CAST(... AS SIGN
 
 ### Fensterfunktionen
 
-Berechne laufende Summen, Rankings und Zeile-über-Zeile-Deltas, ohne Zeilen zu kollabieren — über `Window(expression, partition_by=, order_by=, frame=)`. Acht Funktionen (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE-Frames. Jedes Backend, das **Rustango** unterstützt (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25), liefert native `OVER (…)`-Syntax, sodass die Emission uniform ist.
+Berechne laufende Summen, Rankings und Zeile-über-Zeile-Deltas, ohne Zeilen zu kollabieren — über `Window(expression, partition_by=, order_by=, frame=)`. Vierzehn Funktionen (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `sum_over`, `avg_over`, `min_over`, `max_over`, `count_over`, `count_column_over`) plus ROWS/RANGE-Frames. Jedes Backend, das **Rustango** unterstützt (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25), liefert native `OVER (…)`-Syntax, sodass die Emission uniform ist.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1075,6 +1075,12 @@ let q = Post::objects()
 | `lead(col, offset, default)` | `LEAD(col, offset, default?)` | Spalte + Offset + optionaler Default |
 | `first_value(col)` | `FIRST_VALUE(col)` | Spalte |
 | `last_value(col)` | `LAST_VALUE(col)` | Spalte |
+| `sum_over(col)` | `SUM(col)` | Spalte |
+| `avg_over(col)` | `AVG(col)` | Spalte |
+| `min_over(col)` | `MIN(col)` | Spalte |
+| `max_over(col)` | `MAX(col)` | Spalte |
+| `count_column_over(col)` | `COUNT(col)` | Spalte |
+| `count_over()` | `COUNT(*)` | — |
 
 Jedes gibt einen `WindowBuilder` mit drei verkettbaren Modifikatoren zurück:
 
@@ -1572,14 +1578,15 @@ pub struct Post {
 Verwendung:
 
 ```rust
-post.soft_delete_on(&pool).await?;     // sets deleted_at = NOW()
-post.restore_on(&pool).await?;          // sets deleted_at = NULL
+post.soft_delete(&pool).await?;        // sets deleted_at = NOW()
+post.restore(&pool).await?;            // sets deleted_at = NULL
+post.force_delete(&pool).await?;       // real DELETE
 
 // Default queries DO include soft-deleted rows. Filter explicitly:
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Der "Löschen"-Button des Admins routet automatisch zu `soft_delete_on` für jedes Model, das die Spalte hat. Standardabfragen enthalten weiterhin soft-gelöschte Zeilen, aber du musst den Filter nicht mehr selbst schreiben: `.active()` schließt sie aus, `.only_trashed()` liefert nur sie, `.with_trashed()` nimmt sie wieder auf. Den Ausschluss zum Default zu machen wird in [#820](https://github.com/ujeenet/rustango/issues/820) verfolgt.
+Diese nehmen den `&Pool` und laufen auf allen drei Backends; `soft_delete_on` / `restore_on` sind die Postgres-only-Executor-Formen (für eine Transaktion). Der "Löschen"-Button des Admins soft-löscht jedes Model, das die Spalte hat. Standardabfragen enthalten weiterhin soft-gelöschte Zeilen, aber du musst den Filter nicht mehr selbst schreiben: `.active()` schließt sie aus, `.only_trashed()` liefert nur sie, `.with_trashed()` ist ein Marker, der die Absicht ausdrückt und nichts ändert — ein früheres `.active()` hebt es nicht auf. Um sie standardmäßig auszuschließen, deklariere einen Global Scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, wobei `live_only()` den Filter `deleted_at IS NULL` liefert — und schalte ihn pro Query mit `.without_global_scope("live")` ab.
 
 ---
 

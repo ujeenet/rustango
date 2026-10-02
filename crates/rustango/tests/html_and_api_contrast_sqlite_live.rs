@@ -11,6 +11,9 @@
 
 #![cfg(all(feature = "template_views", feature = "sqlite"))]
 
+#[path = "support/doc_snippet.rs"]
+mod doc_snippet;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -134,6 +137,22 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, String, Option<Stri
         .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8(bytes.to_vec()).unwrap(), ctype)
+}
+
+// doc-snippet:start
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
+// doc-snippet:end
+
+/// `docs/html-views.md`'s `?ordering=` snippet is the compiled one above.
+#[test]
+fn every_locale_publishes_the_ordering_snippet() {
+    let _ = post_list();
+    doc_snippet::assert_published(
+        include_str!("html_and_api_contrast_sqlite_live.rs"),
+        "html-views.md",
+    );
 }
 
 #[tokio::test]

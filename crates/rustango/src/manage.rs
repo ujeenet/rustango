@@ -680,15 +680,10 @@ impl Cli {
         self
     }
 
-    /// Swap the tenant user model used by the `init-tenancy` verb.
-    /// Implement [`crate::tenancy::TenantUserModel`] on a model that
-    /// declares extra columns on `rustango_users` (display name,
-    /// timezone, …) and pass it here — the materialized bootstrap
-    /// migration will then `CREATE TABLE` with those extras included.
-    ///
-    /// Only meaningful in tenancy mode and only on the very first
-    /// `init-tenancy`: subsequent invocations are idempotent and
-    /// won't rewrite the migration JSON.
+    /// Check a custom tenant user model at startup. Declaring the model on
+    /// `rustango_users` is what selects it; this call panics if it lacks a
+    /// [`REQUIRED_USER_COLUMNS`](crate::tenancy::REQUIRED_USER_COLUMNS)
+    /// column, instead of the first login failing (#1203).
     ///
     /// ```ignore
     /// rustango::manage::Cli::new()
@@ -699,8 +694,10 @@ impl Cli {
     /// ```
     #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
-        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(self) -> Self {
+        if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
+            panic!("Cli::user_model: {e}");
+        }
         self
     }
 
@@ -1222,17 +1219,7 @@ impl Cli {
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            crate::shutdown::serve_until_drained(
-                |stop| {
-                    axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(stop)
-                },
-                drain,
-            )
-            .await?;
+            crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
@@ -1267,17 +1254,7 @@ impl Cli {
                 let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                crate::shutdown::serve_until_drained(
-                    |stop| {
-                        axum::serve(
-                            listener,
-                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                        )
-                        .with_graceful_shutdown(stop)
-                    },
-                    drain,
-                )
-                .await?;
+                crate::shutdown::serve_until_drained(listener, app, drain).await?;
                 run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
             }
@@ -1301,21 +1278,7 @@ impl Cli {
             let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            // v0.30.16 — `into_make_service_with_connect_info` is what
-            // populates `ConnectInfo<SocketAddr>` in request extensions.
-            // Without it, `access_log` (and any other middleware that
-            // reads the peer address) sees "-".
-            crate::shutdown::serve_until_drained(
-                |stop| {
-                    axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(stop)
-                },
-                drain,
-            )
-            .await?;
+            crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
             Ok(())
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
@@ -1699,6 +1662,12 @@ impl OuterLayers {
         use crate::security_headers::SecurityHeadersRouterExt as _;
         use crate::ssl_redirect::SslRedirectRouterExt as _;
         app = app.security_headers(self.headers);
+        // Fills the CSP nonce placeholder; the bundled admin nonces its tags (#1703).
+        #[cfg(feature = "admin")]
+        {
+            use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
+            app = app.csp_nonce(CspNonceLayer::default());
+        }
         if let Some(l) = self.ssl_redirect {
             app = app.ssl_redirect(l);
         }
@@ -2713,6 +2682,35 @@ mod assemble_app_tests {
             .to_str()
             .unwrap()
             .starts_with("text/plain"));
+    }
+
+    /// #1703 — `[security] csp` runs the nonce layer: the header's
+    /// placeholder becomes the nonce a handler renders.
+    #[cfg(all(feature = "config", feature = "admin"))]
+    #[tokio::test]
+    async fn security_csp_fills_the_nonce_a_page_renders() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.csp = Some(format!(
+            "script-src {}",
+            crate::csp_nonce::CSP_NONCE_PLACEHOLDER
+        ));
+        let app = Cli::new()
+            .with_settings(&s)
+            .api(Router::new().route(
+                "/page",
+                axum::routing::get(|| async {
+                    let n = crate::csp_nonce::current().unwrap_or_default();
+                    axum::response::Html(format!(r#"<script nonce="{n}"></script>"#))
+                }),
+            ))
+            .assemble_app(pool);
+        let req = Request::builder().uri("/page").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.expect("request");
+        crate::testkit::assert_strict_csp_page(resp, "/page").await;
     }
 }
 

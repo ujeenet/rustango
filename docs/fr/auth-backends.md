@@ -223,10 +223,15 @@ glu HTTP/axum ; utilisez-le lorsque vous voulez des backends d'authentification
 interchangeables au sein de votre propre code d'authentification :
 
 ```rust
-use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};
+use std::sync::Arc;
+use rustango::auth_backends::{
+    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
+};
 
-let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-let principal = chain.authenticate(&Credentials::remote("alice")).await?;
+async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
+    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
+    chain.authenticate(&Credentials::remote(remote_user)).await
+}
 ```
 
 Mêmes sémantiques « le premier succès l'emporte / la première erreur arrête » que

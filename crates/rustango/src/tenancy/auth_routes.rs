@@ -330,23 +330,42 @@ impl JwtAuth {
     }
 
     /// Verify a Bearer token's signature, expiry, revocation AND tenant
-    /// binding, returning `sub`.
+    /// binding, then that its user is active and its session alive,
+    /// returning `sub` — the same checks as [`require_bearer`].
     ///
     /// All tenants share one signing key, so the `tenant` claim is what
     /// stops a token minted on `acme` being replayed on `sju`. A token
-    /// without that claim is refused, and so is an MCP agent token.
-    pub async fn verify_for_tenant(
+    /// without that claim is refused, and so is an MCP agent token. The
+    /// user row is read from `tenant`'s pool, so a logout or password
+    /// change ends the token at once (#2118).
+    /// Takes what it needs from `tenant` up front, so the future is `Send`
+    /// for any `DB`, as in #1778.
+    pub fn verify_for_tenant<DB: Database>(
         &self,
         bearer: &str,
-        expected_slug: &str,
-    ) -> Result<i64, &'static str> {
-        self.0
-            .jwt
-            .verify_access(bearer)
-            .await
-            .ok_or("invalid or expired token")?
-            .user_id_in(UserTokenScope::Tenant(expected_slug))
+        tenant: &Tenant<DB>,
+    ) -> impl std::future::Future<Output = Result<i64, &'static str>> + Send + 'static {
+        let (auth, bearer) = (self.clone(), bearer.to_owned());
+        let (slug, pool) = (tenant.org.slug.clone(), tenant.pool().clone());
+        async move {
+            const REFUSED: &str = "invalid or expired token";
+            match session_user_in(&auth, &bearer, &slug, &pool).await {
+                Ok(Some(u)) if u.active => u.id.get().copied().ok_or(REFUSED),
+                Ok(_) | Err(SessionLookup::Refused) => Err(REFUSED),
+                Err(SessionLookup::Db(e)) => {
+                    tracing::error!(target: "rustango::tenancy", error = %e, "verify_for_tenant: user lookup");
+                    Err("user lookup failed")
+                }
+            }
+        }
     }
+}
+
+/// Compile-time: `verify_for_tenant` is `Send` for a generic `DB` (#1778).
+#[allow(dead_code)]
+fn verify_for_tenant_is_send<DB: Database>(auth: &JwtAuth, t: &Tenant<DB>) {
+    fn send<T: Send>(_: T) {}
+    send(auth.verify_for_tenant("", t));
 }
 
 /// Claims for a freshly issued login pair: the app's hook first, then
@@ -940,20 +959,44 @@ async fn session_user(
 ) -> Result<Option<crate::tenancy::auth::User>, Response> {
     // The reason is deliberately not echoed: "expired" vs "wrong tenant"
     // vs "revoked" tells a prober which of those they achieved.
-    let refused = || unauthorized("invalid or expired token");
-    let claims = auth.0.jwt.verify_access(token).await.ok_or_else(refused)?;
+    session_user_in(auth, token, &t.org.slug, t.pool())
+        .await
+        .map_err(|e| match e {
+            SessionLookup::Refused => unauthorized("invalid or expired token"),
+            SessionLookup::Db(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        })
+}
+
+/// Why [`session_user_in`] found no user to act as.
+enum SessionLookup {
+    Refused,
+    Db(crate::sql::ExecError),
+}
+
+async fn session_user_in(
+    auth: &JwtAuth,
+    token: &str,
+    slug: &str,
+    pool: &crate::sql::Pool,
+) -> Result<Option<crate::tenancy::auth::User>, SessionLookup> {
+    let claims = auth
+        .0
+        .jwt
+        .verify_access(token)
+        .await
+        .ok_or(SessionLookup::Refused)?;
     let user_id = claims
-        .user_id_in(UserTokenScope::Tenant(&t.org.slug))
-        .map_err(|_| refused())?;
+        .user_id_in(UserTokenScope::Tenant(slug))
+        .map_err(|_| SessionLookup::Refused)?;
     // Tokens the login route did not mint carry no session: fail closed.
     let Some(session) = RefreshSession::read(&claims) else {
         return Ok(None);
     };
     let users: Vec<crate::tenancy::auth::User> = crate::tenancy::auth::User::objects()
         .filter("id", user_id)
-        .fetch(t.pool())
+        .fetch(pool)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(SessionLookup::Db)?;
     Ok(users.into_iter().next().filter(|u| {
         crate::tenancy::session::session_survives(
             &auth.0.pwf_secret,
@@ -1101,39 +1144,113 @@ mod tests {
         );
     }
 
-    /// Two configs stay two. Under the old `OnceLock` the first one's key
-    /// signed for both, so B accepted A's token (#1190).
-    #[tokio::test]
-    async fn each_jwt_auth_keeps_its_own_key() {
-        let auth = |key: &[u8]| {
-            JwtAuth::new(Config {
-                session_secret: Some(key.to_vec()),
-                ..Config::default()
-            })
-        };
-        let a = auth(b"key-a-key-a-key-a-key-a-key-a-32");
-        let b = auth(b"key-b-key-b-key-b-key-b-key-b-32");
-        let mut custom = serde_json::Map::new();
-        custom.insert("tenant".into(), "acme".into());
-        let token = a.lifecycle().issue_pair_with(1, custom).unwrap().access;
-
-        assert_eq!(a.verify_for_tenant(&token, "acme").await, Ok(1));
-        assert!(b.verify_for_tenant(&token, "acme").await.is_err());
+    /// A `Tenant` for `testkit::org()` over `pool`, for `verify_for_tenant`.
+    #[cfg(feature = "sqlite")]
+    async fn sqlite_tenant(pool: &crate::sql::Pool) -> Tenant<sqlx::Sqlite> {
+        let conn = pool.as_sqlite().unwrap().acquire().await.unwrap();
+        let conn = crate::tenancy::TenantConn::database(conn);
+        Tenant::for_test(crate::testkit::org(), conn, pool.clone())
     }
 
-    /// #1848 — an MCP agent token from the same lifecycle is not a user bearer.
-    #[tokio::test]
-    async fn an_agent_token_is_not_a_user_bearer() {
+    /// A shared in-memory SQLite, so the held `Tenant` conn and the pool agree.
+    #[cfg(feature = "sqlite")]
+    async fn verify_env(name: &str) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
+        let url = format!("sqlite:file:{name}?mode=memory&cache=shared");
+        let pool = crate::sql::Pool::connect(&url).await.unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::testkit::user();
+        user.insert_pool(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             ..Config::default()
         });
-        let mut custom = serde_json::Map::new();
-        custom.insert("tenant".into(), "acme".into());
-        custom.insert("kind".into(), "agent".into());
-        let token = auth.lifecycle().issue_access_with(1, custom).unwrap();
+        (auth, pool, user)
+    }
 
-        assert!(auth.verify_for_tenant(&token, "acme").await.is_err());
+    #[cfg(feature = "sqlite")]
+    fn login_access(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> String {
+        let id = user.id.get().copied().unwrap();
+        issue_login_pair(auth, user, id, &crate::testkit::org().slug)
+            .unwrap()
+            .access
+    }
+
+    /// Two configs stay two. Under the old `OnceLock` the first one's key
+    /// signed for both, so B accepted A's token (#1190).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn each_jwt_auth_keeps_its_own_key() {
+        let (a, pool, user) = verify_env("jwt_own_key_1190").await;
+        let b = JwtAuth::new(Config {
+            session_secret: Some(b"key-b-key-b-key-b-key-b-key-b-32".to_vec()),
+            ..Config::default()
+        });
+        let t = sqlite_tenant(&pool).await;
+        let token = login_access(&a, &user);
+
+        assert_eq!(
+            a.verify_for_tenant(&token, &t).await,
+            Ok(*user.id.get().unwrap())
+        );
+        assert!(b.verify_for_tenant(&token, &t).await.is_err());
+    }
+
+    /// #1848 — an MCP agent token from the same lifecycle is not a user bearer.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_agent_token_is_not_a_user_bearer() {
+        let (auth, pool, user) = verify_env("jwt_agent_1848").await;
+        let t = sqlite_tenant(&pool).await;
+        let mut custom = serde_json::Map::new();
+        custom.insert("tenant".into(), crate::testkit::org().slug.into());
+        custom.insert("kind".into(), "agent".into());
+        let id = *user.id.get().unwrap();
+        let token = auth.lifecycle().issue_access_with(id, custom).unwrap();
+
+        assert!(auth.verify_for_tenant(&token, &t).await.is_err());
+    }
+
+    /// #2118 — a logout or a password change ends a token for `verify_for_tenant` too.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn verify_for_tenant_refuses_an_ended_session() {
+        let (auth, pool, mut user) = verify_env("jwt_verify_2118").await;
+        let t = sqlite_tenant(&pool).await;
+        let id = *user.id.get().unwrap();
+
+        let token = login_access(&auth, &user);
+        assert_eq!(auth.verify_for_tenant(&token, &t).await, Ok(id));
+        user.password_hash = "$argon2id$changed".into();
+        user.save_pool(&pool).await.unwrap();
+        assert!(
+            auth.verify_for_tenant(&token, &t).await.is_err(),
+            "password change"
+        );
+
+        let token = login_access(&auth, &user);
+        assert_eq!(auth.verify_for_tenant(&token, &t).await, Ok(id));
+        crate::session::revoke_sessions::<crate::tenancy::auth::User>(&pool, id, None, 0)
+            .await
+            .unwrap();
+        assert!(auth.verify_for_tenant(&token, &t).await.is_err(), "logout");
+    }
+
+    /// #2118 review — a deactivated user's token is refused.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn verify_for_tenant_refuses_an_inactive_user() {
+        let (auth, pool, mut user) = verify_env("jwt_verify_inactive_2118").await;
+        let t = sqlite_tenant(&pool).await;
+        let token = login_access(&auth, &user);
+        assert!(auth.verify_for_tenant(&token, &t).await.is_ok());
+        user.active = false;
+        user.save_pool(&pool).await.unwrap();
+        assert_eq!(
+            auth.verify_for_tenant(&token, &t).await,
+            Err("invalid or expired token")
+        );
     }
 
     /// A tenant pool with one user, and a `JwtAuth` capped at `cap` seconds.

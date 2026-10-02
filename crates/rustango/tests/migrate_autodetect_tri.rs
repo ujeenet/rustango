@@ -165,18 +165,11 @@ async fn unique_drops_on_long_names(pool: &Pool) {
         pool.dialect().name()
     );
 
-    let drop = chain.step(pool, with(false)).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnUnique renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
-    };
-    if !runs.value {
-        let err = drop.expect_err(runs.why);
-        assert!(err.contains("AlterColumnUnique"), "{err}");
-        return;
-    }
-    drop.expect("dropping UNIQUE finds the constraint by name");
+    // PG drops it by name, MySQL by its catalog name, SQLite rebuilds (#1676).
+    chain
+        .step(pool, with(false))
+        .await
+        .expect("dropping UNIQUE finds the constraint");
     exec(
         pool,
         "INSERT INTO {} ({}, {}) VALUES (2, 'a')",
@@ -515,16 +508,8 @@ async fn long_fk_names_apply(pool: &Pool) {
 async fn column_drops_after_its_index_and_check(pool: &Pool) {
     let t = "mad_dc_item";
     let chain = Chain::new(pool, "dc", &[t]).await;
-    let checks = by_dialect! { pool,
-        postgres => true, because "ALTER TABLE ADD CONSTRAINT CHECK is native",
-        mysql => true, because "MySQL 8.0.16+ has CHECK; DROP COLUMN takes it along",
-        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
-    };
-    let checks_json = if checks.value {
-        json!([{"name": "mad_dc_ck", "table": t, "expr": "p >= 0"}])
-    } else {
-        json!([])
-    };
+    // SQLite adds the CHECK by a rebuild (#2127).
+    let checks_json = json!([{"name": "mad_dc_ck", "table": t, "expr": "p >= 0"}]);
     chain
         .step(
             pool,
@@ -612,14 +597,6 @@ async fn m2m_drops_before_its_tables(pool: &Pool) {
 async fn composite_fk_drops_before_its_parent(pool: &Pool) {
     let (parent, child) = ("mad_dx_parent", "mad_dx_child");
     let chain = Chain::new(pool, "dx", &[child, parent]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "composite FKs are added by ALTER TABLE",
-        mysql => true, because "composite FKs are added by ALTER TABLE; 1553/3730 if misordered",
-        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
     let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
     let kid = |with_fk: bool| {
         let mut t = table(child, ab());
@@ -631,26 +608,38 @@ async fn composite_fk_drops_before_its_parent(pool: &Pool) {
     };
     let uq = json!([{"name": "mad_dx_ab_uq", "table": parent, "columns": ["a", "b"],
                      "unique": true}]);
-    chain
-        .step(
-            pool,
-            json!({"tables": [table(parent, ab()), kid(false)], "indexes": uq}),
-        )
-        .await
-        .expect("initial");
-    // A composite FK on a new table is emitted twice (a separate bug), so
-    // it is added to the existing one.
+    // A new table's composite FK comes once, with its CREATE (#1983).
     chain
         .step(
             pool,
             json!({"tables": [table(parent, ab()), kid(true)], "indexes": uq}),
         )
         .await
-        .expect("composite FK");
+        .expect("a new table with a composite FK");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[child, "id", "a", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+    // SQLite drops it by a rebuild (#2127).
     chain
         .step(pool, json!({"tables": [kid(false)]}))
         .await
         .expect("the FK drops before its index and table");
+    // With the FK left, SQLite would refuse this: its parent table is gone.
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 9, 9)",
+        &[child, "id", "a", "b"],
+    )
+    .await
+    .expect("the composite FK is gone");
 }
 
 // ---------------------------------------------------------------- #1878
@@ -665,28 +654,40 @@ async fn type_change_is_not_undone_by_max_length(pool: &Pool) {
         .step(pool, c("string", json!({"max_length": 50})))
         .await
         .expect("initial");
-    let alter = chain.step(pool, c("i32", json!({}))).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnType renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
-    };
-    if !runs.value {
-        let err = alter.expect_err(runs.why);
-        assert!(err.contains("is not yet supported on dialect"), "{err}");
-        return;
-    }
-    alter.expect("the type change applies");
-    assert!(
-        exec(
-            pool,
-            "INSERT INTO {} ({}, {}) VALUES (1, 'abc')",
-            &[t, "id", "c"]
-        )
+    chain
+        .step(pool, c("i32", json!({})))
         .await
-        .is_err(),
-        "the column is an integer, so text is refused"
-    );
+        .expect("the type change applies");
+    let refused = by_dialect! { pool,
+        postgres => true, because "an integer column refuses text",
+        mysql => true, because "strict mode refuses text in an integer column",
+        sqlite => false, because "INTEGER affinity keeps text it cannot convert",
+    };
+    let text = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'abc')",
+        &[t, "id", "c"],
+    )
+    .await;
+    assert_eq!(text.is_err(), refused.value, "{}", refused.why);
+    let ints = by_dialect! { pool,
+        postgres => true, because "the column is an integer",
+        mysql => true, because "the column is an integer",
+        sqlite => true, because "the rebuilt column has INTEGER affinity",
+    };
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, '42')",
+        &[t, "id", "c"],
+    )
+    .await
+    .unwrap();
+    let sql = q(pool, "SELECT {} FROM {}", &["c", t]);
+    let got: Vec<(i32,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got == [(42,)], ints.value, "{}", ints.why);
 }
 
 /// Shrinking `max_length` over longer values fails instead of
@@ -707,8 +708,8 @@ async fn shrinking_max_length_refuses_to_truncate(pool: &Pool) {
     let refuses = by_dialect! { pool,
         postgres => Some("too long"),
             because "without USING, PG refuses a value too long for the new type",
-        mysql => Some("AlterColumnMaxLength"),
-            because "AlterColumnMaxLength is refused at render until #559",
+        mysql => Some("truncated"),
+            because "strict mode refuses to truncate in MODIFY COLUMN",
         sqlite => None, because "SQLite never enforces VARCHAR length, so the change is a no-op",
     };
     let Some(expected) = refuses.value else {
@@ -728,20 +729,15 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
         .step(pool, c("i32", json!({})))
         .await
         .expect("initial");
-    let alter = chain
+    chain
         .step(pool, c("string", json!({"max_length": 5})))
-        .await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnType renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
+        .await
+        .expect("the type change applies");
+    let enforced = by_dialect! { pool,
+        postgres => true, because "the column is VARCHAR(5)",
+        mysql => true, because "the column is VARCHAR(5)",
+        sqlite => false, because "SQLite never enforces VARCHAR length",
     };
-    if !runs.value {
-        let err = alter.expect_err(runs.why);
-        assert!(err.contains("is not yet supported on dialect"), "{err}");
-        return;
-    }
-    alter.expect("the type change applies");
     exec(
         pool,
         "INSERT INTO {} ({}, {}) VALUES (1, 'abcde')",
@@ -749,7 +745,7 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
     )
     .await
     .expect("five characters fit");
-    assert!(
+    assert_eq!(
         exec(
             pool,
             "INSERT INTO {} ({}, {}) VALUES (2, 'abcdef')",
@@ -757,7 +753,9 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
         )
         .await
         .is_err(),
-        "the column is VARCHAR(5)"
+        enforced.value,
+        "{}",
+        enforced.why
     );
 }
 
@@ -767,23 +765,21 @@ async fn type_change_into_a_string_keeps_its_length(pool: &Pool) {
 async fn edited_check_is_replaced(pool: &Pool) {
     let t = "mad_ck_item";
     let chain = Chain::new(pool, "ck", &[t]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "ALTER TABLE ADD/DROP CONSTRAINT CHECK is native",
-        mysql => true, because "MySQL 8.0.16+ enforces CHECK and drops it with DROP CHECK",
-        sqlite => false, because "SQLite cannot add a CHECK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
-    let with = |expr: &str| {
-        json!({"tables": [table(t, vec![id(), col("price", "i64", json!({}))])],
+    let with_default = |expr: &str, default: Value| {
+        json!({"tables": [table(t, vec![id(), col("price", "i64", default)])],
                "checks": [{"name": "mad_ck_price", "table": t, "expr": expr}]})
     };
+    let with = |expr: &str| with_default(expr, json!({}));
     chain.step(pool, with("price >= 0")).await.expect("initial");
     chain
         .step(pool, with("price > 0"))
         .await
         .expect("the edit applies");
+    // SQLite rebuilds the table for this; the CHECK must survive it.
+    chain
+        .step(pool, with_default("price > 0", json!({"default": "1"})))
+        .await
+        .expect("a later column change");
     assert!(
         exec(
             pool,
@@ -800,14 +796,6 @@ async fn edited_check_is_replaced(pool: &Pool) {
 async fn edited_composite_fk_is_replaced(pool: &Pool) {
     let (p1, p2, child) = ("mad_cf_parent1", "mad_cf_parent2", "mad_cf_child");
     let chain = Chain::new(pool, "cf", &[child, p1, p2]).await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "composite FKs are added by ALTER TABLE",
-        mysql => true, because "composite FKs are added by ALTER TABLE",
-        sqlite => false, because "SQLite cannot add a composite FK to a table (#559)",
-    };
-    if !runs.value {
-        return;
-    }
     let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
     let with = |to: Option<&str>| {
         let mut c = table(child, ab());
@@ -972,23 +960,986 @@ async fn not_null_with_default_backfills(pool: &Pool) {
                 col("n", "i64", json!({"nullable": false, "default": "0"}))])]}),
         )
         .await;
-    let runs = by_dialect! { pool,
-        postgres => true, because "AlterColumnNullable renders on Postgres",
-        mysql => false, because "AlterColumn* is refused at render until #559",
-        sqlite => false, because "AlterColumn* is refused at render until #559",
+    alter.expect("the NULL row is backfilled first");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(0,)], "the NULL became the default");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, NULL)",
+            &[t, "id", "n"]
+        )
+        .await
+        .is_err(),
+        "the column is NOT NULL on {}",
+        pool.dialect().name()
+    );
+}
+
+// ---------------------------------------------------------------- #1557
+
+/// `SELECT COUNT(*)` of `t`.
+async fn rows(pool: &Pool, t: &str) -> i64 {
+    let sql = q(pool, "SELECT COUNT(*) FROM {}", &[t]);
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    n[0].0
+}
+
+/// A changed `on_delete` reaches a table that already exists, which
+/// keeps its rows, its index and the cascading FK into it.
+async fn on_delete_reaches_an_existing_table(pool: &Pool) {
+    on_delete_reaches(pool, "mad_od", true).await;
+}
+
+/// As above through the non-atomic runners.
+async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
+    on_delete_reaches(pool, "mad_odn", false).await;
+}
+
+async fn on_delete_reaches(pool: &Pool, tag: &str, atomic: bool) {
+    let (a, b, c) = (
+        format!("{tag}_author"),
+        format!("{tag}_book"),
+        format!("{tag}_page"),
+    );
+    let (a, b, c) = (a.as_str(), b.as_str(), c.as_str());
+    let idx = format!("{tag}_title_idx");
+    let chain = Chain::new(pool, tag, &[c, b, a]).await;
+    // `None` is how a snapshot from before #1549 reads.
+    let with = |on_delete: Option<&str>| {
+        let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+        if let Some(action) = on_delete {
+            rel["on_delete"] = json!(action);
+        }
+        json!({
+            "tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64", json!({"fk": rel})),
+                    col("title", "string", json!({"max_length": 32}))]),
+                table(c, vec![id(), col("book_id", "i64", fk(b))]),
+            ],
+            "indexes": [{"name": idx, "table": b, "columns": ["title"], "unique": false}],
+        })
     };
-    if !runs.value {
-        assert!(alter
-            .expect_err(runs.why)
-            .contains("is not yet supported on dialect"));
+    chain.step(pool, with(None)).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 't')",
+        &[b, "id", "author_id", "title"],
+    )
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[c, "id", "book_id"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION before"
+    );
+    // SQLite re-creates the table's triggers from the catalog.
+    let trigger = by_dialect! { pool,
+        postgres => false, because "no table rebuild",
+        mysql => false, because "no table rebuild",
+        sqlite => true, because "the rebuild drops and re-creates triggers",
+    };
+    let trg = format!("{tag}_trg");
+    let create_trigger = q(
+        pool,
+        "CREATE TRIGGER {} AFTER UPDATE ON {} BEGIN SELECT 1; END",
+        &[&trg, b],
+    );
+    if trigger.value {
+        raw_execute_pool(pool, &create_trigger, Vec::new())
+            .await
+            .unwrap();
+    }
+
+    let altered = chain
+        .step_with(pool, with(Some("CASCADE")), atomic)
+        .await
+        .expect("AlterFkOnDelete applies to the existing table");
+    assert_eq!(
+        (rows(pool, b).await, rows(pool, c).await),
+        (1, 1),
+        "rows kept"
+    );
+    if trigger.value {
+        assert!(
+            raw_execute_pool(pool, &create_trigger, Vec::new())
+                .await
+                .is_err(),
+            "{}",
+            trigger.why
+        );
+    }
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 99)",
+            &[c, "id", "book_id"]
+        )
+        .await
+        .is_err(),
+        "the FK into the table still holds on {}",
+        pool.dialect().name()
+    );
+    assert!(
+        exec(pool, "CREATE INDEX {} ON {} ({})", &[&idx, b, "title"])
+            .await
+            .is_err(),
+        "the index is still there on {}",
+        pool.dialect().name()
+    );
+    exec(pool, "DELETE FROM {}", &[a])
+        .await
+        .expect("CASCADE after");
+    assert_eq!(
+        (rows(pool, b).await, rows(pool, c).await),
+        (0, 0),
+        "cascaded"
+    );
+
+    chain.undo(pool, &altered).await.expect("unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 2, 't')",
+        &[b, "id", "author_id", "title"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION again after unapply"
+    );
+}
+
+/// An action change and a dropped column on one table, in one migration:
+/// the first rebuild already drops the column.
+async fn on_delete_and_drop_in_one_migration(pool: &Pool) {
+    let (a, b) = ("mad_om_author", "mad_om_book");
+    let chain = Chain::new(pool, "om", &[b, a]).await;
+    let with = |rel: Value, extra: Vec<Value>| {
+        let mut fields = vec![id(), col("author_id", "i64", json!({"fk": rel}))];
+        fields.extend(extra);
+        json!({"tables": [table(a, vec![id()]), table(b, fields)]})
+    };
+    chain
+        .step(
+            pool,
+            with(
+                json!({"kind": "fk", "to": a, "on": "id"}),
+                vec![col("old", "i64", json!({}))],
+            ),
+        )
+        .await
+        .expect("initial");
+    chain
+        .step(
+            pool,
+            with(
+                json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"}),
+                vec![],
+            ),
+        )
+        .await
+        .expect("AlterFkOnDelete then DropColumn");
+}
+
+/// A rebuild refuses to lose a column the snapshot does not know.
+async fn rebuild_keeps_unknown_columns(pool: &Pool) {
+    let (a, b) = ("mad_ou_author", "mad_ou_book");
+    let chain = Chain::new(pool, "ou", &[b, a]).await;
+    let with = |rel: Value| {
+        json!({"tables": [table(a, vec![id()]),
+            table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))])]})
+    };
+    chain
+        .step(pool, with(json!({"kind": "fk", "to": a, "on": "id"})))
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "ALTER TABLE {} ADD COLUMN {} INTEGER",
+        &[b, "by_hand"],
+    )
+    .await
+    .unwrap();
+    let altered = chain
+        .step(
+            pool,
+            with(json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"})),
+        )
+        .await;
+    let rebuilds = by_dialect! { pool,
+        postgres => false, because "the FK is replaced in place",
+        mysql => false, because "the FK is replaced in place",
+        sqlite => true, because "the table is rebuilt from the snapshot",
+    };
+    if rebuilds.value {
+        assert!(altered.expect_err(rebuilds.why).contains("by_hand"));
+    } else {
+        altered.expect(rebuilds.why);
+    }
+}
+
+// ---------------------------------------------------------------- #1982
+
+/// A column in a table-level UNIQUE drops; SQLite refused it. Rows and
+/// the AUTOINCREMENT high-water mark survive the rebuild.
+async fn unique_column_drops(pool: &Pool) {
+    let t = "mad_ud_item";
+    let chain = Chain::new(pool, "ud", &[t]).await;
+    let n = col("n", "i64", json!({}));
+    let code = col("code", "string", json!({"max_length": 16, "unique": true}));
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), code, n.clone()])]}),
+        )
+        .await
+        .expect("initial");
+    for (code, n) in [("a", "1"), ("b", "2"), ("c", "3")] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ('{code}', {n})"),
+            &[t, "code", "n"],
+        )
+        .await
+        .unwrap();
+    }
+    exec(pool, "DELETE FROM {} WHERE {} = 3", &[t, "n"])
+        .await
+        .unwrap();
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), n])]}))
+        .await
+        .expect("DropColumn of a UNIQUE column applies");
+    exec(pool, "INSERT INTO {} ({}) VALUES (4)", &[t, "n"])
+        .await
+        .unwrap();
+    let sql = q(
+        pool,
+        "SELECT {}, {} FROM {} ORDER BY {}",
+        &["id", "n", t, "id"],
+    );
+    let got: Vec<(i64, i64)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(1, 1), (2, 2), (4, 4)], "rows kept, id 3 not reused");
+}
+
+// ---------------------------------------------------------------- #2121
+
+impl Chain {
+    /// A hand-edited migration to `after` whose ops are `forward`.
+    async fn hand(
+        &self,
+        pool: &Pool,
+        after: Value,
+        forward: Vec<SchemaChange>,
+        data: Option<&str>,
+    ) -> Result<String, String> {
+        let mut mig = make_migrations_from(self.dir.path(), &snap(after), None)
+            .map_err(|e| e.to_string())?
+            .expect("the snapshot changed");
+        mig.forward = forward.into_iter().map(Operation::Schema).collect();
+        if let Some(sql) = data {
+            mig.forward.push(Operation::Data(rustango::migrate::DataOp {
+                sql: sql.to_owned(),
+                reverse_sql: Some(sql.to_owned()),
+                reversible: true,
+            }));
+        }
+        self.write(&mig);
+        self.migrate(pool).await.map(|()| mig.name)
+    }
+
+    /// Delete the newest migration file, one that failed to apply.
+    fn discard_head(&self) {
+        let path = self.dir.path().join(format!("{}.json", self.head().name));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// The FK is found by its live name, not the rendered one, and a composite
+/// FK on the same column stays.
+async fn hand_named_and_composite_fks_survive(pool: &Pool) {
+    let (a, b) = ("mad_hc_author", "mad_hc_book");
+    let chain = Chain::new(pool, "hc", &[b, a]).await;
+    let with = |on_delete: Option<&str>| {
+        let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+        if let Some(action) = on_delete {
+            rel["on_delete"] = json!(action);
+        }
+        let composite = json!([{"name": "author_code", "to": a,
+                                "from": ["author_id", "code"], "on": ["id", "code"]}]);
+        json!({
+            "tables": [
+                table(a, vec![id(), col("code", "i64", json!({}))]),
+                {"name": b, "model": b, "fields": [id(),
+                    col("author_id", "i64", json!({"fk": rel})), col("code", "i64", json!({}))],
+                 "composite_fks": composite},
+            ],
+            "indexes": [{"name": "mad_hc_author_id_code", "table": a,
+                         "columns": ["id", "code"], "unique": true}],
+        })
+    };
+    chain.step(pool, with(None)).await.expect("initial");
+    // As a hand edit or an old release would have named it.
+    let renamed = by_dialect! { pool,
+        postgres => true, because "PG renames a constraint in place",
+        mysql => true, because "MySQL re-adds it under another name",
+        sqlite => false, because "SQLite FKs have no name to look up",
+    };
+    if renamed.value {
+        let fk = format!("{b}_author_id_fkey");
+        let rename = match pool.dialect().name() {
+            "postgres" => vec![q(
+                pool,
+                "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
+                &[b, &fk, "hand_fk"],
+            )],
+            _ => vec![
+                q(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk]),
+                q(
+                    pool,
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+                    &[b, "hand_fk", "author_id", a, "id"],
+                ),
+            ],
+        };
+        for sql in rename {
+            raw_execute_pool(pool, &sql, Vec::new()).await.unwrap();
+        }
+    }
+    chain
+        .step(pool, with(Some("CASCADE")))
+        .await
+        .expect("AlterFkOnDelete replaces the hand-named FK");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[a, "id", "code"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 1, 2)",
+            &[b, "id", "author_id", "code"],
+        )
+        .await
+        .is_err(),
+        "the composite FK still holds on {}",
+        pool.dialect().name()
+    );
+    exec(
+        pool,
+        // A NULL `code` leaves the composite FK out of the delete.
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {}", &[a])
+        .await
+        .expect("no NO ACTION FK is left behind; the cascade fires");
+    assert_eq!(rows(pool, b).await, 0, "cascaded");
+}
+
+/// Unapplying [RenameColumn, AddColumn]: the DropColumn rebuild takes the
+/// table as it is then, with the new column name.
+async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
+    let t = "mad_sa_item";
+    let chain = Chain::new(pool, "sa", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("a", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[t, "id", "a"],
+    )
+    .await
+    .unwrap();
+    let name = chain
+        .hand(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("b", "i64", json!({})),
+                col("c", "i64", json!({}))])]}),
+            vec![
+                SchemaChange::RenameColumn {
+                    table: t.into(),
+                    old_column: "a".into(),
+                    new_column: "b".into(),
+                },
+                SchemaChange::AddColumn {
+                    table: t.into(),
+                    column: "c".into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("rename then add");
+    chain
+        .undo(pool, &name)
+        .await
+        .expect("unapply drops c, then renames b back");
+    let sql = q(pool, "SELECT {} FROM {}", &["a", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)]);
+}
+
+/// SQLite: a rebuild that orphans a row rolls back; an orphan that was
+/// already there elsewhere does not block it; a RunSQL beside it is refused.
+async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
+    let (a, b) = ("mad_ro_author", "mad_ro_book");
+    let chain = Chain::new(pool, "ro", &[b, a]).await;
+    let books = |fields: Vec<Value>| json!({"tables": [table(a, vec![id()]), table(b, fields)]});
+    chain
+        .step(
+            pool,
+            books(vec![
+                id(),
+                col("x", "i64", json!({})),
+                col("y", "i64", json!({})),
+            ]),
+        )
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "x"],
+    )
+    .await
+    .unwrap();
+    // A NOT NULL FK column with a default: SQLite adds it without the FK.
+    let author = col(
+        "author_id",
+        "i64",
+        json!({"nullable": false, "default": "5",
+        "fk": {"kind": "fk", "to": a, "on": "id"}}),
+    );
+    let added = chain
+        .step(
+            pool,
+            books(vec![
+                id(),
+                col("x", "i64", json!({})),
+                col("y", "i64", json!({})),
+                author.clone(),
+            ]),
+        )
+        .await;
+    let sqlite = by_dialect! { pool,
+        postgres => false, because "the FK is added and refuses author 5",
+        mysql => false, because "the FK is added and refuses author 5",
+        sqlite => true, because "SQLite adds the column without its FK",
+    };
+    if !sqlite.value {
+        added.expect_err(sqlite.why);
         return;
     }
-    alter.expect("the NULL row is backfilled first");
+    added.expect(sqlite.why);
+    // The rebuild adds the FK, which row 1 (author 5) breaks.
+    let err = chain
+        .step(
+            pool,
+            books(vec![id(), col("y", "i64", json!({})), author.clone()]),
+        )
+        .await
+        .expect_err("the rebuild orphans row 1");
+    assert!(err.contains("FOREIGN KEY"), "{err}");
+    chain.discard_head();
+    exec(pool, "SELECT {} FROM {}", &["x", b])
+        .await
+        .expect("rolled back: x is still there");
+    // Author 5 exists now; an old orphan in another table does not block.
+    exec(pool, "INSERT INTO {} ({}) VALUES (5)", &[a, "id"])
+        .await
+        .unwrap();
+    // Only SQLite gets here; the gate keeps mysql- and postgres-only builds compiling.
+    #[cfg(feature = "sqlite")]
+    {
+        let sq = pool.as_sqlite().expect("sqlite");
+        let mut conn = sq.acquire().await.unwrap();
+        for sql in [
+            "PRAGMA foreign_keys = OFF",
+            "CREATE TABLE IF NOT EXISTS mad_ro_other (id INTEGER PRIMARY KEY, \
+             a_id INTEGER REFERENCES mad_ro_author (id))",
+            "INSERT INTO mad_ro_other (id, a_id) VALUES (1, 99)",
+            "PRAGMA foreign_keys = ON",
+        ] {
+            rustango::sql::sqlx::query(sql)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+    }
+    let err = chain
+        .hand(
+            pool,
+            books(vec![id(), col("y", "i64", json!({})), author.clone()]),
+            vec![SchemaChange::DropColumn {
+                table: b.into(),
+                column: "x".into(),
+            }],
+            Some("SELECT 1"),
+        )
+        .await
+        .expect_err("RunSQL beside a rebuild");
+    assert!(err.contains("RunSQL"), "{err}");
+    chain.discard_head();
+    chain
+        .step(pool, books(vec![id(), col("y", "i64", json!({})), author]))
+        .await
+        .expect("an old orphan in mad_ro_other does not block");
+    drop_table(pool, "mad_ro_other").await;
+}
+
+/// The `&PgPool` runners drop the live FK too.
+async fn legacy_pg_runner_replaces_the_fk(pool: &Pool) {
+    let legacy = by_dialect! { pool,
+        postgres => true, because "the `&PgPool` runners are Postgres-only",
+        mysql => false, because "no `&PgPool` runner",
+        sqlite => false, because "no `&PgPool` runner",
+    };
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres().filter(|_| legacy.value) {
+        legacy_pg_runner_body(pool, pg, legacy.why).await;
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = legacy;
+}
+
+/// Gated so sqlite- and mysql-only builds compile without the `&PgPool` runners.
+#[cfg(feature = "postgres")]
+async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, why: &str) {
+    let (a, b) = ("mad_lg_author", "mad_lg_book");
+    let chain = Chain::new(pool, "lg", &[b, a]).await;
+    drop_table(pool, "mad_ledger_legacy").await;
+    let runner = rustango::migrate::Builder::new().ledger("mad_ledger_legacy");
+    let with = |rel: Value| {
+        json!({"tables": [table(a, vec![id()]),
+            table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))])]})
+    };
+    for (rel, atomic) in [
+        (json!({"kind": "fk", "to": a, "on": "id"}), true),
+        (
+            json!({"kind": "fk", "to": a, "on": "id", "on_delete": "CASCADE"}),
+            false,
+        ),
+    ] {
+        let mut mig = make_migrations_from(chain.dir.path(), &snap(with(rel)), None)
+            .unwrap()
+            .unwrap();
+        mig.atomic = atomic;
+        chain.write(&mig);
+        runner.migrate(pg, chain.dir.path()).await.expect(why);
+    }
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {}", &[a]).await.expect("CASCADE");
+    runner
+        .unapply(pg, chain.dir.path(), &chain.head().name)
+        .await
+        .expect("legacy unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (2, 2)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(pool, "DELETE FROM {}", &[a]).await.is_err(),
+        "NO ACTION again"
+    );
+}
+
+// ---------------------------------------------------------------- #1676
+
+/// A squash whose tables exist under another ledger still runs its change
+/// to a table it does not create; it was recorded with the change skipped.
+async fn cross_ledger_squash_runs_its_other_changes(pool: &Pool) {
+    let (a, other) = ("mad_sq_a", "mad_sq_other");
+    let first = Chain::new(pool, "sq1", &[a, other]).await;
+    first
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), table(other, vec![id()])]}),
+        )
+        .await
+        .expect("history under the first ledger");
+    let second = Chain::new(pool, "sq2", &[]).await;
+    let after = json!({"tables": [table(a, vec![id()]),
+        table(other, vec![id(), col("c", "i64", json!({}))])]});
+    let mut squash = make_migrations_from(second.dir.path(), &snap(after), None)
+        .unwrap()
+        .unwrap();
+    squash.replaces = vec!["0001_gone".into()];
+    squash.forward = vec![
+        Operation::Schema(SchemaChange::CreateTable(a.into())),
+        Operation::Schema(SchemaChange::AddColumn {
+            table: other.into(),
+            column: "c".into(),
+        }),
+    ];
+    second.write(&squash);
+    second.migrate(pool).await.expect("the squash reconciles");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 2)",
+        &[other, "id", "c"],
+    )
+    .await
+    .expect("its AddColumn ran");
+}
+
+/// A UNIQUE under a name the migrations did not give it still drops, and
+/// an AlterColumn before a later change on the table still rebuilds right.
+async fn unique_drop_finds_the_live_name(pool: &Pool) {
+    let t = "mad_ul_item";
+    let chain = Chain::new(pool, "ul", &[t]).await;
+    let with = |unique: bool| {
+        json!({"tables": [table(t, vec![id(),
+            col("c", "string", json!({"max_length": 20, "unique": unique}))])]})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    let renamed = by_dialect! { pool,
+        postgres => false, because "PG drops the constraint by its rendered name",
+        mysql => true, because "MySQL looks the index up in the catalog",
+        sqlite => false, because "SQLite rebuilds the table",
+    };
+    if renamed.value {
+        let name = rustango::migrate::ddl::unique_constraint_name(t, "c");
+        exec(
+            pool,
+            "ALTER TABLE {} RENAME INDEX {} TO {}",
+            &[t, &name, "hand_uq"],
+        )
+        .await
+        .unwrap();
+    }
+    chain.step(pool, with(false)).await.expect("UNIQUE drops");
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 'same')"),
+            &[t, "id", "c"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+}
+
+/// A column added and another made NOT NULL in one migration: the
+/// rebuild keeps the new column and fills the NULL.
+async fn alter_then_add_on_one_table(pool: &Pool) {
+    let t = "mad_aa_item";
+    let chain = Chain::new(pool, "aa", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(),
+                col("n", "i64", json!({"nullable": false, "default": "3"})),
+                col("m", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("alter and add apply");
+    let sql = q(pool, "SELECT {}, {} FROM {}", &["n", "m", t]);
+    let got: Vec<(i64, Option<i64>)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3, None)]);
+}
+
+// ---------------------------------------------------------------- #2126
+
+/// A cross-ledger squash whose other changes the first ledger already
+/// applied fakes, data op and M2M junction included, as it did before.
+async fn cross_ledger_squash_already_applied_fakes(pool: &Pool) {
+    let (a, other, through) = ("mad_sf_a", "mad_sf_other", "mad_sf_a_other");
+    let first = Chain::new(pool, "sf1", &[through, a, other]).await;
+    let m2m = json!([{"through": through, "src_table": a, "src_col": "a_id",
+                      "dst_table": other, "dst_col": "other_id"}]);
+    let after = json!({"tables": [table(a, vec![id()]),
+        table(other, vec![id(), col("c", "i64", json!({}))])], "m2m_tables": m2m});
+    first
+        .step(pool, after.clone())
+        .await
+        .expect("history under the first ledger");
+    let second = Chain::new(pool, "sf2", &[]).await;
+    let mut squash = make_migrations_from(second.dir.path(), &snap(after), None)
+        .unwrap()
+        .unwrap();
+    squash.replaces = vec!["0001_gone".into()];
+    squash.forward = vec![
+        Operation::Schema(SchemaChange::CreateTable(a.into())),
+        Operation::Schema(SchemaChange::AddColumn {
+            table: other.into(),
+            column: "c".into(),
+        }),
+        Operation::Schema(SchemaChange::CreateM2MTable {
+            through: through.into(),
+            src_table: a.into(),
+            src_col: "a_id".into(),
+            dst_table: other.into(),
+            dst_col: "other_id".into(),
+        }),
+        Operation::Data(rustango::migrate::DataOp {
+            sql: q(pool, "DELETE FROM {}", &[a]),
+            reverse_sql: Some("SELECT 1".into()),
+            reversible: true,
+        }),
+    ];
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    second.write(&squash);
+    second
+        .migrate(pool)
+        .await
+        .expect("everything is applied, so the squash fakes");
+    assert_eq!(rows(pool, a).await, 1, "the data op did not run again");
+}
+
+/// A file from before the default-first order: NOT NULL, then the default.
+async fn not_null_before_default_still_fills(pool: &Pool) {
+    let t = "mad_od2_item";
+    let chain = Chain::new(pool, "od2", &[t]).await;
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]}),
+        )
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    chain
+        .hand(
+            pool,
+            json!({"tables": [table(t, vec![id(),
+                col("n", "i64", json!({"nullable": false, "default": "4"}))])]}),
+            vec![
+                SchemaChange::AlterColumnNullable {
+                    table: t.into(),
+                    column: "n".into(),
+                    nullable: false,
+                },
+                SchemaChange::AlterColumnDefault {
+                    table: t.into(),
+                    column: "n".into(),
+                    from: None,
+                    to: Some("4".into()),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("the NULL is filled with the later default");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(4,)]);
+}
+
+/// Dropping a field's UNIQUE keeps a declared unique index on the column,
+/// and works on an FK column (MySQL 1553).
+async fn unique_drop_keeps_a_declared_index(pool: &Pool) {
+    let (a, b) = ("mad_dk_author", "mad_dk_book");
+    let chain = Chain::new(pool, "dk", &[b, a]).await;
+    let with = |unique: bool| {
+        json!({"tables": [table(a, vec![id()]), table(b, vec![id(),
+            col("author_id", "i64", json!({"unique": unique,
+                "fk": {"kind": "fk", "to": a, "on": "id"}})),
+            col("code", "i64", json!({"unique": unique}))])],
+            "indexes": [{"name": "mad_dk_code_uq", "table": b, "columns": ["code"], "unique": true}]})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    chain
+        .step(pool, with(false))
+        .await
+        .expect("both UNIQUEs drop");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}, {{}}) VALUES ({id}, 1, {id})"),
+            &[b, "id", "author_id", "code"],
+        )
+        .await
+        .expect("author_id is no longer unique");
+    }
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (3, 1)",
+            &[b, "id", "code"]
+        )
+        .await
+        .is_err(),
+        "the declared index still makes code unique on {}",
+        pool.dialect().name()
+    );
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (4, 99)",
+            &[b, "id", "author_id"]
+        )
+        .await
+        .is_err(),
+        "the FK is back on {}",
+        pool.dialect().name()
+    );
+}
+
+/// An AddColumn UNIQUE dropped after its column was renamed: the index
+/// keeps its old name.
+async fn unique_drop_after_a_rename(pool: &Pool) {
+    let t = "mad_ur_item";
+    let chain = Chain::new(pool, "ur", &[t]).await;
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id()])]}))
+        .await
+        .expect("initial");
+    let unique = |name: &str, unique: bool| json!({"tables": [table(t, vec![id(), col(name, "i64", json!({"unique": unique}))])]});
+    chain
+        .step(pool, unique("c", true))
+        .await
+        .expect("AddColumn UNIQUE");
+    chain
+        .hand(
+            pool,
+            unique("d", true),
+            vec![SchemaChange::RenameColumn {
+                table: t.into(),
+                old_column: "c".into(),
+                new_column: "d".into(),
+            }],
+            None,
+        )
+        .await
+        .expect("rename");
+    // Every backend finds the old name in the catalog (#2133).
+    chain
+        .step(pool, unique("d", false))
+        .await
+        .expect("drop the renamed column's UNIQUE");
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 5)"),
+            &[t, "id", "d"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+}
+
+/// AlterColumn* unapplies on every backend.
+async fn alter_column_unapplies(pool: &Pool) {
+    let t = "mad_ua_item";
+    let chain = Chain::new(pool, "ua", &[t]).await;
+    let with = |strict: bool| {
+        let n = if strict {
+            json!({"nullable": false, "default": "5"})
+        } else {
+            json!({})
+        };
+        json!({"tables": [table(t, vec![id(), col("n", "i64", n),
+            col("s", "string", json!({"max_length": 10, "unique": strict}))])]})
+    };
+    chain.step(pool, with(false)).await.expect("initial");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'x')",
+        &[t, "id", "s"],
+    )
+    .await
+    .unwrap();
+    let name = chain.step(pool, with(true)).await.expect("alter");
+    chain.undo(pool, &name).await.expect("unapply");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, NULL, 'x')",
+        &[t, "id", "n", "s"],
+    )
+    .await
+    .expect("nullable and not unique again");
 }
 
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        on_delete_reaches_an_existing_table,
+        on_delete_reaches_without_a_transaction,
+        on_delete_and_drop_in_one_migration,
+        hand_named_and_composite_fks_survive,
+        rebuild_uses_the_shape_at_its_op,
+        rebuild_checks_only_its_own_orphans,
+        legacy_pg_runner_replaces_the_fk,
+        cross_ledger_squash_runs_its_other_changes,
+        unique_drop_finds_the_live_name,
+        alter_then_add_on_one_table,
+        cross_ledger_squash_already_applied_fakes,
+        not_null_before_default_still_fills,
+        unique_drop_keeps_a_declared_index,
+        unique_drop_after_a_rename,
+        alter_column_unapplies,
+        rebuild_keeps_unknown_columns,
+        unique_column_drops,
         unique_drops_on_long_names,
         add_column_keeps_fk_and_unique,
         fk_column_drops,

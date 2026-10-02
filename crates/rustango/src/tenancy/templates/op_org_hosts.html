@@ -59,7 +59,7 @@ one tenant only.</p>
           {% endif %}
         </form>
         <form method="post" action="/orgs/{{ slug }}/hosts/remove" class="inline-form"
-              onsubmit="return confirm('Remove {{ h.hostname }}? Traffic to it stops resolving to {{ slug }}.');">
+              data-confirm="Remove {{ h.hostname }}? Traffic to it stops resolving to {{ slug }}.">
           {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="hostname" value="{{ h.hostname }}">
           <button type="submit" class="btn btn-danger">Remove</button>

@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.59"                                        # Postgres (the default backend)
+//! rustango = "0.60"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.59", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.59", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.60", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.60", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -86,9 +86,9 @@
 //! |---|---|
 //! | `postgres` / `mysql` / `sqlite` | The database backend(s). |
 //! | `batteries` | The default bundle minus the backend (see [Install](#install)). |
-//! | `admin` | Auto-generated admin UI + session auth. |
+//! | `admin` | Auto-generated admin UI + session auth; `#[derive(ViewSet)]` REST endpoints (also under `tenancy`). |
 //! | `tenancy` | Multi-tenant resolver, per-tenant pools, operator console. |
-//! | `serializer` | Serializers + `#[derive(ViewSet)]` REST endpoints. |
+//! | `serializer` | `#[derive(Serializer)]` JSON serializers. |
 //! | `jwt` / `oauth2` | Token auth; social / OIDC login. |
 //! | `jobs` / `jobs-postgres` | Background jobs (in-memory / durable). |
 //! | `cache` / `cache-redis` | Cache layer; Redis backend. |
@@ -401,6 +401,11 @@ pub mod databases;
 pub mod migrate;
 pub mod query;
 pub mod sql;
+/// Context that follows work off the request thread — see
+/// [`task_context::TaskContext`]. `tokio::spawn` inherits no
+/// `task_local!`, so deferred work starts with none of its caller's
+/// ambient context unless it is carried deliberately.
+pub mod task_context;
 
 /// Test-support helpers (schema builders from `Model::SCHEMA` + model
 /// factories). Dev-only: `#[cfg(test)]` for this crate's own tests,
@@ -570,7 +575,7 @@ pub mod notifications;
 
 /// Background job queue with a worker pool — async work outside the request
 /// lifecycle. In-memory by default; `jobs-postgres` adds the database-backed
-/// queue. See [`jobs::JobQueue`].
+/// queue. See [`jobs::JobQueue`]; [`jobs::Job::run`] says which context each carries.
 #[cfg(feature = "jobs")]
 pub mod jobs;
 
@@ -592,6 +597,8 @@ pub mod permissions;
 /// Unified `RustangoError` enum + `From` impls for every framework error type.
 /// Use in handlers: `async fn handler() -> RustangoResult<Json<X>> { ... }`.
 mod error;
+#[cfg(feature = "_axum")]
+pub use error::server_error;
 pub use error::{RustangoError, RustangoResult};
 
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
@@ -856,8 +863,9 @@ pub mod security_headers;
 /// request, exposes it as `Extension<Nonce>`, and replaces
 /// `'nonce-__RUSTANGO_NONCE__'` in the CSP header, so inline
 /// `<script nonce="...">` tags pass a strict CSP. See
-/// [`csp_nonce::CspNonceLayer`].
-#[cfg(feature = "csp-nonce")]
+/// [`csp_nonce::CspNonceLayer`]. Built with `admin` too: `[security]`
+/// mounts it so the bundled admin pages pass a strict CSP (#1703).
+#[cfg(feature = "admin")]
 pub mod csp_nonce;
 
 /// Signed URL helpers — HMAC-SHA256 with optional expiry.

@@ -1,25 +1,34 @@
 //! Webhook signature checks, using HMAC and constant-time compare.
 //!
-//! Providers such as Stripe, GitHub and Slack sign the request body
-//! and send the signature in a header. Verify it before you act on
-//! the payload, or you will run your handler on forged data.
+//! Providers sign the request and send the signature in a header. Verify
+//! it before you act on the payload, or you will run your handler on
+//! forged data. GitHub signs the body; Stripe and Slack sign a timestamp
+//! plus the body, so build that string first (see `docs/security.md`).
 //!
 //! ## Quick start
 //!
-//! ```ignore
+//! ```
+//! use axum::{body::Bytes, http::HeaderMap, http::StatusCode};
 //! use rustango::webhook::{verify_signature, SignatureFormat};
 //!
-//! async fn handle_webhook(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-//!     let signature = headers.get("X-Hub-Signature-256")
+//! // GitHub sends `X-Hub-Signature-256: sha256=<hex>` over the raw body.
+//! fn check_github(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
+//!     let signature = headers
+//!         .get("X-Hub-Signature-256")
 //!         .and_then(|v| v.to_str().ok())
 //!         .unwrap_or("");
-//!
-//!     if !verify_signature(SignatureFormat::HexSha256, secret, &body, signature) {
+//!     if !verify_signature(SignatureFormat::HexSha256WithPrefix, secret, body, signature) {
 //!         return StatusCode::UNAUTHORIZED;
 //!     }
 //!     // ... process the verified payload
 //!     StatusCode::OK
 //! }
+//! # let body = Bytes::from_static(b"{}");
+//! # let mut h = HeaderMap::new();
+//! # let sig = rustango::webhook::sign(SignatureFormat::HexSha256WithPrefix, b"s", &body).unwrap();
+//! # h.insert("X-Hub-Signature-256", sig.parse().unwrap());
+//! # assert_eq!(check_github(b"s", &h, &body), StatusCode::OK);
+//! # assert_eq!(check_github(b"other", &h, &body), StatusCode::UNAUTHORIZED);
 //! ```
 
 use hmac::{Hmac, Mac};

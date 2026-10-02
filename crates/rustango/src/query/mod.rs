@@ -1299,7 +1299,7 @@ impl<T: Model> QuerySet<T> {
     /// // rustango:
     /// let post = Post::objects()
     ///     .where_key(42_i64)
-    ///     .first_pool(&pool).await?;
+    ///     .first(&pool).await?;
     /// ```
     ///
     /// Models without `#[rustango(primary_key)]` surface as
@@ -2558,7 +2558,7 @@ fn lower_select_related(
     model: &'static ModelSchema,
     names: &[String],
 ) -> Result<Vec<crate::core::Join>, QueryError> {
-    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
+    use crate::core::{Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
     let mut out: Vec<Join> = Vec::with_capacity(names.len());
     for name in names {
         // Walk each `__`-separated hop. `current` tracks the schema
@@ -2604,9 +2604,7 @@ fn lower_select_related(
                     });
                 }
             };
-            let target = inventory::iter::<ModelEntry>
-                .into_iter()
-                .find(|e| e.schema.table == to)
+            let target = ModelEntry::for_table(to)
                 .map(|e| e.schema)
                 .ok_or_else(|| QueryError::SelectRelatedInvalid {
                     model: current.name,
@@ -3363,7 +3361,7 @@ fn resolve_span_chain(
     ),
     QueryError,
 > {
-    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Relation};
+    use crate::core::{Expr, Join, JoinKind, ModelEntry, Relation};
     let segs: Vec<&str> = raw_key.split("__").collect();
     let mut joins: Vec<Join> = Vec::new();
     let mut current: &'static ModelSchema = model;
@@ -3380,14 +3378,12 @@ fn resolve_span_chain(
         match fk {
             // An FK that isn't the final segment is a JOIN hop.
             Some((field, to, on)) if !is_last => {
-                let target = inventory::iter::<ModelEntry>
-                    .into_iter()
-                    .find(|e| e.schema.table == to)
-                    .map(|e| e.schema)
-                    .ok_or_else(|| QueryError::UnknownField {
+                let target = ModelEntry::for_table(to).map(|e| e.schema).ok_or_else(|| {
+                    QueryError::UnknownField {
                         model: current.name,
                         field: format!("{seg} (target table `{to}` not registered)"),
-                    })?;
+                    }
+                })?;
                 // The first hop's alias is the schema's field name; deeper
                 // ones are interned. Same scheme as `lower_select_related`,
                 // so a span and a `select_related` over one path dedupe.
@@ -4361,38 +4357,6 @@ pub enum DateKind {
     Day,
 }
 
-impl DateKind {
-    /// Emit the dialect-portable SQL fragment that truncates the
-    /// column to this granularity. `col_quoted` must already be a
-    /// quoted identifier (`"name"` / `\`name\``).
-    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
-        match (dialect_name, self) {
-            ("postgres", DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})::date"),
-            ("postgres", DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})::date"),
-            ("postgres", DateKind::Day) => format!("DATE({col_quoted})"),
-            ("mysql", DateKind::Year) => {
-                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-01-01'))")
-            }
-            ("mysql", DateKind::Month) => {
-                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-%m-01'))")
-            }
-            ("mysql", DateKind::Day) => format!("DATE({col_quoted})"),
-            ("sqlite", DateKind::Year) => {
-                format!("date(strftime('%Y-01-01', {col_quoted}))")
-            }
-            ("sqlite", DateKind::Month) => {
-                format!("date(strftime('%Y-%m-01', {col_quoted}))")
-            }
-            ("sqlite", DateKind::Day) => format!("date({col_quoted})"),
-            // Unknown dialect: fall back to PG-shape DATE_TRUNC. The
-            // driver reports a clear syntax error if it is unsupported.
-            (_, DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})"),
-            (_, DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})"),
-            (_, DateKind::Day) => format!("DATE({col_quoted})"),
-        }
-    }
-}
-
 /// Builder returned by [`QuerySet::dates`]. Run it with
 /// [`crate::sql::fetch_dates_pool`], which emits
 /// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`.
@@ -4493,53 +4457,6 @@ pub enum DateTimeKind {
     Hour,
     Minute,
     Second,
-}
-
-impl DateTimeKind {
-    /// Dialect-portable SQL fragment that truncates a `TIMESTAMP` /
-    /// `DATETIME` column to this granularity, returning a value
-    /// shaped to decode as `DateTime<Utc>`.
-    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
-        match dialect_name {
-            "postgres" => {
-                let unit = match self {
-                    DateTimeKind::Year => "year",
-                    DateTimeKind::Month => "month",
-                    DateTimeKind::Day => "day",
-                    DateTimeKind::Hour => "hour",
-                    DateTimeKind::Minute => "minute",
-                    DateTimeKind::Second => "second",
-                };
-                format!("DATE_TRUNC('{unit}', {col_quoted})")
-            }
-            "mysql" => {
-                let fmt = match self {
-                    DateTimeKind::Year => "%Y-01-01 00:00:00",
-                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
-                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
-                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
-                    DateTimeKind::Minute => "%Y-%m-%d %H:%i:00",
-                    DateTimeKind::Second => "%Y-%m-%d %H:%i:%s",
-                };
-                // CAST back to DATETIME so the decoder sees the right
-                // type.
-                format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
-            }
-            _ => {
-                // SQLite and anything else: format with strftime so
-                // the value comes back in the standard ISO-8601 shape.
-                let fmt = match self {
-                    DateTimeKind::Year => "%Y-01-01 00:00:00",
-                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
-                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
-                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
-                    DateTimeKind::Minute => "%Y-%m-%d %H:%M:00",
-                    DateTimeKind::Second => "%Y-%m-%d %H:%M:%S",
-                };
-                format!("strftime('{fmt}', {col_quoted})")
-            }
-        }
-    }
 }
 
 /// Builder returned by [`QuerySet::datetimes`]. Like

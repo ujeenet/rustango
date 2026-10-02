@@ -64,7 +64,7 @@
 //! let line = Invoice::objects()
 //!     .where_(Invoice::tenant_id.eq(7))
 //!     .where_(Invoice::invoice_number.eq("INV-0001"))
-//!     .first_pool(&pool)
+//!     .first(&pool)
 //!     .await?;
 //! ```
 //!

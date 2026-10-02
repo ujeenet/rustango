@@ -126,6 +126,17 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             column: column.clone(),
             unique: !unique,
         })),
+        Operation::Schema(SchemaChange::AlterFkOnDelete {
+            table,
+            column,
+            from,
+            to,
+        }) => Ok(Operation::Schema(SchemaChange::AlterFkOnDelete {
+            table: table.clone(),
+            column: column.clone(),
+            from: to.clone(),
+            to: from.clone(),
+        })),
         Operation::Schema(SchemaChange::RenameTable { old_name, new_name }) => {
             Ok(Operation::Schema(SchemaChange::RenameTable {
                 old_name: new_name.clone(),

@@ -310,3 +310,33 @@ async fn finalize_and_purge_pending_respect_the_status_on_mysql() {
     let ready = mgr.get(kept).await.unwrap().unwrap();
     assert!(mgr.load_bytes(&ready).await.is_ok(), "Ready object purged");
 }
+
+/// #1677: a deleted collection kept its `unique` slug, so recreating
+/// the folder failed forever.
+#[tokio::test]
+async fn a_deleted_collections_slug_can_be_reused_on_mysql() {
+    let _g = live_lock().lock().await;
+    let Some((mgr, _pool)) = manager_or_skip().await else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let old = mgr
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("create");
+    let Auto::Set(old_id) = old.id else {
+        panic!("no id")
+    };
+    mgr.delete_collection(old_id).await.expect("delete");
+    let new = mgr
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("recreate");
+    assert_ne!(new.id, old.id);
+    let live = mgr
+        .get_collection_by_slug("docs")
+        .await
+        .expect("get")
+        .expect("live");
+    assert_eq!(live.id, new.id);
+}

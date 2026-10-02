@@ -124,6 +124,18 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` when changing a table's constraints means rebuilding the
+    /// table (SQLite), not an `ALTER` (#1557, #1982).
+    fn alters_by_rebuild(&self) -> bool {
+        false
+    }
+
+    /// `true` when changing a column restates its whole definition
+    /// (MySQL's `MODIFY COLUMN`), not one property at a time (#1676).
+    fn modifies_whole_column(&self) -> bool {
+        false
+    }
+
     /// How many binds the backend takes in one statement. A multi-row
     /// `INSERT` reaches this at `rows × columns`.
     ///
@@ -331,8 +343,23 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Query for the names of the FKs on one column, binding `(table,
-    /// column)`. `Some` where `DROP COLUMN` keeps them (MySQL, 1828).
+    /// column)`. Single-column FKs only: a composite one stays (#1557).
+    /// `None` where FKs cannot be dropped by name (SQLite).
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Query for the names of the single-column UNIQUE indexes on one
+    /// column, binding `(table, column)`. `Some` where an `AlterColumnUnique`
+    /// drops the index by that name (MySQL) (#1676).
+    fn unique_index_names_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Drop the UNIQUE index `name` from `table`, for
+    /// [`Self::unique_index_names_sql`]'s names.
+    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
         None
     }
 
@@ -432,9 +459,10 @@ pub trait Dialect: Send + Sync {
             FieldType::Range(crate::core::RangeElem::Date) => "daterange",
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
             FieldType::HStore => "hstore",
-            // `vector(N)` and `geometry(Point, srid)` carry a runtime
-            // value in the type, so they have no fixed CAST spelling.
+            // `vector(N)` carries a runtime value in the type, so it has
+            // no fixed CAST spelling; bulk_update casts its NULLs itself.
             FieldType::Vector(_) => return None,
+            // PostGIS casts text to geometry implicitly, so a NULL needs no cast.
             FieldType::Geometry(_) => return None,
         })
     }

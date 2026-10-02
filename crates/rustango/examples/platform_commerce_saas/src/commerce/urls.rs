@@ -236,7 +236,7 @@ async fn sso_seed(t: Tenant<DefaultTenantDb>) -> ProbeResult {
     use rustango::tenancy::auth::User;
     probes::gate()?;
     let pool = t.pool();
-    let err = |e: &dyn std::fmt::Display| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let err = |e: &dyn std::fmt::Display| rustango::server_error(e);
     let issuer = std::env::var("SOAK_IDP_ISSUER").unwrap_or_else(|_| "http://idp:9000".into());
     // `idp-strict` never links by email; `idp-link` opts in.
     for (slug, allow_email_link) in [("idp-strict", false), ("idp-link", true)] {
@@ -458,7 +458,7 @@ async fn confirm_order(
             order_id: id,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     queue
         .dispatch(&FlakyPaymentCapture {
             tenant: slug.clone(),
@@ -466,7 +466,7 @@ async fn confirm_order(
             fail_ratio_pct: st.fail_ratio_pct,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     if id % 50 == 0 {
         queue
             .dispatch(&jobs::FatalProbe {
@@ -474,7 +474,7 @@ async fn confirm_order(
                 order_id: id,
             })
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(rustango::server_error)?;
     }
     tracing::info!(order = id, tenant = %slug, "order queued for fulfilment");
     Ok((
@@ -562,7 +562,7 @@ async fn soak_set_tenant_active(
         .set("active", active)
         .execute_pool(&st.registry)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
 
     if updated == 0 {
         return Err((StatusCode::NOT_FOUND, format!("no tenant `{slug}`")));

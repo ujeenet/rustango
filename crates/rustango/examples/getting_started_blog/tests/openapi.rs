@@ -57,12 +57,16 @@ fn viewset_generates_crud_paths_referencing_the_schema() {
     assert!(v["paths"]["/api/posts/{pk}"]["get"].is_object());
     assert!(v["paths"]["/api/posts/{pk}"]["delete"].is_object());
 
-    // The create body references the registered component schema.
+    // The created row comes back as the registered component schema.
+    let create = &v["paths"]["/api/posts"]["post"];
     assert_eq!(
-        v["paths"]["/api/posts"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-            ["$ref"],
+        create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/Post"
     );
+    // The create body lists only what a client sends: no server-assigned `id`.
+    let body = &create["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(body["properties"]["title"]["type"], "string");
+    assert!(body["properties"].get("id").is_none());
 
     // The configured filter + search surface as query parameters.
     let params: Vec<String> = v["paths"]["/api/posts"]["get"]["parameters"]

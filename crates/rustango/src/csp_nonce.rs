@@ -120,6 +120,33 @@ pub trait CspNonceRouterExt {
     fn csp_nonce(self, layer: CspNonceLayer) -> Self;
 }
 
+tokio::task_local! {
+    static CURRENT_NONCE: Nonce;
+}
+
+/// This request's nonce, for a template rendered inside the layer.
+/// The bundled admin, console and tenant login read it (#1703).
+#[must_use]
+pub fn current() -> Option<String> {
+    CURRENT_NONCE.try_with(|n| n.value().to_owned()).ok()
+}
+
+/// Run `f` as if under the layer with `nonce`, for render tests.
+#[cfg(test)]
+pub(crate) async fn scoped<F: std::future::Future>(nonce: &str, f: F) -> F::Output {
+    let nonce = Nonce {
+        value: Arc::new(nonce.to_owned()),
+    };
+    CURRENT_NONCE.scope(nonce, f).await
+}
+
+/// ` nonce="…"` for an inline tag built in Rust; empty outside the layer.
+/// The nonce is base64url, so it needs no escaping.
+#[must_use]
+pub(crate) fn nonce_attr() -> String {
+    current().map_or_else(String::new, |n| format!(r#" nonce="{n}""#))
+}
+
 impl<S: Clone + Send + Sync + 'static> CspNonceRouterExt for Router<S> {
     fn csp_nonce(self, layer: CspNonceLayer) -> Self {
         let cfg = Arc::new(layer);
@@ -131,7 +158,7 @@ impl<S: Clone + Send + Sync + 'static> CspNonceRouterExt for Router<S> {
                         value: Arc::new(generate_nonce(cfg.bytes)),
                     };
                     req.extensions_mut().insert(nonce.clone());
-                    let mut response = next.run(req).await;
+                    let mut response = CURRENT_NONCE.scope(nonce.clone(), next.run(req)).await;
                     substitute_nonce(&mut response, nonce.value());
                     response
                 }

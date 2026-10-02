@@ -467,3 +467,146 @@ fn every_admin_post_form_renders_a_csrf_token() {
         missing.join("\n  "),
     );
 }
+
+/// #2131 — basic auth rides the browser like a session cookie, so a
+/// basic-auth admin refuses a tokenless mutation and renders a token.
+#[tokio::test]
+async fn a_basic_auth_admin_has_csrf_too() {
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::Builder::new(pool().await)
+            .admin_prefix("")
+            .build(),
+        "op",
+        "pw",
+    );
+    // "op:pw"
+    let auth = "Basic b3A6cHc=";
+    let forged = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/csrf_post")
+                .header(header::AUTHORIZATION, auth)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("title=forged"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+    let form = app
+        .oneshot(
+            Request::builder()
+                .uri("/csrf_post/new")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = csrf_cookies(&form).pop().expect("a GET seeds the cookie");
+    let html = axum::body::to_bytes(form.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!(r#"name="_csrf" value="{cookie}""#)),
+        "the form renders the cookie's token: {html}"
+    );
+}
+
+/// #2131 — an app behind its own cookie auth can add the same protection.
+#[tokio::test]
+async fn protect_with_csrf_guards_an_app_gated_admin() {
+    let app = rustango::admin::protect_with_csrf(
+        rustango::admin::Builder::new(pool().await)
+            .admin_prefix("")
+            .build(),
+    );
+    let post = |cookie: &str, body: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/csrf_post")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie.to_owned())
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let forged = app.clone().oneshot(post("", "title=forged")).await.unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+    let t = "ffffffffffffffffffffffffffffffff";
+    let ok = app
+        .oneshot(post(
+            &format!("rustango_csrf={t}"),
+            &format!("title=ok&_csrf={t}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "created");
+}
+
+/// #1703 — the signed-in admin pages run under a strict CSP.
+#[tokio::test]
+async fn signed_in_admin_pages_pass_a_strict_csp() {
+    let (app, cookie, token) = signed_in().await;
+    let app = rustango::testkit::with_strict_csp(app);
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/csrf_post")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::from(format!("title=one&_csrf={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+    let mut pages = vec![
+        "/",
+        "/csrf_post",
+        "/csrf_post/new",
+        "/csrf_post/1",
+        "/csrf_post/1/edit",
+        "/__audit",
+        "/account/password",
+    ];
+    if cfg!(feature = "totp") {
+        pages.push("/account/totp");
+    }
+    for uri in pages {
+        let req = Request::builder()
+            .uri(uri)
+            .header(header::COOKIE, cookie.clone())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        rustango::testkit::assert_strict_csp_page(resp, uri).await;
+    }
+}
+
+/// #2131 — `protect_with_csrf` around a session admin still sets one
+/// token, the one its form renders.
+#[tokio::test]
+async fn nested_csrf_layers_keep_one_token() {
+    let app = rustango::admin::protect_with_csrf(app_with_session_auth(pool().await));
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    // A gated page: both CsrfLayers see it.
+    let gated = app.clone().oneshot(get("/csrf_post")).await.unwrap();
+    assert_eq!(csrf_cookies(&gated).len(), 1, "{:?}", csrf_cookies(&gated));
+    let resp = app.oneshot(get("/login")).await.unwrap();
+    let cookies = csrf_cookies(&resp);
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let html = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!(r#"value="{}""#, cookies[0])),
+        "{html}"
+    );
+}

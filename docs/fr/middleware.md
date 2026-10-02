@@ -130,9 +130,10 @@ Conséquences pratiques :
 
 ## Le catalogue intégré
 
-Chaque entrée est un `tower::Layer` avec un one-liner `…RouterExt` associé, sauf
-mention contraire. Amenez le trait `…RouterExt` du module dans la portée pour
-obtenir la méthode.
+La plupart des entrées sont des structs de configuration installées par leur
+one-liner `…RouterExt`, pas des `tower::Layer` — les rares qui acceptent
+`.layer(…)` sont listées plus haut. Amenez le trait `…RouterExt` du module dans la
+portée pour obtenir la méthode.
 
 | Préoccupation | Layer | Câblez-le avec |
 | --- | --- | --- |
@@ -394,9 +395,9 @@ un dans chaque formulaire. Le `| safe` est obligatoire : Tera échappe `.html`
 automatiquement, sans quoi le formulaire ne porte aucun champ `_csrf` et chaque
 POST renvoie 403. Le formulaire de connexion de l'admin fait exactement cela —
 voir `crates/rustango/src/admin/templates/login.html`. Surchargez les noms de cookie/en-tête ou le flag
-`Secure` avec `csrf::with_config(CsrfConfig)` ; pour des configurations SPA,
-ajoutez `.with_trusted_origins([...])` pour activer la vérification de
-défense en profondeur de l'en-tête Origin en plus du jeton. Pour des endpoints
+`Secure` avec `csrf::with_config(CsrfConfig)` ; la vérification de
+l'en-tête Origin s'exécute toujours et accepte le Host de la requête ; une SPA
+servie depuis une autre origine s'ajoute avec `.with_trusted_origins([...])`. Pour des endpoints
 collecteurs append-only atteints via `navigator.sendBeacon` (p. ex. analytics)
 qui ne peuvent pas envoyer d'en-tête de jeton, `CsrfConfig::exempt_prefix("/path")`
 saute l'application pour un préfixe de chemin étroit. L'auto-admin active le CSRF

@@ -27,7 +27,7 @@ use super::{Cache, CacheError};
 /// Async cache backed by Redis.
 ///
 /// Values are UTF-8 strings, either raw or JSON from
-/// [`super::set_json`]. A TTL becomes `SET EX`.
+/// [`super::set_json`]. A TTL becomes `SET PX`.
 pub struct RedisCache {
     conn: redis::aio::ConnectionManager,
     default_ttl: Option<Duration>,
@@ -59,8 +59,11 @@ impl RedisCache {
         Ok(Self { conn, default_ttl })
     }
 
-    fn effective_ttl(&self, ttl: Option<Duration>) -> Option<u64> {
-        ttl.or(self.default_ttl).map(|d| d.as_secs().max(1))
+    /// In milliseconds, as `PX`/`PEXPIRE` take it: whole seconds cut a
+    /// 1500 ms TTL to 1 s (#1677).
+    fn effective_ttl_ms(&self, ttl: Option<Duration>) -> Option<u64> {
+        ttl.or(self.default_ttl)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1))
     }
 }
 
@@ -75,9 +78,9 @@ impl Cache for RedisCache {
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
-        match self.effective_ttl(ttl) {
-            Some(secs) => conn
-                .set_ex::<_, _, ()>(key, value, secs)
+        match self.effective_ttl_ms(ttl) {
+            Some(ms) => conn
+                .pset_ex::<_, _, ()>(key, value, ms)
                 .await
                 .map_err(|e| CacheError::Connection(e.to_string())),
             None => conn
@@ -94,7 +97,7 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
-    /// Atomic set-if-absent via `SET key value NX [EX secs]`. `NX`
+    /// Atomic set-if-absent via `SET key value NX [PX ms]`. `NX`
     /// makes the server do the test-and-set in one round trip, which
     /// is what makes `DistributedLock` safe across replicas. Returns
     /// `true` when this call created the key.
@@ -102,8 +105,8 @@ impl Cache for RedisCache {
         let mut conn = self.conn.clone();
         let mut cmd = redis::cmd("SET");
         cmd.arg(key).arg(value).arg("NX");
-        if let Some(secs) = self.effective_ttl(ttl) {
-            cmd.arg("EX").arg(secs);
+        if let Some(ms) = self.effective_ttl_ms(ttl) {
+            cmd.arg("PX").arg(ms);
         }
         // `SET … NX` replies "OK" on success and nil when the key
         // already existed, which decodes as `Some`/`None`.
@@ -200,18 +203,18 @@ impl Cache for RedisCache {
         // Lua rather than `EXPIRE … NX`, which needs Redis 7.0. `EVAL`
         // works from 2.6, so this also runs on ElastiCache and other
         // Redis-compatible servers. After the INCRBY the key always
-        // exists, so a `TTL` below 0 means no expiry is set.
+        // exists, so a `PTTL` below 0 means no expiry is set.
         let script = redis::Script::new(
             r"local n = redis.call('INCRBY', KEYS[1], ARGV[1])
-              if tonumber(ARGV[2]) > 0 and redis.call('TTL', KEYS[1]) < 0 then
-                redis.call('EXPIRE', KEYS[1], ARGV[2])
+              if tonumber(ARGV[2]) > 0 and redis.call('PTTL', KEYS[1]) < 0 then
+                redis.call('PEXPIRE', KEYS[1], ARGV[2])
               end
               return n",
         );
         script
             .key(key)
             .arg(by)
-            .arg(self.effective_ttl(ttl).unwrap_or(0))
+            .arg(self.effective_ttl_ms(ttl).unwrap_or(0))
             .invoke_async(&mut conn)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))
