@@ -247,6 +247,62 @@ async fn impersonating_a_port_routed_org_lands_on_its_port() {
     );
 }
 
+/// A path-prefix tenant's admin and handoff live under its prefix (#2059).
+#[tokio::test]
+async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&env.registry).await.expect("set prefix");
+    rustango::tenancy::invalidate_org_cache();
+
+    let (_, location) = start_impersonation(&env).await;
+    assert!(
+        location.contains(&format!("{}/acme/__impersonation_handoff?", env.host)),
+        "got {location}"
+    );
+    let handoff = &location[location.find("/acme/").expect("prefixed handoff")..];
+    let redeemed = env.get(handoff, "").await;
+    let cookie = redeemed
+        .headers()
+        .get("set-cookie")
+        .unwrap_or_else(|| panic!("handoff should set a cookie, got {}", redeemed.status()))
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        redeemed
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "/acme/__admin/"
+    );
+    assert_eq!(
+        env.get("/acme/__admin/", &cookie).await.status(),
+        StatusCode::OK
+    );
+
+    // Anonymous: the login redirect keeps the prefix.
+    let anon = env.get("/acme/__admin/", "").await;
+    assert!(
+        anon.headers()
+            .get("location")
+            .is_some_and(|l| l.to_str().unwrap().starts_with("/acme/__login")),
+        "{:?}",
+        anon.headers().get("location")
+    );
+}
+
 /// An operator password change ends their open impersonation session.
 /// The cookie is minted through the real console and handoff.
 #[tokio::test]
@@ -271,10 +327,20 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
     let redeemed = env.get(handoff, "").await;
     let imp_cookie = first(&redeemed, "set-cookie");
     assert!(imp_cookie.starts_with(COOKIE_NAME), "got {imp_cookie}");
+    let index = env.get("/__admin/", &imp_cookie).await;
     assert_eq!(
-        env.get("/__admin/", &imp_cookie).await.status(),
+        index.status(),
         StatusCode::OK,
         "the impersonation session works before the change"
+    );
+    // The session names the operator, so `updated_by` is never empty (#1939).
+    let html = axum::body::to_bytes(index.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(&format!("operator:{}", op.username)),
+        "the sidebar should name the operator"
     );
 
     // A reset: new hash, stamped now.

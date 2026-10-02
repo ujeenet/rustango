@@ -29,6 +29,8 @@ pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
 pub(crate) struct Allowlist {
     hosts: Vec<String>,
     nets: Vec<CidrRange>,
+    /// Never allowed, nor as an IPv6 form carrying one of them.
+    deny: Vec<CidrRange>,
 }
 
 impl Allowlist {
@@ -54,13 +56,29 @@ impl Allowlist {
         list
     }
 
+    /// Every address but the metadata ranges: all of link-local, where
+    /// providers keep adding endpoints, and AWS's fd00:ec2::/32 (#1821).
+    fn any_address() -> Self {
+        let cidr = |n| CidrRange::parse(n).expect("valid CIDR");
+        Self {
+            hosts: Vec::new(),
+            nets: vec![cidr("0.0.0.0/0"), cidr("::/0")],
+            deny: vec![cidr("169.254.0.0/16"), cidr("fd00:ec2::/32")],
+        }
+    }
+
     fn allows_host(&self, host: &str) -> bool {
         let host = normalize_host(host);
         self.hosts.iter().any(|h| *h == host)
     }
 
     fn allows_ip(&self, ip: IpAddr) -> bool {
-        self.nets.iter().any(|n| n.contains(ip))
+        let denied = |ip| self.deny.iter().any(|n: &CidrRange| n.contains(ip));
+        let carried = match ip {
+            IpAddr::V6(v6) => embedded_v4(v6).into_iter().any(|v4| denied(IpAddr::V4(v4))),
+            IpAddr::V4(_) => false,
+        };
+        !denied(ip) && !carried && self.nets.iter().any(|n| n.contains(ip))
     }
 }
 
@@ -77,12 +95,20 @@ pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_n
 pub(crate) enum TargetPolicy {
     /// Public addresses, plus what the allowlist names.
     Public(Allowlist),
-    /// No address check.
+    /// Private addresses too; cloud-metadata ones are still refused.
     #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     AllowPrivate,
 }
 
 impl TargetPolicy {
+    /// The allowlist this policy checks addresses against.
+    fn allowlist(&self) -> std::borrow::Cow<'_, Allowlist> {
+        match self {
+            Self::Public(allow) => std::borrow::Cow::Borrowed(allow),
+            Self::AllowPrivate => std::borrow::Cow::Owned(Allowlist::any_address()),
+        }
+    }
+
     /// Public addresses only.
     #[cfg_attr(not(any(test, feature = "webhook-delivery")), allow(dead_code))]
     pub(crate) fn public_only() -> Self {
@@ -210,9 +236,8 @@ fn build_client(
             warn_proxied_once();
             builder.proxy(reqwest::Proxy::all(url)?)
         }
-        (None, TargetPolicy::AllowPrivate) => builder,
-        (None, TargetPolicy::Public(allow)) => {
-            builder.dns_resolver(Arc::new(CheckingResolver(allow.clone())))
+        (None, policy) => {
+            builder.dns_resolver(Arc::new(CheckingResolver(policy.allowlist().into_owned())))
         }
     };
     builder.build()
@@ -293,9 +318,7 @@ async fn check_url(url: &str, policy: &TargetPolicy) -> Result<reqwest::Url, Tar
             url.scheme()
         )));
     }
-    if let TargetPolicy::Public(allow) = policy {
-        check_host(&url, allow).await?;
-    }
+    check_host(&url, &policy.allowlist()).await?;
     Ok(url)
 }
 
@@ -563,6 +586,34 @@ mod tests {
         assert!(check_url("http://10.0.0.1/", &TargetPolicy::AllowPrivate)
             .await
             .is_ok());
+        // Private targets never open cloud metadata (#1821).
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://100.100.100.200/",
+        ] {
+            let err = check_url(url, &TargetPolicy::AllowPrivate).await.err();
+            assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
+        }
+        // All of link-local and fd00:ec2::/32, embedded forms too.
+        for ip in [
+            "169.254.170.2",
+            "169.254.0.23",
+            "fd00:ec2::5",
+            "::ffff:169.254.0.23",
+            "2002:a9fe:17::1",
+        ] {
+            let at = vec![SocketAddr::new(ip.parse().unwrap(), 80)];
+            let route = checked_addrs("x", at, &TargetPolicy::AllowPrivate.allowlist());
+            assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
+        }
+        let err = check_url("http://169.254.0.23/", &TargetPolicy::AllowPrivate).await;
+        assert!(matches!(err, Err(TargetError::Blocked)));
+        assert!(
+            check_url("http://[fd00:1::1]/", &TargetPolicy::AllowPrivate)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -850,6 +901,26 @@ mod tests {
             assert_eq!(resp.unwrap().status(), 200);
             assert_eq!(next_line(&mut lines).await, "GET /direct HTTP/1.1");
         }
+    }
+
+    /// Under `AllowPrivate` the connect-time resolver refuses a name that
+    /// resolves to metadata; `localhost` still connects (#1821).
+    #[tokio::test]
+    async fn allow_private_resolver_refuses_metadata_names() {
+        use reqwest::dns::Resolve as _;
+        let resolver = CheckingResolver(TargetPolicy::AllowPrivate.allowlist().into_owned());
+        for name in ["169.254.169.254", "169.254.0.23", "100.100.100.200"] {
+            let route = resolver.resolve(name.parse().unwrap()).await;
+            assert!(route.is_err(), "{name}");
+        }
+        let (server, mut lines) = fake_proxy().await;
+        let port = server.rsplit(':').next().unwrap();
+        let egress = EgressCache::default()
+            .get_via(TargetPolicy::AllowPrivate, None, reqwest::Client::builder)
+            .unwrap();
+        let resp = get(&egress, &format!("http://localhost:{port}/private")).await;
+        assert_eq!(resp.unwrap().status(), 200);
+        assert_eq!(next_line(&mut lines).await, "GET /private HTTP/1.1");
     }
 
     /// A pooled client re-checks a name when it connects, so a name that

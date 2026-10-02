@@ -139,12 +139,15 @@ use rustango::test_db::with_rollback;
 
 #[tokio::test]
 async fn creating_a_post_persists_it() {
-    with_rollback(&pool, |tx| async move {
-        // ... insert + assert against `tx` ...
+    with_rollback(&pool, |tx| Box::pin(async move {
+        // ... insert + assert against `&mut *tx.lock().await?` ...
         // everything here is rolled back when the closure returns
-    }).await;
+        Ok(())
+    })).await.unwrap();
 }
 ```
+
+La closure reçoit un `AtomicTx` ; verrouillez-le à chaque instruction avec `tx.lock().await?`. Un `atomic()` sur le même pool à l'intérieur est un savepoint et est annulé lui aussi. Relâchez le guard avant un `atomic()` imbriqué ou un `bulk_insert_pool`, sinon ils échouent avec `ExecError::NestedAtomic`.
 
 Pour SQLite, les tests `*_sqlite_live.rs` à travers ce dépôt utilisent à la place une base de données
 en mémoire par test — également entièrement isolée, avec zéro configuration externe.

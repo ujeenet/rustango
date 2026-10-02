@@ -109,25 +109,101 @@ pub trait Storage: Send + Sync + 'static {
     }
 
     /// A PUT URL that expires, so a browser can upload straight to
-    /// the backend. With a `content_type`, the signature is tied to
-    /// it and the browser must send a matching header.
+    /// the backend. Everything in `put` is signed, so the browser must
+    /// send [`PutConditions::headers`] and a body of the signed length.
     ///
     /// `None` on a backend that cannot sign.
     async fn presigned_put_url(
         &self,
         _key: &str,
         _ttl: std::time::Duration,
-        _content_type: Option<&str>,
+        _put: &PutConditions,
     ) -> Option<String> {
         None
+    }
+
+    /// What the backend holds at `key`, or `None` when nothing is there.
+    ///
+    /// The default is an error, so a backend that cannot report this
+    /// never lets a direct upload be confirmed on trust (#1851).
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        Err(StorageError::Io(format!(
+            "this backend cannot report object metadata (key `{key}`)"
+        )))
+    }
+}
+
+/// Size and stored type of an object, as the backend reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObjectMeta {
+    pub size: u64,
+    /// `None` on a backend that stores no type, such as `LocalStorage`.
+    pub content_type: Option<String>,
+}
+
+impl ObjectMeta {
+    #[must_use]
+    pub fn new(size: u64, content_type: Option<String>) -> Self {
+        Self { size, content_type }
+    }
+}
+
+/// What a presigned PUT signs. Built with the chained setters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PutConditions {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    /// Sign `If-None-Match: *`: the URL creates the object, never replaces it.
+    pub create_only: bool,
+}
+
+impl PutConditions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn content_type(mut self, ct: impl Into<String>) -> Self {
+        self.content_type = Some(ct.into());
+        self
+    }
+
+    #[must_use]
+    pub fn content_length(mut self, len: u64) -> Self {
+        self.content_length = Some(len);
+        self
+    }
+
+    #[must_use]
+    pub fn create_only(mut self) -> Self {
+        self.create_only = true;
+        self
+    }
+
+    /// The headers the client must send. `Content-Length` is left out:
+    /// the client sets it from the body.
+    #[must_use]
+    pub fn headers(&self) -> std::collections::BTreeMap<String, String> {
+        let mut h = std::collections::BTreeMap::new();
+        if let Some(ct) = &self.content_type {
+            h.insert("content-type".to_owned(), ct.clone());
+        }
+        if self.create_only {
+            h.insert("if-none-match".to_owned(), "*".to_owned());
+        }
+        h
     }
 }
 
 /// `Arc<dyn Storage>` — the standard way to share a backend.
 pub type BoxedStorage = Arc<dyn Storage>;
 
-/// Reject a key that could escape the storage root: `..`, a leading
-/// `/` or `\`, a Windows drive prefix, or a null byte. Backends that
+/// Reject a key that could escape the storage root: a `..` segment, a leading
+/// `/` or `\`, a Windows drive prefix, or a null byte. Empty and `.`
+/// segments are refused too. Backends that
 /// store keys as given, such as S3, should still call it so keys stay
 /// consistent.
 ///
@@ -142,7 +218,8 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
             "key must be relative: {key}"
         )));
     }
-    if key.contains("..") {
+    // A whole `..` segment only: `report..final.pdf` is a file name (#1903).
+    if key.split(['/', '\\']).any(|seg| seg == "..") {
         return Err(StorageError::InvalidPath(format!(
             "key contains `..`: {key}"
         )));
@@ -173,6 +250,15 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
         // drive's working directory, which is not ours either.
         return Err(StorageError::InvalidPath(format!(
             "key names a drive: {key}"
+        )));
+    }
+    // `a//b`, `./a` and `a/` name another file on disk than on S3.
+    if key
+        .split(['/', '\\'])
+        .any(|seg| seg.is_empty() || seg == ".")
+    {
+        return Err(StorageError::InvalidPath(format!(
+            "key has an empty or `.` segment: {key}"
         )));
     }
     Ok(())
@@ -221,9 +307,35 @@ impl Storage for LocalStorage {
                 .await
                 .map_err(|e| StorageError::Io(e.to_string()))?;
         }
-        tokio::fs::write(&path, data)
+        // Temp file + rename: a reader never sees a torn file, a crash
+        // leaves the old one (#1905).
+        let tmp = path.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        let io = |e: std::io::Error| StorageError::Io(e.to_string());
+        // Armed before the open, so a cancel at any await removes it.
+        let guard = TmpFile(Some(tmp.clone()));
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
             .await
-            .map_err(|e| StorageError::Io(e.to_string()))
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                guard.keep();
+                return Err(io(e));
+            }
+            Err(e) => return Err(io(e)),
+        };
+        tokio::io::AsyncWriteExt::write_all(&mut file, data)
+            .await
+            .map_err(io)?;
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(io)?;
+        drop(file);
+        tokio::fs::rename(&tmp, &path).await.map_err(io)?;
+        guard.keep();
+        Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
@@ -255,9 +367,37 @@ impl Storage for LocalStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?)
     }
 
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        match tokio::fs::metadata(self.full_path(key)).await {
+            Ok(m) if m.is_file() => Ok(Some(ObjectMeta::new(m.len(), None))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e.to_string())),
+        }
+    }
+
     fn url(&self, key: &str) -> Option<String> {
         let base = self.base_url.as_ref()?;
         Some(format!("{}/{}", base.trim_end_matches('/'), key))
+    }
+}
+
+/// Removes a temp file on drop, unless [`Self::keep`] ran: an error or a
+/// cancelled save leaves nothing behind.
+struct TmpFile(Option<PathBuf>);
+
+impl TmpFile {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -317,6 +457,16 @@ impl Storage for InMemoryStorage {
             .contains_key(key))
     }
 
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        Ok(self
+            .files
+            .lock()
+            .expect("storage mutex poisoned")
+            .get(key)
+            .map(|v| ObjectMeta::new(v.len() as u64, None)))
+    }
+
     fn url(&self, _key: &str) -> Option<String> {
         None
     }
@@ -332,6 +482,19 @@ mod tests {
             validate_key(""),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn validate_rejects_empty_and_dot_segments() {
+        for bad in ["a//b", "./a", "a/./b", "a/", "a\\\\b", "."] {
+            assert!(
+                matches!(validate_key(bad), Err(StorageError::InvalidPath(_))),
+                "accepted {bad:?}"
+            );
+        }
+        for ok in [".hidden", "a.b/c.d", "a/..b", "a/b."] {
+            assert!(validate_key(ok).is_ok(), "rejected {ok:?}");
+        }
     }
 
     #[test]
@@ -352,6 +515,23 @@ mod tests {
             validate_key("safe/../bad"),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    /// #1903: dots inside a file name are not a path segment.
+    #[test]
+    fn validate_accepts_dots_inside_a_segment() {
+        for key in [
+            "report..final.pdf",
+            "a/..b/c",
+            "x/y../z",
+            "...",
+            "a/.hidden",
+        ] {
+            assert!(validate_key(key).is_ok(), "`{key}` must be accepted");
+        }
+        for key in ["..", "a/..", r"a\..\b", "a/../b"] {
+            assert!(validate_key(key).is_err(), "`{key}` must be rejected");
+        }
     }
 
     #[test]
@@ -444,6 +624,84 @@ mod tests {
         let s = LocalStorage::new(dir.clone());
         s.save("a/b/c/file.txt", b"deep").await.unwrap();
         assert_eq!(s.load("a/b/c/file.txt").await.unwrap(), b"deep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmp_file_guard_removes_unless_kept() {
+        let dir = tempdir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.tmp"), dir.join("b.tmp"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        drop(TmpFile(Some(a.clone())));
+        TmpFile(Some(b.clone())).keep();
+        assert!(!a.exists(), "a dropped guard left its file");
+        assert!(b.exists(), "a kept guard removed its file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save dropped mid-write leaves no temp file.
+    #[tokio::test]
+    async fn a_cancelled_local_save_leaves_no_temp_file() {
+        use std::future::Future as _;
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let data = vec![0u8; 64 << 20];
+        let tmp_seen = || {
+            std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        };
+        {
+            let mut fut = std::pin::pin!(s.save("big.bin", &data));
+            loop {
+                let polled =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(fut.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "save finished before it was cancelled");
+                if tmp_seen() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        // Let a write already in flight on the blocking pool finish.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!tmp_seen(), "a cancelled save left its temp file");
+        assert!(!dir.join("big.bin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1905: a load racing a save sees the old file or the new one,
+    /// never a torn one, and no temp file is left behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_storage_save_is_atomic() {
+        let dir = tempdir();
+        let s = Arc::new(LocalStorage::new(dir.clone()));
+        const N: usize = 4 << 20;
+        s.save("f.bin", &vec![b'a'; N]).await.unwrap();
+        let writer = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                for i in 0..20u8 {
+                    s.save("f.bin", &vec![b'b' + i % 2; N]).await.unwrap();
+                }
+            })
+        };
+        while !writer.is_finished() {
+            let got = s.load("f.bin").await.unwrap();
+            assert_eq!(got.len(), N, "torn read");
+        }
+        writer.await.unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("f.bin")]);
+        let meta = s.metadata("f.bin").await.unwrap().unwrap();
+        assert_eq!((meta.size, meta.content_type), (N as u64, None));
+        assert_eq!(s.metadata("nope").await.unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

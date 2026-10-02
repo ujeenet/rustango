@@ -57,6 +57,10 @@ async fn fresh_pool() -> Pool {
             .await
             .expect("setup");
     }
+    // Admin edits commit with their audit row (#2060).
+    rustango::audit::ensure_table_pool(&pool)
+        .await
+        .expect("audit table");
     pool
 }
 

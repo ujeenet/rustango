@@ -77,11 +77,26 @@
 use std::cell::Cell;
 use std::future::Future;
 
+/// One scope's counts: `current` resets on [`QueryCounter::take`],
+/// `total` does not, so an enclosing scope still sees every query.
+#[derive(Default)]
+struct Counts {
+    current: Cell<usize>,
+    total: Cell<usize>,
+}
+
+impl Counts {
+    fn add(&self, n: usize) {
+        self.current.set(self.current.get() + n);
+        self.total.set(self.total.get() + n);
+    }
+}
+
 tokio::task_local! {
     /// Per-task SQL query counter. `None`-equivalent (the `try_with`
     /// returns `Err`) outside an active scope, which is the production
     /// path — every `_pool` call's `bump()` is a no-op.
-    static COUNTER: Cell<usize>;
+    static COUNTER: Counts;
 }
 
 /// Bump the per-task query counter by 1. No-op when called outside an
@@ -90,7 +105,7 @@ tokio::task_local! {
 ///
 /// Called by every `_pool` entry point in [`crate::sql::executor`].
 pub(crate) fn bump() {
-    let _ = COUNTER.try_with(|c| c.set(c.get() + 1));
+    let _ = COUNTER.try_with(|c| c.add(1));
 }
 
 /// Scoped query counter. See module docs for the chained API
@@ -106,7 +121,15 @@ impl QueryCounter {
     /// For the simple "assert N total at the end" case use the
     /// top-level [`assert_num_queries`] helper.
     pub async fn scope<F: Future>(fut: F) -> F::Output {
-        COUNTER.scope(Cell::new(0), fut).await
+        let (out, total) = COUNTER
+            .scope(Counts::default(), async {
+                let out = fut.await;
+                (out, COUNTER.with(|c| c.total.get()))
+            })
+            .await;
+        // A nested scope's queries also count for the one around it (#1960).
+        let _ = COUNTER.try_with(|c| c.add(total));
+        out
     }
 
     /// Read the current count inside an active scope. Panics if
@@ -115,7 +138,7 @@ impl QueryCounter {
     #[must_use]
     pub fn current() -> usize {
         COUNTER
-            .try_with(Cell::get)
+            .try_with(|c| c.current.get())
             .expect("QueryCounter::current() called outside an active scope")
     }
 
@@ -124,11 +147,7 @@ impl QueryCounter {
     /// segment independently.
     pub fn take() -> usize {
         COUNTER
-            .try_with(|c| {
-                let n = c.get();
-                c.set(0);
-                n
-            })
+            .try_with(|c| c.current.replace(0))
             .expect("QueryCounter::take() called outside an active scope")
     }
 }
@@ -230,6 +249,29 @@ mod tests {
             bump();
             assert_eq!(QueryCounter::take(), 1);
             assert_eq!(QueryCounter::current(), 0);
+        })
+        .await;
+    }
+
+    /// The outer scope counts the inner one's queries, even ones it took (#1960).
+    #[tokio::test]
+    async fn nested_scope_counts_toward_the_outer_one() {
+        assert_num_queries(3, async {
+            bump();
+            assert_num_queries(2, async {
+                bump();
+                bump();
+            })
+            .await;
+        })
+        .await;
+        QueryCounter::scope(async {
+            QueryCounter::scope(async {
+                bump();
+                assert_eq!(QueryCounter::take(), 1);
+            })
+            .await;
+            assert_eq!(QueryCounter::current(), 1);
         })
         .await;
     }

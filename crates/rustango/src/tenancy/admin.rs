@@ -367,6 +367,20 @@ where
         }
     };
 
+    // A path-prefix tenant's admin lives under its prefix (#2059).
+    let prefixed;
+    let routes = match org
+        .path_prefix
+        .as_deref()
+        .filter(|p| super::routes::path_is_under(parts.uri.path(), p))
+    {
+        Some(p) => {
+            prefixed = routes.under_prefix(p);
+            &prefixed
+        }
+        None => routes,
+    };
+
     // A schema-mode PG tenant gets a short-lived pool with
     // `search_path` already set; a database-mode tenant gets a cheap
     // clone of its cached pool. Schema mode on another backend errors.
@@ -730,8 +744,8 @@ enum SessionCheck {
         /// duration of the inner-router dispatch so any audited
         /// write picks up the user-attribution automatically.
         user_id: i64,
-        /// Username of the authenticated user (empty for an
-        /// operator-impersonation session, which has no tenant user).
+        /// Username of the authenticated user (`operator:<username>` for
+        /// an operator-impersonation session, which has no tenant user).
         /// Threaded into the inner admin's chrome session so the
         /// sidebar renders "Signed in as <username>" + Logout.
         username: String,
@@ -821,7 +835,8 @@ async fn validate_session(
                 SessionCheck::Authenticated {
                     is_superuser: true,
                     user_id: 0,
-                    username: String::new(),
+                    // Names the operator in `updated_by` and the sidebar (#1939).
+                    username: format!("operator:{}", op.username),
                     impersonated_by: Some(operator_id),
                     sessions_revoked_at: None,
                     iat: payload.iat,

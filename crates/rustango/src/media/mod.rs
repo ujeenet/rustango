@@ -70,6 +70,7 @@ use serde_json::Value;
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;
 
+use crate::core::Column as _;
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
 
@@ -100,15 +101,15 @@ const MAX_LIST_LIMIT: i64 = 1000;
 
 /// Rows [`MediaManager::purge_pending`] deletes per call.
 ///
-/// The sweep is a single `DELETE`, so this bounds how long write locks
-/// are held, how many binds the statement uses, and how much one run
-/// does. 10 000 is well under every backend's parameter ceiling
-/// (SQLite's 32 766 is the lowest) and short enough to avoid the
-/// second-long lock waits a 1M backlog otherwise causes.
+/// Bounds how much one run does: the sweep reads this many rows, then
+/// deletes each with its object.
 ///
 /// A bigger backlog drains over several runs. A sweep that finishes
 /// late beats one that blocks every other writer.
 const PURGE_PENDING_BATCH: i64 = 10_000;
+
+/// Default cap on a direct upload's declared size: 100 MiB.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 << 20;
 
 /// Page size when a caller names none. Below [`MAX_LIST_LIMIT`] on
 /// purpose: an unpaged listing should return a reasonable page, not
@@ -300,6 +301,14 @@ pub struct UploadTicket {
     /// Echoed back so the caller can confirm what they signed for.
     pub disk: String,
     pub storage_key: String,
+    /// The `Content-Type` the browser must send. An active type
+    /// (HTML, SVG, script) is signed as `application/octet-stream`.
+    #[serde(default)]
+    pub content_type: String,
+    /// Every header the PUT must carry, `content-type` and
+    /// `if-none-match` included.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 // =====================================================================
@@ -316,6 +325,7 @@ pub struct UploadTicket {
 pub struct MediaManager {
     pool: crate::sql::Pool,
     registry: StorageRegistry,
+    max_upload_bytes: u64,
 }
 
 impl MediaManager {
@@ -332,7 +342,16 @@ impl MediaManager {
         Self {
             pool: pool.into(),
             registry,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
+    }
+
+    /// Refuse a [`Self::begin_upload`] that declares more than `bytes`.
+    /// Default [`DEFAULT_MAX_UPLOAD_BYTES`].
+    #[must_use]
+    pub fn with_max_upload_bytes(mut self, bytes: u64) -> Self {
+        self.max_upload_bytes = bytes;
+        self
     }
 
     #[must_use]
@@ -381,19 +400,25 @@ impl MediaManager {
         storage
             .save_with_content_type(&key, &opts.bytes, Some(stored_content_type(&opts.mime)))
             .await?;
-        self.insert_row(InsertRow {
-            disk: opts.disk,
-            storage_key: key,
-            mime: opts.mime,
-            size_bytes,
-            original_filename: opts.original_filename,
-            status: MediaStatus::Ready,
-            uploaded_by_id: opts.uploaded_by_id,
-            derived_from_id: None,
-            collection_id: opts.collection_id,
-            metadata: opts.metadata,
-        })
-        .await
+        let inserted = self
+            .insert_row(InsertRow {
+                disk: opts.disk,
+                storage_key: key.clone(),
+                mime: opts.mime,
+                size_bytes,
+                original_filename: opts.original_filename,
+                status: MediaStatus::Ready,
+                uploaded_by_id: opts.uploaded_by_id,
+                derived_from_id: None,
+                collection_id: opts.collection_id,
+                metadata: opts.metadata,
+            })
+            .await;
+        if inserted.is_err() {
+            // No row means no sweep will ever find this object (#1905).
+            let _ = storage.delete(&key).await;
+        }
+        inserted
     }
 
     // --------- begin / finalize (direct browser upload)
@@ -406,12 +431,29 @@ impl MediaManager {
     ///
     /// # Errors
     /// `UnknownDisk`, `Db`, or `Storage` if the backend cannot sign
-    /// URLs.
+    /// URLs. `Other` for a negative size or one over the upload limit.
     pub async fn begin_upload(&self, intent: UploadIntent) -> Result<UploadTicket, MediaError> {
         let storage = self.resolve_disk(&intent.disk)?;
+        let size = u64::try_from(intent.size_bytes).map_err(|_| {
+            MediaError::Other(format!("negative size_bytes: {}", intent.size_bytes))
+        })?;
+        if size > self.max_upload_bytes {
+            return Err(MediaError::Other(format!(
+                "size_bytes {size} is over the {} byte upload limit",
+                self.max_upload_bytes
+            )));
+        }
         let key = build_key(&intent.key_prefix, &intent.original_filename);
+        // Sign a safe type and the declared size: the bucket stores no
+        // active MIME and refuses a bigger body (#2057, #1851).
+        let content_type = stored_content_type(&intent.mime).to_owned();
+        // Create-only: a replayed URL cannot swap a finalized object.
+        let put = crate::storage::PutConditions::new()
+            .content_type(content_type.clone())
+            .content_length(size)
+            .create_only();
         let upload_url = storage
-            .presigned_put_url(&key, intent.ttl, Some(&intent.mime))
+            .presigned_put_url(&key, intent.ttl, &put)
             .await
             .ok_or_else(|| {
                 MediaError::Other(format!(
@@ -451,46 +493,59 @@ impl MediaManager {
             expires_at,
             disk: intent.disk,
             storage_key: key,
+            content_type,
+            headers: put.headers(),
         })
     }
 
-    /// Check the storage object exists for `media_id` and flip the row
-    /// from `Pending` to `Ready`. If it is not there, flip to `Failed`
-    /// so a purge sweep can clean it up. Returns the row either way.
+    /// Check the storage object for `media_id` and flip the row from
+    /// `Pending` to `Ready`. It must have the size the row declared and,
+    /// where the backend stores one, the signed type. Otherwise the row
+    /// flips to `Failed` and a mismatched object is deleted. Returns the
+    /// row either way; a row that is not `Pending` is returned untouched.
     ///
     /// # Errors
     /// `Db` if the row is missing or the update fails. `Storage` for
-    /// transport failures during the `exists` check.
+    /// transport failures, or a backend that cannot report
+    /// [`crate::storage::ObjectMeta`]. Without `s3:ListBucket`, S3 answers
+    /// a HEAD on a missing key with 403, so this fails closed (router: 502).
     pub async fn finalize_upload(&self, media_id: i64) -> Result<Media, MediaError> {
         let media = self
             .get(media_id)
             .await?
             .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")))?;
+        // Only a Pending row is finalized: a Ready or Failed one keeps its
+        // object and its status, whoever calls this.
+        if media.status_enum() != Some(MediaStatus::Pending) {
+            return Ok(media);
+        }
         let storage = self.resolve_disk(&media.disk)?;
-        let exists = storage.exists(&media.storage_key).await?;
-        let new_status = if exists {
-            MediaStatus::Ready
-        } else {
-            MediaStatus::Failed
+        // The backend's word, never the client's: the declared size and
+        // type are what the PUT was signed for (#1851).
+        let (new_status, mismatched) = match storage.metadata(&media.storage_key).await? {
+            Some(meta) if upload_matches(&meta, &media) => (MediaStatus::Ready, false),
+            Some(_) => (MediaStatus::Failed, true),
+            None => (MediaStatus::Failed, false),
         };
-        let d = self.pool.dialect();
-        let sql = format!(
-            "UPDATE rustango_media SET status = {p1} WHERE id = {p2}",
-            p1 = d.placeholder(1),
-            p2 = d.placeholder(2),
-        );
-        // `raw_execute_pool` handles the bind and dispatch for every
-        // backend, so there is no per-dialect `match pool` here.
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                crate::core::SqlValue::String(new_status.as_str().to_owned()),
-                crate::core::SqlValue::I64(media_id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        use crate::sql::UpdaterPool as _;
+        let changed = Media::objects()
+            .where_(Media::id.eq(media_id))
+            .where_(Media::status.eq(MediaStatus::Pending.as_str().to_owned()))
+            .update()
+            .set("status", new_status.as_str())
+            .execute_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        if changed != 1 {
+            // A concurrent finalize won; report the row as it now is.
+            return self
+                .get(media_id)
+                .await?
+                .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")));
+        }
+        if mismatched {
+            let _ = storage.delete(&media.storage_key).await;
+        }
         let mut updated = media;
         updated.status = new_status.as_str().to_owned();
         Ok(updated)
@@ -653,18 +708,19 @@ impl MediaManager {
         // Links first. `rustango_media_tag_links.media_id` has no
         // foreign key, so deleting the media row alone would leave
         // them behind, and `popular_tags` counts links.
+        // One transaction, so a failed row delete keeps its links (#1573).
         let unlink_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &unlink_sql,
-            vec![crate::core::SqlValue::I64(id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
         let sql = format!("DELETE FROM rustango_media WHERE id = {p}");
-        crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(id)])
+        let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
+        crate::sql::raw_execute_tx(&mut tx, &unlink_sql, vec![crate::core::SqlValue::I64(id)])
+            .await
+            .map_err(media_err_from_exec)?;
+        crate::sql::raw_execute_tx(&mut tx, &sql, vec![crate::core::SqlValue::I64(id)])
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -764,68 +820,96 @@ impl MediaManager {
         .map_err(media_err_from_exec)
     }
 
-    /// Hard-delete Media rows stuck in `Pending` for longer than
-    /// `older_than`, up to `PURGE_PENDING_BATCH` per call.
+    /// Hard-delete Media rows still `Pending`, or `Failed`, after
+    /// `older_than`, with their storage objects, up to
+    /// `PURGE_PENDING_BATCH` per call.
     ///
     /// Direct browser uploads leave `Pending` rows behind when the
-    /// browser gives up before calling `finalize_upload`. Run this
-    /// from the [`crate::scheduler`].
+    /// browser gives up before calling `finalize_upload`, and a PUT can
+    /// still land under a `Failed` row. Run this from the
+    /// [`crate::scheduler`].
     ///
     /// Returns the number of media rows deleted. A full batch means
     /// there is more work — call again, or let the next run take it.
     ///
-    /// # Why this is one statement
-    ///
-    /// Resolving ids with a `SELECT` and then deleting by id races:
-    /// a row that finalizes in between is destroyed, or keeps its row
-    /// but loses its tags. Repeating the predicate on both statements
-    /// does not close it on PostgreSQL or MySQL under READ COMMITTED.
-    /// A single predicated statement has no second evaluation to
-    /// drift, and its `LIMIT` bounds both the lock footprint and the
-    /// bind count.
+    /// Each row is deleted on `id` and the status it was read with, so
+    /// one finalized in between is kept. Its object is deleted inside
+    /// that transaction: on a storage error the row stays for the next
+    /// sweep. Tag links of gone rows are reclaimed at the end.
     ///
     /// # Errors
-    /// Driver / SQL failures.
+    /// The first failure, after trying every row.
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
+        use crate::sql::FetcherPool as _;
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let d = self.pool.dialect();
-        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-
-        // Hand-built rather than `QuerySet` because of three ORM gaps
-        // (#1578): `DeleteQuery` has no `limit`, `InSubquery` emits
-        // the naive form, and `WhereExpr::RelExists` — which the
-        // unlink below needs — has no public builder.
-        //
-        // The derived table is required: MySQL rejects a bare
-        // `IN (SELECT … LIMIT n)` with error 1235. Wrapping it makes
-        // the same statement run on all three backends.
-        let sql = format!(
-            "DELETE FROM rustango_media               WHERE id IN (SELECT id FROM (                     SELECT id FROM rustango_media                      WHERE status = 'pending' AND uploaded_at < {p1}                      LIMIT {p2}) AS victims)"
-        );
-        let purged = crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                crate::core::SqlValue::DateTime(cutoff),
-                crate::core::SqlValue::I64(PURGE_PENDING_BATCH),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-
+        let unconfirmed =
+            [MediaStatus::Pending, MediaStatus::Failed].map(|s| s.as_str().to_owned());
+        let rows = Media::objects()
+            .where_(Media::status.is_in(unconfirmed))
+            .where_(Media::uploaded_at.lt(cutoff))
+            .limit(PURGE_PENDING_BATCH)
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        let mut purged = 0u64;
+        let mut first_err: Option<MediaError> = None;
+        for m in rows {
+            match self.purge_unconfirmed(&m).await {
+                Ok(true) => purged += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        disk = %m.disk,
+                        storage_key = %m.storage_key,
+                        error = %e,
+                        "media purge_pending: row left in place, will retry next sweep"
+                    );
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
         // Reclaim tag links whose media row is gone.
         // `rustango_media_tag_links.media_id` has no foreign key, so
         // nothing else reclaims them. Keying on "the row does not
         // exist", rather than on the ids just deleted, makes this
         // race-free: a link whose media row is present is never
         // touched, and one whose row is absent is garbage.
-        let unlink_sql = "DELETE FROM rustango_media_tag_links                            WHERE NOT EXISTS (SELECT 1 FROM rustango_media m                                               WHERE m.id = rustango_media_tag_links.media_id)";
+        let unlink_sql = "DELETE FROM rustango_media_tag_links \
+                           WHERE NOT EXISTS (SELECT 1 FROM rustango_media m \
+                                              WHERE m.id = rustango_media_tag_links.media_id)";
         crate::sql::raw_execute_pool(&self.pool, unlink_sql, Vec::new())
             .await
             .map_err(media_err_from_exec)?;
+        first_err.map_or(Ok(purged), Err)
+    }
 
-        Ok(purged)
+    /// Delete one row read as `m.status`, and its object.
+    /// `Ok(false)` when the row changed status or went away meanwhile.
+    async fn purge_unconfirmed(&self, m: &Media) -> Result<bool, MediaError> {
+        let Auto::Set(id) = m.id else {
+            return Err(MediaError::Other("Media has no id".into()));
+        };
+        let storage = self.resolve_disk(&m.disk)?;
+        let row = Media::objects()
+            .where_(Media::id.eq(id))
+            .where_(Media::status.eq(m.status.clone()))
+            .compile_delete()
+            .map_err(|e| media_err_from_exec(e.into()))?;
+        let mut tx = crate::sql::transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        let deleted = crate::sql::delete_tx(&mut tx, &row)
+            .await
+            .map_err(media_err_from_exec)?;
+        if deleted != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        // A missing key is a no-op, so an error here is real.
+        storage.delete(&m.storage_key).await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     // =================================================================
@@ -1678,6 +1762,24 @@ fn stored_content_type(mime: &str) -> &str {
     }
 }
 
+/// Whether a direct upload landed as signed: the declared size and,
+/// when the backend stores a type, the safe type for the row's MIME.
+fn upload_matches(meta: &crate::storage::ObjectMeta, media: &Media) -> bool {
+    // `type/subtype` only: a backend may rewrite the parameters.
+    let norm = |t: &str| {
+        t.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    };
+    u64::try_from(media.size_bytes) == Ok(meta.size)
+        && meta
+            .content_type
+            .as_deref()
+            .is_none_or(|t| norm(t) == norm(stored_content_type(&media.mime)))
+}
+
 /// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.
 fn build_key(prefix: &str, original_filename: &str) -> String {
     let prefix = prefix.trim_end_matches('/');
@@ -1802,6 +1904,16 @@ mod tests {
         let mut m = bare_media();
         m.status = "garbage".into();
         assert!(m.status_enum().is_none());
+    }
+
+    #[test]
+    fn upload_matches_compares_the_main_type_only() {
+        let mut m = bare_media();
+        m.mime = "text/plain; charset=utf-8".into();
+        let meta = |ct: &str| crate::storage::ObjectMeta::new(0, Some(ct.to_owned()));
+        assert!(upload_matches(&meta("text/plain;charset=UTF-8"), &m));
+        assert!(upload_matches(&meta("Text/Plain"), &m));
+        assert!(!upload_matches(&meta("text/csv; charset=utf-8"), &m));
     }
 
     fn bare_media() -> Media {

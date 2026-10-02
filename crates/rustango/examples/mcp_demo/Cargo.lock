@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.59.17"
+version = "0.59.18"
 dependencies = [
  "argon2",
  "async-stream",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.59.17"
+version = "0.59.18"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

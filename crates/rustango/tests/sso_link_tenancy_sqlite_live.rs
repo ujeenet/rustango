@@ -80,7 +80,8 @@ struct Env {
     /// An editable console (it has the tenant pools).
     console: Router,
     readonly_console: Router,
-    pools: Arc<TenantPools<sqlx::Sqlite>>,
+    /// Keeps the tenant pools alive for the test.
+    _pools: Arc<TenantPools<sqlx::Sqlite>>,
     /// `acme` and `globex`, each with its own database.
     tenants: [Tenant; 2],
     secret: SessionSecret,
@@ -181,7 +182,7 @@ async fn boot_with(permissions: bool) -> Env {
         admin,
         console,
         readonly_console,
-        pools,
+        _pools: pools,
         tenants: [a, b],
         secret,
         idp: Idp::start().await,

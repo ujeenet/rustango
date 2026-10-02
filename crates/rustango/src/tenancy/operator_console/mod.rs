@@ -183,8 +183,11 @@ impl OpBrand {
     fn from_env() -> Self {
         let mut out = Self::defaults();
         #[cfg(feature = "config")]
-        if let Ok(s) = crate::config::Settings::load_from_env() {
-            Self::apply_brand_settings(&mut out, &s.brand);
+        match crate::config::Settings::load_from_env() {
+            Ok(s) => Self::apply_brand_settings(&mut out, &s.brand),
+            Err(e) if e.is_missing_config() => {}
+            // A broken config should say so, not silently drop the brand (#1948).
+            Err(e) => warn_config_error(&e),
         }
         Self::apply_env_overrides(&mut out);
         out
@@ -1787,8 +1790,8 @@ async fn org_edit_form(
 }
 
 /// `POST /orgs/{slug}/edit`: parse the form with
-/// [`crate::forms::collect_values`] and UPDATE only the columns it
-/// supplied.
+/// [`crate::forms::collect_values`] and write the columns it supplied
+/// through [`crate::tenancy::org_edit::apply_values`].
 ///
 /// Two side effects: changing `database_url` calls
 /// [`TenantPools::invalidate`] so the next request rebuilds the pool,
@@ -1830,65 +1833,14 @@ async fn org_edit_submit(
         return redirect_with_error(&slug, "no editable fields supplied");
     }
 
-    // Fetch existing for change detection (database_url rotation).
-    // ORM path so registry-backend stays plug-and-play.
-    let existing_orgs: Vec<super::Org> = match super::Org::objects()
-        .where_(super::Org::slug.eq(slug.clone()))
-        .fetch(&state.registry)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return server_error("operator_console", &e),
-    };
-    let Some(existing_org) = existing_orgs.into_iter().next() else {
-        return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
-    };
-    let new_database_url = collected.iter().find_map(|(c, v)| {
-        if *c == DATABASE_URL_FIELD {
-            match v {
-                crate::core::SqlValue::String(s) => Some(s.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    });
-    let database_url_changed = new_database_url
-        .as_deref()
-        .is_some_and(|new| existing_org.database_url.as_deref() != Some(new));
-
-    // Build the UPDATE through the ORM's `UpdateQuery` IR + run it
-    // via `update_pool` so the SQL gets compiled with the right
-    // dialect (PG `$N` / MySQL `?` / SQLite `?`) + identifier
-    // quoting. Replaces the prior hand-rolled `UPDATE "…" SET … = $N
-    // WHERE …` string which was PG-only.
-    let assignments: Vec<crate::core::Assignment> = collected
-        .iter()
-        .map(|(col, val)| crate::core::Assignment {
-            column: *col,
-            value: val.clone().into(),
-        })
-        .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: super::Org::SCHEMA,
-        set: assignments,
-        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
-            column: "slug",
-            op: crate::core::Op::Eq,
-            value: crate::core::SqlValue::String(slug.clone()),
-        }]),
-    };
-    if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
-        return redirect_with_error(&slug, &format!("update failed: {e}"));
-    }
-
-    // Drop the cached `Org` before anything else acts on the write.
-    // Resolution serves from that cache now, so without this the pool
-    // is evicted and then immediately rebuilt from the stale row — the
-    // rotation this handler promises would report success while the
-    // next request reconnected with the old credential. `active =
-    // false` has the same shape: the tenant would keep serving.
-    super::invalidate_org_cache();
+    // The CLI's write path, so the console runs the same routing
+    // validators and host-clash check (#1931).
+    let applied =
+        match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
+            Ok(a) => a,
+            Err(e) => return redirect_with_error(&slug, &e.to_string()),
+        };
+    let database_url_changed = applied.database_url_rotated;
 
     if database_url_changed {
         pools.invalidate(&slug).await;
@@ -1905,15 +1857,11 @@ async fn org_edit_submit(
         "action".into(),
         serde_json::Value::String("org.edit".into()),
     );
-    let touched_cols: Vec<String> = collected
+    let touched_cols: Vec<&str> = applied
+        .touched
         .iter()
-        .filter_map(|(c, _)| {
-            if *c == DATABASE_URL_FIELD {
-                None
-            } else {
-                Some((*c).to_owned())
-            }
-        })
+        .copied()
+        .filter(|c| *c != DATABASE_URL_FIELD)
         .collect();
     detail.insert("fields".into(), serde_json::json!(touched_cols));
     if database_url_changed {
@@ -2272,19 +2220,25 @@ async fn org_impersonate(
     // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
     // http for local dev.
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    let prefix = handoff_prefix(org.path_prefix.as_deref());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
     } else {
-        // No host pattern: build `<slug>.<apex>` from env.
+        // No host pattern: a path-prefix tenant lives on the apex,
+        // any other on `<slug>.<apex>`.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
-        format!("{}.{}", slug, apex)
+        if prefix.is_empty() {
+            format!("{}.{}", slug, apex)
+        } else {
+            apex
+        }
     };
     let port_suffix = handoff_port_suffix(
         org.port,
         std::env::var("RUSTANGO_TENANT_PORT").ok(),
         headers.get(header::HOST).and_then(|v| v.to_str().ok()),
     );
-    let handoff_path = state.tenant_handoff_url.trim_end_matches('/');
+    let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
     let redirect_to = format!("{scheme}://{host}{port_suffix}{handoff_path}?token={token}");
@@ -2306,6 +2260,15 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
+}
+
+/// The org's path prefix for the handoff URL, or `""` when the stored
+/// value is not one segment: `//evil.example` would redirect off-site.
+fn handoff_prefix(path_prefix: Option<&str>) -> &str {
+    path_prefix
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
+        .unwrap_or("")
 }
 
 /// Port for the handoff URL. A port-routed org's own port wins (#1933);
@@ -2335,9 +2298,53 @@ fn handoff_port_suffix(
         .unwrap_or_default()
 }
 
+/// Names only where the config broke; the error text can quote a secret.
+#[cfg(feature = "config")]
+fn warn_config_error(e: &crate::config::ConfigError) {
+    tracing::warn!(
+        target: "rustango::tenancy::operator_console",
+        at = %e.location(),
+        "the config does not load; console branding uses defaults"
+    );
+}
+
+#[cfg(all(test, feature = "config", feature = "runtime"))]
+mod config_warn_tests {
+    #[test]
+    fn a_broken_config_logs_its_line_not_its_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/default.toml"),
+            "[database]\nurl = \"postgres://app:s3cret@db/app\n",
+        )
+        .unwrap();
+        let err = crate::config::Settings::load_from(&dir.path().join("config"), "dev")
+            .expect_err("unterminated string");
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || super::warn_config_error(&err));
+        let logged = out.contents();
+        assert!(!logged.contains("s3cret"), "{logged}");
+        assert!(logged.contains("line 2"), "{logged}");
+    }
+}
+
 #[cfg(test)]
 mod handoff_port_tests {
-    use super::handoff_port_suffix;
+    use super::{handoff_port_suffix, handoff_prefix};
+
+    #[test]
+    fn only_a_valid_path_prefix_reaches_the_handoff_url() {
+        assert_eq!(handoff_prefix(Some("/acme/")), "/acme");
+        assert_eq!(handoff_prefix(None), "");
+        for bad in ["//evil.example", "/a/b", "acme", "/a?b", "/@evil"] {
+            assert_eq!(handoff_prefix(Some(bad)), "", "`{bad}`");
+        }
+    }
 
     #[test]
     fn a_port_routed_org_lands_on_its_own_port() {

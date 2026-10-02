@@ -126,6 +126,11 @@ where
         StorageMode::Schema => Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned())),
         StorageMode::Database => None,
     };
+    // Same rule as the provisioner, so neither path can create `public`.
+    if let Some(schema) = &schema_name {
+        crate::tenancy::provision::validate_schema_name(schema)
+            .map_err(TenancyError::Validation)?;
+    }
 
     if let StorageMode::Schema = opts.mode {
         #[cfg(feature = "postgres")]
