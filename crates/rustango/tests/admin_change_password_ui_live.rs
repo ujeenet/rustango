@@ -16,7 +16,7 @@ use rustango::migrate as rmig;
 use rustango::sql::sqlx;
 use rustango::sql::Auto;
 use rustango::tenancy::tenant_console::{
-    encode as encode_session, TenantSessionPayload, COOKIE_NAME,
+    encode as encode_session, PasswordFingerprint, TenantSessionPayload, COOKIE_NAME,
 };
 use rustango::tenancy::{
     admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, Org, StorageMode,
@@ -158,7 +158,12 @@ async fn change_password_authenticated_get_renders_form() {
         .with_session(secret.clone())
         .build();
 
-    let payload = TenantSessionPayload::new(user_id, &slug, 3600);
+    let payload = TenantSessionPayload::new(
+        user_id,
+        &slug,
+        3600,
+        PasswordFingerprint::of(&secret, &hash),
+    );
     let cookie = format!("{COOKIE_NAME}={}", encode_session(&secret, &payload));
 
     let res = app
@@ -235,7 +240,12 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         .with_session(secret.clone())
         .build();
 
-    let payload = TenantSessionPayload::new(user_id, &slug, 3600);
+    let payload = TenantSessionPayload::new(
+        user_id,
+        &slug,
+        3600,
+        PasswordFingerprint::of(&secret, &hash),
+    );
     let cookie = format!("{COOKIE_NAME}={}", encode_session(&secret, &payload));
 
     let body =
@@ -245,6 +255,8 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
             Request::builder()
                 .method("POST")
                 .uri("/__change-password")
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .header("Host", &host_pattern)
                 .header(header::COOKIE, cookie.clone())
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -319,7 +331,12 @@ async fn change_password_post_rejects_wrong_current() {
         .with_session(secret.clone())
         .build();
 
-    let payload = TenantSessionPayload::new(user_id, &slug, 3600);
+    let payload = TenantSessionPayload::new(
+        user_id,
+        &slug,
+        3600,
+        PasswordFingerprint::of(&secret, &hash),
+    );
     let cookie = format!("{COOKIE_NAME}={}", encode_session(&secret, &payload));
 
     let body =
@@ -329,6 +346,8 @@ async fn change_password_post_rejects_wrong_current() {
             Request::builder()
                 .method("POST")
                 .uri("/__change-password")
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .header("Host", &host_pattern)
                 .header(header::COOKIE, cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -420,7 +439,12 @@ async fn session_minted_before_password_rotation_is_rejected() {
     // `password_changed_at` later in this test to a value strictly
     // greater than `iat`.
     let now_ts = chrono::Utc::now().timestamp();
-    let mut payload = TenantSessionPayload::new(user_id, &slug, 3600);
+    let mut payload = TenantSessionPayload::new(
+        user_id,
+        &slug,
+        3600,
+        PasswordFingerprint::of(&secret, &hash),
+    );
     payload.iat = now_ts - 60;
     payload.exp = now_ts + 3600;
     let cookie = format!("{COOKIE_NAME}={}", encode_session(&secret, &payload));

@@ -4,7 +4,7 @@
 # what you need.
 
 # [database]
-# url           = "postgres://localhost/getting_started_blog"
+# url           = "postgres://rustango:rustango@localhost:5432/getting_started_blog_dev"
 # pool_min_size = 2
 # pool_max_size = 20
 
@@ -16,12 +16,18 @@
 # bind                  = "127.0.0.1:8080"
 # request_timeout_secs  = 30
 # max_body_bytes        = 2097152      # 2 MiB
+# shutdown_timeout_secs = 20           # drain after SIGTERM
 
 # [auth]
 # argon2_memory_kib  = 19456    # OWASP 2024 floor
 # argon2_iterations  = 2
 # lockout_threshold  = 5
 # lockout_duration_secs = 900
+# login_ip_limit     = 20       # failed logins per IP per window
+# login_ip_window_secs = 60
+# login_global_limit = 600      # failed logins across all clients, per login, per window
+# login_global_window_secs = 60
+# hash_wait_ms       = 5000     # wait for a hashing slot before 503
 
 # [auth.jwt]
 # access_ttl_secs   = 900       # 15 min
@@ -46,3 +52,20 @@
 
 # [audit]
 # retention_days = 90
+
+# [logging]                        # needs `Cli::with_logging()` AND
+#                                  # `#[rustango::main(logging = false)]` —
+#                                  # see config/prod_settings.toml for why
+# level             = "info,sqlx=warn"   # RUST_LOG syntax; RUST_LOG still wins
+# format            = "pretty"           # pretty | json | compact
+# with_line_numbers = false
+# file_dir          = "/var/log/getting_started_blog"  # set to also write a rolling file
+# file_rotation     = "daily"            # daily | hourly | minutely | never
+
+# [mcp]                            # Model Context Protocol server (feature = "mcp")
+# prefix                = "/mcp"   # URL prefix the MCP router mounts under
+# token_ttl_secs        = 900      # agent access-token lifetime (15 min)
+# enable_sse            = true     # serve the GET {prefix} SSE stream
+# allowed_origins       = []       # CORS allow-list (empty = same-origin only)
+# rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
+# max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)

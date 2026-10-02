@@ -1,9 +1,7 @@
-//! Database-backed [`Cache`] backend (#409) — Django parity for
-//! `django.core.cache.backends.db.DatabaseCache`. Stores one row per
-//! cache key in a small `cache_key TEXT PRIMARY KEY, value TEXT,
-//! expires BIGINT` table, identical layout across PG / MySQL /
-//! SQLite. Expired rows are pruned lazily on read (no background
-//! reaper).
+//! A [`Cache`] backend that stores one row per key in the database.
+//! The table is `cache_key`, `value` and `expires`,
+//! with the same layout on PG, MySQL and SQLite. Expired rows are
+//! removed on read; there is no background reaper.
 //!
 //! ## Quick start
 //!
@@ -23,20 +21,29 @@
 //! PRIMARY KEY survives across dialects:
 //!
 //! - Postgres: `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
-//! - MySQL:    `cache_key VARCHAR(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
+//! - MySQL:    `cache_key VARBINARY(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
 //!
-//! `expires` is a Unix-seconds timestamp; `0` means "never expires".
-//! Lazy GC: any `get`/`exists` call that lands on an expired row
-//! deletes the row before returning `None`.
+//! `VARBINARY` makes MySQL compare keys byte for byte, as PG and SQLite do;
+//! a default `VARCHAR` collation matched `user:1` to `User:1` (#1757).
+//!
+//! A key longer than 255 bytes is stored as its first 190 bytes plus
+//! `#` and its SHA-256, so it fits MySQL's column and stays unique. A
+//! shorter key that already ends that way is hashed too.
+//!
+//! `expires` holds Unix **milliseconds**; `0` means the entry never
+//! expires. An entry is expired once now is *past* `expires`, not once
+//! it reaches it — the same rule as [`super::InMemoryCache`] and
+//! [`super::FileCache`]. A `get` or `exists` that lands on an expired
+//! row deletes it and reports a miss.
 //!
 //! ## Why not a migration?
 //!
-//! The cache table's lifecycle is decoupled from application data —
-//! it's safe to drop, recreate, or store in a separate database.
-//! [`DatabaseCache::ensure_table`] runs the dialect's
-//! `CREATE TABLE IF NOT EXISTS` once at boot, matching Django's
-//! `createcachetable` manage command.
+//! The cache table does not follow the app's data. You can drop it,
+//! recreate it, or keep it in another database.
+//! [`DatabaseCache::ensure_table`] runs the right
+//! `CREATE TABLE IF NOT EXISTS` at boot; `manage createcachetable`
+//! does the same from the CLI.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,8 +53,53 @@ use super::{Cache, CacheError};
 use crate::core::SqlValue;
 use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
 
-/// SQL-table-backed cache. Holds a [`Pool`] + table name; each
-/// operation runs one dialect-rendered statement.
+/// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
+const MAX_RAW_KEY_BYTES: usize = 255;
+
+/// Bytes of a long key kept ahead of its hash, so prefix deletes still reach it.
+const HASHED_HEAD_BYTES: usize = MAX_RAW_KEY_BYTES - 1 - 64;
+
+/// The `cache_key` column value: the key itself, or `{head}#{sha256 hex}`
+/// when it is longer than [`MAX_RAW_KEY_BYTES`] or already ends like a hash,
+/// so a raw key never equals a hashed one.
+struct StoredKey(String);
+
+impl StoredKey {
+    fn new(key: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        if key.len() <= MAX_RAW_KEY_BYTES && !ends_like_hash(key) {
+            return Self(key.to_owned());
+        }
+        let digest = crate::hex::hex_encode(&Sha256::digest(key.as_bytes()));
+        Self(format!("{}#{digest}", head(key)))
+    }
+
+    fn into_value(self) -> SqlValue {
+        SqlValue::String(self.0)
+    }
+}
+
+/// Whether `key` ends in `#` plus 64 lowercase hex, the hashed form's tail.
+fn ends_like_hash(key: &str) -> bool {
+    let b = key.as_bytes();
+    b.len() >= 65
+        && b[b.len() - 65] == b'#'
+        && b[b.len() - 64..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+}
+
+/// `s` cut to at most [`HASHED_HEAD_BYTES`], on a char boundary.
+fn head(s: &str) -> &str {
+    let mut end = HASHED_HEAD_BYTES.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Cache stored in a SQL table. Holds a [`Pool`] and a table name;
+/// every operation runs one statement written for that dialect.
 #[derive(Clone)]
 pub struct DatabaseCache {
     pool: Pool,
@@ -56,8 +108,7 @@ pub struct DatabaseCache {
 
 impl DatabaseCache {
     /// Build a cache writing to `table` on `pool`. Call
-    /// [`Self::ensure_table`] once at startup to issue the
-    /// `CREATE TABLE IF NOT EXISTS` DDL.
+    /// [`Self::ensure_table`] once at startup to create the table.
     #[must_use]
     pub fn new(pool: Pool, table: impl Into<String>) -> Self {
         Self {
@@ -66,19 +117,18 @@ impl DatabaseCache {
         }
     }
 
-    /// The configured table name (used for diagnostics + manage verbs).
+    /// The configured table name.
     #[must_use]
     pub fn table(&self) -> &str {
         &self.table
     }
 
-    /// Idempotently create the cache table on the active backend.
-    /// Safe to call at every boot; uses `CREATE TABLE IF NOT EXISTS`.
+    /// Create the cache table if it is missing. Safe to call at every
+    /// boot.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor on
-    /// DDL failure (permissions, syntax mismatch on an unknown
-    /// dialect, etc.).
+    /// [`CacheError::Connection`] when the DDL fails, for example on a
+    /// permission problem.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -92,12 +142,12 @@ impl DatabaseCache {
             ),
             "mysql" => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
-                 cache_key VARCHAR(255) PRIMARY KEY, \
+                 cache_key VARBINARY(255) PRIMARY KEY, \
                  value LONGTEXT NOT NULL, \
                  expires BIGINT NOT NULL DEFAULT 0\
                  )"
             ),
-            // SQLite + ANSI-leaning fallback.
+            // SQLite, and a reasonable default for anything else.
             _ => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
                  cache_key TEXT PRIMARY KEY, \
@@ -112,12 +162,11 @@ impl DatabaseCache {
         Ok(())
     }
 
-    /// Drop the cache table. Useful in tests; production deployments
-    /// should typically issue this as a deliberate manage verb
-    /// rather than from app code.
+    /// Drop the cache table. Handy in tests. In production, run it
+    /// from a manage verb rather than from app code.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor.
+    /// [`CacheError::Connection`] when the statement fails.
     pub async fn drop_table(&self) -> Result<(), CacheError> {
         let table = self.pool.dialect().quote_ident(&self.table);
         let sql = format!("DROP TABLE IF EXISTS {table}");
@@ -127,27 +176,21 @@ impl DatabaseCache {
         Ok(())
     }
 
-    /// Eagerly delete every expired row. Pairs with the implicit
-    /// lazy GC on `get` / `exists` — call this from a periodic
-    /// cron / scheduled-task / `manage` verb to reclaim space
-    /// from keys nobody reads anymore. Django parity for
-    /// `manage clearsessions` (when the session backend is the
-    /// DB cache) + the broader `manage clearcache` flow.
+    /// Delete every expired row now. `get` and `exists` already clean
+    /// up rows they touch, so run this on a schedule to reclaim space
+    /// from keys nobody reads.
     ///
     /// Returns the number of rows deleted. Rows with `expires = 0`
-    /// (no TTL) are never touched.
+    /// have no TTL and are never touched.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] forwarded from the executor on
-    /// DELETE failure.
+    /// [`CacheError::Connection`] when the DELETE fails.
     pub async fn purge_expired(&self) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
-        // Keep `expires = 0` (no-TTL) rows. Compare against the
-        // same `now_unix_ms` reading the get/set path uses so this
-        // method's notion of "expired" stays consistent with the
-        // lazy GC branch.
+        // Keep no-TTL rows. Use the same clock as `get`/`set` so both
+        // agree on what "expired" means.
         let sql = format!("DELETE FROM {table} WHERE expires != 0 AND expires < {p1}");
         let now = Self::now_unix_ms();
         raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
@@ -155,15 +198,10 @@ impl DatabaseCache {
             .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
     }
 
-    /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
-    /// to eliminate a second-boundary race: `set` at `HH:MM:SS.999`
-    /// followed by `get` at `HH:MM:SS+1.001` used to truncate both
-    /// readings to integer seconds (`SS` and `SS+1`), making a TTL of
-    /// 1 second look already-expired at the immediate read. The
-    /// `expires BIGINT` column stays the same — it now carries
-    /// millisecond ticks instead of second ticks; existing pre-v0.42
-    /// rows look like 1970-era timestamps under the new lens and are
-    /// lazily purged on first read (cache is regeneratable by design).
+    /// Unix epoch in **milliseconds**. Seconds are too coarse: a
+    /// `set` at `HH:MM:SS.999` read back 2 ms later would truncate to
+    /// two different seconds, so a 1-second TTL looked expired at
+    /// once.
     fn now_unix_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -188,14 +226,16 @@ impl Cache for DatabaseCache {
         let p1 = dialect.placeholder(1);
         let sql = format!("SELECT value, expires FROM {table} WHERE cache_key = {p1} LIMIT 1");
         let rows: Vec<(String, i64)> =
-            raw_query_pool(&sql, vec![SqlValue::String(key.to_owned())], &self.pool)
+            raw_query_pool(&sql, vec![StoredKey::new(key).into_value()], &self.pool)
                 .await
                 .map_err(|e| CacheError::Connection(format!("get: {e}")))?;
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        if expires != 0 && Self::now_unix_ms() >= expires {
-            // Lazy GC — purge expired before reporting miss.
+        // `>`, not `>=`, so an entry lives its full stated duration.
+        // The other backends and `purge_expired` use `>` as well.
+        if expires != 0 && Self::now_unix_ms() > expires {
+            // Drop the dead row before reporting a miss.
             let _ = self.delete(key).await;
             return Ok(None);
         }
@@ -226,7 +266,7 @@ impl Cache for DatabaseCache {
             &self.pool,
             &sql,
             vec![
-                SqlValue::String(key.to_owned()),
+                StoredKey::new(key).into_value(),
                 SqlValue::String(value.to_owned()),
                 SqlValue::I64(expires),
             ],
@@ -236,25 +276,18 @@ impl Cache for DatabaseCache {
         Ok(())
     }
 
-    /// Atomic set-if-absent (#1281).
+    /// Atomic set-if-absent. `DistributedLock` needs this: the trait
+    /// default checks and then writes, so two racers could both get
+    /// `Ok(true)` and both run the guarded body.
     ///
-    /// Without this override `DatabaseCache` inherited the trait default
-    /// — `exists()` then `set()` — which is a check-then-act across two
-    /// round trips, and `set` is an unconditional upsert, so two racers
-    /// both saw "absent", both wrote, and **both got `Ok(true)`**. That
-    /// silently voided `DistributedLock`'s entire guarantee on this
-    /// backend: two processes ran the same guarded body. Redis and
-    /// in-memory already overrode `add`; this was the third backend.
+    /// An expired row must still be takeable, so this is not a plain
+    /// `INSERT`. It takes the row when it is absent *or* expired, and
+    /// says whether it did. A row with `expires = 0` never expires, so
+    /// a live permanent entry is never stolen.
     ///
-    /// An expired row must still be acquirable, so this is not a bare
-    /// `INSERT` — it takes the row when it is absent *or* already
-    /// expired, and reports whether it did. `expires = 0` means "never
-    /// expires" (see [`Self::expires_for`]), so a live persistent entry
-    /// is never stolen.
-    ///
-    /// The database does the test-and-set under row locks, so a race
-    /// resolves to exactly one winner: the loser's `WHERE` no longer
-    /// matches once the winner has pushed `expires` into the future.
+    /// The database does the test-and-set under row locks, so exactly
+    /// one racer wins: once the winner moves `expires` forward, the
+    /// loser's `WHERE` no longer matches.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -265,18 +298,15 @@ impl Cache for DatabaseCache {
         let expires = Self::expires_for(ttl);
         let now = Self::now_unix_ms();
 
-        // Bind order is *textual* placeholder order, not logical order:
-        // MySQL and SQLite use positional `?`, so the args must appear in
-        // the sequence the placeholders do. (Postgres' numbered `$n`
-        // would tolerate any order, which is exactly how a MySQL-only
-        // mismatch stays hidden until a MySQL test runs it.)
+        // Bind args in the order the placeholders appear in the text.
+        // MySQL and SQLite use positional `?`. Postgres' `$n` would
+        // accept any order, which is how a MySQL-only mismatch hides
+        // until a MySQL test runs.
         if dialect.name() == "mysql" {
-            // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so the
-            // conditional take is two statements. Both are individually
-            // atomic and the pair is still race-free: the INSERT settles
-            // the absent case, and for the expired case the UPDATE's own
-            // predicate is the compare-and-swap — whoever lands first
-            // moves `expires` forward and the other matches nothing.
+            // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so
+            // this needs two statements. Still race-free: the INSERT
+            // covers the absent case, and the UPDATE's own predicate
+            // is the compare-and-swap for the expired one.
             let inserted = raw_execute_pool(
                 &self.pool,
                 &format!(
@@ -284,7 +314,7 @@ impl Cache for DatabaseCache {
                      VALUES ({p1}, {p2}, {p3})"
                 ),
                 vec![
-                    SqlValue::String(key.to_owned()),
+                    StoredKey::new(key).into_value(),
                     SqlValue::String(value.to_owned()),
                     SqlValue::I64(expires),
                 ],
@@ -303,7 +333,7 @@ impl Cache for DatabaseCache {
                 vec![
                     SqlValue::String(value.to_owned()),
                     SqlValue::I64(expires),
-                    SqlValue::String(key.to_owned()),
+                    StoredKey::new(key).into_value(),
                     SqlValue::I64(now),
                 ],
             )
@@ -312,10 +342,10 @@ impl Cache for DatabaseCache {
             return Ok(took == 1);
         }
 
-        // Postgres and SQLite both support `ON CONFLICT … DO UPDATE …
-        // WHERE`, which expresses the whole thing in one statement:
-        // insert, or overwrite only an expired row. When the predicate
-        // fails nothing is written and the statement reports 0 rows.
+        // Postgres and SQLite support `ON CONFLICT … DO UPDATE …
+        // WHERE`, so one statement does it: insert, or overwrite only
+        // an expired row. A failed predicate writes nothing and
+        // reports 0 rows.
         let took = raw_execute_pool(
             &self.pool,
             &format!(
@@ -325,9 +355,9 @@ impl Cache for DatabaseCache {
                  SET value = EXCLUDED.value, expires = EXCLUDED.expires \
                  WHERE {table}.expires <> 0 AND {table}.expires <= {p4}"
             ),
-            // Textual placeholder order — see the note above.
+            // Textual placeholder order; see the note above.
             vec![
-                SqlValue::String(key.to_owned()),
+                StoredKey::new(key).into_value(),
                 SqlValue::String(value.to_owned()),
                 SqlValue::I64(expires),
                 SqlValue::I64(now),
@@ -338,12 +368,126 @@ impl Cache for DatabaseCache {
         Ok(took == 1)
     }
 
+    /// One upsert, so parallel callers never lose a count (#1871). The TTL
+    /// is set on insert only; an expired or non-integer value restarts at `by`.
+    /// Overflow is an error, not a saturation.
+    async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let (p1, p2, p3, p4, p5, p6) = (
+            dialect.placeholder(1),
+            dialect.placeholder(2),
+            dialect.placeholder(3),
+            dialect.placeholder(4),
+            dialect.placeholder(5),
+            dialect.placeholder(6),
+        );
+        let now = Self::now_unix_ms();
+        // Binds in text order: MySQL and SQLite are positional.
+        let mut binds = vec![
+            StoredKey::new(key).into_value(),
+            SqlValue::String(by.to_string()),
+            SqlValue::I64(Self::expires_for(ttl)),
+            SqlValue::I64(now),
+            SqlValue::I64(now),
+        ];
+        let err = |e: crate::sql::ExecError| CacheError::Connection(format!("incr: {e}"));
+        let mysql = dialect.name() == "mysql";
+        let excluded = |col: &str| {
+            if mysql {
+                format!("VALUES({col})")
+            } else {
+                format!("EXCLUDED.{col}")
+            }
+        };
+        let (new_value, new_expires) = (excluded("value"), excluded("expires"));
+        let expired = |p: &str| format!("{table}.expires <> 0 AND {table}.expires < {p}");
+        // A strict-mode MySQL CAST of a non-integer is an error, not 0.
+        let (not_int, int) = match dialect.name() {
+            "mysql" => (
+                format!("{table}.value NOT REGEXP '^-?[0-9]{{1,18}}$'"),
+                "SIGNED",
+            ),
+            "postgres" => (format!("{table}.value !~ '^-?[0-9]{{1,18}}$'"), "BIGINT"),
+            _ => (
+                format!("CAST(CAST({table}.value AS INTEGER) AS TEXT) <> {table}.value"),
+                "INTEGER",
+            ),
+        };
+        let text = if mysql { "CHAR" } else { "TEXT" };
+        // MySQL applies the assignments left to right, so `value` goes
+        // first while `expires` still holds the old row's value.
+        let set = format!(
+            "value = CASE WHEN ({}) OR {not_int} THEN {new_value} \
+             ELSE CAST(CAST({table}.value AS {int}) + CAST({new_value} AS {int}) AS {text}) END, \
+             expires = CASE WHEN {} THEN {new_expires} ELSE {table}.expires END",
+            expired(&p4),
+            expired(&p5),
+        );
+        let insert =
+            format!("INSERT INTO {table} (cache_key, value, expires) VALUES ({p1}, {p2}, {p3})");
+        let value: String = if dialect.name() == "mysql" {
+            // No RETURNING: read back in the same transaction, which still
+            // holds the row lock the upsert took.
+            let mut tx = crate::sql::transaction_pool(&self.pool)
+                .await
+                .map_err(err)?;
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                &format!("{insert} ON DUPLICATE KEY UPDATE {set}"),
+                binds,
+            )
+            .await
+            .map_err(err)?;
+            let rows: Vec<(String,)> = crate::sql::raw_query_tx(
+                &mut tx,
+                &format!("SELECT value FROM {table} WHERE cache_key = {p1}"),
+                vec![StoredKey::new(key).into_value()],
+            )
+            .await
+            .map_err(err)?;
+            tx.commit().await.map_err(|e| err(e.into()))?;
+            rows.into_iter().next().map(|(v,)| v).unwrap_or_default()
+        } else {
+            // SQLite turns an overflowing sum into a REAL; skip that update
+            // instead, and report it as PG and MySQL do.
+            let guard = if dialect.name() == "sqlite" {
+                binds.push(SqlValue::I64(now));
+                format!(
+                    " WHERE ({}) OR {not_int} OR typeof(CAST({table}.value AS INTEGER) + \
+                     CAST({new_value} AS INTEGER)) = 'integer'",
+                    expired(&p6)
+                )
+            } else {
+                String::new()
+            };
+            let rows: Vec<(String,)> = raw_query_pool(
+                &format!(
+                    "{insert} ON CONFLICT (cache_key) DO UPDATE SET {set}{guard} RETURNING value"
+                ),
+                binds,
+                &self.pool,
+            )
+            .await
+            .map_err(err)?;
+            let Some((v,)) = rows.into_iter().next() else {
+                return Err(CacheError::Connection(
+                    "incr: integer out of range (i64 overflow)".to_owned(),
+                ));
+            };
+            v
+        };
+        value
+            .parse()
+            .map_err(|_| CacheError::Connection(format!("incr: non-integer result {value:?}")))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("DELETE FROM {table} WHERE cache_key = {p1}");
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(key.to_owned())])
+        raw_execute_pool(&self.pool, &sql, vec![StoredKey::new(key).into_value()])
             .await
             .map_err(|e| CacheError::Connection(format!("delete: {e}")))?;
         Ok(())
@@ -363,44 +507,42 @@ impl Cache for DatabaseCache {
         Ok(())
     }
 
-    /// Exact prefix delete via `LIKE 'prefix%'` — the keys are a real
-    /// column, so there is no need for the trait default's whole-table
-    /// clear (#1227).
+    /// Prefix delete with `LIKE 'prefix%'`. The keys are a real
+    /// column, so no whole-table clear is needed.
     ///
     /// `%` and `_` are LIKE wildcards, so a prefix containing either
-    /// would match more rows than intended — an unescaped `_` matches
-    /// any single character, and one namespace's clear could sweep a
-    /// neighbour's rows.
+    /// has to be escaped or it would sweep a neighbour's rows.
     ///
-    /// The escape character is **`!`, not `\`**. A backslash cannot be
-    /// written portably here: MySQL treats `\` as an escape *inside
-    /// string literals*, so `ESCAPE '\'` is a syntax error there, while
-    /// Postgres (with `standard_conforming_strings`) reads the same
-    /// literal as one backslash and accepts it. `!` needs no escaping in
-    /// any of the three dialects, so one statement works everywhere.
-    /// Covered on all three by `cache_db_backend_sqlite_live.rs` and
-    /// `cache_delete_prefix_live.rs`.
+    /// The escape character is **`!`, not `\`**. A backslash is not
+    /// portable: `ESCAPE '\'` is a syntax error on MySQL but valid on
+    /// Postgres. `!` needs no escaping on any of the three, so one
+    /// statement works everywhere.
     ///
-    /// One asymmetry to know about: `LIKE` uses the column's collation,
-    /// which folds ASCII case on SQLite and is case-insensitive by
-    /// default on MySQL, while `get` / `delete` compare with `=`. Two
-    /// namespaces differing only in case therefore collide on a prefix
-    /// delete but not on a read. Keep namespaces lower-case — tenant
-    /// slugs already are — and it does not arise.
+    /// SQLite's `LIKE` ignores ASCII case, so it matches with
+    /// `instr(..) = 1` instead; the prefix stays exact on every backend.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p = dialect.placeholder(1);
-        // One escape algorithm for the whole crate (#1257 promoted this
-        // module's `!`-based escaping to `core::escape_like`); reusing
-        // it here means the escape character can never drift between
-        // the cache and the ORM's LIKE lookups.
-        let pattern = format!("{}%", crate::core::escape_like(prefix));
-        let sql = format!(
-            "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
-            crate::core::LIKE_ESCAPE_CLAUSE
-        );
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(pattern)])
+        // Use the crate-wide escaper so the escape character cannot
+        // drift between the cache and the ORM's LIKE lookups.
+        // A hashed key keeps only its head, so a longer prefix matches on that
+        // head: this may drop extra entries, never fewer.
+        let (sql, arg) = if dialect.name() == "sqlite" {
+            (
+                format!("DELETE FROM {table} WHERE instr(cache_key, {p}) = 1"),
+                head(prefix).to_owned(),
+            )
+        } else {
+            (
+                format!(
+                    "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
+                    crate::core::LIKE_ESCAPE_CLAUSE
+                ),
+                format!("{}%", crate::core::escape_like(head(prefix))),
+            )
+        };
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(arg)])
             .await
             .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;
         Ok(())
@@ -411,20 +553,41 @@ impl Cache for DatabaseCache {
 mod tests {
     use super::*;
 
-    /// Pure-string DDL emission — no real pool needed. Verifies the
-    /// dialect branch (`postgres` arm above) compiles a syntactically
-    /// well-formed `CREATE TABLE IF NOT EXISTS` shape. The runtime
-    /// path is exercised by the sqlite live test in
-    /// `tests/cache_db_backend_sqlite_live.rs`.
+    /// No TTL means `expires = 0`, which never expires.
     #[test]
     fn expires_for_zero_when_no_ttl() {
         assert_eq!(DatabaseCache::expires_for(None), 0);
     }
 
     #[test]
+    fn short_keys_are_stored_unchanged() {
+        let k = "x".repeat(MAX_RAW_KEY_BYTES);
+        assert_eq!(StoredKey::new(&k).0, k);
+    }
+
+    #[test]
+    fn long_keys_fit_the_column_and_stay_distinct() {
+        // Multi-byte chars around the cut must not split a char.
+        let base = "é".repeat(200);
+        let a = StoredKey::new(&format!("{base}a")).0;
+        let b = StoredKey::new(&format!("{base}b")).0;
+        assert!(a.len() <= MAX_RAW_KEY_BYTES, "{}", a.len());
+        assert_ne!(a, b);
+        assert!(a.starts_with(head(&base)));
+    }
+
+    #[test]
+    fn a_raw_key_never_equals_a_hashed_one() {
+        let long = "x".repeat(300);
+        let hashed = StoredKey::new(&long).0;
+        assert!(hashed.len() <= MAX_RAW_KEY_BYTES);
+        // Writing the hashed form as a raw key must not reach the long key's row.
+        assert_ne!(StoredKey::new(&hashed).0, hashed);
+    }
+
+    #[test]
     fn expires_for_offsets_from_now() {
-        // ms precision: a 60-second TTL adds 60_000 ms to the current
-        // unix-ms reading, bracketed by the surrounding observations.
+        // A 60-second TTL adds 60_000 ms to the clock reading.
         let before = DatabaseCache::now_unix_ms();
         let ts = DatabaseCache::expires_for(Some(Duration::from_secs(60)));
         let after = DatabaseCache::now_unix_ms();

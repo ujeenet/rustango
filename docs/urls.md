@@ -1,13 +1,12 @@
 # URL names & reverse
 
 Hardcoding URLs (`/posts/42`) all over handlers and templates is fragile — change
-a route and every literal breaks silently. **Rustango** gives you Django's
-answer: **name a URL pattern once, then build the URL by name everywhere** — in
-Rust with `reverse(...)`, in templates with `{{ url(...) }}`, and in redirects
-with `redirect_to_view(...)`. The API surface mirrors Django's
-`reverse()` / `{% url %}` / `resolve_url()` / `redirect()`.
+a route and every literal breaks silently. **Rustango**'s answer: **name a URL
+pattern once, then build the URL by name everywhere** — in Rust with
+`reverse(...)`, in templates with `{{ url(...) }}`, and in redirects with
+`redirect_to_view(...)`.
 
-[![Django-style reverse URLs: register_url! names a pattern, reverse() builds the URL in Rust, and {{ url(...) }} builds it in a template](img/urls.png)](img/urls.png)
+[![Reverse URLs: register_url! names a pattern, reverse() builds the URL in Rust, and {{ url(...) }} builds it in a template](img/urls.png)](img/urls.png)
 
 > **Source:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) and `rustango::shortcuts`
@@ -31,8 +30,8 @@ with `redirect_to_view(...)`. The API surface mirrors Django's
 
 `register_url!("name", "/pattern")` registers a name → pattern mapping. It runs
 at module-load time (via `inventory`), so the route lands in a global registry
-the moment its module is linked — no central `urls.py` to edit, and no
-`include()` to wire up.
+the moment its module is linked — there is no central route file to edit and
+nothing to wire up by hand.
 
 ```rust
 use rustango::register_url;
@@ -79,7 +78,7 @@ the pattern doesn't have, is an error (not a silent mismatch) — see
 
 ## Reverse in templates
 
-Templates get Django's `{% url %}` as a Tera function. Register it once on your
+Templates get a `url(...)` Tera function. Register it once on your
 `Tera` instance at setup (it's behind the `template_views` feature):
 
 ```rust
@@ -95,8 +94,7 @@ accepted):
 <a href="{{ url(name='user-posts', user_id=7, post_id=42) }}">…</a>
 ```
 
-That's the equivalent of Django's `{% url 'post-detail' id=42 %}`. For the
-`{% url 'x' as var %}` capture pattern, use Tera's `{% set %}`:
+To keep the URL in a variable instead of printing it, use Tera's `{% set %}`:
 
 ```jinja
 {% set post_url = url(name='post-detail', id=post.id) %}
@@ -110,20 +108,20 @@ than silently producing a broken URL.
 
 ## Redirect by name
 
-`rustango::shortcuts` mirrors Django's view-name redirect helpers, so handlers
-never hardcode a `Location`:
+`rustango::shortcuts` redirects by route name, so handlers never hardcode a
+`Location`:
 
 ```rust
 use std::collections::HashMap;
 use rustango::shortcuts::{redirect_to_view, resolve_url};
 
-// redirect('post-detail', id=42) → 302 Location: /posts/42
+// → 302 Location: /posts/42
 let mut params = HashMap::new();
 params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` is Django's `resolve_url`: if `spec` already looks
+`resolve_url(spec, &params)` accepts either form: if `spec` already looks
 like a URL (`/…`, `http://`, `https://`, `./`, `../`) it's returned unchanged;
 otherwise it's treated as a route name and reverse-resolved. Handy for a
 `?next=` parameter or a setting that may hold *either* a path or a name:
@@ -140,9 +138,9 @@ plain `302`.)
 
 ## Namespacing
 
-There's no `include()` and no auto-applied app namespace — every `register_url!`
-lands in one global registry. Namespacing is a **convention in the name itself**:
-prefix with `app:`, exactly as you'd call Django's `reverse("app:detail")`.
+There's no auto-applied app namespace — every `register_url!` lands in one
+global registry. Namespacing is a **convention in the name itself**: prefix the
+name with `app:`, then reverse the full name.
 
 ```rust
 register_url!("blog:post-detail", "/blog/posts/{id}");
@@ -205,11 +203,11 @@ rather than rendering a broken link.
 
 ## Regex & typed path patterns
 
-**Rustango has no `re_path`, and no path converter is ever enforced.** A pattern
-segment is either a literal (`/posts/new`) or a `{name}` placeholder that captures
-exactly one segment; `{*name}` captures the rest of the path. That's the whole
-vocabulary — there is no `r'(?P<year>[0-9]{4})'`, and `{int:id}` does **not**
-constrain `id` to an integer.
+**Rustango has no regex routes, and no path converter is ever enforced.** A
+pattern segment is either a literal (`/posts/new`) or a `{name}` placeholder
+that captures exactly one segment; `{*name}` captures the rest of the path.
+That's the whole vocabulary — there is no `r'(?P<year>[0-9]{4})'`, and
+`{int:id}` does **not** constrain `id` to an integer.
 
 ### Why — the matcher isn't a regex engine
 
@@ -217,8 +215,8 @@ Routing *is* [axum](https://docs.rs/axum) 0.8, and axum matches paths with
 [`matchit`](https://docs.rs/matchit), a **radix-trie** router. It walks the URL
 one segment at a time down a prefix tree, so a match costs O(path length) and is
 independent of how many routes you've registered. A regex router does the
-opposite: Django evaluates `urlpatterns` top-to-bottom, running each entry's
-regex against the path until one matches. The trie buys constant-time matching
+opposite: it walks a list of patterns top to bottom, running each entry's regex
+against the path until one matches. The trie buys constant-time matching
 and an unambiguous "most-specific literal wins" precedence — at the cost of not
 expressing character-class constraints *in the path itself*.
 
@@ -231,13 +229,14 @@ engine to begin with.
 The `{int:id}` form is accepted only as a **porting affordance** for `reverse()`:
 the builder splits the placeholder on `:` and keeps just the name, discarding the
 type prefix ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). That lets `reverse()`
-run on a pattern copied verbatim from a Django `path("<int:id>/", …)` — but
-nothing validates that the supplied value is actually an integer.
+run on a pattern copied verbatim from a framework that writes the type into the
+path (`"<int:id>/"`) — but nothing validates that the supplied value is actually
+an integer.
 
 ### How to express a constrained route
 
 Match the segment with a plain `{placeholder}`, then enforce its shape where the
-value is used. Django's `re_path(r'^articles/(?P<year>[0-9]{4})/$', …)` becomes:
+value is used. A route that should accept only a four-digit year becomes:
 
 ```rust
 register_url!("article-by-year", "/articles/{year}");
@@ -253,9 +252,9 @@ async fn article_by_year(Path(year): Path<String>) -> impl IntoResponse {
 }
 ```
 
-To reject *before* the handler runs (closer to Django's converter semantics), put
-the check in a custom axum extractor (`FromRequestParts`) and take that type as
-the handler argument instead of `Path<String>` — the framework doesn't ship one,
+To reject *before* the handler runs, put the check in a custom axum extractor
+(`FromRequestParts`) and take that type as the handler argument instead of
+`Path<String>` — the framework doesn't ship one,
 but axum's extractor trait is the intended seam. The `regex` crate is already a
 dependency (the ORM uses it for `__regex` lookups), so a validating extractor can
 compile a `Regex` once and reuse it across requests.
@@ -273,10 +272,10 @@ compile a `Regex` once and reuse it across requests.
   that pattern. Register the name where you mount the route so they stay in sync.
 - **Values are percent-encoded** by `reverse`, so they're safe to drop into a
   `Location` header or an `href`.
-- **No regex/typed converters** in patterns (Django's `<int:pk>`); placeholders
-  are plain `{name}` and values are substituted as-is (after encoding). See
-  [Regex & typed path patterns](#regex--typed-path-patterns) for why, and how to
-  constrain a route instead.
+- **No regex or typed converters** in patterns (nothing like `<int:pk>`);
+  placeholders are plain `{name}` and values are substituted as-is (after
+  encoding). See [Regex & typed path patterns](#regex--typed-path-patterns) for
+  why, and how to constrain a route instead.
 
 
 ---

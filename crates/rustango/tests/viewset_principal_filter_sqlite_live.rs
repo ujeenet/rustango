@@ -60,22 +60,22 @@ impl ViewSetFilter for OwnerFilter {
             return deny(schema);
         };
         schema.field("owner_id").map_or_else(Vec::new, |f| {
-            vec![WhereExpr::Predicate(Filter {
-                column: f.column,
-                op: Op::Eq,
-                value: SqlValue::from(uid),
-            })]
+            vec![WhereExpr::Predicate(Filter::new(
+                f.column,
+                Op::Eq,
+                SqlValue::from(uid),
+            ))]
         })
     }
 }
 
 fn deny(schema: &'static ModelSchema) -> Vec<WhereExpr> {
     schema.field("owner_id").map_or_else(Vec::new, |f| {
-        vec![WhereExpr::Predicate(Filter {
-            column: f.column,
-            op: Op::Eq,
-            value: SqlValue::from(-1_i64),
-        })]
+        vec![WhereExpr::Predicate(Filter::new(
+            f.column,
+            Op::Eq,
+            SqlValue::from(-1_i64),
+        ))]
     })
 }
 

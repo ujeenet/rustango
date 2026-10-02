@@ -65,6 +65,21 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
     chrome_context_with_session(state, active_table, session.as_ref())
 }
 
+/// The hidden CSRF field for this request's token; empty outside a request.
+pub(crate) fn csrf_input_for(csrf_token: &str) -> String {
+    if csrf_token.is_empty() {
+        String::new()
+    } else {
+        crate::forms::csrf::csrf_input_html(csrf_token)
+    }
+}
+
+/// The hidden CSRF field for the current request.
+#[cfg(feature = "totp")]
+pub(crate) fn current_csrf_input() -> String {
+    csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
+}
+
 /// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
 /// Used by tests and any path that has the session in hand directly
 /// (without going through the task-local). #253 slice B.
@@ -80,7 +95,20 @@ pub(crate) fn chrome_context_with_session(
         .brand_tagline
         .as_deref()
         .or(state.config.subtitle.as_deref());
+    // #1395 — every admin template's POST form renders `csrf_input`, and
+    // this is the one place all of them get their variables from. The
+    // token comes from the request-scoped task-local installed by
+    // `csrf_context`; outside a request there is none, and the empty
+    // string is the honest value. That case is a hand-rendered page or a
+    // test, neither of which submits anything — and enforcement never
+    // depends on the template, because `CsrfLayer` rejects an unsafe
+    // request whatever was rendered.
+    let csrf_token = super::session::current_csrf_token().unwrap_or_default();
+    let csrf_input = csrf_input_for(&csrf_token);
+
     serde_json::json!({
+        "csrf_token": csrf_token,
+        "csrf_input": csrf_input,
         "sidebar_groups": sidebar_context(state, active_table),
         "active_table": active_table.unwrap_or(""),
         "admin_title": admin_title,
@@ -108,6 +136,8 @@ pub(crate) fn chrome_context_with_session(
         // standalone admins. Templates compose the full
         // audit URL as `{{ admin_prefix }}{{ audit_url }}`.
         "audit_url": &state.config.audit_url,
+        // Hides the Activity links from users the feed would refuse.
+        "can_view_audit": state.audit_reader().is_some(),
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
         "change_password_url": &state.config.change_password_url,
@@ -145,8 +175,8 @@ pub(crate) fn chrome_context_with_session(
 }
 
 /// Build the sidebar context — every visible model the admin exposes,
-/// grouped by Django-shape app label. Pass `active_table` so the
-/// matching link gets `class="active"`.
+/// grouped by app label. Pass `active_table` so the matching link
+/// gets `class="active"`.
 ///
 /// Sidebar shape mirrors the operator console's left rail
 /// (`tenancy/templates/op_layout.html`) so tenant operators see a
@@ -268,6 +298,55 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
+/// `true` for a column with a `password` widget override. Its value is
+/// never echoed: forms render it empty, lists and detail show only whether it is set.
+#[must_use]
+pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) -> bool {
+    admin_cfg
+        .formfield_overrides
+        .iter()
+        .any(|(f, w)| *f == name && *w == "password")
+}
+
+/// `true` when the list may filter on `field` from the URL: a
+/// `list_filter`, displayed or FK column, or an inline's parent pin.
+/// Never a secret, so a URL cannot probe its value (#2031).
+/// Every FK column is allowed on purpose: inline and facet links filter on it.
+#[must_use]
+pub(crate) fn url_filterable(
+    model: &'static ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    field: &FieldSchema,
+) -> bool {
+    if is_secret_field(admin_cfg, field.name) {
+        return false;
+    }
+    let named = |names: &[&str]| names.contains(&field.name);
+    named(admin_cfg.list_filter)
+        || named(admin_cfg.list_display)
+        || admin_cfg.list_display.is_empty()
+        || field.relation.is_some()
+        || super::inlines::is_parent_pin(model.table, field.column)
+}
+
+/// A secret column's list/detail cell: whether it is set, never the value.
+pub(crate) fn render_secret_cell(row: &serde_json::Value, field: &FieldSchema) -> String {
+    render_secret_value(row.get(field.name))
+}
+
+/// [`render_secret_cell`] for an already-read value.
+pub(crate) fn render_secret_value(value: Option<&serde_json::Value>) -> String {
+    let set = value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|v| !v.is_empty());
+    if set {
+        "<em>set</em>"
+    } else {
+        "<em>not set</em>"
+    }
+    .to_owned()
+}
+
 /// Resolve the model's primary-key `FieldSchema`, mapping the
 /// `Option::None` no-PK case to [`AdminError::Internal`]. Folds the
 /// fourth prologue pattern that recurs across every detail / create /
@@ -319,8 +398,8 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
 /// visible and has a display field. The join's `project` carries only
 /// the target's display column — that's all the admin renders.
 ///
-/// #352 — Django-shape `list_select_related` lets operators opt out
-/// of specific FK joins (`ListSelectRelated::None` for "no joins";
+/// `list_select_related` lets operators opt out of specific FK
+/// joins (`ListSelectRelated::None` for "no joins";
 /// `ListSelectRelated::Only(&[...])` for a whitelist). The default
 /// `ListSelectRelated::All` preserves rustango's join-everything
 /// behavior.
@@ -381,23 +460,71 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
     joins
 }
 
-/// Build a `&q=…&<field>=<v>…` tail for prev/next pager URLs so the
-/// active search and filters survive page navigation. Each value is
-/// percent-encoded via a tiny ASCII-safe escaper good enough for the
-/// admin's expected inputs.
-pub(crate) fn pager_suffix(q: Option<&str>, filters: &[(&'static str, String)]) -> String {
-    let mut out = String::new();
-    if let Some(qs) = q {
-        out.push_str("&q=");
-        out.push_str(&url_encode(qs));
+/// A list page's URL: its base path plus the filter state as query
+/// pairs. Every link on the page derives from one value, so a pager,
+/// facet or date link cannot keep a different subset (#1916).
+#[derive(Clone, Debug)]
+pub(crate) struct ListQuery {
+    base: String,
+    params: Vec<(String, String)>,
+}
+
+impl ListQuery {
+    /// `base` is the full path, admin prefix included.
+    pub(crate) fn new(base: String) -> Self {
+        Self {
+            base,
+            params: Vec::new(),
+        }
     }
-    for (k, v) in filters {
-        out.push('&');
-        out.push_str(k);
-        out.push('=');
-        out.push_str(&url_encode(v));
+
+    pub(crate) fn push(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.params.push((key.into(), value.into()));
     }
-    out
+
+    /// A copy without `keys`.
+    #[must_use]
+    pub(crate) fn without(&self, keys: &[&str]) -> Self {
+        Self {
+            base: self.base.clone(),
+            params: self
+                .params
+                .iter()
+                .filter(|(k, _)| !keys.contains(&k.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// This query with `key=value` added.
+    #[must_use]
+    pub(crate) fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.push(key, value);
+        self
+    }
+
+    pub(crate) fn pairs(&self) -> &[(String, String)] {
+        &self.params
+    }
+
+    pub(crate) fn url(&self) -> String {
+        if self.params.is_empty() {
+            return self.base.clone();
+        }
+        format!("{}?{}", self.base, &self.suffix()[1..])
+    }
+
+    /// `&k=v…` for templates that write `?page=N` themselves.
+    pub(crate) fn suffix(&self) -> String {
+        let mut out = String::new();
+        for (k, v) in &self.params {
+            out.push('&');
+            out.push_str(&url_encode(k));
+            out.push('=');
+            out.push_str(&url_encode(v));
+        }
+        out
+    }
 }
 
 // #806 — was a byte-identical copy of `crate::url_codec::url_encode`;
@@ -449,6 +576,7 @@ pub(crate) fn render_cell_json(
     row: &serde_json::Value,
     field: &FieldSchema,
     fk_map: &FkMap,
+    admin_prefix: &str,
 ) -> String {
     if let Some(rel) = field.relation {
         let to = match rel {
@@ -460,7 +588,10 @@ pub(crate) fn render_cell_json(
         let raw_esc = render::escape(&raw_value);
         let to_esc = render::escape(to);
         return match fk_map.get(&(to.to_owned(), raw_value)) {
-            Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
+            Some(display) => format!(
+                r#"<a href="{prefix}/{to_esc}/{raw_esc}">{display}</a>"#,
+                prefix = render::escape(admin_prefix),
+            ),
             None => raw_esc,
         };
     }
@@ -489,6 +620,16 @@ pub(crate) fn render_form(
         Vec::new(),
         &[],
     )
+}
+
+/// A new form preselects the model default; only a nullable bool can
+/// show "false" apart from blank (NULL).
+fn new_form_bool_value(f: &FieldSchema) -> &'static str {
+    match f.default.map(|d| d.trim_matches('\'').to_ascii_lowercase()) {
+        Some(d) if d == "true" || d == "1" => "true",
+        Some(d) if f.nullable && (d == "false" || d == "0") => "false",
+        _ => "",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,14 +689,22 @@ fn render_form_with_inlines_and_pickers(
     };
 
     let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
-        let value = prefill
-            .and_then(|m| m.get(f.name))
-            .map_or("", String::as_str);
+        let is_secret = is_secret_field(&admin_cfg, f.name);
+        let value = match prefill.and_then(|m| m.get(f.name)) {
+            _ if is_secret => "",
+            Some(v) => v.as_str(),
+            None if prefill.is_none() && f.ty == crate::core::FieldType::Bool => {
+                new_form_bool_value(f)
+            }
+            None => "",
+        };
         let is_readonly_field = admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
         let extra = if f.primary_key {
             " <small>(pk)</small>"
         } else if is_readonly_field {
             " <small>read-only</small>"
+        } else if is_secret && pk_locked {
+            " <small>leave empty to keep</small>"
         } else if f.auto {
             " <small>auto</small>"
         } else if gfk_ct_columns.contains(f.column) {
@@ -565,14 +714,13 @@ fn render_form_with_inlines_and_pickers(
         } else {
             ""
         };
-        // PK is locked on edit; readonly_fields are locked on edit.
-        // Auto fields are always locked — they're DB-assigned.
-        let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
-        // #359 — Django-shape `formfield_overrides`. Look up a
-        // per-field widget override from the AdminConfig before
-        // dispatching to the FieldType default. Unknown names fall
-        // back automatically — `render_input_with_widget` logs the
-        // warning.
+        // PK is locked on edit. Auto and readonly fields are always
+        // locked: the server never reads them from the form.
+        let lock_input = f.auto || is_readonly_field || (pk_locked && f.primary_key);
+        // `formfield_overrides`: look up a per-field widget override
+        // from the AdminConfig before dispatching to the FieldType
+        // default. Unknown names fall back automatically —
+        // `render_input_with_widget` logs the warning.
         let widget_override = admin_cfg
             .formfield_overrides
             .iter()
@@ -582,14 +730,17 @@ fn render_form_with_inlines_and_pickers(
         // on fields named as a `generic_fk` ct_column.
         let mut input_html = if gfk_ct_columns.contains(f.column) {
             render::render_gfk_select(f, value, lock_input, gfk_picker_cts)
+        } else if is_secret {
+            // Required only on create: an empty edit keeps the stored value.
+            render::render_secret_input(f, lock_input, !pk_locked)
         } else {
             render::render_input_with_widget(f, value, lock_input, widget_override)
         };
-        // #357 — Django-shape `raw_id_fields`. When the field is an
-        // FK / O2O AND is named in `admin.raw_id_fields`, append a
-        // magnifying-glass lookup link that points at the target
-        // model's admin list view. Lets the operator find the right
-        // PK to type without scrolling through every option.
+        // `raw_id_fields`: when the field is an FK / O2O and is named
+        // in `admin.raw_id_fields`, append a magnifying-glass lookup
+        // link that points at the target model's admin list view. It
+        // lets the operator find the right PK to type without
+        // scrolling through every option.
         if admin_cfg.raw_id_fields.iter().any(|n| *n == f.name) {
             if let Some(rel) = f.relation {
                 let target_table = match rel {
@@ -605,8 +756,8 @@ fn render_form_with_inlines_and_pickers(
                 );
             }
         }
-        // #358 — Django-shape `autocomplete_fields`. Append a
-        // `<datalist>` with `id="<field>_options"`, set the input's
+        // `autocomplete_fields`: append a `<datalist>` with
+        // `id="<field>_options"`, set the input's
         // `list=` attribute, and emit a tiny inline JS block that
         // populates the datalist via fetch to the target's
         // `__autocomplete` endpoint on every input event.
@@ -656,64 +807,28 @@ fn render_form_with_inlines_and_pickers(
             "label": f.display_label(),
             "extra": extra,
             "input": input_html,
-            // Django-shape `help_text` (#admin-helptext) — short
-            // caption rendered under the input. `None` means no
-            // caption; template treats it as falsy and renders nothing.
+            // `help_text` — short caption rendered under the input.
+            // `None` means no caption; the template treats it as
+            // falsy and renders nothing.
             "help_text": f.help_text,
         })
     };
 
-    let visible = |f: &&'static FieldSchema| -> bool {
-        // Auto fields (Auto<T> PK, auto_now_add, auto_uuid, default=…
-        // server-assigned columns) are hidden on create — Postgres'
-        // DEFAULT fills them. On edit they are shown readonly so the
-        // operator can see the value.
-        if f.auto && !pk_locked {
-            // Hide auto fields entirely on the create form.
-            return false;
-        }
-        // #449 — Django-shape `editable = false` removes the field
-        // from the auto-generated change-form entirely. The value
-        // is still visible on list / detail views (those don't
-        // route through this filter).
-        if !f.editable {
-            return false;
-        }
-        true
-    };
-
-    // Optionally group fields into fieldsets (slice 10.5). Empty
-    // fieldsets means "one unnamed group with every visible field".
-    let fieldsets_ctx: Vec<serde_json::Value> = if admin_cfg.fieldsets.is_empty() {
-        let rows: Vec<serde_json::Value> = model
-            .scalar_fields()
-            .filter(visible)
-            .map(row_for_field)
-            .collect();
-        vec![serde_json::json!({ "title": "", "rows": rows })]
-    } else {
-        admin_cfg
-            .fieldsets
-            .iter()
-            .map(|set| {
-                let rows: Vec<serde_json::Value> = set
-                    .fields
-                    .iter()
-                    .filter_map(|name| model.field(name))
-                    .filter(visible)
-                    .map(row_for_field)
-                    .collect();
-                serde_json::json!({ "title": set.title, "rows": rows })
-            })
-            .collect()
-    };
+    let fieldsets_ctx: Vec<serde_json::Value> = FormLayout::of(model, &admin_cfg, pk_locked)
+        .groups
+        .into_iter()
+        .map(|(title, fields)| {
+            let rows: Vec<serde_json::Value> = fields.into_iter().map(row_for_field).collect();
+            serde_json::json!({ "title": title, "rows": rows })
+        })
+        .collect();
 
     let inline_form_panels_ctx: Vec<serde_json::Value> = inline_panels
         .into_iter()
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
         .collect();
 
-    // #356 — Django-shape `prepopulated_fields`. Build the
+    // `prepopulated_fields`: build the
     // `{ target_input_name: [source_input_name, …] }` map the
     // form.html JS reads to wire change events. We translate Rust
     // field names → HTML input `name=` (which == Rust field name in
@@ -759,9 +874,9 @@ fn render_form_with_inlines_and_pickers(
         "fieldsets": fieldsets_ctx,
         "inline_form_panels": inline_form_panels_ctx,
         "prepopulated_fields": prepopulated_ctx,
-        // Only emit the slug script when not editing — Django's
-        // semantic is "stop populating once the value is set" and a
-        // stored slug usually wants to remain stable. The form has
+        // Only emit the slug script when not editing: stop
+        // populating once the value is set, because a stored slug
+        // usually wants to stay stable. The form has
         // a `prepopulated_active` flag the template can branch on.
         "prepopulated_active": !pk_locked && !prepopulated_ctx.is_empty(),
     });
@@ -772,12 +887,66 @@ fn render_form_with_inlines_and_pickers(
     )
 }
 
+/// The fields the admin form renders, grouped by fieldset. The renderer
+/// and both submit handlers read it, so a POST can only write what the
+/// form shows.
+pub(crate) struct FormLayout {
+    /// `(fieldset title, fields)`; one untitled group without `fieldsets`.
+    pub(crate) groups: Vec<(&'static str, Vec<&'static FieldSchema>)>,
+}
+
+impl FormLayout {
+    /// `pk_locked` is the edit form, which shows auto fields read-only.
+    pub(crate) fn of(
+        model: &'static ModelSchema,
+        admin_cfg: &crate::core::AdminConfig,
+        pk_locked: bool,
+    ) -> Self {
+        // `editable = false` fields never render; auto fields only on edit.
+        let visible = |f: &&'static FieldSchema| f.editable && (pk_locked || !f.auto);
+        let groups = if admin_cfg.fieldsets.is_empty() {
+            vec![("", model.scalar_fields().filter(visible).collect())]
+        } else {
+            admin_cfg
+                .fieldsets
+                .iter()
+                .map(|set| {
+                    let fields = set
+                        .fields
+                        .iter()
+                        .filter_map(|name| model.field(name))
+                        .filter(visible)
+                        .collect();
+                    (set.title, fields)
+                })
+                .collect()
+        };
+        Self { groups }
+    }
+
+    /// Scalar fields the form does not render; submit handlers skip them.
+    /// Auto fields stay with the writers, which assign them server-side.
+    pub(crate) fn unrendered(&self, model: &'static ModelSchema) -> Vec<&'static str> {
+        model
+            .scalar_fields()
+            .filter(|f| {
+                !f.auto
+                    && !self
+                        .groups
+                        .iter()
+                        .any(|(_, g)| g.iter().any(|r| r.name == f.name))
+            })
+            .map(|f| f.name)
+            .collect()
+    }
+}
+
 /// As [`render_form`] but threads a list of `InlineFormPanel` and a
 /// pre-loaded `ContentType` list into the form context. The first
 /// drives inline panel rendering (#50, slice 2); the second drives
 /// the `generic_fk` `<select>` picker (#244). Used by `edit_form` and
-/// `create_form` — pass an empty `inline_panels` from create-form
-/// (Django's create-form-doesn't-render-inlines behavior).
+/// `create_form` — pass an empty `inline_panels` from create-form,
+/// which does not render inlines.
 pub(crate) fn render_form_with_inlines_and_picker(
     state: &AppState,
     model: &'static ModelSchema,
@@ -796,4 +965,54 @@ pub(crate) fn render_form_with_inlines_and_picker(
         inline_panels,
         gfk_picker_cts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::FieldType;
+
+    /// List and detail FK cells link under the mounted prefix (#1916).
+    #[test]
+    fn fk_cell_links_under_the_admin_prefix() {
+        let mut f = FieldSchema::new("author", "author_id", FieldType::I64);
+        f.relation = Some(Relation::Fk {
+            to: "author",
+            on: "id",
+        });
+        let row = serde_json::json!({ "author": 7 });
+        let mut fk_map = FkMap::new();
+        fk_map.insert(("author".into(), "7".into()), "Ann".into());
+        assert_eq!(
+            render_cell_json(&row, &f, &fk_map, "/adm"),
+            r#"<a href="/adm/author/7">Ann</a>"#
+        );
+    }
+
+    #[test]
+    fn new_form_bool_preselects_the_default() {
+        let mut f = FieldSchema::new("flag", "flag", FieldType::Bool);
+        f.nullable = true;
+        f.default = Some("false");
+        assert_eq!(new_form_bool_value(&f), "false");
+        f.default = Some("0");
+        assert_eq!(new_form_bool_value(&f), "false");
+        f.default = None;
+        assert_eq!(new_form_bool_value(&f), "");
+        f.default = Some("TRUE");
+        assert_eq!(new_form_bool_value(&f), "true");
+        f.nullable = false;
+        f.default = Some("false");
+        assert_eq!(new_form_bool_value(&f), "");
+    }
+
+    #[test]
+    fn list_query_drops_and_adds_keys() {
+        let mut q = ListQuery::new("/adm/t".into());
+        q.push("q", "a b");
+        q.push("year", "2024");
+        assert_eq!(q.url(), "/adm/t?q=a%20b&year=2024");
+        assert_eq!(q.without(&["q", "year"]).url(), "/adm/t");
+        assert_eq!(q.without(&["year"]).with("k", "v").suffix(), "&q=a%20b&k=v");
+    }
 }

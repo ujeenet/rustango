@@ -1,4 +1,4 @@
-//! Django-parity #354 — `admin.actions_on_top` / `actions_on_bottom`.
+//! Issue #354 — `admin.actions_on_top` / `actions_on_bottom`.
 //! Position knobs for the action-bar on the list view.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]
@@ -11,7 +11,7 @@ use rustango::sql::Pool;
 use rustango::Model;
 use tower::ServiceExt;
 
-// Default model: actions_on_top=true (Django default), actions_on_bottom=false.
+// Default model: actions_on_top=true, actions_on_bottom=false.
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "ap_top_post",
@@ -111,7 +111,7 @@ async fn fetch_body(pool: Pool, uri: &str) -> String {
 }
 
 #[test]
-fn defaults_match_django_top_true_bottom_false() {
+fn defaults_are_top_true_bottom_false() {
     let cfg = ApTopPost::SCHEMA.admin.expect("admin attr set");
     assert!(cfg.actions_on_top);
     assert!(!cfg.actions_on_bottom);

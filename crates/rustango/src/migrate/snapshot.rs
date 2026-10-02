@@ -1,43 +1,63 @@
-//! Schema snapshots — serializable mirror of the inventory registry.
+//! Schema snapshots: a serializable copy of the model registry.
 //!
-//! v0.2 captures table + column metadata in JSON so two snapshots can be
-//! diffed to produce DDL. Only the fields the writer cares about are
-//! tracked: type, nullability, primary key, `max_length`, min/max,
-//! relations. Per-field bounds become `CHECK` constraints; relations
-//! become `FOREIGN KEY` ALTER statements.
+//! A snapshot records table and column metadata as JSON, so two of
+//! them can be diffed into DDL. It keeps only what the DDL writer
+//! needs: type, nullability, primary key, `max_length`, min/max and
+//! relations. Bounds become `CHECK` constraints and relations become
+//! `FOREIGN KEY` statements.
 
 use crate::core::{inventory, FieldType, ModelEntry, ModelSchema, Relation};
 use serde::{Deserialize, Serialize};
+
+/// Framework tables that exist in **every** rustango database, the
+/// registry and every tenant, because both need audit rows and a
+/// content-type catalog. A migration has one scope and cannot say
+/// "both", so these appear in every scope's system migrations and
+/// each database gets its own copy.
+pub const SHARED_SYSTEM_TABLES: &[&str] = &["rustango_audit_log", "rustango_content_types"];
+
+/// `true` when at least one framework model *declares* `scope`.
+///
+/// This is **not** the same as "the scope's snapshot is non-empty".
+/// [`SHARED_SYSTEM_TABLES`] belong to the tenant scope but are copied
+/// into every scope, so a registry snapshot is never empty even in a
+/// build with no registry database.
+#[must_use]
+pub fn scope_owns_system_tables(scope: crate::core::ModelScope) -> bool {
+    inventory::iter::<ModelEntry>.into_iter().any(|e| {
+        e.schema.scope == scope
+            && e.schema.table.starts_with("rustango_")
+            && !e.schema.is_view
+            && e.schema.managed
+    })
+}
 
 /// A snapshot of every registered model, ordered by table name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SchemaSnapshot {
     pub tables: Vec<TableSnapshot>,
-    /// Junction tables derived from `ModelSchema::m2m` declarations,
-    /// sorted by `through` name. Absent from old migration files — the
-    /// `#[serde(default)]` produces an empty vec, which is correct
-    /// (no M2M tables in older snapshots).
+    /// Junction tables from `ModelSchema::m2m`, sorted by `through`.
+    /// Older snapshot files have no such key and load as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub m2m_tables: Vec<M2MTableSnapshot>,
-    /// Indexes derived from `ModelSchema::indexes` declarations, sorted
-    /// by name. Absent from old migration files — defaults to empty.
+    /// Indexes from `ModelSchema::indexes`, sorted by name. Older
+    /// snapshot files load as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<IndexSnapshot>,
-    /// CHECK constraints derived from `ModelSchema::check_constraints`,
-    /// sorted by name. Absent from old migration files — defaults to empty.
+    /// CHECK constraints from `ModelSchema::check_constraints`, sorted
+    /// by name. Older snapshot files load as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckSnapshot>,
-    /// Postgres `EXCLUDE` constraints derived from
-    /// `ModelSchema::exclusion_constraints`, sorted by name. PG-only —
-    /// the migration writer renders nothing on MySQL/SQLite (with a
-    /// `tracing::warn!`). Absent from pre-#319 migration files —
-    /// defaults to empty.
+    /// Postgres `EXCLUDE` constraints from
+    /// `ModelSchema::exclusion_constraints`, sorted by name. Postgres
+    /// only: MySQL and SQLite render nothing and log a warning. Older
+    /// snapshot files load as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<ExclusionSnapshot>,
 }
 
-/// Snapshot of one Postgres `EXCLUDE` constraint. Issue #319.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Snapshot of one Postgres `EXCLUDE` constraint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct ExclusionSnapshot {
     pub name: String,
     pub table: String,
@@ -49,7 +69,7 @@ pub struct ExclusionSnapshot {
 }
 
 /// Snapshot of one table-level CHECK constraint.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct CheckSnapshot {
     pub name: String,
     pub table: String,
@@ -57,31 +77,23 @@ pub struct CheckSnapshot {
 }
 
 /// Snapshot of one `CREATE INDEX` declaration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct IndexSnapshot {
     pub name: String,
     pub table: String,
     pub columns: Vec<String>,
     pub unique: bool,
-    /// Access method as a lowercase token (`btree` / `gin` / `gist` /
-    /// `brin` / `spgist` / `hash` / `bloom`). Defaults to `"btree"`
-    /// when missing or unknown — keeps pre-#34 snapshots forward-
-    /// compatible (older files have no `method` key; deserialize
-    /// fills it with the default + the migration runner emits
-    /// regular btree).
+    /// Access method, lowercase: `btree`, `gin`, `gist`, `brin`,
+    /// `spgist`, `hash` or `bloom`. Missing or unknown means `btree`,
+    /// so older snapshot files still load.
     #[serde(default = "default_index_method")]
     pub method: String,
-    /// Optional partial-index `WHERE <expr>` clause — Django's
-    /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
-    /// `None` (default) emits a plain index. Older snapshots without
-    /// this key deserialize cleanly via `#[serde(default)]`.
+    /// `WHERE <expr>` clause for a partial index. `None` gives a
+    /// plain index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_clause: Option<String>,
-    /// Django `Index(include=[...])` covering-index columns. PG 11+
-    /// only; MySQL/SQLite drop the clause at render time with a
-    /// warning. Empty `Vec` (default) means "no covering columns".
-    /// Older snapshots without this key deserialize cleanly via
-    /// `#[serde(default)]`.
+    /// Covering-index columns. Postgres 11 and newer only; MySQL and
+    /// SQLite drop the clause and log a warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
 }
@@ -91,17 +103,17 @@ fn default_index_method() -> String {
 }
 
 /// Snapshot of one many-to-many junction table.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct M2MTableSnapshot {
-    /// SQL name of the junction table (e.g. `"post_tags"`).
+    /// Junction table name, such as `"post_tags"`.
     pub through: String,
-    /// SQL name of the source model's table (e.g. `"posts"`).
+    /// Source model's table, such as `"posts"`.
     pub src_table: String,
-    /// FK column in the junction table pointing to the source (e.g. `"post_id"`).
+    /// Junction column pointing at the source, such as `"post_id"`.
     pub src_col: String,
-    /// SQL name of the target model's table (e.g. `"app_tags"`).
+    /// Target model's table, such as `"app_tags"`.
     pub dst_table: String,
-    /// FK column in the junction table pointing to the target (e.g. `"tag_id"`).
+    /// Junction column pointing at the target, such as `"tag_id"`.
     pub dst_col: String,
 }
 
@@ -110,28 +122,24 @@ pub struct TableSnapshot {
     pub name: String,
     pub model: String,
     pub fields: Vec<FieldSnapshot>,
-    /// Composite (multi-column) FKs declared on the model via
-    /// `#[rustango(fk_composite(...))]`. Sub-slice F.5 of the
-    /// v0.15.0 ContentType plan. Skipped on serialize when empty
-    /// so older snapshots written before F.5 stay diff-clean
-    /// (matches the `m2m_tables` / `indexes` / `checks`
-    /// already-empty-elision pattern).
+    /// Multi-column FKs from `#[rustango(fk_composite(...))]`. Left
+    /// out of the JSON when empty, so older snapshots stay
+    /// diff-clean.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub composite_fks: Vec<CompositeFkSnapshot>,
 }
 
-/// Serialized form of [`crate::core::CompositeFkRelation`]. Captured
-/// per-table in [`TableSnapshot`]. Stable order: declaration order
-/// from the `#[rustango(fk_composite(...))]` attrs on the model.
+/// Serialized [`crate::core::CompositeFkRelation`], stored per table
+/// in [`TableSnapshot`] in declaration order.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompositeFkSnapshot {
-    /// Logical relation name (free-form Rust identifier).
+    /// Relation name, a free-form Rust identifier.
     pub name: String,
-    /// Target SQL table name.
+    /// Target table name.
     pub to: String,
-    /// Source-side column names, in declaration order.
+    /// Source columns, in declaration order.
     pub from: Vec<String>,
-    /// Target-side column names, same length / order as `from`.
+    /// Target columns, same length and order as `from`.
     pub on: Vec<String>,
 }
 
@@ -151,35 +159,23 @@ pub struct FieldSnapshot {
     /// Raw SQL fragment for `DEFAULT` if the model declared one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default: Option<String>,
-    /// `true` for fields whose Rust type is `Auto<T>` — server-assigned
-    /// PKs that translate to `BIGSERIAL` / `SERIAL` in DDL. Skipped on
-    /// serialize when `false` so older snapshots stay diff-clean.
+    /// `true` for an `Auto<T>` field: a server-assigned PK that
+    /// becomes `BIGSERIAL` or `SERIAL` in DDL.
     #[serde(skip_serializing_if = "is_false", default)]
     pub auto: bool,
-    /// `true` when `#[rustango(unique)]` was declared. Skipped on
-    /// serialize when `false` to keep snapshots diff-clean.
+    /// `true` when the model declared `#[rustango(unique)]`.
     #[serde(skip_serializing_if = "is_false", default)]
     pub unique: bool,
-    /// Django-shape `CITextField` flag (#344). Threaded through from
-    /// `FieldSchema::case_insensitive`. Skipped on serialize when
-    /// `false` so older snapshots stay diff-clean. The diff writer
-    /// dispatches to `dialect.ci_text_type(max_length)` when set.
+    /// Case-insensitive text column. The DDL writer then uses
+    /// `dialect.ci_text_type(max_length)`.
     #[serde(skip_serializing_if = "is_false", default)]
     pub case_insensitive: bool,
-    /// Raw SQL expression for a `GENERATED ALWAYS AS (...) STORED`
-    /// computed column. Threaded through from
-    /// `FieldSchema::generated_as`. Skipped on serialize when `None`
-    /// so older snapshots stay diff-clean. Captured in #559 — was
-    /// previously dropped from file-based migrations, causing
-    /// generated columns to silently disappear when applying from
-    /// snapshot JSON instead of the live registry.
+    /// SQL expression for a `GENERATED ALWAYS AS (...) STORED`
+    /// column. Must be captured here: system migrations render from
+    /// the snapshot, not the live registry.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub generated_as: Option<String>,
-    /// Django-shape `db_comment="..."` column comment. Threaded
-    /// through from `FieldSchema::db_comment`. Skipped on serialize
-    /// when `None`. Captured in #559 — was previously dropped from
-    /// file-based migrations so MySQL/PG `COMMENT` clauses were
-    /// missing when applying from snapshot JSON.
+    /// Column comment from `db_comment="..."`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub db_comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -197,22 +193,23 @@ pub struct RelationSnapshot {
     pub kind: String,
     pub to: String,
     pub on: String,
-}
-
-/// Was this model registered by the framework itself (as opposed to a
-/// downstream crate)? Used to decide which model owns a `rustango_*` table
-/// when a project overrides one — see [`SchemaSnapshot::from_registry_system_for_scope`].
-fn is_framework_model(e: &ModelEntry) -> bool {
-    e.module_path == "rustango" || e.module_path.starts_with("rustango::")
+    /// The `ON DELETE` action as its SQL token: `"CASCADE"`,
+    /// `"SET NULL"` and so on.
+    ///
+    /// Must be captured here. System migrations render from the
+    /// snapshot, so an action missing from it never reaches the
+    /// database and a declared `cascade` silently becomes
+    /// `NO ACTION`. Older snapshots with no key load as `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub on_delete: Option<String>,
 }
 
 impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
     ///
-    /// Issue #293 / T2.10 — models marked `#[rustango(view)]` are
-    /// excluded. Their underlying SQL view is operator-owned, not
-    /// rustango-owned, so the diff machinery must never emit
-    /// `CREATE TABLE` / `DROP TABLE` against them.
+    /// `#[rustango(view)]` models are left out. The operator owns
+    /// their SQL view, so the diff must never emit `CREATE TABLE` or
+    /// `DROP TABLE` for one.
     #[must_use]
     pub fn from_registry() -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
@@ -237,17 +234,16 @@ impl SchemaSnapshot {
         }
     }
 
-    /// Capture only the models whose [`crate::core::ModelSchema::scope`]
-    /// matches `scope`. Powers tenancy-aware `makemigrations` — registry
-    /// changes (e.g. `rustango_orgs`, `rustango_operators`) and tenant
-    /// changes (everything else) get partitioned into separate migration
-    /// files, each tagged with the matching [`super::MigrationScope`].
+    /// Capture only the models whose
+    /// [`crate::core::ModelSchema::scope`] matches `scope`, so
+    /// `makemigrations` writes registry and tenant changes into
+    /// separate files tagged with the matching
+    /// [`super::MigrationScope`].
     ///
-    /// Without this split, framework registry-scoped models are diff'd
-    /// alongside tenant ones into a single tenant-scoped migration —
-    /// when the migration replays under a tenant's `search_path`, ALTERs
-    /// for `rustango_operators` resolve to the registry copy and crash
-    /// (`relation … already exists`).
+    /// **The split is required.** A registry table inside a
+    /// tenant-scoped migration replays under the tenant's
+    /// `search_path`, where its ALTERs hit the registry copy and
+    /// fail.
     #[must_use]
     pub fn from_registry_for_scope(scope: crate::core::ModelScope) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
@@ -272,34 +268,29 @@ impl SchemaSnapshot {
         }
     }
 
-    /// Capture only the **framework** models (reserved `rustango_`
-    /// table-name namespace) whose scope matches `scope`. This is the
-    /// "system app" — the framework's own tables, which `makemigrations`
-    /// generates into the project's `system/migrations/` folder instead
-    /// of hand-written bootstrap/ensure DDL. User (non-`rustango_`)
-    /// models are excluded so the framework's migrations and the app's
-    /// own migrations never mix.
+    /// Capture only **framework** models, those with a `rustango_`
+    /// table name, whose scope matches `scope`. This is the "system
+    /// app": `makemigrations` writes it to the project's
+    /// `system/migrations/` folder. User models are left out so the
+    /// framework's migrations never mix with the app's.
+    ///
+    /// Every scope also carries [`SHARED_SYSTEM_TABLES`], so a
+    /// non-empty snapshot does not mean the scope is in use. Use
+    /// [`scope_owns_system_tables`] for that.
     #[must_use]
     pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
-        // A few framework tables are "shared" — they exist in EVERY
-        // rustango database (the registry AND each tenant), because both
-        // do audits / carry a content-type catalog. The single-scope
-        // migration model can't say "both", so they're included in every
-        // scope's system migrations (each DB creates its own copy).
-        const SHARED: &[&str] = &["rustango_audit_log", "rustango_content_types"];
         let matching = inventory::iter::<ModelEntry>.into_iter().filter(|e| {
-            (e.schema.scope == scope || SHARED.contains(&e.schema.table))
+            (e.schema.scope == scope || SHARED_SYSTEM_TABLES.contains(&e.schema.table))
                 && e.schema.table.starts_with("rustango_")
                 && !e.schema.is_view
                 && e.schema.managed
         });
-        // Exactly one model may own a table. The documented custom-user-model
-        // path has a downstream model declare `rustango_users` with extra
-        // columns — but the built-in `User` derive is unconditional, so both
-        // land in the inventory and both used to flow into the migration,
-        // yielding a duplicate/ambiguous `CREATE TABLE` (#1168). Dedup by
-        // table, and let the *downstream* model win: a project that spells out
-        // a framework table is overriding it on purpose.
+        // Only one model may own a table, or the migration emits two
+        // `CREATE TABLE`s for it. A custom user model declares
+        // `rustango_users` while the built-in `User` derive is always
+        // present, so both reach the inventory. Dedupe by table and
+        // let the downstream model win: naming a framework table is a
+        // deliberate override.
         let mut by_table: std::collections::BTreeMap<&'static str, &ModelEntry> =
             std::collections::BTreeMap::new();
         for e in matching {
@@ -309,7 +300,7 @@ impl SchemaSnapshot {
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
                     let held = *slot.get();
-                    match (is_framework_model(held), is_framework_model(e)) {
+                    match (held.is_framework(), e.is_framework()) {
                         // Downstream model overrides the framework's own.
                         (true, false) => {
                             tracing::warn!(
@@ -322,10 +313,10 @@ impl SchemaSnapshot {
                             );
                             slot.insert(e);
                         }
-                        // Two downstream models claiming one table is ambiguous.
-                        // Resolve by module path so the emitted migration is
-                        // stable across builds (inventory order is link-order
-                        // dependent), and say so rather than silently picking.
+                        // Two downstream models on one table is
+                        // ambiguous. Pick by module path, not
+                        // inventory order, so the migration is the
+                        // same on every build, and warn about it.
                         (false, false) => {
                             tracing::warn!(
                                 target: "rustango::migrate",
@@ -362,17 +353,17 @@ impl SchemaSnapshot {
         }
     }
 
-    /// Filter `self` to only the tables / indexes / checks whose owning
-    /// model has [`crate::core::ModelSchema::scope`] matching `scope`.
-    /// Used to filter a *prior* on-disk snapshot down to one scope before
-    /// diffing — necessary because the framework's bootstrap migrations
-    /// (and v0.23.x and earlier projects) put ALL framework tables into
-    /// the same snapshot regardless of which scope the migration ran in.
+    /// Keep only the tables, indexes and checks whose owning model has
+    /// [`crate::core::ModelSchema::scope`] equal to `scope`.
     ///
-    /// Tables not currently in the inventory (model removed since the
-    /// snapshot was written) default to [`ModelScope::Tenant`] —
-    /// matches `MigrationScope`'s default and never accidentally
-    /// promotes a vanished registry table back into a tenant migration.
+    /// Use it on an on-disk snapshot before diffing: older snapshots
+    /// hold every framework table whatever scope the migration ran in.
+    ///
+    /// A table no longer in the inventory counts as
+    /// [`ModelScope::Tenant`](crate::core::ModelScope::Tenant), which
+    /// matches `MigrationScope`'s
+    /// default and never pulls a removed registry table back into a
+    /// tenant migration.
     #[must_use]
     pub fn filtered_to_scope(&self, scope: crate::core::ModelScope) -> Self {
         let scope_of = |table: &str| {
@@ -387,8 +378,8 @@ impl SchemaSnapshot {
             .filter(|t| scope_of(&t.name) == scope)
             .cloned()
             .collect();
-        // M2M / indexes / checks live on a parent table — keep only
-        // those whose parent is in `tables`.
+        // M2M, indexes and checks hang off a parent table, so keep
+        // only those whose parent survived the filter.
         let table_names: std::collections::HashSet<&str> =
             tables.iter().map(|t| t.name.as_str()).collect();
         let m2m_tables = self
@@ -425,13 +416,10 @@ impl SchemaSnapshot {
     }
 
     /// Capture only the models whose [`ModelEntry::resolved_app_label`]
-    /// matches `app`. Powers `manage makemigrations <app>` — diffs
-    /// just one app's models against the latest snapshot and emits a
-    /// migration scoped to that app.
+    /// is `app`, for `manage makemigrations <app>`.
     ///
-    /// Models with no app label (project-root models) are excluded —
-    /// they belong to the project's flat `migrations/` dir, not to a
-    /// sub-app's `migrations/<app>/`.
+    /// Models with no app label are left out: they belong to the
+    /// project's top-level `migrations/` folder.
     #[must_use]
     pub fn from_registry_for_app(app: &str) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
@@ -458,33 +446,30 @@ impl SchemaSnapshot {
         }
     }
 
-    /// Capture an explicit list of model schemas — the inventory-
-    /// agnostic counterpart of [`from_registry`]. Used by callers that
-    /// want a curated snapshot rather than every linked model (e.g.
-    /// `rustango-tenancy`'s bootstrap migrations, which pin themselves
-    /// to `rustango_orgs` + `rustango_operators` + `rustango_users`).
+    /// Capture an explicit list of model schemas instead of the whole
+    /// inventory. Use it for a curated snapshot, such as a bootstrap
+    /// migration pinned to a few known tables.
     ///
-    /// View-backed models (`#[rustango(view)]`) are filtered out — same
-    /// rule as [`from_registry`].
+    /// `#[rustango(view)]` models are skipped, as in
+    /// [`Self::from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
         Self::build_from(models.iter().copied().filter(|s| !s.is_view && s.managed))
     }
 
-    /// Like [`Self::from_models`] but does **not** skip `managed = false`
-    /// models. The drift-free `ensure_*` table helpers use this: their
-    /// models are intentionally `managed = false` (outside the migration
-    /// set — the framework creates them lazily on first use), yet the
-    /// helper still needs to render the table's `CREATE TABLE` from
-    /// [`ModelSchema`] rather than hand-written per-dialect DDL. Views are
-    /// still skipped.
+    /// Like [`Self::from_models`], but keeps `managed = false`
+    /// models. The `ensure_*` table helpers need this: their models
+    /// sit outside the migration set, yet the helper still renders
+    /// their `CREATE TABLE` from [`ModelSchema`] instead of
+    /// hand-written per-dialect DDL. Views are still skipped.
     #[must_use]
     pub fn from_models_forced(models: &[&ModelSchema]) -> Self {
         Self::build_from(models.iter().copied().filter(|s| !s.is_view))
     }
 
-    /// Shared body of [`Self::from_models`] / [`Self::from_models_forced`]:
-    /// builds the snapshot from an already-filtered model iterator.
+    /// Shared body of [`Self::from_models`] and
+    /// [`Self::from_models_forced`], over an already-filtered
+    /// iterator.
     fn build_from<'a>(models: impl Iterator<Item = &'a ModelSchema>) -> Self {
         let models: Vec<&ModelSchema> = models.collect();
         let mut tables: Vec<TableSnapshot> = models
@@ -531,20 +516,16 @@ impl SchemaSnapshot {
 }
 
 impl TableSnapshot {
-    /// Build a snapshot row from a registered [`ModelSchema`]. Public
-    /// so external callers (e.g. tenancy bootstrap migrations) can
-    /// assemble their own snapshots without going through the global
-    /// inventory.
+    /// Build a snapshot row from a [`ModelSchema`]. Public so an
+    /// outside caller can assemble its own snapshot without the
+    /// global inventory.
     #[must_use]
     pub fn from_schema(s: &ModelSchema) -> Self {
         let mut fields: Vec<FieldSnapshot> =
             s.scalar_fields().map(FieldSnapshot::from_schema).collect();
         fields.sort_by(|a, b| a.column.cmp(&b.column));
-        // Composite FK relations (sub-slice F.5) — preserve declaration
-        // order so snapshot diffs aren't sensitive to a meaningless
-        // reorder. Empty Vec for models with no fk_composite attrs;
-        // the field's `skip_serializing_if = Vec::is_empty` keeps
-        // pre-F.5 snapshot JSON byte-identical.
+        // Keep declaration order, so a reorder in the source does not
+        // show up as a snapshot diff.
         let composite_fks: Vec<CompositeFkSnapshot> = s
             .composite_relations
             .iter()
@@ -578,16 +559,19 @@ impl TableSnapshot {
 
 impl FieldSnapshot {
     fn from_schema(f: &crate::core::FieldSchema) -> Self {
+        let on_delete = f.fk_on_delete.map(|a| a.as_sql().to_owned());
         let fk = f.relation.and_then(|r| match r {
             Relation::Fk { to, on } => Some(RelationSnapshot {
                 kind: "fk".into(),
                 to: to.to_owned(),
                 on: on.to_owned(),
+                on_delete: on_delete.clone(),
             }),
             Relation::O2O { to, on } => Some(RelationSnapshot {
                 kind: "o2o".into(),
                 to: to.to_owned(),
                 on: on.to_owned(),
+                on_delete: on_delete.clone(),
             }),
         });
         Self {
@@ -611,7 +595,8 @@ impl FieldSnapshot {
 }
 
 pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
-    // Reuse the `FieldType::as_str` mapping but with stable JSON names.
+    // Like `FieldType::as_str`, but with names that are stable in
+    // snapshot JSON.
     match ty {
         FieldType::I16 => "i16",
         FieldType::I32 => "i32",
@@ -627,127 +612,137 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Json => "json",
         FieldType::Decimal => "decimal",
         FieldType::Binary => "binary",
-        // #341 — stable snapshot names for PG array element kinds.
         FieldType::Array(crate::core::ArrayElem::Text) => "array_text",
         FieldType::Array(crate::core::ArrayElem::Int) => "array_int",
         FieldType::Array(crate::core::ArrayElem::BigInt) => "array_bigint",
-        // #343 — stable snapshot names for PG range element kinds.
         FieldType::Range(crate::core::RangeElem::Int) => "range_int",
         FieldType::Range(crate::core::RangeElem::BigInt) => "range_bigint",
         FieldType::Range(crate::core::RangeElem::Numeric) => "range_numeric",
         FieldType::Range(crate::core::RangeElem::Date) => "range_date",
         FieldType::Range(crate::core::RangeElem::DateTime) => "range_datetime",
-        // #342 — PG hstore.
         FieldType::HStore => "hstore",
-        // #824 — pgvector. NOTE: dims aren't encoded here (this returns
-        // `&'static str`), so a dimension-only change (`vector(3)` →
-        // `vector(4)`) isn't surfaced as a schema diff.
+        // The return type is `&'static str`, so the vector dimension
+        // is not encoded. A change from `vector(3)` to `vector(4)`
+        // does not show up as a schema diff.
         FieldType::Vector(_) => "vector",
-        // #443 — PostGIS geometry. Like `vector`, the SRID isn't encoded
-        // in this `&'static str`, so an SRID-only change isn't diffed.
+        // Same for the geometry SRID: an SRID-only change is not
+        // diffed.
         FieldType::Geometry(_) => "geometry",
     }
 }
 
+/// Sort by name and keep one entry per name: the smallest definition,
+/// not the first in `inventory` order, which a rebuild can change. The
+/// diff compares whole definitions, so a flipping winner meant a Drop +
+/// Create every run, and for a junction table, lost rows.
+fn dedup_by_name<T: PartialOrd + std::fmt::Debug>(
+    mut out: Vec<T>,
+    kind: &str,
+    name: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    out.sort_by(|a, b| {
+        name(a)
+            .cmp(name(b))
+            .then_with(|| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    out.dedup_by(|later, kept| {
+        if name(later) != name(kept) {
+            return false;
+        }
+        if *later != *kept {
+            tracing::warn!(
+                target: "rustango::migrate",
+                name = %name(kept),
+                kept = ?kept,
+                ignored = ?later,
+                "two models declare {kind} `{}` differently; using the first in sort order",
+                name(kept),
+            );
+        }
+        true
+    });
+    out
+}
+
 /// Collect all CHECK constraint descriptors, deduplicating by name.
 fn collect_checks<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<CheckSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<CheckSnapshot> = Vec::new();
     for schema in schemas {
         for c in schema.check_constraints {
-            if seen.insert(c.name) {
-                out.push(CheckSnapshot {
-                    name: c.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    expr: c.expr.to_owned(),
-                });
-            }
+            out.push(CheckSnapshot {
+                name: c.name.to_owned(),
+                table: schema.table.to_owned(),
+                expr: c.expr.to_owned(),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "CHECK", |c| &c.name)
 }
 
-/// Collect all PG `EXCLUDE` constraint descriptors, deduplicating by
-/// name. Mirrors [`collect_checks`]. Issue #319.
+/// Collect all PG `EXCLUDE` constraints, deduplicated by name.
+/// Mirrors [`collect_checks`].
 fn collect_excludes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<ExclusionSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<ExclusionSnapshot> = Vec::new();
     for schema in schemas {
         for x in schema.exclusion_constraints {
-            if seen.insert(x.name) {
-                out.push(ExclusionSnapshot {
-                    name: x.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    using: x.using.to_owned(),
-                    elements: x
-                        .elements
-                        .iter()
-                        .map(|(c, o)| ((*c).to_owned(), (*o).to_owned()))
-                        .collect(),
-                    where_clause: x.where_clause.map(str::to_owned),
-                });
-            }
+            out.push(ExclusionSnapshot {
+                name: x.name.to_owned(),
+                table: schema.table.to_owned(),
+                using: x.using.to_owned(),
+                elements: x
+                    .elements
+                    .iter()
+                    .map(|(c, o)| ((*c).to_owned(), (*o).to_owned()))
+                    .collect(),
+                where_clause: x.where_clause.map(str::to_owned),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "EXCLUDE", |x| &x.name)
 }
 
-/// Collect all `CREATE INDEX` descriptors from a set of model schemas,
-/// deduplicating by index name and sorting for deterministic output.
+/// Collect all `CREATE INDEX` declarations, deduplicated by name and
+/// sorted so the output is stable.
 fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<IndexSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<IndexSnapshot> = Vec::new();
     for schema in schemas {
         for idx in schema.indexes {
-            if seen.insert(idx.name) {
-                out.push(IndexSnapshot {
-                    name: idx.name.to_owned(),
-                    table: schema.table.to_owned(),
-                    columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
-                    unique: idx.unique,
-                    method: idx.method.as_str().to_owned(),
-                    where_clause: idx.where_clause.map(str::to_owned),
-                    include: idx.include.iter().map(|&c| c.to_owned()).collect(),
-                });
-            }
+            out.push(IndexSnapshot {
+                name: idx.name.to_owned(),
+                table: schema.table.to_owned(),
+                columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
+                unique: idx.unique,
+                method: idx.method.as_str().to_owned(),
+                where_clause: idx.where_clause.map(str::to_owned),
+                include: idx.include.iter().map(|&c| c.to_owned()).collect(),
+            });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    dedup_by_name(out, "index", |i| &i.name)
 }
 
-/// Collect all M2M junction table descriptors from a set of model schemas,
-/// deduplicating by `through` table name and sorting for deterministic output.
+/// Collect all M2M junction tables, deduplicated by `through` name
+/// and sorted so the output is stable.
 ///
-/// #324 — relations marked `auto_create = false` are skipped here.
-/// The operator owns those junction tables via their own
-/// `#[derive(Model)]` struct, so the migration writer must not emit a
-/// second `CREATE TABLE` for them (which would conflict on apply).
-/// The Rust-side `<name>_m2m()` accessor still works because it
-/// references the through table by name, not by snapshot.
+/// Relations with `auto_create = false` are skipped: the project owns
+/// those junction tables through its own `#[derive(Model)]`, and a
+/// second `CREATE TABLE` would clash on apply. The `<name>_m2m()`
+/// accessor still works, because it uses the table name rather than
+/// the snapshot.
 fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<M2MTableSnapshot> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<M2MTableSnapshot> = Vec::new();
     for schema in schemas {
-        for rel in schema.m2m {
-            if !rel.auto_create {
-                continue;
-            }
-            if seen.insert(rel.through) {
-                out.push(M2MTableSnapshot {
-                    through: rel.through.to_owned(),
-                    src_table: schema.table.to_owned(),
-                    src_col: rel.src_col.to_owned(),
-                    dst_table: rel.to.to_owned(),
-                    dst_col: rel.dst_col.to_owned(),
-                });
-            }
+        for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+            out.push(M2MTableSnapshot {
+                through: rel.through.to_owned(),
+                src_table: schema.table.to_owned(),
+                src_col: rel.src_col.to_owned(),
+                dst_table: rel.to.to_owned(),
+                dst_col: rel.dst_col.to_owned(),
+            });
         }
     }
-    out.sort_by(|a, b| a.through.cmp(&b.through));
-    out
+    dedup_by_name(out, "M2M junction", |m| &m.through)
 }
 
 #[cfg(test)]
@@ -768,6 +763,7 @@ mod composite_fk_snapshot_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
@@ -834,11 +830,10 @@ mod composite_fk_snapshot_tests {
         assert_eq!(c.on, vec!["x", "y"]);
     }
 
-    /// Issue #321 — `#[rustango(managed = false)]` keeps the model
-    /// out of `makemigrations` output. We exercise the registry path
-    /// through `SchemaSnapshot::from_models` so we don't need to register
-    /// real models into `inventory` (which would leak into every
-    /// downstream test).
+    /// `#[rustango(managed = false)]` must keep a model out of
+    /// `makemigrations`. Driven through `from_models` so nothing has
+    /// to be registered in `inventory`, which would leak into every
+    /// other test.
     #[test]
     fn unmanaged_models_are_skipped_by_snapshot_from_models() {
         static FIELDS: [FieldSchema; 1] = [FieldSchema {
@@ -853,6 +848,7 @@ mod composite_fk_snapshot_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
@@ -944,9 +940,8 @@ mod composite_fk_snapshot_tests {
 
     #[test]
     fn empty_composite_fks_skipped_on_serialize_for_back_compat() {
-        // Models without composite FKs serialize without the
-        // composite_fks field — pre-F.5 snapshot JSON stays
-        // diff-clean against post-F.5 builds.
+        // A model with no composite FKs must leave the key out, so
+        // older snapshot JSON stays diff-clean.
         static FIELDS: [FieldSchema; 1] = [FieldSchema {
             name: "id",
             column: "id",
@@ -959,6 +954,7 @@ mod composite_fk_snapshot_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
@@ -1012,6 +1008,46 @@ mod composite_fk_snapshot_tests {
             "empty composite_fks should not appear in JSON; got: {json}"
         );
     }
+
+    /// Two models sharing a junction, CHECK, EXCLUDE or index name give
+    /// the same snapshot in either `inventory` order.
+    #[test]
+    fn shared_names_do_not_depend_on_model_order() {
+        use crate::core::{CheckConstraint, ExclusionConstraint, IndexSchema, M2MRelation};
+        const M2M: &[M2MRelation] = &[M2MRelation::new(
+            "tags",
+            "tag",
+            "shared_tags",
+            "post_id",
+            "tag_id",
+        )];
+        const CK: &[CheckConstraint] = &[CheckConstraint::new("shared_ck", "id > 0")];
+        const EX: &[ExclusionConstraint] = &[ExclusionConstraint::new(
+            "shared_ex",
+            "gist",
+            &[("id", "=")],
+        )];
+        const IX: &[IndexSchema] = &[IndexSchema::new("shared_ix", &["id"])];
+        const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+            let mut s = ModelSchema::new(name, table);
+            s.m2m = M2M;
+            s.check_constraints = CK;
+            s.exclusion_constraints = EX;
+            s.indexes = IX;
+            s
+        }
+        static POST: ModelSchema = model("Post", "post");
+        static NOTE: ModelSchema = model("Note", "note");
+        let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
+        let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+        assert_eq!(a, b);
+        assert_eq!(a.m2m_tables.len(), 1);
+        assert_eq!(a.m2m_tables[0].src_table, "note");
+        assert_eq!(
+            (a.checks.len(), a.excludes.len(), a.indexes.len()),
+            (1, 1, 1)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1033,6 +1069,7 @@ mod generated_as_and_db_comment_capture {
                 max: None,
                 default: None,
                 auto: true,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,
@@ -1057,6 +1094,7 @@ mod generated_as_and_db_comment_capture {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: Some("price * quantity"),
                 help_text: None,
@@ -1081,6 +1119,7 @@ mod generated_as_and_db_comment_capture {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,
@@ -1179,10 +1218,8 @@ mod generated_as_and_db_comment_capture {
     fn snapshot_skips_serializing_when_none() {
         let snap = TableSnapshot::from_schema(schema_with_generated_and_comment());
         let json = serde_json::to_string(&snap).expect("serialize");
-        // The `id` column has neither generated_as nor db_comment set —
-        // it should NOT have those keys in JSON (skip_serializing_if).
-        // We check that the `id` field's JSON object doesn't have the
-        // keys by re-parsing.
+        // `id` sets neither field, so neither key may appear in its
+        // JSON object. Re-parse and check.
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let fields = value.get("fields").unwrap().as_array().unwrap();
         let id_field = fields

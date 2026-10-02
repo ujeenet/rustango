@@ -1,15 +1,15 @@
-//! Prompts + resources from skills (epic #1013, Slice 5 / #1018).
+//! Prompts and resources, the MCP skill surface beyond tools.
 //!
-//! The full MCP skill surface beyond tools:
+//! **Prompts.** Every skill an agent was granted is a prompt, and its
+//! `instructions` field is the prompt body. `prompts/list` and
+//! `prompts/get` cover granted skills only.
 //!
-//! * **Prompts** — each granted skill *is* a prompt; its `instructions`
-//!   field is the prompt body. `prompts/list` / `prompts/get` are derived
-//!   from the agent's granted skills (fail-closed: only granted skills).
-//! * **Resources** — `resources/list` / `resources/read` return the
-//!   resources attached to granted skills, **plus** any static framework
-//!   resources registered with [`register_mcp_resource!`] (the same
-//!   `inventory` pattern as tools; static resources are app-declared and
-//!   always available).
+//! **Resources.** `resources/list` and `resources/read` return the
+//! resources attached to granted skills, plus any static ones the app
+//! declared with [`register_mcp_resource!`]. Static resources are
+//! always available.
+//!
+//! [`register_mcp_resource!`]: crate::register_mcp_resource
 
 use serde_json::{json, Value};
 
@@ -18,10 +18,10 @@ use super::types::{codes, JsonRpcError};
 
 // ---------------------------------------------------------------- prompts
 
-/// `prompts/list` — one entry per granted skill.
+/// `prompts/list`: one entry per granted skill.
 ///
 /// # Errors
-/// DB errors while loading the granted skills.
+/// A database failure while loading the grants.
 pub async fn list_prompts(ctx: &McpContext) -> Result<Value, JsonRpcError> {
     let skills = crate::tenancy::skills_by_codenames_pool(&ctx.pool, &ctx.agent.skills)
         .await
@@ -33,12 +33,13 @@ pub async fn list_prompts(ctx: &McpContext) -> Result<Value, JsonRpcError> {
     Ok(json!({ "prompts": prompts }))
 }
 
-/// `prompts/get` — return a granted skill's instructions as a prompt
-/// message. Fail-closed: an ungranted (or unknown) prompt name errors.
+/// `prompts/get`: return a granted skill's instructions as a prompt
+/// message. A name the agent was not granted is an error.
 ///
 /// # Errors
-/// `INVALID_PARAMS` for a missing `name`; `TOOL_FORBIDDEN` for a
-/// prompt the agent isn't granted; DB errors otherwise.
+/// `INVALID_PARAMS` when `name` is missing, `TOOL_FORBIDDEN` when
+/// the agent has no grant for it, and an internal error on a
+/// database failure.
 pub async fn get_prompt(ctx: &McpContext, params: Value) -> Result<Value, JsonRpcError> {
     let name = params
         .get("name")
@@ -69,15 +70,15 @@ pub async fn get_prompt(ctx: &McpContext, params: Value) -> Result<Value, JsonRp
 
 // -------------------------------------------------------------- resources
 
-/// A static, compile-time-registered framework resource.
+/// A resource registered at compile time.
 pub struct McpResource {
-    /// Resource URI (the `resources/read` key).
+    /// The URI, which is what `resources/read` looks up.
     pub uri: &'static str,
-    /// Human-readable name.
+    /// A name for people to read.
     pub name: &'static str,
     /// MIME type.
     pub mime_type: &'static str,
-    /// Produces the resource body.
+    /// Builds the body.
     pub read: fn() -> String,
 }
 
@@ -89,10 +90,11 @@ fn static_resource(uri: &str) -> Option<&'static McpResource> {
         .find(|r| r.uri == uri)
 }
 
-/// `resources/list` — granted-skill resources + static framework resources.
+/// `resources/list`: the granted skills' resources, plus the static
+/// ones.
 ///
 /// # Errors
-/// DB errors while loading skill resources.
+/// A database failure while loading the skill resources.
 pub async fn list_resources(ctx: &McpContext) -> Result<Value, JsonRpcError> {
     let mut out: Vec<Value> = inventory::iter::<McpResource>
         .into_iter()
@@ -108,25 +110,24 @@ pub async fn list_resources(ctx: &McpContext) -> Result<Value, JsonRpcError> {
     Ok(json!({ "resources": out }))
 }
 
-/// `resources/read` — read a static framework resource or a granted-skill
-/// resource by URI. Fail-closed: a skill resource only reads if its skill
-/// is granted.
+/// `resources/read`: read a static resource, or a skill resource,
+/// by URI. A skill resource reads only when its skill was granted.
 ///
 /// # Errors
-/// `INVALID_PARAMS` for a missing `uri`; `TOOL_FORBIDDEN` when the URI isn't
-/// a static resource and isn't reachable through a granted skill.
+/// `INVALID_PARAMS` when `uri` is missing, and `TOOL_FORBIDDEN` when
+/// the URI is neither static nor reachable through a granted skill.
 pub async fn read_resource(ctx: &McpContext, params: Value) -> Result<Value, JsonRpcError> {
     let uri = params
         .get("uri")
         .and_then(Value::as_str)
         .ok_or_else(|| JsonRpcError::invalid_params("resources/read requires a string `uri`"))?;
 
-    // Static framework resources are always readable.
+    // A static resource is always readable.
     if let Some(r) = static_resource(uri) {
         return Ok(contents(uri, r.mime_type, (r.read)()));
     }
 
-    // Otherwise it must belong to one of the agent's granted skills.
+    // Otherwise it must belong to a skill the agent was granted.
     let skill_resources = crate::tenancy::resources_for_skills_pool(&ctx.pool, &ctx.agent.skills)
         .await
         .map_err(internal)?;
@@ -156,8 +157,8 @@ fn internal(e: crate::tenancy::AgentError) -> JsonRpcError {
     JsonRpcError::new(codes::INTERNAL_ERROR, e.to_string())
 }
 
-/// Register a static framework resource available to every authenticated
-/// agent (independent of skill grants).
+/// Register a resource that every authenticated agent can read, with
+/// no skill grant needed.
 ///
 /// ```ignore
 /// rustango::register_mcp_resource!(

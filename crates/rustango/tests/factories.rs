@@ -1,4 +1,4 @@
-//! Django-parity #432 — factory_boy-shape `Factory` + `Sequence`.
+//! Issue #432 — test-data `Factory` + `Sequence`.
 //!
 //! Verifies the `test_factory::Sequence` counter is deterministic
 //! across `build()` calls and that `Factory::build_batch` can drive

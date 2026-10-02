@@ -1,58 +1,31 @@
 //! Dialect-agnostic database pool wrapper.
 //!
-//! Existing rustango code talks directly to `sqlx::PgPool`. The
-//! v0.23.0 series introduces this `Pool` wrapper so callers can
-//! reach either Postgres or `MySQL` through the same handle, with
-//! the right [`Dialect`] dispatch baked in.
+//! [`Pool`] reaches Postgres, MySQL or SQLite through one handle and
+//! picks the matching [`Dialect`] for you. The older `&PgPool` APIs
+//! still work; this is an addition, not a replacement.
 //!
-//! ## Backwards compatibility
-//!
-//! Every existing `&PgPool` API in the framework keeps working. The
-//! `Pool` wrapper is *additive* — new code can take `&Pool` and get
-//! cross-dialect support; legacy code that takes `&PgPool` still
-//! does and is migrated module-by-module in subsequent batches.
-//!
-//! Construct a `Pool` from a `PgPool` you already have:
+//! Wrap a pool you already have:
 //!
 //! ```ignore
 //! let pg: sqlx::PgPool = sqlx::PgPool::connect(&url).await?;
 //! let pool: rustango::sql::Pool = pg.into();
 //! ```
 //!
-//! Or let the wrapper build it for you:
+//! Or let it connect for you, from a URL or the environment:
 //!
 //! ```ignore
 //! use rustango::sql::Pool;
 //!
-//! // Scheme-sniffed (postgres:// or mysql://):
 //! let pool = Pool::connect("postgres://user:pass@host/db").await?;
-//!
-//! // Or assembled from env vars (DATABASE_URL OR DB_HOST/DB_USER/...):
 //! let pool = Pool::connect_from_env().await?;
 //! ```
 //!
-//! ## Dialect dispatch
+//! Then ask which backend you got:
 //!
 //! ```ignore
 //! let dialect: &dyn rustango::sql::Dialect = pool.dialect();
 //! tracing::info!(name = dialect.name(), "started against backend");
 //! ```
-//!
-//! ## `MySQL` status
-//!
-//! - **batch1** (shipped) — `mysql` Cargo feature wired; connecting
-//!   via `mysql://` returns a soft-error.
-//! - **batch2** (this batch) — `Pool::Mysql(MySqlPool)` variant lands;
-//!   `Pool::connect("mysql://…")` opens a real `MySqlPool` and
-//!   `pool.dialect()` returns the [`crate::sql::MySql`] dialect with
-//!   correct identifier quoting (backticks), placeholder shape (`?`),
-//!   `BIGINT AUTO_INCREMENT` for `Auto<T>` PKs, and `GET_LOCK`-based
-//!   advisory locking. The query-compilation methods on `MySql`
-//!   error with [`crate::sql::SqlError::DialectQueryCompilationNotImplemented`]
-//!   — ORM queries against `MySQL` light up in batch3.
-//! - **batch3** — port the IR-to-SQL writers off Postgres-only
-//!   assumptions so `Model::objects().filter(...).fetch(...)` works
-//!   against either backend.
 
 use std::time::Duration;
 
@@ -61,12 +34,11 @@ use crate::env::{database_url_from_env, EnvError};
 use super::connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 use super::Dialect;
 
-/// Why a connect attempt failed, before it is rendered into whichever
-/// error type the caller asked for.
+/// Why a connect attempt failed, before it becomes whichever error
+/// type the caller asked for.
 ///
-/// The two are genuinely different: a driver failure has a host, a
-/// cause and advice; a scheme or missing-feature failure never dialled
-/// anything and wants `PoolError`'s typed variants instead.
+/// The two cases differ: a driver failure has a host, a cause and
+/// some advice, while a bad scheme never dialled anything at all.
 enum ConnectFail {
     Driver(ConnectDiagnosis),
     Pool(PoolError),
@@ -83,9 +55,7 @@ pub enum PoolError {
     #[error("unsupported scheme in URL `{0}` — expected postgres://, mysql://, or sqlite:")]
     UnsupportedScheme(String),
 
-    /// Tried to construct a Pool with a backend whose Cargo feature
-    /// isn't enabled (e.g. `mysql://` URL with `default-features = false`
-    /// and no `mysql` feature added).
+    /// The URL names a backend whose Cargo feature is off.
     #[error(
         "URL scheme `{scheme}` requires the `{feature}` Cargo feature on rustango \
          — add `features = [\"{feature}\"]` to your dependency"
@@ -99,27 +69,23 @@ pub enum PoolError {
     Env(#[from] EnvError),
 }
 
-/// Cheap-to-clone wrapper around any rustango-supported sqlx pool.
-/// `Arc`-wrapping is handled by `sqlx` itself — cloning a Pool is
-/// cloning the underlying `Arc`.
+/// A wrapper around any sqlx pool rustango supports. Cloning is
+/// cheap: sqlx already keeps the pool behind an `Arc`.
 #[derive(Clone)]
 pub enum Pool {
     #[cfg(feature = "postgres")]
     Postgres(sqlx::PgPool),
     #[cfg(feature = "mysql")]
     Mysql(sqlx::MySqlPool),
-    /// SQLite — file-backed or `:memory:`. Phase 2 of the v0.27
-    /// SQLite rollout (item #37).
+    /// SQLite, either file-backed or `:memory:`.
     #[cfg(feature = "sqlite")]
     Sqlite(sqlx::SqlitePool),
 }
 
-/// Apply [`tuning`] to a `PoolOptions` of any backend.
+/// Apply [`tuning`] to any backend's `PoolOptions`.
 ///
-/// A macro rather than a generic function because sqlx's three
-/// `PoolOptions` types share no trait — the builder methods have the
-/// same names on each, but nothing relates them. Defined here because
-/// `macro_rules!` must precede its call sites.
+/// A macro, not a function: sqlx's three `PoolOptions` types share
+/// the same method names but no trait.
 #[allow(unused_macros)]
 macro_rules! tuned {
     ($opts:expr) => {{
@@ -134,9 +100,8 @@ macro_rules! tuned {
         if let Some(n) = t.min_connections {
             o = o.min_connections(n);
         }
-        // These two already take `Option`, where `None` means "no
-        // bound" — the same thing `None` means in `PoolTuning`, so an
-        // unset knob is left entirely alone rather than set to nothing.
+        // These two take an `Option` where `None` means "no bound",
+        // which is not what an unset setting means, so skip them.
         if t.idle_timeout.is_some() {
             o = o.idle_timeout(t.idle_timeout);
         }
@@ -148,26 +113,19 @@ macro_rules! tuned {
 }
 
 impl Pool {
-    /// Connect to a database from a URL. Recognized schemes:
-    ///
-    /// - `postgres://` (alias `postgresql://`) — requires the
-    ///   `postgres` feature (default).
-    /// - `mysql://` — requires the `mysql` feature; returns
-    ///   [`PoolError::MysqlNotYetImplemented`] in batch1, full
-    ///   support in batch2.
+    /// Connect from a URL. The scheme picks the backend and must be
+    /// `postgres://`, `postgresql://`, `mysql://` or `sqlite:`, and
+    /// its Cargo feature must be on.
     ///
     /// # Errors
     ///
-    /// - [`PoolError::UnsupportedScheme`] — URL didn't start with a
-    ///   recognized scheme.
-    /// - [`PoolError::FeatureNotEnabled`] — scheme is recognized but
-    ///   the corresponding Cargo feature wasn't enabled at build time.
-    /// - [`PoolError::Connect`] — sqlx couldn't reach the database.
-    /// - [`PoolError::MysqlNotYetImplemented`] — see error variant.
+    /// - [`PoolError::UnsupportedScheme`] for any other scheme.
+    /// - [`PoolError::FeatureNotEnabled`] when the scheme is known
+    ///   but its feature was off at build time.
+    /// - [`PoolError::Connect`] when sqlx cannot reach the database.
     pub async fn connect(url: &str) -> Result<Self, PoolError> {
-        // SQLite URLs use `sqlite:` (no `//`) for the colon form
-        // (`sqlite::memory:`, `sqlite:./path.db`) AND `sqlite://` for
-        // the URI form. Strip up to the first colon to detect.
+        // SQLite is written both `sqlite:./path.db` and
+        // `sqlite://…`, so read the scheme up to the first colon.
         let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             "postgres" | "postgresql" => Self::connect_postgres_inner(url).await,
@@ -177,10 +135,9 @@ impl Pool {
         }
     }
 
-    /// Same as [`Self::connect`] but with an explicit acquire timeout
-    /// for this one pool. [`Self::connect`] already applies a bounded
-    /// default — see [`ACQUIRE_TIMEOUT_ENV`] — so reach for this only
-    /// when a single pool needs to differ from the rest.
+    /// [`Self::connect`] with its own acquire timeout. That already
+    /// has a bounded default, see [`ACQUIRE_TIMEOUT_ENV`], so use
+    /// this only when one pool must differ from the rest.
     ///
     /// # Errors
     /// Same set as [`Self::connect`], plus a `Connect` error if `sqlx`
@@ -195,13 +152,11 @@ impl Pool {
     }
 
     /// [`Self::connect_with_timeout`], but a failure comes back as a
-    /// structured [`ConnectDiagnosis`] rather than a rendered string.
+    /// [`ConnectDiagnosis`] instead of a string.
     ///
-    /// `PoolError::Connect` carries a `String`, so the classification
-    /// made during the attempt is gone by the time a caller sees it.
-    /// A caller that needs to *branch* on the fault — the tenant
-    /// pre-flight, an operator console rendering per-fault advice —
-    /// wants the enum, not prose it has to parse back.
+    /// Use this when the caller needs to branch on the kind of
+    /// fault, as a tenant pre-flight check or an operator console
+    /// showing per-fault advice does.
     ///
     /// # Errors
     /// A `ConnectDiagnosis` naming the fault, the endpoint tried (with
@@ -211,25 +166,24 @@ impl Pool {
             .await
             .map_err(|f| match f {
                 ConnectFail::Driver(d) => d,
-                // A scheme this build cannot speak is not a *connection*
-                // fault — nothing was dialled — but a caller asking for a
-                // diagnosis still needs one, and the message is already
-                // specific about what to add to Cargo.toml.
+                // A scheme this build cannot speak is not a
+                // connection fault, but the caller still needs a
+                // diagnosis, and the message already says what to add
+                // to Cargo.toml.
                 ConnectFail::Pool(e) => {
                     ConnectDiagnosis::new(ConnectFault::Other, url, e.to_string())
                 }
             })
     }
 
-    /// The one place the scheme dispatch lives. Keeps the driver's
-    /// classified failure and a scheme/feature failure distinct, so
-    /// each public wrapper can render whichever shape it promises.
+    /// The only place the scheme dispatch lives. It keeps a driver
+    /// failure and a scheme failure apart, so each public wrapper can
+    /// return the shape it promises.
     async fn connect_inner(url: &str, timeout: Duration) -> Result<Self, ConnectFail> {
-        // Deliberately *not* tuned beyond the caller's timeout. The only
-        // users of this path are one-shot probes — tenant preflight opens
-        // a pool, asks whether the database answers, and closes it. Giving
-        // a probe the application's sizing would have it eagerly open
-        // `min_connections` connections it is about to throw away.
+        // Not tuned beyond the caller's timeout. This path serves
+        // one-shot probes, which open a pool, ask whether the
+        // database answers and close it. Applying the app's sizing
+        // would open `min_connections` connections for nothing.
         let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
@@ -295,13 +249,9 @@ impl Pool {
         Self::connect(&url).await
     }
 
-    /// v0.38 — backend-agnostic counterpart of
-    /// `sqlx::PgPool::connect_lazy`. Builds a pool that defers the
-    /// first connection until the first query, dispatching to
-    /// sqlx's per-backend `connect_lazy` based on the URL scheme.
-    /// Used by `manage::Cli` for "no-db verbs" (`help` / `startapp`
-    /// / `makemigrations` etc.) so we don't open a TCP socket just
-    /// to print help text.
+    /// [`Self::connect`] without dialling: the pool connects on the
+    /// first query. `manage::Cli` uses it for commands that may never
+    /// touch the database, so printing help opens no socket.
     ///
     /// # Errors
     /// As [`Self::connect`].
@@ -333,14 +283,13 @@ impl Pool {
         }
     }
 
-    /// Borrow the dialect for this pool. Stable [`Dialect`] reference
     /// Close the pool, waiting for its connections to be released.
     ///
-    /// Dropping a pool schedules the close but does not wait for it, so
-    /// a short-lived pool — a connection probe, a one-shot migration
-    /// against a tenant — can outlive the code that made it and hold a
-    /// socket open. Call this when the pool is finished with and the
-    /// release should have happened by the time you return.
+    /// Dropping a pool schedules the close but does not wait, so a
+    /// short-lived pool such as a connection probe can outlive the
+    /// code that made it and keep a socket open. Call this when you
+    /// are done with the pool and the release must have happened
+    /// before you return.
     pub async fn close(&self) {
         match self {
             #[cfg(feature = "postgres")]
@@ -352,9 +301,9 @@ impl Pool {
         }
     }
 
-    /// usable by callers who need to inspect identifier quoting,
-    /// placeholder syntax, etc., without caring which backend the
-    /// pool actually wraps.
+    /// The [`Dialect`] for this pool's backend. Use it to ask about
+    /// identifier quoting, placeholder shape and the rest without
+    /// caring which backend is underneath.
     #[must_use]
     pub fn dialect(&self) -> &'static dyn Dialect {
         match self {
@@ -367,21 +316,62 @@ impl Pool {
         }
     }
 
-    /// Short identifier for the active backend — `"postgres"` or
-    /// `"mysql"`. Convenience for logs and `manage` output; same as
-    /// `pool.dialect().name()`.
+    /// The backend's short name, for logs and `manage` output. The
+    /// same as `pool.dialect().name()`.
     #[must_use]
     pub fn backend_name(&self) -> &'static str {
         self.dialect().name()
     }
 
-    /// Borrow as a `PgPool` for callers (and existing code paths)
-    /// that expect Postgres specifically. Returns `None` when the
-    /// pool wraps a non-Postgres backend.
+    /// A stable hash of **which database this pool talks to**. Use it
+    /// to partition any process-global cache whose rows are facts
+    /// about one database.
     ///
-    /// During batch 1 → batch 5 of v0.23.0 most legacy `&PgPool`
-    /// code paths use this to convert at the boundary; the goal is
-    /// to flip them to `&Pool` directly in batch 5.
+    /// `ContentType` is the case that needs it: its `id` comes from
+    /// that database's own sequence, so the same natural key is a
+    /// different number in every tenant. A cache keyed on the natural
+    /// key alone would hand one tenant another's id.
+    ///
+    /// **On Postgres the hash includes the connect options, and that
+    /// part is load-bearing.** Schema-mode tenants share one host,
+    /// port and database, and differ only in their `search_path`.
+    /// Hashing the connection details alone would collide across all
+    /// of them.
+    ///
+    /// Two pools to the same database hash the same, which is what a
+    /// cache wants. Cheap enough for a hot path.
+    #[must_use]
+    pub fn scope_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.backend_name().hash(&mut h);
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => {
+                let o = p.connect_options();
+                o.get_host().hash(&mut h);
+                o.get_port().hash(&mut h);
+                o.get_database().hash(&mut h);
+                o.get_options().hash(&mut h);
+            }
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => {
+                let o = p.connect_options();
+                o.get_host().hash(&mut h);
+                o.get_port().hash(&mut h);
+                o.get_database().hash(&mut h);
+            }
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => {
+                let o = p.connect_options();
+                o.get_filename().hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// Borrow as a `PgPool` for code that needs Postgres itself.
+    /// `None` on any other backend.
     #[must_use]
     #[cfg(feature = "postgres")]
     pub fn as_postgres(&self) -> Option<&sqlx::PgPool> {
@@ -394,10 +384,7 @@ impl Pool {
         }
     }
 
-    /// Borrow as a `MySqlPool`. Symmetric with [`Self::as_postgres`] —
-    /// returns `None` when the pool wraps a non-MySQL backend. Lets
-    /// MySQL-specific code paths reach the underlying `sqlx` handle
-    /// without having to re-dispatch through `Pool`'s enum each time.
+    /// Borrow as a `MySqlPool`. [`Self::as_postgres`] for MySQL.
     #[must_use]
     #[cfg(feature = "mysql")]
     pub fn as_mysql(&self) -> Option<&sqlx::MySqlPool> {
@@ -410,8 +397,7 @@ impl Pool {
         }
     }
 
-    /// Borrow as a `SqlitePool`. Symmetric with [`Self::as_postgres`] —
-    /// returns `None` when the pool wraps a non-SQLite backend.
+    /// Borrow as a `SqlitePool`. [`Self::as_postgres`] for SQLite.
     #[must_use]
     #[cfg(feature = "sqlite")]
     pub fn as_sqlite(&self) -> Option<&sqlx::SqlitePool> {
@@ -426,25 +412,20 @@ impl Pool {
 
     // ---- typed constructors ----
     //
-    // Stage 1 made these the single place a pool is built; the `tuned!`
-    // macro below is what that bought — one edit reaches every pool in
-    // the process, including the ones that used to call sqlx directly.
+    // These are the only places a backend pool is built; everything
+    // else routes through them. That is what makes the `tuned!` macro
+    // work: one edit reaches every pool in the process.
     //
-    // These are the **only** places a backend pool is built. Everything
-    // else — `connect`, `connect_lazy`, `connect_inner`, and the
-    // `manage` dispatch paths — routes through them.
-    //
-    // They exist because the callers that need a typed pool
-    // (`TenantPools<DB>` takes `sqlx::Pool<DB>`, not the enum) were
-    // otherwise reaching for `PgPool::connect(&url)` directly, which
-    // skips every option the framework applies. The main `runserver`
-    // pool was one of them.
+    // They are public because some callers need the typed pool —
+    // `TenantPools<DB>` takes `sqlx::Pool<DB>`, not the enum — and
+    // would otherwise call sqlx directly and skip every option the
+    // framework applies.
 
-    /// Connect to Postgres, returning the typed pool.
+    /// Connect to Postgres and return the typed pool.
     ///
-    /// Prefer [`Self::connect`] unless you need `sqlx::PgPool` itself.
-    /// This applies the same options as `connect` — use it rather than
-    /// `PgPool::connect`, which applies none.
+    /// Prefer [`Self::connect`] unless you need `sqlx::PgPool`
+    /// itself. Use this over `PgPool::connect`, which applies none of
+    /// the framework's pool options.
     ///
     /// # Errors
     /// As [`Self::connect`].
@@ -456,8 +437,8 @@ impl Pool {
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
     }
 
-    /// [`Self::connect_postgres`] without dialling — the pool connects
-    /// on first use. For verbs that may never touch the database.
+    /// [`Self::connect_postgres`] without dialling: the pool connects
+    /// on first use. For commands that may never touch the database.
     ///
     /// # Errors
     /// As [`Self::connect`].
@@ -468,8 +449,7 @@ impl Pool {
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
     }
 
-    /// Connect to MySQL, returning the typed pool. See
-    /// [`Self::connect_postgres`].
+    /// Connect to MySQL. [`Self::connect_postgres`] for MySQL.
     ///
     /// # Errors
     /// As [`Self::connect`].
@@ -492,12 +472,9 @@ impl Pool {
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
     }
 
-    /// Connect to SQLite, returning the typed pool.
-    ///
-    /// Unlike the other two this also applies the framework's pragmas
-    /// via [`sqlite_connect_options`] — WAL for file-backed databases,
-    /// and `?mode=rwc` so a missing file is created. Sites that built
-    /// their own `SqlitePoolOptions` were silently getting neither.
+    /// Connect to SQLite. This also applies the framework's pragmas
+    /// through [`sqlite_connect_options`]: WAL for a file-backed
+    /// database, and `?mode=rwc` so a missing file is created.
     ///
     /// # Errors
     /// As [`Self::connect`].
@@ -521,7 +498,6 @@ impl Pool {
     }
 
     // ---- internal connect helpers ----
-    // (see `default_acquire_timeout` below for the timeout they share)
 
     #[cfg(feature = "postgres")]
     async fn connect_postgres_inner(url: &str) -> Result<Self, PoolError> {
@@ -541,8 +517,7 @@ impl Pool {
         Ok(Self::Mysql(Self::connect_mysql(url).await?))
     }
 
-    // Stays async so the call-site `.await` shape matches across
-    // feature configurations.
+    // Async so the call site looks the same with the feature off.
     #[cfg(not(feature = "mysql"))]
     #[allow(clippy::unused_async)]
     async fn connect_mysql_inner(_url: &str) -> Result<Self, PoolError> {
@@ -554,19 +529,15 @@ impl Pool {
 
     #[cfg(feature = "sqlite")]
     async fn connect_sqlite_inner(url: &str) -> Result<Self, PoolError> {
-        // Phase 3 — bi-dialect executor surface now dispatches to
-        // SqliteRow, so `Pool::connect("sqlite:…")` returns a usable
-        // pool. SQLite URL forms accepted by sqlx:
-        //   - `sqlite::memory:` — anonymous in-memory database
-        //   - `sqlite:./path.db` — relative path
-        //   - `sqlite:///abs/path.db` — absolute path
-        //   - `sqlite:?mode=memory&cache=shared` — query-string options
+        // sqlx accepts several SQLite URL forms:
+        //   `sqlite::memory:`             anonymous in-memory
+        //   `sqlite:./path.db`            relative path
+        //   `sqlite:///abs/path.db`       absolute path
+        //   `sqlite:?mode=memory&cache=shared`
         //
-        // v0.37 friendly-default: missing files are created on connect
-        // via `ensure_sqlite_rwc_default` (applied inside
-        // `sqlite_connect_options`). v0.40: `sqlite_connect_options`
-        // also turns on `foreign_keys`, sets `busy_timeout = 5s`, and
-        // enables WAL journal mode for file-backed databases.
+        // `sqlite_connect_options` creates a missing file, turns on
+        // foreign keys, sets a 5s busy timeout, and uses WAL for a
+        // file-backed database.
         Ok(Self::Sqlite(Self::connect_sqlite(url).await?))
     }
 
@@ -583,20 +554,16 @@ impl Pool {
 /// Env override for the pool acquire timeout, in seconds.
 pub const ACQUIRE_TIMEOUT_ENV: &str = "RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS";
 
-/// Default seconds a request will wait for a pooled connection.
+/// How many seconds a request waits for a pooled connection.
 ///
-/// sqlx defaults this to **30s**, which is a batch-tool number, not a
-/// web-server one. On a request path it means a database that is simply
-/// unreachable pins a worker for half a minute per request — so an
-/// outage of one database saturates the server and takes down surfaces
-/// that never touch it. Five seconds still leaves ample room for a
-/// saturated-but-healthy pool to hand back a connection, while failing
-/// an unreachable one six times sooner.
+/// sqlx would wait 30s, which suits a batch tool, not a web server:
+/// an unreachable database would pin a worker for half a minute per
+/// request, so one database's outage saturates the whole server.
+/// Five seconds is still plenty for a busy but healthy pool.
 const ACQUIRE_TIMEOUT_DEFAULT_SECS: u64 = 5;
 
-/// Env overrides for the rest of the pool knobs. Same shape and same
-/// reason as [`ACQUIRE_TIMEOUT_ENV`]: a deploy can retune a pool without
-/// a config push and a restart of the config pipeline.
+/// Env overrides for the rest of the pool settings, so a deploy can
+/// retune a pool without a config change. See [`ACQUIRE_TIMEOUT_ENV`].
 pub const MAX_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MAX_CONNECTIONS";
 /// See [`MAX_CONNECTIONS_ENV`].
 pub const MIN_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MIN_CONNECTIONS";
@@ -607,34 +574,29 @@ pub const MAX_LIFETIME_ENV: &str = "RUSTANGO_DB_MAX_LIFETIME_SECS";
 
 /// How every pool this process opens is sized and timed.
 ///
-/// `None` means "leave sqlx's default alone", not "zero" — a knob nobody
-/// set must behave exactly as it did before the knob existed.
+/// `None` means "leave sqlx's default alone", not zero.
 ///
-/// Installed once at boot by [`configure_pools`], which
-/// [`crate::manage::Cli::with_settings`] calls from `[database]`. Read by
-/// every constructor on [`Pool`].
+/// [`configure_pools`] installs it once at boot from `[database]`,
+/// and every [`Pool`] constructor reads it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PoolTuning {
-    /// Upper bound on pooled connections. sqlx defaults to 10, which is
-    /// usually too small for a web server and far too large for SQLite.
+    /// Most connections to keep. sqlx's 10 is usually too few for a
+    /// web server and far too many for SQLite.
     pub max_connections: Option<u32>,
-    /// Connections kept open even when idle. sqlx defaults to 0, so the
-    /// first request after a quiet period pays the connect round-trip.
+    /// Connections held open while idle. sqlx keeps none, so the
+    /// first request after a quiet spell pays for a new connection.
     pub min_connections: Option<u32>,
-    /// How long a caller waits for a connection — both dialling a new
-    /// one and queueing for a free one. See
-    /// [`ACQUIRE_TIMEOUT_DEFAULT_SECS`] for why this one has a rustango
-    /// default rather than sqlx's.
+    /// How long a caller waits for a connection, whether dialling a
+    /// new one or queueing for a free one. See
+    /// [`ACQUIRE_TIMEOUT_DEFAULT_SECS`].
     pub acquire_timeout: Option<Duration>,
-    /// Close a connection that has sat idle this long. Defends against
-    /// a load balancer or `idle_in_transaction_session_timeout` cutting
-    /// it from the other end, which surfaces as a broken connection on
-    /// the next unlucky request.
+    /// Close a connection idle this long. This guards against the
+    /// other end dropping it first, which shows up as a broken
+    /// connection on some later request.
     pub idle_timeout: Option<Duration>,
-    /// Close a connection this old regardless of use. The knob that
-    /// matters behind a failover or a credential rotation: without it a
-    /// pool can hold connections to a server that is no longer the one
-    /// you want, or with credentials that have since been revoked.
+    /// Close a connection this old, however busy. Without it, a pool
+    /// can keep connections to a server that has failed over, or
+    /// with credentials that have since been revoked.
     pub max_lifetime: Option<Duration>,
 }
 
@@ -642,21 +604,16 @@ static TUNING: std::sync::OnceLock<PoolTuning> = std::sync::OnceLock::new();
 
 /// Pools opened before anything called [`configure_pools`].
 ///
-/// Counted rather than ignored because those pools silently ran on
-/// env-only tuning, and the operator who configured `[database]` has no
-/// other way to find out.
+/// They ran on env-only tuning, and the count is the only way the
+/// operator who configured `[database]` finds out.
 static POOLS_BEFORE_CONFIG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Install the pool tuning for this process. **First call wins**, like
-/// the other boot globals, so a library cannot retune an application's
-/// pools out from under it.
+/// Install the pool tuning for this process. **The first call
+/// wins**, so a library cannot retune an application's pools.
+/// Returns `false` when tuning was already set.
 ///
-/// Returns `false` if tuning was already set and this call changed
-/// nothing.
-///
-/// Env vars win over the values passed here — the same precedence
-/// `with_settings` uses for `bind`, so a deploy-time override does not
-/// need a config push.
+/// Env vars beat the values passed here, so a deploy can override
+/// without a config change.
 pub fn configure_pools(from_settings: PoolTuning) -> bool {
     let installed = TUNING.set(merge_env_over(from_settings)).is_ok();
     let missed = POOLS_BEFORE_CONFIG.load(std::sync::atomic::Ordering::Relaxed);
@@ -695,8 +652,7 @@ fn merge_env_over(base: PoolTuning) -> PoolTuning {
     PoolTuning {
         max_connections: parse_env(MAX_CONNECTIONS_ENV).or(base.max_connections),
         min_connections: parse_env(MIN_CONNECTIONS_ENV).or(base.min_connections),
-        // The one knob with a rustango default rather than an sqlx one,
-        // so it is never `None`.
+        // The only setting with a rustango default, so never `None`.
         acquire_timeout: Some(
             env_secs(ACQUIRE_TIMEOUT_ENV)
                 .or(base.acquire_timeout)
@@ -711,9 +667,9 @@ fn env_secs(key: &str) -> Option<Duration> {
     parse_env::<u64>(key).map(Duration::from_secs)
 }
 
-/// Parse a positive whole number from `key`, warning and ignoring
-/// anything else. Zero is rejected: every knob here is a bound, and a
-/// bound of zero is a mistake rather than an instruction.
+/// Parse a positive whole number from `key`, warning about and
+/// ignoring anything else. Zero is rejected: these are all bounds,
+/// and a bound of zero is a mistake.
 fn parse_env<T: std::str::FromStr + PartialEq + Default>(key: &str) -> Option<T> {
     let raw = std::env::var(key).ok()?;
     match raw.trim().parse::<T>() {
@@ -729,21 +685,19 @@ fn parse_env<T: std::str::FromStr + PartialEq + Default>(key: &str) -> Option<T>
     }
 }
 
-/// v0.40 — build a `SqliteConnectOptions` with the pragmas every
-/// rustango SQLite pool needs:
+/// Build a `SqliteConnectOptions` with the pragmas every rustango
+/// SQLite pool needs:
 ///
-/// - `foreign_keys = ON` — SQLite ships with FK enforcement OFF, so
-///   without this an ORM that emits `ForeignKey` columns silently
-///   accepts orphaned references.
-/// - `busy_timeout = 5s` — contended writes wait instead of
-///   immediately returning `database is locked`.
-/// - `journal_mode = WAL` for file-backed databases — concurrent
-///   readers don't block writers. Skipped for `:memory:` and
-///   `mode=memory` URLs (WAL is file-only; setting it on memory
-///   databases silently falls back to MEMORY mode).
+/// - `foreign_keys = ON`. SQLite leaves FK enforcement off, so
+///   without this the database accepts orphaned references.
+/// - `busy_timeout = 5s`, so a contended write waits instead of
+///   returning `database is locked` at once.
+/// - `journal_mode = WAL` for a file-backed database, so readers do
+///   not block writers. Skipped for in-memory databases, where WAL
+///   quietly falls back to MEMORY mode.
 ///
-/// Applies `ensure_sqlite_rwc_default` to the URL first, so missing
-/// files are created on connect.
+/// The URL passes through `ensure_sqlite_rwc_default` first, so a
+/// missing file is created on connect.
 ///
 /// # Errors
 /// [`PoolError::Connect`] if the URL can't be parsed as a SQLite URL.
@@ -763,22 +717,19 @@ pub(crate) fn sqlite_connect_options(
     Ok(opts)
 }
 
-/// v0.37 — append `?mode=rwc` to a sqlite file URL that doesn't
-/// already specify a `mode=`. In-memory URLs (`sqlite::memory:`) and
-/// URLs that already opt into a mode (`mode=ro` / `mode=rwc` / etc.)
-/// pass through unchanged. Public for tests in
-/// `pool_sqlite_rwc_default_tests`.
+/// Add `?mode=rwc` to a SQLite file URL that names no mode, so a
+/// missing file is created. An in-memory URL, or one that already
+/// names a mode, passes through unchanged.
 #[cfg(feature = "sqlite")]
 fn ensure_sqlite_rwc_default(url: &str) -> String {
-    // In-memory: no file to create, no default needed.
+    // In-memory: no file to create.
     if url.contains(":memory:") || url.starts_with("sqlite::memory:") {
         return url.to_owned();
     }
-    // Caller already opted into a mode — respect their intent.
+    // The caller chose a mode; leave it alone.
     if url.contains("mode=") {
         return url.to_owned();
     }
-    // Append `?mode=rwc` or `&mode=rwc` depending on existing query.
     if url.contains('?') {
         format!("{url}&mode=rwc")
     } else {
@@ -898,9 +849,8 @@ mod tuning_tests {
         }
     }
 
-    /// Unconfigured, every knob stays `None` so sqlx keeps its own
-    /// defaults — except the acquire timeout, which rustango
-    /// deliberately tightens from 30s to 5s.
+    /// With nothing configured, every setting stays `None` and sqlx
+    /// keeps its defaults, except the acquire timeout.
     #[test]
     fn an_unconfigured_process_changes_nothing_but_the_acquire_timeout() {
         let _g = env_lock();
@@ -930,8 +880,7 @@ mod tuning_tests {
         assert_eq!(merge_env_over(from_toml), from_toml);
     }
 
-    /// Same precedence `with_settings` uses for `bind`: a deploy-time
-    /// override must not need a config push and a restart.
+    /// A deploy-time override must not need a config change.
     #[test]
     fn env_wins_over_settings() {
         let _g = env_lock();
@@ -945,7 +894,7 @@ mod tuning_tests {
         assert_eq!(t.max_connections, Some(99));
     }
 
-    /// A typo'd knob must not take a bound to zero or fail the boot.
+    /// A typo must not set a bound to zero, nor fail the boot.
     #[test]
     fn an_unparseable_or_zero_value_is_ignored_not_obeyed() {
         let _g = env_lock();
@@ -971,15 +920,10 @@ mod tuning_tests {
         assert_eq!(t.idle_timeout, Some(Duration::from_secs(300)));
     }
 
-    /// **The assertion nobody wrote the first time.** `pool_max_size`
-    /// was parsed, type-checked and unit-tested for years while
-    /// reaching no pool at all, because every test asserted the
-    /// *parsed value* and none asserted the *effect*.
-    ///
-    /// A lazy pool is enough: `connect_lazy` builds the pool without
-    /// dialling, so the options are observable with no database — but
-    /// sqlx still wants a runtime to hang the pool's reaper on, hence
-    /// `#[tokio::test]`.
+    /// The settings must reach the pool, not merely parse. A lazy
+    /// pool is enough: it is built without dialling, so the options
+    /// are readable with no database. It still needs a tokio runtime
+    /// for the pool's reaper.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_configured_size_reaches_the_pool_itself() {
@@ -989,13 +933,10 @@ mod tuning_tests {
         std::env::set_var(MIN_CONNECTIONS_ENV, "3");
         std::env::set_var(ACQUIRE_TIMEOUT_ENV, "11");
 
-        // Compare the pool against the tuning actually in force, not
-        // against the env vars just set. Another test in this binary
-        // may have sealed the tuning already — every `with_settings`
-        // test does — and asserting on `37` would then pass or fail by
-        // test order. That `merge_env_over` reads these vars is proved
-        // by the pure tests above; what is proved *here* is that
-        // whatever tuning says reaches the pool.
+        // Compare against the tuning in force, not the env vars just
+        // set: another test may already have sealed it, and then the
+        // result would depend on test order. The tests above already
+        // cover the parsing; this one covers the effect.
         let expect = tuning();
         let pool = Pool::connect_sqlite_lazy("sqlite::memory:").expect("build a lazy pool");
         let opts = pool.options();
@@ -1016,20 +957,16 @@ mod tuning_tests {
         clear();
     }
 
-    /// Reading the tuning must not seal it. An earlier cut used
-    /// `get_or_init`, so a pool opened before `with_settings` froze
-    /// env-only tuning for the entire process — silently, and for
-    /// every pool after it.
+    /// Reading the tuning must not seal it. With `get_or_init`, a
+    /// pool opened before `with_settings` would freeze env-only
+    /// tuning for the whole process.
     #[test]
     fn reading_the_tuning_leaves_it_configurable() {
         let _g = env_lock();
-        // Assert the *property* — a read does not change whether the
-        // cell is set — rather than its absolute state. Another test in
-        // this binary may legitimately have called `configure_pools`
-        // already (any `with_settings` test does), and under some
-        // feature sets it runs first. An assertion on
-        // `TUNING.get().is_none()` passes or fails by test order, which
-        // is a flaky test dressed up as a real one.
+        // Check that a read does not change whether the cell is set,
+        // rather than its state. Another test may already have
+        // called `configure_pools`, so asserting `is_none()` would
+        // pass or fail by test order.
         let set_before = TUNING.get().is_some();
         let _ = tuning();
         let _ = tuning();
@@ -1080,8 +1017,8 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn from_pg_pool_wraps() {
-        // `connect_lazy` doesn't actually dial but still spawns sqlx
-        // internals on the current Tokio runtime — needs `#[tokio::test]`.
+        // `connect_lazy` does not dial, but sqlx still spawns on the
+        // current Tokio runtime, so this needs `#[tokio::test]`.
         let pg = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost:1/none")
@@ -1096,9 +1033,6 @@ mod tests {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn from_mysql_pool_wraps() {
-        // Symmetric with `from_pg_pool_wraps`. `connect_lazy` defers
-        // the actual TCP dial, but the pool's spawn surface still
-        // needs a Tokio runtime.
         let my = sqlx::mysql::MySqlPoolOptions::new()
             .max_connections(1)
             .connect_lazy("mysql://user:pass@localhost:1/none")
@@ -1113,9 +1047,6 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn sqlite_url_connect_succeeds_in_memory() {
-        // Phase 3: `Pool::connect("sqlite::memory:")` returns a
-        // usable pool now that the bi-dialect executor surface
-        // dispatches to SqliteRow.
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         assert_eq!(pool.backend_name(), "sqlite");
         assert!(pool.as_sqlite().is_some());
@@ -1124,8 +1055,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn sqlite_from_pool_dispatches_to_sqlite_dialect() {
-        // Users CAN build a Pool::Sqlite manually via From<SqlitePool>
-        // — confirms dialect dispatch + accessors work end-to-end.
+        // A hand-built `Pool::Sqlite` gets the right dialect too.
         let sqlite_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_lazy("sqlite::memory:")
@@ -1146,10 +1076,7 @@ mod tests {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn mysql_pool_dialect_is_mysql() {
-        // Confirms Pool::dialect() dispatches to the MySql singleton —
-        // identifier quoting on the borrowed dialect must be backticks
-        // even though the pool itself can't be reached without a
-        // running MySQL.
+        // The dialect must be MySQL's even with no server to reach.
         let my = sqlx::mysql::MySqlPoolOptions::new()
             .max_connections(1)
             .connect_lazy("mysql://user:pass@localhost:1/none")

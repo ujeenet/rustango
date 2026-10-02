@@ -1,4 +1,4 @@
-//! Generic class-based views for HTML templates (Django-shape).
+//! Generic class-based views for HTML templates.
 //!
 //! Sibling of [`crate::viewset`] for the JSON/API side. Each view is a
 //! data structure that builds a Tera-rendered axum `Router` over a
@@ -17,9 +17,8 @@
 //! ```ignore
 //! use rustango::template_views::ListView;
 //! use std::sync::Arc;
-//! use tera::Tera;
 //!
-//! let mut tera = Tera::default();
+//! let mut tera = rustango::template_extensions::html_tera();
 //! tera.add_raw_template("post_list.html", r#"
 //!     {% for post in object_list %}
 //!         <h2>{{ post.title }}</h2>
@@ -65,6 +64,12 @@
 //! Same builder API across both flavors; pick whichever matches
 //! the project's connection-management strategy. Templates port
 //! between them without edits.
+//!
+//! [`ListView`]: crate::template_views::ListView
+//! [`DetailView`]: crate::template_views::DetailView
+//! [`CreateView`]: crate::template_views::CreateView
+//! [`UpdateView`]: crate::template_views::UpdateView
+//! [`DeleteView`]: crate::template_views::DeleteView
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +85,16 @@ use tera::{Context, Tera};
 use crate::core::{FieldSchema, Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
+
+/// [`coerce_pk`], returning `404` from the handler when the value does not parse.
+macro_rules! pk_or_404 {
+    ($field:expr, $raw:expr) => {
+        match $crate::template_views::coerce_pk($field, $raw) {
+            Some(v) => v,
+            None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        }
+    };
+}
 
 // ============================================================== ListView
 
@@ -185,10 +200,9 @@ pub struct ListView {
     actions: Vec<BulkAction>,
     /// When `true`, the built-in `delete_selected` action shows a
     /// confirmation page (selected rows + a "Confirm delete" button)
-    /// before actually firing the DELETE — Django admin's two-step
-    /// shape. Custom actions registered via [`Self::action`] /
-    /// [`Self::tenant_action`] are not gated by this flag (mirrors
-    /// Django: only `delete_selected` is confirmed by default).
+    /// before actually firing the DELETE. Custom actions registered
+    /// via [`Self::action`] / [`Self::tenant_action`] are not gated by
+    /// this flag: only `delete_selected` is confirmed by default.
     /// Default off — confirmations only mount when the user opts in
     /// via [`Self::with_delete_confirmation`].
     confirm_delete: bool,
@@ -207,7 +221,7 @@ pub struct ListView {
     /// usually cheap but isn't free. Opt in via
     /// [`Self::with_fk_display`].
     fk_display: bool,
-    /// #379 — Django-shape `context_object_name`. Binds the row
+    /// `context_object_name`. Binds the row
     /// list under a custom Tera variable in addition to the
     /// default `object_list`. Empty (the default) skips the
     /// extra binding.
@@ -362,10 +376,10 @@ impl ListView {
     /// parameters: `GET /posts?author_id=42&status=published` runs
     /// `WHERE author_id = '42' AND status = 'published'` (when both
     /// are in the allowlist; unknown query params are silently
-    /// ignored, matching the Django convention).
+    /// ignored rather than rejected).
     ///
     /// Mirrors `viewset::ViewSet::filter_fields` but without the
-    /// Django-style `__lookup` syntax (just exact match) — keeps
+    /// `__lookup` syntax (just exact match) — keeps
     /// the ListView surface minimal. Projects that want
     /// `__gt` / `__in` / `__icontains` build their own filters in
     /// a hand-rolled handler.
@@ -396,7 +410,7 @@ impl ListView {
 
     // `fields` is emitted via `cbv_setters!` at the top of this impl.
 
-    /// Enable bulk actions (Django-admin shape). Mounts a `POST
+    /// Enable bulk actions. Mounts a `POST
     /// <prefix>` route alongside the existing `GET`. The list
     /// endpoint stamps a `bulk_actions` array into the Tera context
     /// (`[{name, label}, ...]`) so templates can render an action
@@ -407,8 +421,8 @@ impl ListView {
     /// Form shape the POST handler expects:
     /// - `action`: the name of one registered action
     /// - `_selected_action`: one or more values, each a row's PK
-    /// - `_csrf`: the CSRF token (when [`crate::manage::Cli::with_csrf`]
-    ///   is on, which is the recommended setup for form-driven CBVs)
+    /// - `_csrf`: the CSRF token (`{{ csrf_input | safe }}`); the
+    ///   router rejects a POST without it
     ///
     /// Successful action runs return `303 See Other` to the same
     /// prefix so a refresh after the redirect doesn't replay the
@@ -417,12 +431,11 @@ impl ListView {
     /// ## Destructive-action UX (built-in `delete_selected`)
     ///
     /// **The current implementation runs every action immediately
-    /// on POST — no confirmation step.** Django admin ships a
-    /// confirmation page for `delete_selected` (select rows →
-    /// submit → "are you sure?" page → confirm → delete). The
-    /// rustango v0.30.4 v1 of bulk actions skips that intermediate
-    /// page. Until a `confirm_template` builder lands, the
-    /// recommended pattern is:
+    /// on POST — no confirmation step.** The safe flow for a
+    /// destructive action is select rows → submit → "are you sure?"
+    /// page → confirm → delete, and this skips the middle page.
+    /// Until a `confirm_template` builder lands, the recommended
+    /// pattern is:
     ///
     /// 1. Add a `<confirm>` JS handler in the template:
     ///    `<form onsubmit="return confirmDestructive(this)">`
@@ -436,16 +449,19 @@ impl ListView {
     /// = delete_selected` POST arrives without a `confirmed = true`
     /// flag. v0.31 candidate.
     ///
+    /// A custom action gets only the selected PKs the model's global
+    /// scopes let through.
+    ///
     /// ```rust,ignore
     /// ListView::for_model(Post::SCHEMA)
     ///     .bulk_actions(true)               // enables built-in delete_selected
     ///     .action("publish_selected", "Publish selected", Arc::new(|pool, pks| {
     ///         Box::pin(async move {
-    ///             let pks: Vec<i64> = pks.iter().filter_map(|v| match v {
-    ///                 SqlValue::I64(n) => Some(*n), _ => None,
-    ///             }).collect();
-    ///             sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
-    ///                 .bind(&pks).execute(pool).await
+    ///             Post::objects()
+    ///                 .filter("id__in", SqlValue::List(pks.to_vec()))
+    ///                 .update()
+    ///                 .set("status", "published")
+    ///                 .execute_pool(pool).await
     ///                 .map(|_| ()).map_err(|e| e.to_string())
     ///         })
     ///     }))
@@ -481,7 +497,7 @@ impl ListView {
     }
 
     /// Show a confirmation page before the built-in `delete_selected`
-    /// action fires. Mirrors Django admin's two-step delete flow
+    /// action fires — the two-step delete flow
     /// (select rows → submit → "are you sure?" → confirm → delete)
     /// and closes the destructive-action footgun documented in the
     /// v0.30.4 v1 of bulk actions.
@@ -502,9 +518,9 @@ impl ListView {
     /// confirmation render and runs the actual DELETE.
     ///
     /// Custom actions registered via [`Self::action`] /
-    /// [`Self::tenant_action`] are NOT gated by this flag —
-    /// matches Django's convention (only `delete_selected` is
-    /// confirmed). Custom actions that need confirmation should
+    /// [`Self::tenant_action`] are NOT gated by this flag; only
+    /// `delete_selected` is confirmed. Custom actions that need
+    /// confirmation should
     /// implement their own confirm+submit handler shape.
     #[must_use]
     pub fn with_delete_confirmation(mut self, on: bool) -> Self {
@@ -611,7 +627,7 @@ impl ListView {
         } else {
             get(handle_list)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 
     /// Tenant-aware variant — each request resolves its own
@@ -630,13 +646,12 @@ impl ListView {
         } else {
             get(handle_list_tenant)
         };
-        Router::new().route(prefix, route).with_state(state)
+        csrf_protected(Router::new().route(prefix, route).with_state(state))
     }
 }
 
 /// Action-name comparison helper. Names are stored as `String`s but
-/// matched literal — no case-folding (consistency with Django's
-/// `action` form field).
+/// matched literally — no case-folding.
 fn same_action_name(a: &str, b: &str) -> bool {
     a == b
 }
@@ -715,13 +730,9 @@ async fn handle_list(
     extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page: i64 = params
-        .get("page")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(1)
-        .max(1);
+    let page = crate::list_params::parse_page(&params);
     let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = (page - 1) * page_size;
+    let offset = crate::list_params::page_offset(page, page_size);
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -746,15 +757,10 @@ async fn handle_list(
         limit: Some(page_size),
         offset: Some(offset),
         ..SelectQuery::new(state.vs.schema)
-    };
-    let count_q = crate::core::CountQuery {
-        model: state.vs.schema,
-        where_clause,
-        // template_views folds the search-fields ILIKE predicates
-        // into where_clause via build_list_where, so the dedicated
-        // SearchClause is unused here.
-        search: None,
-    };
+    }
+    .with_global_scopes();
+    // Search predicates are folded into where_clause by build_list_where.
+    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
@@ -780,7 +786,7 @@ async fn handle_list(
     // stay as they are; this only adds the range.
     ctx.insert("page_marks", &page_marks(total, page_size, page));
     ctx.insert("object_list", &object_list);
-    // #379 — Django-shape `context_object_name`. Adds a second
+    // `context_object_name` adds a second
     // binding so templates can read `{{ posts }}` instead of
     // `{{ object_list }}`. Empty (the default) skips the rename.
     if !state.vs.context_object_name.is_empty() {
@@ -802,7 +808,7 @@ async fn handle_list(
 
     // v0.30.17 — stamp the CSRF token into the context AND set the
     // cookie on the response. ListView's bulk-action POST is gated
-    // by the project's CSRF middleware (when on); without this the
+    // by the router's CSRF layer; without this the
     // form-rendered token is empty and every legitimate POST 403s.
     let set_cookie = stamp_csrf(&headers, &mut ctx);
     let mut resp = render(&state.tera, &state.vs.template, &ctx);
@@ -844,7 +850,7 @@ async fn handle_list_action(
     // matches the built-in DELETE name AND the form lacks a
     // `confirmed=true` flag, render the confirmation template
     // instead of running the DELETE. Custom actions are NOT gated
-    // by this flag (matches Django's convention).
+    // by this flag.
     if state.vs.confirm_delete && action == BUILTIN_DELETE_SELECTED && !is_form_confirmed(&form) {
         let objects =
             match fetch_pks_as_objects_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
@@ -869,6 +875,10 @@ async fn handle_list_action(
         .iter()
         .find(|a| same_action_name(&a.name, &action))
     {
+        let pks = match visible_pks_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+            Ok(v) => v,
+            Err(e) => return template_error(&format!("scope selected rows: {e}")),
+        };
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
             #[cfg(all(feature = "tenancy", feature = "postgres"))]
@@ -932,13 +942,13 @@ pub struct DetailView {
     schema: &'static ModelSchema,
     template: String,
     fields: Option<Vec<String>>,
-    /// #379 — Django-shape `context_object_name`. Renames the row
+    /// `context_object_name`. Renames the row
     /// under a custom Tera variable name. The legacy `"object"`
     /// key stays populated for back-compat; this just adds a
     /// second binding so templates can read `{{ post.title }}`
     /// instead of `{{ object.title }}`. Empty → no rename.
     context_object_name: String,
-    /// #379 — Django-shape `slug_field` / `slug_url_kwarg`. When
+    /// Look the row up by a non-PK column instead of the PK. When
     /// non-empty, the URL captures the lookup value as `{lookup}`
     /// (instead of `{pk}`) and the SELECT predicate matches
     /// `WHERE <lookup_field> = <captured>` instead of `WHERE pk =
@@ -961,14 +971,14 @@ impl DetailView {
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, fields, context_object_name);
 
-    /// Django-shape `slug_field` — look up the row by a non-PK
-    /// column. The captured URL segment matches against the named
-    /// column instead of the model's primary key. Issue #379.
+    /// Look up the row by a non-PK column. The captured URL segment
+    /// matches against the named column instead of the model's
+    /// primary key.
     ///
     /// Field name must exist on the schema (Rust field name OR
     /// SQL column name); unknown names produce a 500 at request
-    /// time with a clear `template render error: unknown lookup
-    /// field …` message.
+    /// time. The `unknown lookup field …` detail is logged, and
+    /// reaches the response body only on the debug tier (#1525).
     ///
     /// ```ignore
     /// // /posts/{slug} → SELECT … WHERE slug = $1
@@ -1027,7 +1037,8 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1079,11 +1090,10 @@ fn resolve_lookup_field(
 
 /// Two-step delete: `GET <prefix>/{pk}/delete` renders a confirmation
 /// page, `POST <prefix>/{pk}/delete` executes the delete and 303s to
-/// `success_url`. Mirrors Django's `DeleteView`.
+/// `success_url`.
 ///
-/// CSRF protection is the project's responsibility — mount this view
-/// under a CSRF-protected scope (`rustango::forms::csrf`) when the
-/// POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct DeleteView {
     schema: &'static ModelSchema,
@@ -1117,12 +1127,14 @@ impl DeleteView {
             pool,
         });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1131,12 +1143,15 @@ impl DeleteView {
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_delete_confirm_tenant).post(handle_delete_submit_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_delete_confirm_tenant)
+                        .post(handle_delete_submit_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1159,7 +1174,8 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
+        .with_global_scopes();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1184,15 +1200,13 @@ async fn handle_delete_submit(
             state.vs.schema.table
         ));
     };
-    let delete_q = crate::core::DeleteQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
-    match crate::sql::delete_pool(&state.pool, &delete_q).await {
+    let delete_q = crate::core::DeleteQuery::by_pk(
+        state.vs.schema,
+        pk_field.column,
+        pk_or_404!(pk_field, &pk),
+    )
+    .with_global_scopes();
+    match crate::audit::delete(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -1225,8 +1239,8 @@ async fn handle_delete_submit(
 /// DEFAULT fires). Validation errors render the form back with
 /// `errors: { field_name: "message" }` in the context.
 ///
-/// CSRF protection is the project's responsibility — mount under
-/// a CSRF-protected scope when the POST is reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 #[derive(Clone)]
 pub struct CreateView {
     schema: &'static ModelSchema,
@@ -1298,8 +1312,8 @@ impl CreateView {
     /// between `F` and the model schema (e.g. `F` has a
     /// `confirm_password` field with no model column, or `F`'s
     /// `i32 score` differs from the model's `i64 score`) are
-    /// silently ignored on the SQL side. Full Django-style
-    /// `ModelForm`-as-source-of-truth is a future enhancement;
+    /// silently ignored on the SQL side. Making the form the single
+    /// source of truth is a future enhancement;
     /// for now `.form::<F>()` is a *validation-only* hook.
     ///
     /// ## Example
@@ -1335,12 +1349,14 @@ impl CreateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get).post(handle_create_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get).post(handle_create_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1356,12 +1372,14 @@ impl CreateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/new");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1431,12 +1449,14 @@ impl UpdateView {
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get).post(handle_update_post),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get).post(handle_update_post),
+                )
+                .with_state(state),
+        )
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
@@ -1452,12 +1472,14 @@ impl UpdateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        Router::new()
-            .route(
-                &path,
-                axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    &path,
+                    axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -1509,8 +1531,8 @@ struct FormField {
 }
 
 /// Walk the schema and produce the form-fields slice. Skips:
-/// - the primary key (CreateView lets the DB assign; UpdateView
-///   pins it from the URL)
+/// - the primary key on update (UpdateView pins it from the URL); a
+///   natural PK is input on create (#1725)
 /// - `Auto<T>` fields generally (server-assigned)
 /// - `generated_as` columns (DB-computed)
 /// - relations whose target is a foreign table (FK/M2M handling
@@ -1520,12 +1542,13 @@ fn form_fields(
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     values: &HashMap<String, String>,
+    kind: crate::core::WriteKind,
 ) -> Vec<FormField> {
     schema
         .fields
         .iter()
         .filter(|f| {
-            if f.primary_key || f.auto || f.generated_as.is_some() {
+            if !f.accepts_input(kind) {
                 return false;
             }
             match explicit {
@@ -1590,7 +1613,8 @@ fn substitute_pk(template: &str, pk: &str) -> String {
     if !template.contains("{pk}") {
         return template.to_owned();
     }
-    template.replace("{pk}", pk)
+    // Encoded as a path segment: a raw CR/LF panics `Redirect::to`.
+    template.replace("{pk}", &crate::url_codec::url_encode(pk))
 }
 
 /// Substitute every `{column}` placeholder in a `success_url`
@@ -1621,8 +1645,9 @@ fn substitute_pk(template: &str, pk: &str) -> String {
 fn interpolate_success_url(
     template: &str,
     row: &crate::sql::InsertReturningPool,
-    schema: &'static crate::core::ModelSchema,
+    query: &crate::core::InsertQuery,
 ) -> Result<String, String> {
+    let schema = query.model;
     let placeholders = parse_success_url_placeholders(template);
     if placeholders.is_empty() {
         return Ok(template.to_owned());
@@ -1645,13 +1670,21 @@ fn interpolate_success_url(
                 )
             })?
         };
-        let v = column_value_as_string_returning(row, column).map_err(|e| {
+        // The PK as written, not MySQL's `LAST_INSERT_ID()` for a client-set one (#1894).
+        let read = if column.primary_key {
+            crate::sql::inserted_pk(query, row, column)
+                .map(|v| v.to_display_string())
+                .map_err(|e| e.to_string())
+        } else {
+            column_value_as_string_returning(row, column)
+        };
+        let v = read.map_err(|e| {
             format!(
                 "success_url interpolation failed reading `{}`: {e}",
                 column.column
             )
         })?;
-        out = out.replace(&format!("{{{name}}}"), &v);
+        out = out.replace(&format!("{{{name}}}"), &crate::url_codec::url_encode(&v));
     }
     Ok(out)
 }
@@ -1667,19 +1700,12 @@ fn column_value_as_string_returning(
             column_value_as_string(pg_row, column).map_err(|e| e.to_string())
         }
         #[cfg(feature = "mysql")]
-        crate::sql::InsertReturningPool::MySqlAutoId(id) => {
-            // MySQL only carries the auto-generated PK; placeholders
-            // for other columns are unresolvable on this path.
-            if column.primary_key {
-                Ok(id.to_string())
-            } else {
-                Err(format!(
-                    "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
-                     only the auto-generated primary key is available)",
-                    column.column,
-                ))
-            }
-        }
+        // MySQL only carries the auto-generated PK, which `inserted_pk` reads.
+        crate::sql::InsertReturningPool::MySqlAutoId(_) => Err(format!(
+            "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
+             only the auto-generated primary key is available)",
+            column.column,
+        )),
         #[cfg(feature = "sqlite")]
         crate::sql::InsertReturningPool::SqliteRow(sq_row) => {
             use crate::core::FieldType;
@@ -1806,82 +1832,12 @@ fn column_value_as_string(
     }
 }
 
-/// Coerce a URL-path PK string to the field's declared SQL type.
-/// Tighter than [`coerce_value`] — never returns `Null`, never
-/// allows empty strings (a `/{pk}` segment is always present).
-/// Used by DetailView / UpdateView / DeleteView to bind the
-/// `WHERE pk = $1` parameter without relying on Postgres'
-/// implicit string-to-int casts.
-///
-/// Returns the original `SqlValue::String(raw)` as a permissive
-/// fallback when:
-/// - Field type is not one of the integer / UUID variants we
-///   know how to parse from a URL string
-/// - Parsing fails (e.g. `i64` with non-numeric segment) — the
-///   resulting query will produce no rows / 404, which is the
-///   same effect as a typed-mismatch error and avoids leaking
-///   parse errors to the user
-fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> SqlValue {
-    use crate::core::FieldType as T;
-    match field.ty {
-        T::I16 | T::I32 | T::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        T::Uuid => raw
-            .parse::<uuid::Uuid>()
-            .map(SqlValue::Uuid)
-            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
-        // Strings are the natural representation; everything else
-        // (Bool / Float / DateTime / Date / Json) doesn't normally
-        // serve as a PK. Pass the raw string through and let
-        // Postgres' implicit cast handle it.
-        _ => SqlValue::String(raw.to_owned()),
-    }
-}
-
-/// Coerce a form-encoded string into a `SqlValue` based on the
-/// field's declared type. Empty strings on nullable fields produce
-/// `SqlValue::Null`. Coercion failures surface as a per-field error
-/// so the form can re-render with the user's input intact.
-fn coerce_value(field: &crate::core::FieldSchema, raw: &str) -> Result<SqlValue, String> {
-    use crate::core::FieldType as T;
-    if raw.is_empty() && field.nullable {
-        return Ok(SqlValue::Null);
-    }
-    match field.ty {
-        T::String => Ok(SqlValue::String(raw.to_owned())),
-        T::I16 => raw
-            .parse::<i16>()
-            .map(|n| SqlValue::I64(i64::from(n)))
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::I32 => raw
-            .parse::<i32>()
-            .map(|n| SqlValue::I64(i64::from(n)))
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .map_err(|e| format!("expected an integer, got `{raw}` ({e})")),
-        T::F32 => raw
-            .parse::<f32>()
-            .map(|n| SqlValue::F64(f64::from(n)))
-            .map_err(|e| format!("expected a number, got `{raw}` ({e})")),
-        T::F64 => raw
-            .parse::<f64>()
-            .map(SqlValue::F64)
-            .map_err(|e| format!("expected a number, got `{raw}` ({e})")),
-        T::Bool => match raw {
-            "1" | "true" | "on" | "yes" => Ok(SqlValue::Bool(true)),
-            "0" | "false" | "off" | "no" | "" => Ok(SqlValue::Bool(false)),
-            _ => Err(format!("expected boolean, got `{raw}`")),
-        },
-        // The rest fall through to String — DB-level casts handle
-        // most projects' shapes (datetime / date / uuid all parse
-        // cleanly from ISO 8601 / canonical text). Projects that
-        // need stricter parsing override via ModelForm.
-        _ => Ok(SqlValue::String(raw.to_owned())),
-    }
+/// A URL-path PK (or lookup) value bound as the field's type, or `None`
+/// when it does not parse, so the caller 404s instead of a PG cast 500 (#1950).
+fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    crate::forms::parse_pk_string(field, raw)
+        .or_else(|_| crate::forms::parse_form_value(field, Some(raw)))
+        .ok()
 }
 
 async fn handle_create_get(
@@ -1889,7 +1845,12 @@ async fn handle_create_get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let mut ctx = Context::new();
-    let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        &HashMap::new(),
+        crate::core::WriteKind::Insert,
+    );
     ctx.insert(
         "form",
         &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -1907,43 +1868,130 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (mut columns, mut values, mut errors) = parse_form(
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+        crate::core::WriteKind::Insert,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
-    // When `success_url` carries `{column}` placeholders, request
-    // those columns back via RETURNING so we can substitute
-    // before the redirect. Otherwise plain INSERT — saves the
-    // round-trip.
-    let returning = match success_url_returning_columns(&state.success_url, state.schema) {
-        Ok(cols) => cols,
-        Err(e) => return template_error(&e),
-    };
-    let need_returning = !returning.is_empty();
+    // Schema-driven INSERT: nothing else supplies these (#1464).
+    crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
+    match create_insert(
+        &state.pool,
+        state.schema,
+        &state.success_url,
+        columns,
+        values,
+    )
+    .await
+    {
+        Ok(url) => axum::response::Redirect::to(&url).into_response(),
+        Err(InsertFailed::Duplicate(errors)) => {
+            rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers)
+        }
+        Err(InsertFailed::Error(resp)) => resp,
+    }
+}
+
+/// Why a CreateView INSERT did not redirect.
+enum InsertFailed {
+    /// A unique value is taken: field errors for the form (#2033).
+    Duplicate(HashMap<String, String>),
+    /// Anything else: an opaque 500.
+    Error(Response),
+}
+
+/// The CreateView INSERT shared by the static and tenant routers; returns
+/// the redirect target.
+async fn create_insert(
+    pool: &Pool,
+    schema: &'static ModelSchema,
+    success_url: &str,
+    columns: Vec<&'static str>,
+    values: Vec<SqlValue>,
+) -> Result<String, InsertFailed> {
+    // `{column}` placeholders in `success_url` come back via RETURNING;
+    // otherwise a plain INSERT saves the round-trip.
+    let mut returning = success_url_returning_columns(success_url, schema)
+        .map_err(|e| InsertFailed::Error(template_error(&e)))?;
+    // An audited create needs the new PK for its audit row (#1821).
+    let audited_pk = schema
+        .primary_key()
+        .filter(|_| crate::audit::audits_creates(schema));
+    if let Some(pk) = audited_pk.filter(|pk| !returning.contains(&pk.column)) {
+        returning.push(pk.column);
+    }
     let insert_q = crate::core::InsertQuery {
-        model: state.schema,
+        model: schema,
         columns,
         values,
         returning,
         on_conflict: None,
     };
-    let target_url = if need_returning {
-        match crate::sql::insert_returning_pool(&state.pool, &insert_q).await {
-            Ok(row) => match interpolate_success_url(&state.success_url, &row, state.schema) {
-                Ok(url) => url,
-                Err(e) => return template_error(&e),
-            },
-            Err(e) => return template_error(&format!("insert row: {e}")),
-        }
+    let result = if let Some(pk) = audited_pk {
+        crate::audit::insert_returning(pool, &insert_q, pk)
+            .await
+            .map(|(_, row)| interpolate_success_url(success_url, &row, &insert_q))
+    } else if insert_q.returning.is_empty() {
+        crate::sql::insert_pool(pool, &insert_q)
+            .await
+            .map(|()| Ok(success_url.to_owned()))
     } else {
-        if let Err(e) = crate::sql::insert_pool(&state.pool, &insert_q).await {
-            return template_error(&format!("insert row: {e}"));
-        }
-        state.success_url.clone()
+        crate::sql::insert_returning_pool(pool, &insert_q)
+            .await
+            .map(|row| interpolate_success_url(success_url, &row, &insert_q))
     };
-    axum::response::Redirect::to(&target_url).into_response()
+    match result {
+        Ok(Ok(url)) => Ok(url),
+        Ok(Err(e)) => Err(InsertFailed::Error(template_error(&e))),
+        Err(e) if e.is_unique_violation() => Err(InsertFailed::Duplicate(
+            duplicate_errors(pool, &insert_q).await,
+        )),
+        Err(e) => Err(InsertFailed::Error(template_error(&format!(
+            "insert row: {e}"
+        )))),
+    }
 }
+
+/// Blames each submitted unique field whose value is already taken.
+async fn duplicate_errors(
+    pool: &Pool,
+    insert_q: &crate::core::InsertQuery,
+) -> HashMap<String, String> {
+    let schema = insert_q.model;
+    let mut errors = HashMap::new();
+    let unique = insert_q
+        .columns
+        .iter()
+        .zip(&insert_q.values)
+        .filter_map(|(col, v)| Some((schema.field_by_column(col)?, v)))
+        .filter(|(f, _)| f.unique || f.primary_key);
+    for (field, value) in unique {
+        let taken = crate::core::CountQuery::new(
+            schema,
+            WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone())),
+        );
+        if count_rows_pool(pool, &taken).await.unwrap_or(0) > 0 {
+            errors.insert(field.name.to_owned(), DUPLICATE_VALUE.to_owned());
+        }
+    }
+    // A composite UNIQUE, or a row gone since: no single field to blame.
+    if errors.is_empty() {
+        tracing::warn!(
+            target: "rustango::template_views",
+            table = schema.table,
+            "unique violation blames no submitted field; shown as a form-wide error"
+        );
+        errors.insert("__all__".to_owned(), DUPLICATE_VALUE.to_owned());
+    }
+    errors
+}
+
+const DUPLICATE_VALUE: &str = "a row with this value already exists";
 
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,
@@ -1958,7 +2006,8 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
+        .with_global_scopes();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -1977,7 +2026,12 @@ async fn handle_update_get(
         };
         values.insert(k, s);
     }
-    let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        &values,
+        crate::core::WriteKind::Update,
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -2005,7 +2059,12 @@ async fn handle_update_post(
             state.schema.table
         ));
     };
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (columns, values, mut errors) = parse_form(
+        state.schema,
+        state.fields.as_deref(),
+        &form,
+        crate::core::WriteKind::Update,
+    );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
@@ -2018,16 +2077,14 @@ async fn handle_update_post(
             value: value.into(),
         })
         .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: state.schema,
-        set: assignments,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-    };
-    match crate::sql::update_pool(&state.pool, &update_q).await {
+    let pk_match = WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::Eq,
+        value: pk_or_404!(pk_field, &pk),
+    });
+    let update_q =
+        crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
+    match crate::audit::update(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
@@ -2046,12 +2103,13 @@ fn parse_form(
     schema: &'static ModelSchema,
     explicit: Option<&[String]>,
     submitted: &HashMap<String, String>,
+    kind: crate::core::WriteKind,
 ) -> (Vec<&'static str>, Vec<SqlValue>, HashMap<String, String>) {
     let mut columns: Vec<&'static str> = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if f.primary_key || f.auto || f.generated_as.is_some() {
+        if !f.accepts_input(kind) {
             continue;
         }
         if let Some(names) = explicit {
@@ -2071,7 +2129,7 @@ fn parse_form(
             errors.insert(f.name.to_owned(), "this field is required".to_owned());
             continue;
         }
-        match coerce_value(f, &raw) {
+        match crate::forms::parse_form_value(f, Some(&raw)).map_err(|e| e.to_string()) {
             Ok(v) => {
                 // Bounds validation — `max_length` / `min` / `max`
                 // declared on the schema. Surface as a per-field
@@ -2118,16 +2176,14 @@ fn bounds_error_message(e: &crate::core::QueryError) -> String {
 }
 
 /// Re-render the form template after a validation failure with the
-/// user's submitted values + per-field errors. Mirrors Django's
-/// "render with errors" pattern so the user doesn't lose what they
-/// typed.
+/// user's submitted values + per-field errors, so the user doesn't
+/// lose what they typed.
 /// Run an optional user-supplied validator and merge any
 /// `FormErrors` it returns into the existing per-field error map.
 /// Multi-error fields are joined with `"; "` so the single-string-
 /// per-field shape rerender_form expects is preserved. Non-field
-/// errors land under the `"__all__"` key (matches Django convention
-/// for cross-field errors and lets templates render them once at
-/// the top of the form).
+/// errors land under the `"__all__"` key, so templates can render
+/// cross-field errors once at the top of the form.
 fn merge_validator_errors(
     validator: Option<&Validator>,
     submitted: &HashMap<String, String>,
@@ -2163,6 +2219,14 @@ fn merge_validator_errors(
     }
 }
 
+fn write_kind(is_update: bool) -> crate::core::WriteKind {
+    if is_update {
+        crate::core::WriteKind::Update
+    } else {
+        crate::core::WriteKind::Insert
+    }
+}
+
 fn rerender_form(
     state: &FormViewState,
     submitted: &HashMap<String, String>,
@@ -2170,7 +2234,12 @@ fn rerender_form(
     is_update: bool,
     headers: &axum::http::HeaderMap,
 ) -> Response {
-    let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+    let fields = form_fields(
+        state.schema,
+        state.fields.as_deref(),
+        submitted,
+        write_kind(is_update),
+    );
     let mut ctx = Context::new();
     ctx.insert(
         "form",
@@ -2195,20 +2264,23 @@ fn rerender_form(
 /// shape the SQL writer expects. Returns the original column name in
 /// the error string when it doesn't match any field.
 ///
-/// **Stable-pagination guarantee**: when `spec` is empty, falls back
-/// to `ORDER BY <pk> ASC` so paginated [`ListView`] doesn't return
-/// rows in arbitrary Postgres-internal order (which would make
-/// page 2 overlap page 1 between requests). Models without a PK
-/// still get an empty `ORDER BY` — there's no canonical column to
-/// pick — but the paginated views warn-log when that happens.
+/// **Stable-pagination guarantee**: the PK is appended as a final
+/// tiebreak (or is the whole order when `spec` is empty), so rows tied
+/// on the sort keys cannot repeat or vanish across pages.
 fn resolve_order_by(
     schema: &'static ModelSchema,
     spec: &[(String, bool)],
 ) -> Result<Vec<crate::core::OrderItem>, String> {
-    if spec.is_empty() {
-        return Ok(default_order_by(schema));
-    }
     let mut out = Vec::with_capacity(spec.len());
+    // No builder order: the model's `default_order`, as the admin list does (#2005).
+    if spec.is_empty() {
+        out.extend(schema.default_order.iter().filter_map(|(name, desc)| {
+            schema
+                .field(name)
+                .or_else(|| schema.field_by_column(name))
+                .map(|f| crate::core::OrderItem::column(f.column, *desc))
+        }));
+    }
     for (name, desc) in spec {
         let field = schema
             .fields
@@ -2222,24 +2294,7 @@ fn resolve_order_by(
             })?;
         out.push(crate::core::OrderItem::column(field.column, *desc));
     }
-    Ok(out)
-}
-
-/// PK-based fallback ordering for paginated views without an
-/// explicit `.order_by(...)`. Postgres doesn't guarantee any
-/// particular row order without `ORDER BY` — between two requests,
-/// the same query can return rows in different order, so page 2
-/// might have rows that already appeared on page 1. Defaulting to
-/// `<pk> ASC` is cheap (the PK is indexed) and deterministic.
-///
-/// Models without a primary key fall through to an empty clause —
-/// the application is on its own (and pagination on a PK-less model
-/// is unusual anyway).
-fn default_order_by(schema: &'static ModelSchema) -> Vec<crate::core::OrderItem> {
-    match schema.primary_key() {
-        Some(pk) => vec![crate::core::OrderItem::column(pk.column, false)],
-        None => Vec::new(),
-    }
+    Ok(schema.with_pk_tiebreak(out))
 }
 
 /// Resolve the active page size from the URL `?page_size=N` param,
@@ -2289,10 +2344,8 @@ fn resolve_active_order(
         };
         if ordering_fields.iter().any(|f| f == name) {
             if let Some(field) = schema.field(name) {
-                return Ok((
-                    vec![crate::core::OrderItem::column(field.column, desc)],
-                    raw.clone(),
-                ));
+                let order = vec![crate::core::OrderItem::column(field.column, desc)];
+                return Ok((schema.with_pk_tiebreak(order), raw.clone()));
             }
         }
         // Not in allowlist or unknown field — fall through to the
@@ -2354,10 +2407,13 @@ fn build_list_where(
         let Some(field) = schema.field(key) else {
             continue;
         };
+        let Some(value) = filter_value(field, val) else {
+            continue;
+        };
         predicates.push(WhereExpr::Predicate(Filter {
             column: field.column,
             op: Op::Eq,
-            value: SqlValue::String(val.clone()),
+            value,
         }));
     }
 
@@ -2393,25 +2449,39 @@ fn build_list_where(
     }
 }
 
-fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
-    #[cfg(feature = "csrf")]
-    {
-        // Delegate to the public helper so the CBV-side context shape
-        // matches what hand-rolled handlers get from
-        // `forms::csrf::stamp_into_context` (issue #15). Stamps both
-        // `csrf_token` (raw) and `csrf_input` (HTML).
-        crate::forms::csrf::stamp_into_context(_headers, ctx)
+/// A `?field=value` filter typed as its field (#1915). `None` ignores the
+/// filter: an empty value, an unknown bool word, or anything unparsable.
+fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue> {
+    use crate::core::FieldType as T;
+    if raw.is_empty() {
+        return None;
     }
-    #[cfg(not(feature = "csrf"))]
-    {
-        // CSRF feature off — render with empty token so templates that
-        // reference `{{ csrf_token }}` don't error. Validation isn't
-        // enforced in this configuration; the empty hidden input is
-        // harmless.
-        ctx.insert("csrf_token", "");
-        ctx.insert("csrf_input", "");
-        None
+    match field.ty {
+        T::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Some(SqlValue::Bool(true)),
+            "false" | "0" | "off" => Some(SqlValue::Bool(false)),
+            _ => None,
+        },
+        T::DateTime => crate::forms::parse_form_value(field, Some(raw))
+            .ok()
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|d| SqlValue::DateTime(d.and_utc()))
+            }),
+        _ => crate::forms::parse_form_value(field, Some(raw)).ok(),
     }
+}
+
+/// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
+fn stamp_csrf(headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
+    crate::forms::csrf::stamp_into_context(headers, ctx)
+}
+
+/// Every CBV router with a POST route goes through here, so each
+/// write must carry the token [`stamp_csrf`] rendered (#1669).
+fn csrf_protected(router: Router<()>) -> Router<()> {
+    router.route_layer(crate::forms::csrf::layer())
 }
 
 /// Append a `Set-Cookie` header to a ready response when
@@ -2613,41 +2683,8 @@ fn coerce_selected_pks(
     raws: &[String],
 ) -> Result<Vec<SqlValue>, String> {
     raws.iter()
-        .map(|s| coerce_pk_typed(pk_field, s))
+        .map(|s| crate::forms::parse_pk_string(pk_field, s).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()
-}
-
-/// Like `coerce_pk` but returns a typed error rather than falling
-/// back to `SqlValue::String`. The fallback is fine for URL-segment
-/// lookups (the SQL layer's implicit casts paper over the
-/// difference) but bulk-action PKs are bound as a list, where a
-/// type mismatch would crash the whole batch — fail fast.
-fn coerce_pk_typed(
-    pk_field: &'static crate::core::FieldSchema,
-    raw: &str,
-) -> Result<SqlValue, String> {
-    use crate::core::FieldType;
-    match pk_field.ty {
-        FieldType::I64 => raw
-            .parse::<i64>()
-            .map(SqlValue::I64)
-            .map_err(|e| format!("invalid i64 PK `{raw}`: {e}")),
-        FieldType::I32 => raw
-            .parse::<i32>()
-            .map(SqlValue::I32)
-            .map_err(|e| format!("invalid i32 PK `{raw}`: {e}")),
-        FieldType::I16 => raw
-            .parse::<i16>()
-            .map(SqlValue::I16)
-            .map_err(|e| format!("invalid i16 PK `{raw}`: {e}")),
-        FieldType::Uuid => uuid::Uuid::parse_str(raw)
-            .map(SqlValue::Uuid)
-            .map_err(|e| format!("invalid uuid PK `{raw}`: {e}")),
-        FieldType::String => Ok(SqlValue::String(raw.to_owned())),
-        other => Err(format!(
-            "PK type {other:?} is not supported for bulk actions"
-        )),
-    }
 }
 
 /// Resolve `_display` sibling fields for every FK column on the
@@ -2698,10 +2735,8 @@ struct FkLookup {
     target_pk_column: &'static str,
     target_display_column: &'static str,
     target_display_field_name: &'static str,
-    /// Distinct stringified source values from the page (NULL
-    /// values are filtered out so the SQL doesn't bind a NULL
-    /// into the `ANY($1)` array).
-    distinct_values: Vec<Value>,
+    /// Distinct non-null source values, typed as the target column (#1915).
+    distinct_values: Vec<SqlValue>,
 }
 
 fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]) -> Vec<FkLookup> {
@@ -2718,19 +2753,22 @@ fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]
         let Some(display_field) = target.display_field() else {
             continue;
         };
+        let Some(target_field) = target.field_by_column(on) else {
+            continue;
+        };
         // The target's PK column is what we filter on; `on` from
         // the Relation IR is the remote column the local FK
         // references (usually the PK).
-        let mut distinct: Vec<Value> = Vec::new();
+        let mut distinct: Vec<SqlValue> = Vec::new();
         for row in object_list {
-            let Some(val) = row.get(field.name) else {
+            let Some(key) = row.get(field.name).and_then(json_value_as_lookup_key) else {
                 continue;
             };
-            if val.is_null() {
+            let Ok(val) = crate::forms::parse_form_value(target_field, Some(&key)) else {
                 continue;
-            }
-            if !distinct.iter().any(|v| v == val) {
-                distinct.push(val.clone());
+            };
+            if !distinct.contains(&val) {
+                distinct.push(val);
             }
         }
         if distinct.is_empty() {
@@ -2784,44 +2822,10 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
-    // #810 — IN-list lookup via the `by_pk_in` constructor.
-    SelectQuery::by_pk_in(
-        target,
-        fk.target_pk_column,
-        fk.distinct_values
-            .iter()
-            .map(json_value_to_sql_for_fk_pk)
-            .collect(),
-    )
-}
-
-/// Convert a JSON-shaped value (read out of an object_list row)
-/// back into a `SqlValue` for re-binding into the FK lookup's
-/// `IN ($1)` clause. The JSON shape comes from `row_to_json`
-/// which serializes per FieldType, so we round-trip on the same
-/// type table.
-fn json_value_to_sql_for_fk_pk(v: &Value) -> SqlValue {
-    match v {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                SqlValue::I64(i)
-            } else if let Some(u) = n.as_u64() {
-                SqlValue::I64(u as i64)
-            } else {
-                // Float PKs are unusual; bind as string and let PG cast.
-                SqlValue::String(n.to_string())
-            }
-        }
-        Value::String(s) => {
-            // Could be a UUID or a string PK. Try UUID first.
-            if let Ok(u) = uuid::Uuid::parse_str(s) {
-                SqlValue::Uuid(u)
-            } else {
-                SqlValue::String(s.clone())
-            }
-        }
-        _ => SqlValue::Null,
-    }
+    // #810 — IN-list lookup via the `by_pk_in` constructor; a target
+    // row its own global scopes hide gets no `_display`.
+    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone())
+        .with_global_scopes()
 }
 
 /// v0.38 — operates on JSON rows from `select_rows_as_json`
@@ -2944,12 +2948,42 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// `pks` narrowed to the rows the model's global scopes let through,
+/// in submitted order — what a custom bulk action receives.
+async fn visible_pks_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &Pool,
+    pks: &[SqlValue],
+) -> Result<Vec<SqlValue>, String> {
+    if pks.is_empty() || schema.global_scopes.is_empty() {
+        return Ok(pks.to_vec());
+    }
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let rows = select_rows_as_json(pool, &q, &[pk_field])
+        .await
+        .map_err(|e| e.to_string())?;
+    let visible: Vec<SqlValue> = rows
+        .iter()
+        .filter_map(|r| r.get(pk_field.name))
+        .filter_map(|v| {
+            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            crate::forms::parse_pk_string(pk_field, &raw).ok()
+        })
+        .collect();
+    Ok(pks
+        .iter()
+        .filter(|p| visible.contains(p))
+        .cloned()
+        .collect())
 }
 
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
@@ -2963,8 +2997,9 @@ async fn run_delete_selected_pool(
     pks: &[SqlValue],
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
-    crate::sql::delete_pool(pool, &q)
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
+        .with_global_scopes();
+    crate::audit::delete(pool, &q)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -2998,39 +3033,53 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::warn!(target: "rustango::template_views", template = %name, error = %e, "template render failed");
-            // #386 — Django-shape DEBUG overlay. When the active tier
-            // is dev/staging (or RUSTANGO_TEMPLATE_DEBUG=1), serve a
-            // styled HTML page with the full Tera diagnostic instead
-            // of the plain-text 500 fallback. The plain-text path
-            // stays the production default — same stderr/tracing
-            // breadcrumbs, no information leak in the response body.
-            if crate::template_debug::enabled() {
+            // DEBUG overlay: a styled page with
+            // the full Tera diagnostic instead of the plain-text 500.
+            //
+            // Requires **both** the dev tier and the explicit
+            // disclosure opt-in. The overlay renders `Display`,
+            // `Debug` and the whole source chain, which is the same
+            // class of content #1525 removed from 5xx bodies — and it
+            // was reachable on any deployment that had not set
+            // `RUSTANGO_ENV`, i.e. the default, eleven lines above a
+            // comment promising no leak (#1604 review, security-006).
+            //
+            // `template_debug::enabled()` alone still governs whether
+            // this is a *dev* build; `disclose_server_errors` governs
+            // whether a response body may carry a cause. An overlay is
+            // a response body, so it needs both.
+            if crate::template_debug::enabled() && crate::error::disclose_server_errors() {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html(crate::template_debug::error_page_html(&e, name)),
                 )
                     .into_response();
             }
+            // Not the debug tier: the full diagnostic went to the
+            // `warn!` above, and the body says only that it failed.
+            // It used to interpolate `{e}`, directly under a comment
+            // promising no leak — Tera errors quote template source
+            // and the context keys around the failure (#1525, #1543).
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("template render error: {e}"),
+                "template render error".to_owned(),
             )
                 .into_response()
         }
     }
 }
 
+/// A logged `500`; the body withholds `msg`, which may carry driver text (#1955).
 fn template_error(msg: &str) -> Response {
-    tracing::warn!(target: "rustango::template_views", error = %msg, "template view error");
-    (StatusCode::INTERNAL_SERVER_ERROR, msg.to_owned()).into_response()
+    let body = crate::error::server_error_body("rustango::template_views", &msg);
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
 }
 
 // ============================================================== TemplateView
 
 /// No-model CBV that renders a Tera template with a static context.
-/// Django's [`TemplateView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#templateview).
 /// Use for about pages, terms-of-service, dashboards built from
-/// context the caller assembles up front. Issue #13.
+/// context the caller assembles up front.
 ///
 /// ```ignore
 /// use rustango::template_views::TemplateView;
@@ -3108,23 +3157,22 @@ async fn handle_template_view(State(state): State<Arc<TemplateViewState>>) -> Re
 
 // ============================================================== RedirectView
 
-/// No-model CBV that returns an HTTP redirect to a fixed URL. Django's
-/// [`RedirectView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#redirectview).
+/// No-model CBV that returns an HTTP redirect to a fixed URL.
 /// Use for canonical URL migrations (old `/about-us` → new `/about`),
 /// short links, or "click here to go there" flows. Issue #13.
 ///
 /// ```ignore
 /// use rustango::template_views::RedirectView;
 ///
-/// // 302 to /about (matches Django's default temporary redirect).
+/// // 302 to /about — a temporary redirect by default.
 /// let app = RedirectView::to("/about").router("/about-us");
 ///
 /// // 301 (permanent) — survives indexing, search engines update.
 /// let app = RedirectView::to("/about").permanent().router("/old-about");
 /// ```
 ///
-/// Status codes match Django's (302 / 301) — not axum's modern
-/// defaults (303 / 308) — for method-preservation semantics consistent
+/// Status codes are 302 / 301 — not axum's modern defaults
+/// (303 / 308) — for method-preservation semantics consistent
 /// with the framework's [`crate::shortcuts::redirect`] helper.
 #[derive(Clone)]
 pub struct RedirectView {
@@ -3183,8 +3231,7 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 
 /// No-model CBV that renders a `#[derive(Form)]` form on GET, parses
 /// + validates on POST, and redirects to `success_url` when valid.
-/// Django's [`FormView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-editing/#formview).
-/// Issue #13.
+/// The no-model counterpart to [`CreateView`].
 ///
 /// Unlike [`CreateView`] / [`UpdateView`] (which know about a model
 /// schema and do the INSERT/UPDATE for you), `FormView` only handles
@@ -3220,8 +3267,8 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 /// - `values: HashMap<String, String>` — empty on GET, raw POST values
 ///   on validation failure so the form can repopulate.
 ///
-/// CSRF protection is the project's responsibility — mount under a
-/// CSRF-protected scope when reachable from a browser.
+/// The router rejects a POST whose `_csrf` field (render
+/// `{{ csrf_input | safe }}` in the form) does not match the cookie.
 pub struct FormView<F>
 where
     F: crate::forms::Form,
@@ -3278,12 +3325,14 @@ where
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(StandaloneFormViewState { vs: self, tera });
-        Router::new()
-            .route(
-                prefix,
-                get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
-            )
-            .with_state(state)
+        csrf_protected(
+            Router::new()
+                .route(
+                    prefix,
+                    get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
+                )
+                .with_state(state),
+        )
     }
 }
 
@@ -3377,14 +3426,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: Tenant,
     ) -> Response {
-        let page: i64 = params
-            .get("page")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(1)
-            .max(1);
+        let page = crate::list_params::parse_page(&params);
         let page_size =
             super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = (page - 1) * page_size;
+        let offset = crate::list_params::page_offset(page, page_size);
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,
@@ -3409,12 +3454,10 @@ mod tenant {
             limit: Some(page_size),
             offset: Some(offset),
             ..SelectQuery::new(state.vs.schema)
-        };
-        let count_q = crate::core::CountQuery {
-            model: state.vs.schema,
-            where_clause,
-            search: None,
-        };
+        }
+        .with_global_scopes();
+        let count_q =
+            crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
@@ -3529,6 +3572,10 @@ mod tenant {
             .iter()
             .find(|a| super::same_action_name(&a.name, &action))
         {
+            let pks = match super::visible_pks_pool(state.vs.schema, pk_field, &pool, &pks).await {
+                Ok(v) => v,
+                Err(e) => return template_error(&format!("scope selected rows: {e}")),
+            };
             match &custom.handler {
                 #[cfg(feature = "postgres")]
                 super::BulkActionHandler::Tenant(f) => {
@@ -3594,7 +3641,8 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
+            .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3632,7 +3680,8 @@ mod tenant {
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
-            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
+                .with_global_scopes();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3658,15 +3707,13 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        let delete_q = crate::core::DeleteQuery {
-            model: state.vs.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
-        match crate::sql::delete_pool(t.pool(), &delete_q).await {
+        let delete_q = crate::core::DeleteQuery::by_pk(
+            state.vs.schema,
+            pk_field.column,
+            pk_or_404!(pk_field, &pk),
+        )
+        .with_global_scopes();
+        match crate::audit::delete(t.pool(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
@@ -3695,7 +3742,12 @@ mod tenant {
         headers: axum::http::HeaderMap,
     ) -> Response {
         let mut ctx = Context::new();
-        let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            &HashMap::new(),
+            crate::core::WriteKind::Insert,
+        );
         ctx.insert(
             "form",
             &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
@@ -3714,44 +3766,29 @@ mod tenant {
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (columns, values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (mut columns, mut values, mut errors) = parse_form(
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+            crate::core::WriteKind::Insert,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
                 &state, &form, &errors, /*is_update=*/ false, &headers,
             );
         }
-        let returning = match super::success_url_returning_columns(&state.success_url, state.schema)
-        {
-            Ok(cols) => cols,
-            Err(e) => return template_error(&e),
-        };
-        let need_returning = !returning.is_empty();
-        let insert_q = crate::core::InsertQuery {
-            model: state.schema,
-            columns,
-            values,
-            returning,
-            on_conflict: None,
-        };
-        let target_url = if need_returning {
-            match crate::sql::insert_returning_pool(t.pool(), &insert_q).await {
-                Ok(row) => {
-                    match super::interpolate_success_url(&state.success_url, &row, state.schema) {
-                        Ok(url) => url,
-                        Err(e) => return template_error(&e),
-                    }
-                }
-                Err(e) => return template_error(&format!("insert row: {e}")),
+        // Schema-driven INSERT: nothing else supplies these (#1464).
+        crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
+        let insert =
+            super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
+        match insert.await {
+            Ok(url) => axum::response::Redirect::to(&url).into_response(),
+            Err(super::InsertFailed::Duplicate(errors)) => {
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &headers)
             }
-        } else {
-            if let Err(e) = crate::sql::insert_pool(t.pool(), &insert_q).await {
-                return template_error(&format!("insert row: {e}"));
-            }
-            state.success_url.clone()
-        };
-        axum::response::Redirect::to(&target_url).into_response()
+            Err(super::InsertFailed::Error(resp)) => resp,
+        }
     }
 
     pub(super) async fn handle_update_get_tenant(
@@ -3767,7 +3804,8 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
+            .with_global_scopes();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
@@ -3786,7 +3824,12 @@ mod tenant {
             };
             values.insert(k, s);
         }
-        let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            &values,
+            crate::core::WriteKind::Update,
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -3815,8 +3858,12 @@ mod tenant {
                 state.schema.table
             ));
         };
-        let (columns, values, mut errors) =
-            parse_form(state.schema, state.fields.as_deref(), &form);
+        let (columns, values, mut errors) = parse_form(
+            state.schema,
+            state.fields.as_deref(),
+            &form,
+            crate::core::WriteKind::Update,
+        );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
@@ -3831,16 +3878,14 @@ mod tenant {
                 value: value.into(),
             })
             .collect();
-        let update_q = crate::core::UpdateQuery {
-            model: state.schema,
-            set: assignments,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-        };
-        match crate::sql::update_pool(t.pool(), &update_q).await {
+        let pk_match = WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: pk_or_404!(pk_field, &pk),
+        });
+        let update_q =
+            crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
+        match crate::audit::update(t.pool(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);
@@ -3857,7 +3902,12 @@ mod tenant {
         is_update: bool,
         headers: &axum::http::HeaderMap,
     ) -> Response {
-        let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+        let fields = form_fields(
+            state.schema,
+            state.fields.as_deref(),
+            submitted,
+            write_kind(is_update),
+        );
         let mut ctx = Context::new();
         ctx.insert(
             "form",
@@ -3906,6 +3956,7 @@ mod tests {
                     max: None,
                     default: None,
                     auto: true,
+                    auto_now: false,
                     unique: false,
                     generated_as: None,
                     help_text: None,
@@ -3930,6 +3981,7 @@ mod tests {
                     max: None,
                     default: None,
                     auto: false,
+                    auto_now: false,
                     unique: false,
                     generated_as: None,
                     help_text: None,
@@ -3995,6 +4047,7 @@ mod tests {
                     max: None,
                     default: None,
                     auto: true,
+                    auto_now: false,
                     unique: false,
                     generated_as: None,
                     help_text: None,
@@ -4019,6 +4072,7 @@ mod tests {
                     max: None,
                     default: None,
                     auto: false,
+                    auto_now: false,
                     unique: false,
                     generated_as: None,
                     help_text: None,
@@ -4043,6 +4097,7 @@ mod tests {
                     max: Some(100),
                     default: None,
                     auto: false,
+                    auto_now: false,
                     unique: false,
                     generated_as: None,
                     help_text: None,
@@ -4088,7 +4143,7 @@ mod tests {
         }))
     }
 
-    /// Default template name follows the Django convention.
+    /// Default template name is derived from the table name.
     #[test]
     fn list_view_default_template_matches_table() {
         let lv = ListView::for_model(schema_two_fields());
@@ -4131,9 +4186,10 @@ mod tests {
     fn resolve_order_by_accepts_field_or_column_name() {
         let s = schema_two_fields();
         let r = resolve_order_by(s, &[("title".into(), false)]).unwrap();
-        assert_eq!(r.len(), 1);
+        assert_eq!(r.len(), 2);
         assert_eq!(r[0].column_name(), Some("title"));
         assert!(!r[0].is_desc());
+        assert_eq!(r[1].column_name(), Some("id"), "PK tiebreak (#1917)");
     }
 
     /// Unknown field name surfaces a clear error string instead of
@@ -4156,6 +4212,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].column_name(), Some("id"));
         assert!(!out[0].is_desc(), "PK fallback is ASC");
+    }
+
+    /// No builder order: the model's `default_order` applies, then the PK (#2005).
+    #[test]
+    fn resolve_order_by_empty_uses_model_default_order() {
+        let mut s = schema_two_fields().clone();
+        s.default_order = &[("title", true)];
+        let s: &'static ModelSchema = Box::leak(Box::new(s));
+        let out = resolve_order_by(s, &[]).unwrap();
+        let cols: Vec<_> = out.iter().map(|o| (o.column_name(), o.is_desc())).collect();
+        assert_eq!(cols, [(Some("title"), true), (Some("id"), false)]);
+        // An explicit builder order still wins.
+        let out = resolve_order_by(s, &[("id".into(), true)]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].column_name(), Some("id"));
     }
 
     /// `ListView` builder accepts filter_fields + search_fields.
@@ -4196,8 +4267,8 @@ mod tests {
         }
     }
 
-    /// Filter params NOT in the allowlist are silently dropped —
-    /// matches Django's behavior (typos shouldn't 400).
+    /// Filter params NOT in the allowlist are silently dropped, so a
+    /// typo in a query string does not 400.
     #[test]
     fn build_list_where_unknown_field_ignored() {
         let s = schema_two_fields();
@@ -4329,13 +4400,14 @@ mod tests {
     /// rendered hidden input matches what the browser will send
     /// back on POST). Returns `None` for the Set-Cookie since the
     /// cookie was already there.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_reuses_existing_cookie() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_static("session=abc; rustango_csrf=existing-token"),
+            axum::http::HeaderValue::from_static(
+                "session=abc; rustango_csrf=existing-token-existing-token-existing-toke",
+            ),
         );
         let mut ctx = Context::new();
         let set_cookie = stamp_csrf(&headers, &mut ctx);
@@ -4346,12 +4418,11 @@ mod tests {
         let mut tera = Tera::default();
         tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
         let rendered = tera.render("t", &ctx).unwrap();
-        assert_eq!(rendered, "existing-token");
+        assert_eq!(rendered, "existing-token-existing-token-existing-toke");
     }
 
     /// `stamp_csrf` mints a fresh token when the cookie is absent
     /// and returns the Set-Cookie header for the caller to attach.
-    #[cfg(feature = "csrf")]
     #[test]
     fn stamp_csrf_mints_fresh_when_absent() {
         let headers = axum::http::HeaderMap::new();
@@ -4370,21 +4441,6 @@ mod tests {
         assert_eq!(rendered, token_in_cookie);
         // Token shape: 32 random bytes → base64url no-pad → 43 chars.
         assert_eq!(rendered.len(), 43);
-    }
-
-    /// Without the `csrf` feature, `stamp_csrf` is a no-op that
-    /// stamps an empty `csrf_token`. The hidden input renders as
-    /// `<input value="">` — harmless when CSRF isn't enforced.
-    #[cfg(not(feature = "csrf"))]
-    #[test]
-    fn stamp_csrf_noop_when_feature_off() {
-        let headers = axum::http::HeaderMap::new();
-        let mut ctx = Context::new();
-        let set_cookie = stamp_csrf(&headers, &mut ctx);
-        assert!(set_cookie.is_none());
-        let mut tera = Tera::default();
-        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
-        assert_eq!(tera.render("t", &ctx).unwrap(), "");
     }
 
     /// `apply_csrf_cookie` appends a Set-Cookie header when given
@@ -4423,7 +4479,7 @@ mod tests {
     /// pagination on PK-less models is unusual, and there's no
     /// canonical column to pick.
     #[test]
-    fn default_order_by_empty_when_no_pk() {
+    fn pk_tiebreak_empty_when_no_pk() {
         // Build a schema with no primary key.
         let no_pk: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
             name: "Audit",
@@ -4440,6 +4496,7 @@ mod tests {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,
@@ -4482,7 +4539,7 @@ mod tests {
             extra_permissions: &[],
             global_scopes: &[],
         }));
-        assert!(default_order_by(no_pk).is_empty());
+        assert!(resolve_order_by(no_pk, &[]).unwrap().is_empty());
     }
 
     /// `resolved_fields(None)` returns every scalar field.
@@ -4504,7 +4561,7 @@ mod tests {
         assert_eq!(fields[0].name, "title");
     }
 
-    /// `DeleteView::for_model` produces the Django-convention
+    /// `DeleteView::for_model` produces the default
     /// confirm-delete template name + a `/` success_url default
     /// (caller almost always overrides to the list URL).
     #[test]
@@ -4547,9 +4604,41 @@ mod tests {
     fn form_fields_skips_pk_and_auto() {
         let s = schema_two_fields();
         let values = HashMap::new();
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
         assert_eq!(ff.len(), 1);
         assert_eq!(ff[0].name, "title");
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "tv_tag")]
+    #[allow(dead_code)]
+    pub struct Tag {
+        #[rustango(primary_key, max_length = 32)]
+        pub slug: String,
+        #[rustango(max_length = 64)]
+        pub name: String,
+    }
+
+    /// CreateView renders and parses a natural PK; UpdateView does not (#1725).
+    #[test]
+    fn create_view_keeps_a_natural_pk() {
+        use crate::core::WriteKind;
+        let s = <Tag as crate::core::Model>::SCHEMA;
+        let names = |kind| -> Vec<&str> {
+            form_fields(s, None, &HashMap::new(), kind)
+                .iter()
+                .map(|f| f.name)
+                .collect()
+        };
+        assert_eq!(names(WriteKind::Insert), ["slug", "name"]);
+        assert_eq!(names(WriteKind::Update), ["name"]);
+        let submitted: HashMap<String, String> = [("slug", "go"), ("name", "Go")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let (cols, _, errors) = parse_form(s, None, &submitted, WriteKind::Insert);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cols, ["slug", "name"]);
     }
 
     /// `form_fields` populates `value` from the supplied row.
@@ -4558,8 +4647,75 @@ mod tests {
         let s = schema_two_fields();
         let mut values = HashMap::new();
         values.insert("title".to_owned(), "Hello".to_owned());
-        let ff = form_fields(s, None, &values);
+        let ff = form_fields(s, None, &values, crate::core::WriteKind::Insert);
         assert_eq!(ff[0].value, "Hello");
+    }
+
+    /// Pull the backticked names out of the "each entry in `form.fields`
+    /// carries …" sentence, whatever language the page is written in.
+    fn documented_field_keys(text: &str) -> std::collections::BTreeSet<String> {
+        // The template example names `form.fields` too, but inside a
+        // fence and without backticks. The sentence wanted is the one
+        // where a backticked mention is followed by the field list.
+        let start = text
+            .match_indices("`form.fields`")
+            .find(|(i, _)| {
+                let window: String = text[*i..].chars().take(200).collect();
+                window.contains("`max_length`")
+            })
+            .map(|(i, _)| i)
+            .expect("no `form.fields` field-list sentence on this page");
+        // The list ends at the full stop directly after a closing backtick.
+        let end = start + text[start..].find("`.").expect("unterminated sentence") + 1;
+
+        text[start..end]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| !t.contains('.')) // drops `form.fields` itself
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The contract `docs/html-views.md` states is the *serialized* key
+    /// set — a template author writes `{{ field.ty }}`, not a Rust field
+    /// access. The two tests above read the struct directly, so renaming
+    /// a field or adding one leaves them green while the page describes
+    /// a shape that no longer ships.
+    ///
+    /// All four translations carry the same list, so all four are checked.
+    #[test]
+    fn documented_form_field_keys_match_what_is_stamped() {
+        let value = serde_json::to_value(FormField {
+            name: "title",
+            column: "title",
+            ty: "string",
+            required: true,
+            max_length: Some(200),
+            value: String::new(),
+        })
+        .expect("serialize FormField");
+        let serde_json::Value::Object(map) = value else {
+            panic!("FormField no longer serializes as an object: {value:?}")
+        };
+        let stamped: std::collections::BTreeSet<String> = map.keys().cloned().collect();
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for page in [
+            "docs/html-views.md",
+            "docs/de/html-views.md",
+            "docs/es/html-views.md",
+            "docs/fr/html-views.md",
+        ] {
+            let text = std::fs::read_to_string(root.join(page)).expect("read page");
+            assert_eq!(
+                documented_field_keys(&text),
+                stamped,
+                "{page} describes a different set of `form.fields` keys than the \
+                 views stamp — a template written from that page would read \
+                 undefined values"
+            );
+        }
     }
 
     /// `substitute_pk` is the simpler sibling of
@@ -4572,6 +4728,13 @@ mod tests {
             substitute_pk("/posts/{pk}/edit", "abc-123"),
             "/posts/abc-123/edit"
         );
+    }
+
+    #[test]
+    fn substitute_pk_percent_encodes_the_segment() {
+        // A raw CR/LF would panic `Redirect::to`.
+        assert_eq!(substitute_pk("/p/{pk}", "a\r\nb/c"), "/p/a%0D%0Ab%2Fc");
+        let _ = axum::response::Redirect::to(&substitute_pk("/p/{pk}", "a\nb"));
     }
 
     #[test]
@@ -4661,24 +4824,19 @@ mod tests {
     fn coerce_pk_integer_field() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "42") {
+        match coerce_pk(pk, "42").unwrap() {
             SqlValue::I64(n) => assert_eq!(n, 42),
             other => panic!("expected I64, got {other:?}"),
         }
     }
 
-    /// `coerce_pk` falls back to `SqlValue::String` on parse
-    /// failure rather than panicking — the resulting query just
-    /// returns no rows / 404, same effect as a 400 but without
-    /// leaking parse errors.
+    /// A PK that does not parse is `None` (a 404), not a text bind
+    /// PostgreSQL rejects with a 500 (#1950).
     #[test]
-    fn coerce_pk_integer_field_fallback_on_garbage() {
+    fn coerce_pk_integer_field_rejects_garbage() {
         let s = schema_two_fields();
         let pk = s.primary_key().unwrap();
-        match coerce_pk(pk, "not-a-number") {
-            SqlValue::String(raw) => assert_eq!(raw, "not-a-number"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        assert!(coerce_pk(pk, "not-a-number").is_none());
     }
 
     /// `coerce_pk` for a UUID PK parses to `SqlValue::Uuid`.
@@ -4701,6 +4859,7 @@ mod tests {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,
@@ -4745,21 +4904,17 @@ mod tests {
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
-        match coerce_pk(pk, raw) {
+        match coerce_pk(pk, raw).unwrap() {
             SqlValue::Uuid(_) => {} // success — variant matches
             other => panic!("expected Uuid, got {other:?}"),
         }
-        // Garbage UUID falls back to String.
-        match coerce_pk(pk, "not-a-uuid") {
-            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
-            other => panic!("expected fallback String, got {other:?}"),
-        }
+        // A garbage UUID is a 404, not a text bind (#1950).
+        assert!(coerce_pk(pk, "not-a-uuid").is_none());
     }
 
-    /// `coerce_pk` for a String PK passes through verbatim.
-    #[test]
-    fn coerce_pk_string_field() {
-        let str_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+    /// A model whose PK is a client-set `String`.
+    fn slug_schema() -> &'static ModelSchema {
+        Box::leak(Box::new(ModelSchema {
             name: "Slug",
             table: "slugs",
             fields: Box::leak(Box::new([crate::core::FieldSchema {
@@ -4774,6 +4929,7 @@ mod tests {
                 max: None,
                 default: None,
                 auto: false,
+                auto_now: false,
                 unique: false,
                 generated_as: None,
                 help_text: None,
@@ -4815,35 +4971,49 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
-        }));
+        }))
+    }
+
+    /// A lookup field `parse_pk_string` refuses (a date) goes through `parse_form_value`.
+    #[test]
+    fn coerce_pk_falls_back_to_the_form_parser() {
+        let day = crate::core::FieldSchema {
+            name: "day",
+            column: "day",
+            ty: FieldType::Date,
+            primary_key: false,
+            ..*schema_two_fields().primary_key().unwrap()
+        };
+        let want = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(coerce_pk(&day, "2026-10-01"), Some(SqlValue::Date(want)));
+        assert!(coerce_pk(&day, "not-a-date").is_none());
+    }
+
+    /// `coerce_pk` for a String PK passes through verbatim.
+    #[test]
+    fn coerce_pk_string_field() {
+        let str_schema = slug_schema();
         let pk = str_schema.primary_key().unwrap();
-        match coerce_pk(pk, "hello-world") {
+        match coerce_pk(pk, "hello-world").unwrap() {
             SqlValue::String(s) => assert_eq!(s, "hello-world"),
             other => panic!("expected String, got {other:?}"),
         }
     }
 
-    /// `coerce_value` rejects garbage integers with a clear error.
+    /// MySQL's `LAST_INSERT_ID()` is 0 for a client-set PK; `{pk}` takes the written one (#1894).
+    #[cfg(feature = "mysql")]
     #[test]
-    fn coerce_value_int_error_surfaces() {
-        let s = schema_two_fields();
-        // The `id` field is i64.
-        let id = &s.fields[0];
-        let err = coerce_value(id, "not-a-number").unwrap_err();
-        assert!(err.contains("integer"), "got: {err}");
-    }
-
-    /// Empty raw value on a NOT NULL non-bool field is reported as
-    /// required-missing by `parse_form` (not by `coerce_value`).
-    /// `coerce_value` itself returns Ok(SqlValue::String("")) for
-    /// strings with the empty value — which is fine; required-ness
-    /// is checked in the parse layer.
-    #[test]
-    fn coerce_value_empty_string_passes_through() {
-        let s = schema_two_fields();
-        let title = &s.fields[1];
-        let v = coerce_value(title, "").unwrap();
-        assert!(matches!(v, SqlValue::String(ref s) if s.is_empty()));
+    fn success_url_pk_is_the_submitted_one_on_mysql() {
+        let q = crate::core::InsertQuery::new(
+            slug_schema(),
+            vec!["slug"],
+            vec![SqlValue::String("rust".into())],
+        );
+        let row = crate::sql::InsertReturningPool::MySqlAutoId(0);
+        let url = interpolate_success_url("/tags/{pk}", &row, &q).expect("url");
+        assert_eq!(url, "/tags/rust");
+        let unsent = crate::core::InsertQuery::new(slug_schema(), vec![], vec![]);
+        assert!(interpolate_success_url("/tags/{pk}", &row, &unsent).is_err());
     }
 
     /// `parse_form` collects required-missing errors for non-nullable
@@ -4852,7 +5022,7 @@ mod tests {
     fn parse_form_flags_required_missing() {
         let s = schema_two_fields();
         let submitted = HashMap::new();
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty());
         assert!(vals.is_empty());
         assert_eq!(errors.len(), 1);
@@ -4866,7 +5036,7 @@ mod tests {
         let s = schema_two_fields();
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "Hello".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(errors.is_empty());
         assert_eq!(cols, vec!["title"]);
         assert_eq!(vals.len(), 1);
@@ -4900,7 +5070,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
         submitted.insert("score".to_owned(), "50".to_owned());
-        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        let (cols, vals, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         assert!(cols.is_empty() || !cols.contains(&"title"));
         assert!(
             vals.is_empty() || vals.len() == 1,
@@ -4922,7 +5092,7 @@ mod tests {
         let mut submitted = HashMap::new();
         submitted.insert("title".to_owned(), "ok".to_owned());
         submitted.insert("score".to_owned(), "150".to_owned()); // > 100
-        let (_, _, errors) = parse_form(s, None, &submitted);
+        let (_, _, errors) = parse_form(s, None, &submitted, crate::core::WriteKind::Insert);
         let score_err = errors.get("score").expect("score error present");
         assert!(
             score_err.contains("100") && score_err.contains("150"),
@@ -5091,9 +5261,10 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("ordering".into(), "title".into());
         let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
-        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses.len(), 2);
         assert_eq!(clauses[0].column_name(), Some("title"));
         assert!(!clauses[0].is_desc());
+        assert_eq!(clauses[1].column_name(), Some("id"), "PK tiebreak (#1917)");
         assert_eq!(active, "title");
     }
 
@@ -5118,8 +5289,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("ordering".into(), "id".into()); // not in allowlist
         let (_, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
-        // Builder default has no order_by, so `default_order_by`
-        // returns PK-ASC; `active` is empty (templates render no
+        // Builder default has no order_by, so the order is PK-ASC; `active` is empty (templates render no
         // "active sort" indicator since the user-requested sort
         // wasn't applied).
         assert_eq!(active, "");
@@ -5181,7 +5351,7 @@ mod tests {
     }
 
     /// Non-field errors land under the special `__all__` key —
-    /// matches Django convention for cross-field errors.
+    /// the agreed key for cross-field errors.
     #[test]
     fn merge_validator_non_field_errors_land_under_all_key() {
         let v: Validator = Arc::new(|_data| {
@@ -5300,55 +5470,6 @@ mod tests {
         assert_eq!(pks, vec!["1", "2", "3"]);
     }
 
-    /// `coerce_pk_typed` converts to the right `SqlValue` per
-    /// `FieldType` and surfaces parse errors instead of falling
-    /// back to a string (which would corrupt the SQL `IN (...)`
-    /// bind).
-    #[test]
-    fn coerce_pk_typed_returns_correct_sqlvalue_per_type() {
-        use crate::core::FieldType;
-        let f = |ty: FieldType| {
-            Box::leak(Box::new(crate::core::FieldSchema {
-                name: "id",
-                column: "id",
-                ty,
-                nullable: false,
-                primary_key: true,
-                relation: None,
-                max_length: None,
-                min: None,
-                max: None,
-                default: None,
-                auto: false,
-                unique: false,
-                generated_as: None,
-                help_text: None,
-                choices: None,
-                db_comment: None,
-                verbose_name: None,
-                editable: true,
-                blank: false,
-                case_insensitive: false,
-                fk_on_delete: None,
-                validators: &[],
-            })) as &'static crate::core::FieldSchema
-        };
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I64), "42"),
-            Ok(SqlValue::I64(42))
-        ));
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I32), "42"),
-            Ok(SqlValue::I32(42))
-        ));
-        assert!(matches!(
-            coerce_pk_typed(f(FieldType::I16), "42"),
-            Ok(SqlValue::I16(42))
-        ));
-        assert!(coerce_pk_typed(f(FieldType::I64), "not-a-number").is_err());
-        assert!(coerce_pk_typed(f(FieldType::Uuid), "not-a-uuid").is_err());
-    }
-
     /// `bulk_actions` Tera context entry leads with `delete_selected`,
     /// then user-registered actions in order.
     #[test]
@@ -5438,28 +5559,6 @@ mod tests {
             "NULL FK has no lookup key"
         );
         assert_eq!(json_value_as_lookup_key(&serde_json::json!(true)), None);
-    }
-
-    /// `json_value_to_sql_for_fk_pk` round-trips integer JSON →
-    /// SqlValue::I64 (the common FK shape) and string-shaped UUIDs
-    /// → SqlValue::Uuid (auto-detected via parse). Other strings
-    /// pass through as SqlValue::String.
-    #[test]
-    fn json_value_to_sql_for_fk_pk_round_trips_common_pk_types() {
-        match json_value_to_sql_for_fk_pk(&serde_json::json!(42)) {
-            SqlValue::I64(42) => {}
-            other => panic!("expected I64(42), got {other:?}"),
-        }
-        match json_value_to_sql_for_fk_pk(&serde_json::json!(
-            "550e8400-e29b-41d4-a716-446655440000"
-        )) {
-            SqlValue::Uuid(u) => assert_eq!(u.to_string(), "550e8400-e29b-41d4-a716-446655440000"),
-            other => panic!("expected Uuid, got {other:?}"),
-        }
-        match json_value_to_sql_for_fk_pk(&serde_json::json!("not-a-uuid")) {
-            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
-            other => panic!("expected String, got {other:?}"),
-        }
     }
 
     /// `stamp_display_into_rows` walks a `Vec<Value>`, looks up
@@ -5738,20 +5837,141 @@ mod tests {
             .template("f.html")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("name="))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "name=")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
+    }
+
+    const TEST_CSRF: &str = "existing-token-existing-token-existing-toke";
+
+    /// A form POST carrying a matching CSRF cookie and `_csrf` field.
+    fn csrf_form_post(uri: &str, body: &str) -> Request<Body> {
+        let body = if body.is_empty() {
+            format!("_csrf={TEST_CSRF}")
+        } else {
+            format!("_csrf={TEST_CSRF}&{body}")
+        };
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("rustango_csrf={TEST_CSRF}"))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    /// Every CBV router with a POST route rejects a write without the token (#1669).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_post_without_csrf_token_is_forbidden() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+        let schema = schema_two_fields();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let tera = Arc::new(tera);
+        let routers: Vec<(&str, Router<()>)> = vec![
+            (
+                "/form",
+                FormView::<OkForm>::for_form(|_| async { Ok(()) })
+                    .template("f.html")
+                    .router("/form", tera.clone()),
+            ),
+            (
+                "/c/new",
+                CreateView::for_model(schema).router("/c", tera.clone(), pool.clone()),
+            ),
+            (
+                "/u/1/edit",
+                UpdateView::for_model(schema).router("/u", tera.clone(), pool.clone()),
+            ),
+            (
+                "/d/1/delete",
+                DeleteView::for_model(schema).router("/d", tera.clone(), pool.clone()),
+            ),
+            (
+                "/l",
+                ListView::for_model(schema).bulk_actions(true).router(
+                    "/l",
+                    tera.clone(),
+                    pool.clone(),
+                ),
+            ),
+        ];
+        for (uri, app) in routers {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from("action=delete_selected&_selected_action=1"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    /// Every `tenant_router` with a POST route rejects a write without the
+    /// token, before tenant resolution (#1669).
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn cbv_tenant_post_without_csrf_token_is_forbidden() {
+        let schema = schema_two_fields();
+        let tera = Arc::new(Tera::default());
+        let routers = || -> Vec<(&str, Router<()>)> {
+            vec![
+                (
+                    "/c/new",
+                    CreateView::for_model(schema).tenant_router("/c", tera.clone()),
+                ),
+                (
+                    "/u/1/edit",
+                    UpdateView::for_model(schema).tenant_router("/u", tera.clone()),
+                ),
+                (
+                    "/d/1/delete",
+                    DeleteView::for_model(schema).tenant_router("/d", tera.clone()),
+                ),
+                (
+                    "/l",
+                    ListView::for_model(schema)
+                        .bulk_actions(true)
+                        .tenant_router("/l", tera.clone()),
+                ),
+            ]
+        };
+        let body = "action=delete_selected&_selected_action=1";
+        for (uri, app) in routers() {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        // With the token the request gets past CSRF (and fails on the missing tenant).
+        for (uri, app) in routers() {
+            let res = app.oneshot(csrf_form_post(uri, body)).await.unwrap();
+            assert_ne!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -5773,17 +5993,7 @@ mod tests {
             .success_url("/thanks")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             res.headers()
@@ -5815,17 +6025,7 @@ mod tests {
             .success_url("/thanks\r\nSet-Cookie: pwned=1")
             .router("/", Arc::new(tera));
 
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(""))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert!(
             res.headers().get(axum::http::header::LOCATION).is_none(),

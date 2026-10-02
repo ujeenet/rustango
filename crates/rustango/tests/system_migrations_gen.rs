@@ -88,9 +88,7 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
         let pool = Pool::connect(&url).await.unwrap();
         let applied = rustango::migrate::migrate_pool(&pool, dir).await.unwrap();
         assert_eq!(applied.len(), 1, "one system migration applied for {dir:?}");
-        let Pool::Sqlite(sq) = &pool else {
-            unreachable!()
-        };
+        let sq = pool.as_sqlite().expect("sqlite pool");
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'rustango\\_%' ESCAPE '\\'",
         )
@@ -146,9 +144,7 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
 
     // The composite unique index on the permissions table came through
     // from the model's `unique_together` (tenant DB).
-    let Pool::Sqlite(sq) = &ten_pool else {
-        unreachable!()
-    };
+    let sq = ten_pool.as_sqlite().expect("sqlite pool");
     let idx: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='rustango_permissions_table_name_codename_idx'",
     ).fetch_one(sq).await.unwrap();
@@ -198,4 +194,478 @@ fn admin_sso_feature_toggles_provider_table() {
         disable.contains("DropTable(\"rustango_shared_sso_providers\")"),
         "disabling admin-sso must DropTable the shared providers: {disable}"
     );
+}
+
+/// `true` when `table` has `column` in the SQLite database behind `pool`.
+async fn has_column(pool: &rustango::sql::Pool, table: &str, column: &str) -> bool {
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let n: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(sq)
+    .await
+    .unwrap();
+    n == 1
+}
+
+/// `true` when `table` exists in the SQLite database behind `pool`.
+async fn has_table(pool: &rustango::sql::Pool, table: &str) -> bool {
+    has_column(pool, table, "id").await
+}
+
+/// #1988 — an image without `system/` regenerates a baseline whose name
+/// is already in the ledger. A framework table the upgrade adds is
+/// modelled by dropping one; a second dir must restore it, not skip it.
+#[tokio::test]
+async fn single_db_migrate_from_a_dir_without_system_restores_the_schema() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let migrate = |dir: std::path::PathBuf| {
+        let pool = pool.clone();
+        async move {
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut out = Vec::new();
+            rustango::migrate::manage::run_with_writer(
+                &pool,
+                &dir,
+                ["migrate".to_owned()],
+                &mut out,
+            )
+            .await
+        }
+    };
+    migrate(tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    let table = "rustango_user_permissions";
+    rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+
+    migrate(tmp.path().join("deploy2/migrations"))
+        .await
+        .expect("a second dir migrates the same database");
+    assert!(has_table(&pool, table).await, "{table} was skipped");
+}
+
+/// The tenancy runner takes the same path; a dropped column comes back too.
+#[tokio::test]
+async fn registry_migrate_from_a_dir_without_system_restores_the_schema() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let migrate = |dir: std::path::PathBuf| {
+        let pool = pool.clone();
+        async move {
+            std::fs::create_dir_all(&dir).unwrap();
+            rustango::tenancy::migrate_registry_pool(&pool, &dir).await
+        }
+    };
+    migrate(tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    let (table, column) = ("rustango_operators", "password_changed_at");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!("ALTER TABLE {table} DROP COLUMN {column}"),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    migrate(tmp.path().join("deploy2/migrations"))
+        .await
+        .expect("a second dir migrates the same database");
+    assert!(
+        has_column(&pool, table, column).await,
+        "{table}.{column} was skipped"
+    );
+}
+
+/// `manage migrate` against `pool` from `dir`, which it creates.
+async fn manage_migrate(
+    pool: &rustango::sql::Pool,
+    dir: std::path::PathBuf,
+) -> Result<(), rustango::migrate::MigrateError> {
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut out = Vec::new();
+    rustango::migrate::manage::run_with_writer(pool, &dir, ["migrate".to_owned()], &mut out).await
+}
+
+async fn exec(pool: &rustango::sql::Pool, sql: &str) {
+    rustango::sql::raw_execute_pool(pool, sql, Vec::new())
+        .await
+        .unwrap();
+}
+
+/// A `database`-mode SQLite tenant whose file is `<dir>/<slug>.db`.
+fn sqlite_org(dir: &std::path::Path, slug: &str) -> rustango::tenancy::Org {
+    rustango::tenancy::Org {
+        slug: slug.to_owned(),
+        display_name: slug.to_owned(),
+        storage_mode: "database".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite:{}?mode=rwc",
+            dir.join(format!("{slug}.db")).display()
+        )),
+        ..rustango::testkit::org()
+    }
+}
+
+/// Migrate the registry, then every tenant, from `dir`.
+async fn deploy(
+    registry: &rustango::sql::Pool,
+    pools: &rustango::tenancy::TenantPools<rustango::sql::sqlx::Sqlite>,
+    dir: &std::path::Path,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    rustango::tenancy::migrate_registry_pool(registry, dir)
+        .await
+        .expect("registry");
+    let report = rustango::tenancy::migrate_tenants_db(pools, dir, "")
+        .await
+        .expect("tenants");
+    assert!(report.all_ok(), "{report:?}");
+}
+
+/// #1988 — the registry run fills a fresh dir first; every later tenant
+/// must still converge, so a table and column dropped in the 2nd come back.
+#[tokio::test]
+async fn tenants_after_the_registry_restore_the_schema() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let reg_url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let reg = rustango::sql::sqlx::SqlitePool::connect(&reg_url)
+        .await
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Sqlite(reg);
+    let boot = tmp.path().join("boot/migrations");
+    std::fs::create_dir_all(&boot).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &boot)
+        .await
+        .expect("registry tables");
+    for slug in ["t1", "t2", "t3"] {
+        let mut org = sqlite_org(tmp.path(), slug);
+        org.insert_pool(&registry).await.unwrap();
+    }
+    deploy(&registry, &pools, &tmp.path().join("deploy1/migrations")).await;
+    let t2 = Pool::connect(&sqlite_org(tmp.path(), "t2").database_url.unwrap())
+        .await
+        .unwrap();
+    exec(&t2, "DROP TABLE rustango_user_permissions").await;
+    exec(
+        &t2,
+        "ALTER TABLE rustango_users DROP COLUMN password_changed_at",
+    )
+    .await;
+
+    deploy(&registry, &pools, &tmp.path().join("deploy2/migrations")).await;
+    assert!(
+        has_table(&t2, "rustango_user_permissions").await,
+        "the 2nd tenant's dropped table was skipped"
+    );
+    assert!(
+        has_column(&t2, "rustango_users", "password_changed_at").await,
+        "the 2nd tenant's dropped column was skipped"
+    );
+}
+
+/// SQLite can't `ADD COLUMN … DEFAULT (strftime(…'now'))` on a table with
+/// rows; converge must still restore such a column instead of failing.
+#[tokio::test]
+async fn converge_adds_a_now_default_column_to_a_table_with_rows() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    manage_migrate(&pool, tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    exec(
+        &pool,
+        "INSERT INTO rustango_audit_log (entity_table, entity_pk, operation, source, changes) \
+         VALUES ('t', '1', 'create', 'test', '{}')",
+    )
+    .await;
+    let sq = pool.as_sqlite().unwrap();
+    let indexes: Vec<String> = rustango::sql::sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND tbl_name = 'rustango_audit_log' AND sql LIKE '%occurred_at%'",
+    )
+    .fetch_all(sq)
+    .await
+    .unwrap();
+    for ix in indexes {
+        exec(&pool, &format!("DROP INDEX \"{ix}\"")).await;
+    }
+    exec(
+        &pool,
+        "ALTER TABLE rustango_audit_log DROP COLUMN occurred_at",
+    )
+    .await;
+
+    manage_migrate(&pool, tmp.path().join("deploy2/migrations"))
+        .await
+        .expect("a now() column on a table with rows must not fail the boot");
+    assert!(has_column(&pool, "rustango_audit_log", "occurred_at").await);
+    let null_rows: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rustango_audit_log WHERE occurred_at IS NULL",
+    )
+    .fetch_one(sq)
+    .await
+    .unwrap();
+    assert_eq!(null_rows, 0, "existing rows got no timestamp");
+}
+
+/// One column converge can't add must not block the rest, and the error
+/// must name it without telling the user to delete framework files.
+#[tokio::test]
+async fn converge_reports_what_it_cannot_add_and_fixes_the_rest() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    manage_migrate(&pool, tmp.path().join("deploy1/migrations"))
+        .await
+        .expect("first deploy");
+    exec(&pool, "ALTER TABLE rustango_audit_log DROP COLUMN source").await;
+    // A row, so the column has no value to take; an empty table gets it (#2066).
+    exec(
+        &pool,
+        "INSERT INTO rustango_audit_log (entity_table, entity_pk, operation, changes) \
+         VALUES ('t', '1', 'create', '{}')",
+    )
+    .await;
+    exec(&pool, "DROP TABLE rustango_user_permissions").await;
+
+    let err = manage_migrate(&pool, tmp.path().join("deploy2/migrations"))
+        .await
+        .expect_err("a NOT NULL column with no default can't be added")
+        .to_string();
+    assert!(
+        has_table(&pool, "rustango_user_permissions").await,
+        "one bad column blocked the other tables: {err}"
+    );
+    assert!(err.contains("rustango_audit_log.source"), "{err}");
+    assert!(!err.to_lowercase().contains("delete"), "{err}");
+}
+
+/// Mixed-scope project migrations: tenants must apply the committed
+/// `system/migrations/`, not a chain regenerated in a temp dir.
+#[tokio::test]
+async fn mixed_scope_tenants_use_the_committed_system_chain() {
+    use rustango::migrate::{Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let dir = root.join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scope, table) in [
+        ("0001_reg", MigrationScope::Registry, "reg_things"),
+        ("0002_ten", MigrationScope::Tenant, "ten_things"),
+    ] {
+        let table: rustango::migrate::TableSnapshot = serde_json::from_value(serde_json::json!({
+            "name": table, "model": "T",
+            "fields": [{"name": "id", "column": "id", "ty": "i64",
+                        "nullable": false, "primary_key": true}]
+        }))
+        .unwrap();
+        let mig = Migration {
+            name: name.into(),
+            created_at: "2026-10-01T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope,
+            replaces: Vec::new(),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(
+                table.name.clone(),
+            ))],
+            snapshot: SchemaSnapshot {
+                tables: vec![table],
+                ..Default::default()
+            },
+        };
+        rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+    }
+    rustango::migrate::make_migrations_system(&root, ModelScope::Tenant, Some("committed"))
+        .unwrap()
+        .expect("committed tenant chain");
+
+    let reg_url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let reg = rustango::sql::sqlx::SqlitePool::connect(&reg_url)
+        .await
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Sqlite(reg);
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry");
+    let mut org = sqlite_org(tmp.path(), "t1");
+    org.insert_pool(&registry).await.unwrap();
+    let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .unwrap();
+    assert!(report.all_ok(), "{report:?}");
+
+    let tenant = Pool::connect(&org.database_url.unwrap()).await.unwrap();
+    let n: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM __rustango_system_migrations__ WHERE name = '0001_committed'",
+    )
+    .fetch_one(tenant.as_sqlite().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(
+        n, 1,
+        "the tenant ran a regenerated chain, not the committed one"
+    );
+}
+
+/// A framework change the engine can't emit fails `migrate`, rather than
+/// applying the stale chain (#2014).
+#[tokio::test]
+async fn migrate_fails_when_the_system_chain_cannot_be_generated() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let dir = tmp.path().join("deploy/migrations");
+    manage_migrate(&pool, dir.clone())
+        .await
+        .expect("first deploy");
+    poison_users_username(&tmp.path().join("deploy/system/migrations"));
+
+    let err = manage_migrate(&pool, dir)
+        .await
+        .expect_err("a generation error must fail migrate")
+        .to_string();
+    assert!(err.contains("rustango_users.username"), "{err}");
+}
+
+/// A `min` on the committed `rustango_users.username`: no op can move a
+/// live table there, so generating the tenant chain fails.
+fn poison_users_username(sys: &std::path::Path) {
+    let last = rustango::migrate::file::list_dir(sys)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|m| m.scope == rustango::migrate::MigrationScope::Tenant)
+        .expect("a tenant system migration");
+    let path = sys.join(format!("{}.json", last.name));
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let field = json["snapshot"]["tables"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["name"] == "rustango_users")
+        .and_then(|t| {
+            t["fields"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|f| f["column"] == "username")
+        })
+        .expect("rustango_users.username");
+    field["min"] = serde_json::json!(7);
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+}
+
+/// #2014 on the tenant runner: a chain that can't be generated fails it.
+#[tokio::test]
+async fn migrate_tenants_fails_when_the_system_chain_cannot_be_generated() {
+    use rustango::sql::Pool;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let dir = root.join("migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg_url = format!("sqlite:{}?mode=rwc", tmp.path().join("reg.db").display());
+    let reg = rustango::sql::sqlx::SqlitePool::connect(&reg_url)
+        .await
+        .unwrap();
+    let pools = rustango::tenancy::TenantPools::new(reg.clone());
+    let registry = Pool::Sqlite(reg);
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry");
+    sqlite_org(tmp.path(), "t1")
+        .insert_pool(&registry)
+        .await
+        .unwrap();
+    let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .unwrap();
+    assert!(report.all_ok(), "{report:?}");
+
+    poison_users_username(&root.join("system/migrations"));
+    let err = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
+        .await
+        .expect_err("a generation error must fail migrate-tenants")
+        .to_string();
+    assert!(err.contains("rustango_users.username"), "{err}");
+}
+
+/// A project whose own `0001` creates `rustango_admin_users` (pre-system-chain
+/// scaffold) plus an older system chain: the system `AddColumn` on that table
+/// must wait for the project chain on a fresh database.
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn legacy_project_table_gets_the_later_system_column_on_a_fresh_db() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let sys = root.join("system/migrations");
+    for scope in [ModelScope::Registry, ModelScope::Tenant] {
+        rustango::migrate::make_migrations_system(root, scope, None).unwrap();
+    }
+    // Age the tenant chain: its admin_users predates `sessions_revoked_at`.
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let tenant = std::fs::read_dir(&sys)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| !std::fs::read_to_string(p).unwrap().contains("\"scope\""))
+        .expect("tenant file");
+    let mut mig: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&tenant).unwrap()).unwrap();
+    let tables = mig["snapshot"]["tables"].as_array_mut().unwrap();
+    let old = tables.iter_mut().find(|t| t["name"] == table).unwrap();
+    old["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|f| f["column"] != column);
+    let old = old.clone();
+    std::fs::write(&tenant, mig.to_string()).unwrap();
+    let step = rustango::migrate::make_migrations_system(root, ModelScope::Tenant, None)
+        .unwrap()
+        .expect("the AddColumn step");
+    assert!(format!("{:?}", step.forward).contains(column));
+    // The project's own initial creates the old table.
+    let project = serde_json::json!({
+        "name": "0001_initial",
+        "created_at": "2026-01-01T00:00:00Z",
+        "prev": null,
+        "snapshot": { "tables": [old] },
+        "forward": [{ "schema": { "CreateTable": table } }],
+    });
+    std::fs::create_dir_all(root.join("migrations")).unwrap();
+    std::fs::write(
+        root.join("migrations/0001_initial.json"),
+        project.to_string(),
+    )
+    .unwrap();
+
+    let url = format!("sqlite:{}?mode=rwc", root.join("db.sqlite").display());
+    let pool = rustango::sql::Pool::connect(&url).await.unwrap();
+    manage_migrate(&pool, root.join("migrations"))
+        .await
+        .expect("fresh database migrates");
+    assert!(has_column(&pool, table, column).await);
+    manage_migrate(&pool, root.join("migrations"))
+        .await
+        .expect("second run is a no-op");
 }

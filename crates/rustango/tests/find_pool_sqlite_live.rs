@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted `Model::find(pk, pool)`
-//! shortcut — Eloquent `Model::find()` / Django `Model.objects.get(pk=)`
-//! parity (non-throwing, returns `Option<Self>`).
+//! shortcut — fetch by primary key, returning `Option<Self>` rather
+//! than erroring when the row is absent.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

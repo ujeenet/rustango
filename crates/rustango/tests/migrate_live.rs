@@ -445,3 +445,102 @@ async fn apply_all_is_safe_to_call_after_drop_all() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+/// Replicas migrating a fresh DB at once: the ledger CREATE used to run
+/// before the lock and collide on `pg_type` (23505) (#1844).
+#[tokio::test]
+async fn concurrent_migrates_bootstrap_one_ledger() {
+    let _g = live_lock().lock().await;
+    let Some(pg) = pool().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = "mig_race_ledger";
+    for _ in 0..5 {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {ledger}"))
+            .execute(&pg)
+            .await
+            .unwrap();
+        // A pool each, as separate replicas have.
+        let mut replicas = Vec::new();
+        for _ in 0..8 {
+            let url = std::env::var("DATABASE_URL").unwrap();
+            replicas.push(rustango::sql::Pool::from(
+                sqlx::PgPool::connect(&url).await.unwrap(),
+            ));
+        }
+        let runs: Vec<_> = replicas
+            .into_iter()
+            .map(|pool| {
+                let dir = dir.path().to_path_buf();
+                tokio::spawn(
+                    async move { migrate::migrate_pool_with_ledger(&pool, &dir, ledger).await },
+                )
+            })
+            .collect();
+        for run in runs {
+            run.await.unwrap().expect("every replica migrates");
+        }
+    }
+    sqlx::query(&format!("DROP TABLE IF EXISTS {ledger}"))
+        .execute(&pg)
+        .await
+        .unwrap();
+}
+
+/// The legacy `PgPool` ledger bootstrap waits for a pool migrate: they
+/// locked on different keys, so their CREATEs could collide (23505).
+#[tokio::test]
+async fn legacy_bootstrap_waits_for_a_pool_migrate() {
+    use rustango::migrate::{DataOp, Migration, Operation};
+    let _g = live_lock().lock().await;
+    let Some(pg) = pool().await else {
+        return;
+    };
+    let (slow, legacy) = ("mig_lock_slow_ledger", "mig_lock_legacy_ledger");
+    for t in [slow, legacy] {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {t}"))
+            .execute(&pg)
+            .await
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mig = Migration {
+        name: "0001_slow".into(),
+        created_at: "2026-10-01T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT pg_sleep(2)".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+        snapshot: Default::default(),
+    };
+    migrate::file::write(&dir.path().join("0001_slow.json"), &mig).unwrap();
+    let runner = rustango::sql::Pool::from(pg.clone());
+    let path = dir.path().to_path_buf();
+    let run =
+        tokio::spawn(async move { migrate::migrate_pool_with_ledger(&runner, &path, slow).await });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let started = std::time::Instant::now();
+    migrate::Builder::default()
+        .ledger(legacy)
+        .ensure_ledger(&pg)
+        .await
+        .unwrap();
+    let waited = started.elapsed();
+    run.await.unwrap().expect("the slow migrate");
+    assert!(
+        waited.as_millis() >= 1000,
+        "no wait for the lock: {waited:?}"
+    );
+    for t in [slow, legacy] {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {t}"))
+            .execute(&pg)
+            .await
+            .unwrap();
+    }
+}

@@ -1,4 +1,4 @@
-//! Django-parity #359 — `admin(formfield_overrides = "field:widget, …")`
+//! Issue #359 — `admin(formfield_overrides = "field:widget, …")`
 //! swaps the FieldType-default input on the admin change-form for a
 //! named built-in widget. Unknown names fall back to the default
 //! (with a tracing warning at dispatch time).

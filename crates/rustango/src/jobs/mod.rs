@@ -32,33 +32,27 @@
 //! queue.shutdown().await;
 //! ```
 //!
-//! ## Backends shipped
+//! ## Backends
 //!
 //! | Backend | When to use |
 //! |---|---|
-//! | [`InMemoryJobQueue`] | Single-process apps, dev, tests. Jobs lost on restart. |
-//!
-//! ## Backends planned
-//!
-//! - **`DbJobQueue`** — Postgres-backed using `SELECT ... FOR UPDATE SKIP LOCKED`
-//!   for multi-process / multi-replica deployments
-//! - **`RedisJobQueue`** — Redis-backed using `BRPOPLPUSH` for high-throughput / language-agnostic queues
+//! | [`InMemoryJobQueue`] | One process: dev, tests, small apps. Jobs are lost on restart. |
+//! | `pg::PgJobQueue` (feature `jobs-postgres`) | Many processes or replicas. Runs on PostgreSQL, MySQL 8+ or SQLite. |
 //!
 //! ## Retry policy
 //!
-//! Jobs that return `Err(JobError::Retryable(_))` are retried with
-//! exponential backoff (1s, 2s, 4s, 8s, ...) up to `max_attempts` (default 5).
-//! `Err(JobError::Fatal(_))` skips the retry queue and goes straight to the
-//! dead-letter handler.
+//! A job that returns `Err(JobError::Retryable(_))` is retried with
+//! growing backoff (1s, 2s, 4s, 8s, …). `max_attempts` counts **all**
+//! runs, so the default of 5 means one run plus four retries.
+//! `Err(JobError::Fatal(_))` goes straight to the dead-letter handler.
+//!
+//! [`InMemoryJobQueue`]: crate::jobs::InMemoryJobQueue
 
 #[cfg(feature = "jobs-postgres")]
 pub mod pg;
 
-/// v0.41 — forward-looking alias for [`pg::PgJobQueue`]. The struct
-/// itself is tri-dialect since v0.38; the `Pg` prefix is purely
-/// historical (it was the original PG-only impl name). New code should
-/// reach for `DatabaseJobQueue`; existing `PgJobQueue` call-sites
-/// keep working unchanged.
+/// Alias for [`pg::PgJobQueue`]. The queue is not PG-only — the `Pg`
+/// prefix is historical. Prefer this name in new code.
 #[cfg(feature = "jobs-postgres")]
 pub type DatabaseJobQueue = pg::PgJobQueue;
 
@@ -96,32 +90,28 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Stable identifier for this job kind. Routes payloads to handlers.
     const NAME: &'static str;
 
-    /// Maximum retry attempts before giving up. Default 5.
+    /// Cap on **total** runs, not extra retries. The default of 5 is
+    /// one run plus four retries; 3 gives two retries.
     const MAX_ATTEMPTS: u32 = 5;
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
-    /// retry with backoff, `Err(Fatal(_))` to dead-letter immediately.
+    /// retry with backoff, `Err(Fatal(_))` to dead-letter at once.
     ///
-    /// **Some ambient context reaches here, and which depends on the
-    /// queue.** [`tokio::spawn`] inherits no `tokio::task_local!` state,
-    /// so anything a job sees had to be carried to it deliberately —
-    /// see [`crate::task_context::TaskContext`].
+    /// **Which ambient context reaches here depends on the queue.**
+    /// [`tokio::spawn`] inherits no `tokio::task_local!` state, so the
+    /// queue must carry it — see [`crate::task_context::TaskContext`].
     ///
     /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
     /// |---|---|---|
     /// | audit source | the enqueuer's | `System` |
     /// | active timezone | the enqueuer's | the default |
     ///
-    /// `PgJobQueue` carries neither: its envelope is a `rustango_jobs`
-    /// row, so context needs a column and a migration (#1229).
+    /// `PgJobQueue` stores its envelope as a `rustango_jobs` row, so it
+    /// needs a column to carry context (#1229). There, put the actor in
+    /// the payload and re-enter [`crate::audit::with_source`] yourself.
     ///
-    /// **Neither queue carries a session or a tenant**, and no job
-    /// should assume one. Anything else a job needs travels in its
-    /// payload. Tenant scoping is tracked separately in #1223.
-    ///
-    /// Do not wrap the body in [`crate::audit::with_source`] to
-    /// re-establish the caller — on `InMemoryJobQueue` that overwrites
-    /// a source already installed for you.
+    /// **Neither queue carries a session or a tenant.** Anything else a
+    /// job needs travels in its payload.
     async fn run(&self) -> Result<(), JobError>;
 }
 
@@ -183,7 +173,13 @@ impl HandlerRegistry {
             Box::pin(async move {
                 let job: T =
                     serde_json::from_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
-                job.run().await
+                // A panic is a failed run, not a dead worker (#1843).
+                crate::panic_guard::catch_unwind(job.run())
+                    .await
+                    .unwrap_or_else(|panic| {
+                        let msg = crate::panic_guard::panic_message(&*panic);
+                        Err(JobError::Retryable(format!("job panicked: {msg}")))
+                    })
             })
         });
         self.handlers.insert(T::NAME, (handler, T::MAX_ATTEMPTS));
@@ -208,12 +204,32 @@ pub struct JobDeadLetter {
     pub error: String,
 }
 
+/// Run a dead-letter callback; a panic in it is logged, not propagated.
+pub(crate) async fn deliver_dead_letter(cb: DeadLetterFn, dl: JobDeadLetter) {
+    let name = dl.name;
+    if let Err(panic) = crate::panic_guard::catch_unwind(cb(dl)).await {
+        let msg = crate::panic_guard::panic_message(&*panic);
+        tracing::error!(job = name, panic = msg, "dead-letter callback panicked");
+    }
+}
+
+/// Milliseconds to wait before the retry that follows `failed_attempt`:
+/// 1s, 2s, 4s, 8s, … capped at 2^10 s.
+///
+/// `failed_attempt` is **0-based** — the index of the run that just
+/// failed — so the first retry waits 1s. Shared by both backends so
+/// they cannot drift apart.
+pub(crate) fn retry_backoff_ms(failed_attempt: u32) -> u64 {
+    1000u64.saturating_mul(1u64 << failed_attempt.min(10))
+}
+
 // ------------------------------------------------------------------ InMemoryJobQueue
 
-/// In-process job queue using tokio mpsc channels.
+/// In-process job queue built on tokio mpsc channels.
 ///
-/// **Persistence: none.** Jobs in flight or queued at process restart are lost.
-/// Use the (planned) `DbJobQueue` for production multi-process deployments.
+/// **Nothing is persisted.** Queued and in-flight jobs are lost when
+/// the process restarts. For production or multi-process deploys use
+/// `pg::PgJobQueue` (feature `jobs-postgres`).
 pub struct InMemoryJobQueue {
     tx: mpsc::UnboundedSender<JobEnvelope>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<JobEnvelope>>>,
@@ -264,18 +280,16 @@ impl Default for InMemoryJobQueue {
     }
 }
 
-/// Build an [`InMemoryJobQueue`] sized from a loaded
-/// [`crate::config::JobsSettings`] section (#87 wiring, v0.29).
-/// Honors `s.concurrency` (defaults to 4 workers when unset).
+/// Build an [`InMemoryJobQueue`] from a loaded
+/// [`crate::config::JobsSettings`]. Uses `s.concurrency`, or 4 workers
+/// when it is unset.
 ///
-/// ## Why memory-only?
+/// ## Why only the in-memory backend?
 ///
-/// The [`JobQueue`] trait is **not object-safe** — its `register<T:
-/// Job>` and `dispatch<T: Job>` methods are generic, so `Arc<dyn
-/// JobQueue>` can't compile. That precludes a runtime backend
-/// picker that returns a single shared type. Projects wanting
-/// [`pg::PgJobQueue`] (or any third-party backend) wire it
-/// directly:
+/// [`JobQueue`] is not object-safe: `register<T>` and `dispatch<T>`
+/// are generic, so `Arc<dyn JobQueue>` does not compile. There can be
+/// no runtime backend picker with one shared return type. Wire any
+/// other backend yourself:
 ///
 /// ```ignore
 /// let queue = match cfg.jobs.backend.as_deref() {
@@ -284,9 +298,7 @@ impl Default for InMemoryJobQueue {
 /// };
 /// ```
 ///
-/// `s.backend` is **read-only** at this layer; `manage check
-/// --deploy` warns if a non-memory value is set without a backend
-/// shipped to consume it.
+/// This function only reads `s.backend` to warn on a mismatch.
 #[cfg(feature = "config")]
 #[must_use]
 pub fn inmemory_from_settings(s: &crate::config::JobsSettings) -> Arc<InMemoryJobQueue> {
@@ -355,9 +367,8 @@ impl JobQueue for InMemoryJobQueue {
     }
 
     async fn shutdown(&self) {
-        // Drop the inbound channel by replacing it with a fresh one
-        // (the workers' rx will see the channel close and exit naturally).
-        // Since rx is held inside a Mutex, we can't easily replace; just abort.
+        // The receiver lives behind a Mutex, so we cannot close the
+        // channel to let workers exit on their own. Abort them instead.
         let mut workers = self.workers.lock().await;
         for h in workers.drain(..) {
             h.abort();
@@ -414,20 +425,19 @@ async fn worker_loop(
                     // Dead-letter
                     let dl_callback = dead_letter.lock().await.clone();
                     if let Some(cb) = dl_callback {
-                        cb(JobDeadLetter {
+                        let dl = JobDeadLetter {
                             name: envelope.name,
                             payload: envelope.payload.clone(),
                             attempts: next_attempt,
                             error: msg,
-                        })
-                        .await;
+                        };
+                        deliver_dead_letter(cb, dl).await;
                     } else {
                         tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
                     }
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 } else {
-                    // Re-enqueue after backoff (1s, 2s, 4s, 8s, ...)
-                    let backoff_ms = 1000u64.saturating_mul(1u64 << next_attempt.min(10));
+                    let backoff_ms = retry_backoff_ms(envelope.attempt);
                     let mut retry = envelope.clone();
                     retry.attempt = next_attempt;
                     let tx = tx.clone();
@@ -442,13 +452,13 @@ async fn worker_loop(
                 let msg = e.to_string();
                 let dl_callback = dead_letter.lock().await.clone();
                 if let Some(cb) = dl_callback {
-                    cb(JobDeadLetter {
+                    let dl = JobDeadLetter {
                         name: envelope.name,
                         payload: envelope.payload.clone(),
                         attempts: envelope.attempt + 1,
                         error: msg,
-                    })
-                    .await;
+                    };
+                    deliver_dead_letter(cb, dl).await;
                 } else {
                     tracing::error!(job = envelope.name, error = %msg, "job fatal");
                 }
@@ -463,6 +473,31 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Pins the documented 1s, 2s, 4s, 8s sequence.
+    #[test]
+    fn retry_backoff_starts_at_one_second_and_doubles() {
+        // `failed_attempt` is 0-based: the run that just failed.
+        assert_eq!(
+            retry_backoff_ms(0),
+            1_000,
+            "the first retry waits 1s, not 2s"
+        );
+        assert_eq!(retry_backoff_ms(1), 2_000);
+        assert_eq!(retry_backoff_ms(2), 4_000);
+        assert_eq!(retry_backoff_ms(3), 8_000);
+    }
+
+    /// The cap, and that it cannot overflow the shift.
+    #[test]
+    fn retry_backoff_caps_rather_than_overflowing() {
+        assert_eq!(retry_backoff_ms(10), 1_024_000);
+        assert_eq!(
+            retry_backoff_ms(u32::MAX),
+            1_024_000,
+            "a runaway attempt count must clamp, not shift past 63 and panic"
+        );
+    }
 
     #[derive(Serialize, Deserialize, Debug)]
     struct Increment;
@@ -640,11 +675,61 @@ mod tests {
         })
         .await
         .unwrap();
-        // Backoff: ~2s after first failure, ~4s after second → wait ~7s to be safe.
+        // Backoff is ~1s then ~2s; 7s leaves plenty of room.
         tokio::time::sleep(Duration::from_millis(7000)).await;
         let succ = SUCCESSES.lock().unwrap();
         assert!(succ.contains(&marker), "expected marker, got {succ:?}");
         drop(succ);
+        q.shutdown().await;
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct Panics;
+
+    #[async_trait::async_trait]
+    impl Job for Panics {
+        const NAME: &'static str = "test:panics";
+        const MAX_ATTEMPTS: u32 = 1;
+        async fn run(&self) -> Result<(), JobError> {
+            panic!("boom");
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct AfterPanic;
+
+    static AFTER_PANIC: AtomicUsize = AtomicUsize::new(0);
+
+    #[async_trait::async_trait]
+    impl Job for AfterPanic {
+        const NAME: &'static str = "test:after_panic";
+        async fn run(&self) -> Result<(), JobError> {
+            AFTER_PANIC.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// #1843: the one worker survives a panic, and the panic is a failed run.
+    #[tokio::test]
+    async fn a_panicking_job_keeps_the_worker() {
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Panics>().await;
+        q.register::<AfterPanic>().await;
+        let dead: Arc<Mutex<Vec<JobDeadLetter>>> = Arc::default();
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().await.push(dl) }
+        })
+        .await;
+        q.start().await;
+        q.dispatch(&Panics).await.unwrap();
+        q.dispatch(&AfterPanic).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(AFTER_PANIC.load(Ordering::SeqCst), 1, "worker still runs");
+        let dead = dead.lock().await;
+        assert!(dead[0].error.contains("job panicked: boom"), "{dead:?}");
+        assert_eq!(q.pending_count().await, 0);
         q.shutdown().await;
     }
 
@@ -682,8 +767,7 @@ mod tests {
         assert_eq!(q.pending_count().await, 3);
     }
 
-    /// `inmemory_from_settings` honors `concurrency` and defaults
-    /// to 4 workers when unset (#87 wiring).
+    /// `inmemory_from_settings` uses `concurrency` when it is set.
     #[cfg(feature = "config")]
     #[test]
     fn inmemory_from_settings_uses_configured_concurrency() {

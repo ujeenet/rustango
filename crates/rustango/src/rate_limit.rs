@@ -19,8 +19,9 @@
 //! - **Token bucket**: each key (IP or user id) gets `capacity` tokens.
 //! - On each request, one token is removed. If empty, return 429.
 //! - Tokens refill at `capacity / refill_period` per second.
-//! - Buckets live in an in-process `tokio::sync::Mutex<HashMap>`. Process-local —
-//!   for distributed enforcement, integrate with the cache layer (future slice).
+//! - Buckets live in an in-process map, so each process limits on its
+//!   own. For one shared limit across processes, use the
+//!   `rate_limit_cache` module instead.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -29,15 +30,21 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request};
-use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderValue, Response};
 use axum::middleware::Next;
 use axum::Router;
 
-/// Warn (at most once per process) that the limiter could not derive a
-/// per-client key and is falling back to a shared bucket — a
-/// misconfiguration that turns the limiter into a site-wide throttle
-/// (#1252). Rate-limited to one line so a hot path can't flood logs.
-fn warn_missing_discriminator(what: &str) {
+/// Ceiling on how many buckets the map may hold.
+///
+/// 100k entries costs a few megabytes. That is more clients than a
+/// real deployment sees inside one `refill_period`, but low enough
+/// that a flood of forged header values cannot exhaust memory.
+const MAX_BUCKETS: usize = 100_000;
+
+/// Warn once per process that the limiter cannot tell clients apart
+/// and is using one shared bucket. That turns the limiter into a
+/// site-wide throttle. Logged once so a hot path cannot flood logs.
+pub(crate) fn warn_missing_discriminator(what: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -52,26 +59,107 @@ fn warn_missing_discriminator(what: &str) {
     }
 }
 
+/// Warn once that a forwarding header arrived but no
+/// [`TrustedRealIp`] did, so every client behind that proxy shares
+/// one bucket. Either `RealIpLayer` is missing, it is mounted after
+/// the limiter, or no proxies were marked trusted.
+///
+/// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
+fn warn_forwarded_but_unresolved(headers: &axum::http::HeaderMap) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    let forwarded = headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded");
+    if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::rate_limit",
+            "per-IP rate limiting saw a forwarding header but no trusted client \
+             address, so it is keying on the connecting address and EVERY client \
+             behind that proxy shares ONE bucket. Mount `real_ip::RealIpLayer` \
+             ahead of the limiter (layers apply outermost-last, so add it after) \
+             AND name your proxies with `.trust_proxies([...])` — without that \
+             the header is only a claim and is deliberately ignored here.",
+        );
+    }
+}
+
+/// The client IP the limiters key on: the forwarded address if it
+/// came through a **trusted** proxy, otherwise the connecting socket.
+///
+/// This uses [`TrustedRealIp`], never [`RealIp`]. A `RealIp` is only a
+/// claim by whoever sent the header. Keying on it would let any client
+/// pick its own bucket and skip the limit entirely. Only
+/// [`RealIpLayer::trust_proxies`] produces the trusted form: the
+/// rightmost hop outside the named proxies. It is only as sound as
+/// that list and the header strategy your proxy actually writes.
+///
+/// All header parsing lives in `RealIpLayer`. The limiters never read
+/// `X-Forwarded-For` themselves. IPv6 is keyed by its /64, as in
+/// [`ip_bucket`].
+///
+/// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
+/// [`RealIp`]: crate::real_ip::RealIp
+/// [`RealIpLayer::trust_proxies`]: crate::real_ip::RealIpLayer::trust_proxies
+pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
+    client_ip(req.extensions(), req.headers()).map_or_else(
+        || {
+            warn_missing_discriminator("IP (ConnectInfo missing)");
+            "<no-ip>".to_owned()
+        },
+        ip_bucket,
+    )
+}
+
+/// The client IP from request parts; `None` when no address is known.
+/// Every IP reader goes through here, so none trusts a raw header.
+pub(crate) fn client_ip(
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Option<std::net::IpAddr> {
+    if let Some(ip) = extensions.get::<crate::real_ip::TrustedRealIp>() {
+        return Some(ip.0);
+    }
+    let ci = extensions.get::<ConnectInfo<SocketAddr>>()?;
+    warn_forwarded_but_unresolved(headers);
+    Some(ci.ip())
+}
+
+/// The bucket key for one address: IPv4 as is, IPv6 by its /64, since
+/// one IPv6 client usually holds the whole /64.
+pub(crate) fn ip_bucket(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+                format!("{net}/64")
+            }
+        },
+    }
+}
+
 /// Strategy for picking the bucket key per request.
 #[derive(Clone, Debug)]
 pub enum KeyBy {
     /// Use the connecting client's IP address (`ConnectInfo<SocketAddr>`).
     ///
-    /// Requires the server to be built with
-    /// `into_make_service_with_connect_info::<SocketAddr>()`. If it is
-    /// **not**, every request falls back to one shared bucket, so one
-    /// client throttles the whole site — a self-inflicted DoS. The
-    /// limiter logs a one-time warning when this happens (#1252); make
-    /// sure your bind wires up `ConnectInfo`.
+    /// Serve with
+    /// `into_make_service_with_connect_info::<SocketAddr>()`. Without
+    /// it, every request shares one bucket, so a single client can
+    /// throttle the whole site. The limiter warns once if that happens.
     Ip,
-    /// Use the value of a request header (e.g. `"x-api-key"` or `"authorization"`).
+    /// Use the value of a request header, such as `"x-api-key"`.
     ///
-    /// In the cache-backed limiter the value is **hashed** before use as
-    /// a key, so a shared cache never exposes a raw credential (#1252).
-    /// Requests missing the header fall back to one shared bucket and
-    /// log a one-time warning, as with `Ip`.
+    /// The cache-backed limiter hashes the value first, so a shared
+    /// cache never holds a raw credential. Requests without the header
+    /// share one bucket and log a warning, as with `Ip`.
     Header(&'static str),
-    /// Single global bucket — coarse but easy. Good for "max N requests/sec for the whole endpoint".
+    /// One bucket for everything. Coarse, but fine for "max N
+    /// requests/sec on this endpoint".
     Global,
 }
 
@@ -84,6 +172,9 @@ pub struct RateLimitLayer {
     refill_period: Duration,
     /// Bucket key strategy.
     key_by: KeyBy,
+    /// Ceiling on distinct buckets — see [`MAX_BUCKETS`] and
+    /// [`RateLimitLayer::max_buckets`].
+    max_buckets: usize,
     /// Shared bucket store across all requests.
     store: Arc<tokio::sync::Mutex<HashMap<String, Bucket>>>,
 }
@@ -118,8 +209,21 @@ impl RateLimitLayer {
             capacity,
             refill_period,
             key_by,
+            max_buckets: MAX_BUCKETS,
             store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the distinct-bucket ceiling (default [`MAX_BUCKETS`]).
+    ///
+    /// Raise it if you really serve more than 100k distinct clients
+    /// inside one `refill_period` and have the memory. Lower it on a
+    /// small instance. `0` becomes 1: a limiter with no buckets cannot
+    /// limit. Tests also use a small ceiling to reach the eviction path.
+    #[must_use]
+    pub fn max_buckets(mut self, n: usize) -> Self {
+        self.max_buckets = n.max(1);
+        self
     }
 
     fn rate_per_sec(&self) -> f64 {
@@ -129,13 +233,67 @@ impl RateLimitLayer {
         self.capacity as f64 / self.refill_period.as_secs_f64()
     }
 
+    /// Bound the bucket map before inserting a new key. With
+    /// `KeyBy::Header` the key is an attacker-chosen header value, so
+    /// an unbounded map is a way to kill the process.
+    ///
+    /// **The sweep drops only buckets that are full.** A full bucket
+    /// and a missing bucket behave the same: a new key starts at
+    /// `tokens = capacity`, and a bucket left alone for
+    /// `refill_period` has refilled to exactly that. So dropping it
+    /// cannot give anyone one extra request. Dropping a partly spent
+    /// bucket would, and that is a rate-limit bypass.
+    ///
+    /// If every bucket is still partly spent, the hard cap kicks in
+    /// and drops the **fullest** ones, which are the cheapest to lose.
+    ///
+    /// **Both passes rank on projected tokens, never on age.** Ranking
+    /// by age is backwards: `last_refill` moves on every take, so the
+    /// least recently used bucket is the one that spent its budget and
+    /// went quiet. That is exactly the bucket an attacker wants
+    /// evicted, because evicting it returns a full allowance.
+    fn make_room(&self, store: &mut HashMap<String, Bucket>, now: Instant) {
+        if store.len() < self.max_buckets {
+            return;
+        }
+        let cap = self.capacity as f64;
+        let rate = self.rate_per_sec();
+        // What this bucket would hold if it were touched right now.
+        let projected = |b: &Bucket| {
+            let elapsed = now.duration_since(b.last_refill).as_secs_f64();
+            (b.tokens + elapsed * rate).min(cap)
+        };
+
+        // A bucket at capacity allows the same as a missing one.
+        store.retain(|_, b| projected(b) < cap);
+        if store.len() < self.max_buckets {
+            return;
+        }
+
+        // Still at the cap. Drop the fullest eighth, so this does not
+        // run again on the very next miss.
+        let mut by_fullness: Vec<(f64, String)> = store
+            .iter()
+            .map(|(k, b)| (projected(b), k.clone()))
+            .collect();
+        by_fullness.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, k) in by_fullness.into_iter().take((self.max_buckets / 8).max(1)) {
+            store.remove(&k);
+        }
+    }
+
     /// Take one token. Returns `Ok((remaining, retry_after_secs))` on success,
     /// `Err(retry_after_secs)` when the bucket is empty.
-    async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
+    pub(crate) async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
         let now = Instant::now();
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();
         let mut store = self.store.lock().await;
+        // Only a new key grows the map, so sweep on the miss path and
+        // keep the hot path a plain lookup.
+        if !store.contains_key(key) {
+            self.make_room(&mut store, now);
+        }
         let bucket = store.entry(key.to_owned()).or_insert(Bucket {
             tokens: cap,
             last_refill: now,
@@ -150,31 +308,52 @@ impl RateLimitLayer {
             bucket.tokens -= 1.0;
             Ok((bucket.tokens.floor() as u32, 0))
         } else {
-            // How many seconds until 1 token is available?
-            let need = 1.0 - bucket.tokens;
-            let retry = if rate > 0.0 {
-                (need / rate).ceil() as u64
-            } else {
-                u64::MAX
-            };
-            Err(retry.max(1))
+            Err(self.retry_after(bucket.tokens))
         }
+    }
+
+    /// [`Self::take`] without spending: `Err(retry_after_secs)` when
+    /// the bucket is empty. Never adds a bucket.
+    #[cfg(feature = "admin")] // only `login_throttle` calls it
+    pub(crate) async fn peek(&self, key: &str) -> Result<(), u64> {
+        let store = self.store.lock().await;
+        let Some(b) = store.get(key) else {
+            return Ok(());
+        };
+        let elapsed = Instant::now().duration_since(b.last_refill).as_secs_f64();
+        let tokens = (b.tokens + elapsed * self.rate_per_sec()).min(f64::from(self.capacity));
+        if tokens >= 1.0 {
+            Ok(())
+        } else {
+            Err(self.retry_after(tokens))
+        }
+    }
+
+    /// Return one token spent by [`Self::take`].
+    #[cfg(feature = "admin")]
+    pub(crate) async fn give_back(&self, key: &str) {
+        if let Some(b) = self.store.lock().await.get_mut(key) {
+            b.tokens = (b.tokens + 1.0).min(f64::from(self.capacity));
+        }
+    }
+
+    /// Seconds until a bucket holding `tokens` has one to spend.
+    fn retry_after(&self, tokens: f64) -> u64 {
+        let rate = self.rate_per_sec();
+        let retry = if rate > 0.0 {
+            ((1.0 - tokens) / rate).ceil() as u64
+        } else {
+            u64::MAX
+        };
+        retry.max(1)
     }
 
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
-            KeyBy::Ip => req
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ci| ci.ip().to_string())
-                .unwrap_or_else(|| {
-                    warn_missing_discriminator("IP (ConnectInfo missing)");
-                    "<no-ip>".to_owned()
-                }),
-            // Unlike the cache-backed limiter, this store is a
-            // process-local `HashMap` that never leaves memory, so the
-            // header value is not persisted anywhere an attacker could
-            // read it — no hashing needed here (#1252).
+            KeyBy::Ip => client_ip_key(req),
+            // This map stays in process memory and is never written
+            // anywhere, so the raw header value needs no hashing. The
+            // cache-backed limiter does hash it.
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)
@@ -223,15 +402,16 @@ async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Res
             );
             response
         }
-        Err(retry_secs) => Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(header::RETRY_AFTER, retry_secs.to_string())
-            .header("x-ratelimit-limit", cfg.capacity.to_string())
-            .header("x-ratelimit-remaining", "0")
-            .body(Body::from(format!(
-                r#"{{"error":"rate limit exceeded","retry_after":{retry_secs}}}"#
-            )))
-            .unwrap(),
+        Err(retry_secs) => {
+            let mut resp = crate::api_errors::ApiError::rate_limited_response(
+                "rate limit exceeded",
+                retry_secs,
+            );
+            let h = resp.headers_mut();
+            h.insert("x-ratelimit-limit", cfg.capacity.into());
+            h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+            resp
+        }
     }
 }
 
@@ -265,6 +445,44 @@ mod tests {
         assert!(l.take("alice").await.is_err());
         // Different key — fresh bucket
         assert!(l.take("bob").await.is_ok());
+    }
+
+    #[test]
+    fn ipv6_buckets_by_64_and_ipv4_by_address() {
+        let b = |s: &str| ip_bucket(s.parse().unwrap());
+        assert_eq!(b("2001:db8:1:2:aaaa::1"), b("2001:db8:1:2:ffff::9"));
+        assert_ne!(b("2001:db8:1:2::1"), b("2001:db8:1:3::1"));
+        assert_ne!(b("10.0.0.1"), b("10.0.0.2"));
+        assert_eq!(b("::ffff:10.0.0.1"), b("10.0.0.1"));
+    }
+
+    /// One IPv6 client rotating through its /64 stays in one bucket (#1748).
+    #[test]
+    fn per_ip_keys_ipv6_by_its_64() {
+        let l = RateLimitLayer::per_ip(1, Duration::from_secs(60));
+        let key = |addr: &str| {
+            let mut req = axum::http::Request::builder().body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(addr.parse::<SocketAddr>().unwrap()));
+            l.extract_key(&req)
+        };
+        assert_eq!(
+            key("[2001:db8:1:2::1]:4000"),
+            key("[2001:db8:1:2::ffff]:4000")
+        );
+        assert_ne!(key("[2001:db8:1:2::1]:4000"), key("[2001:db8:1:3::1]:4000"));
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn peek_spends_nothing_and_give_back_refunds() {
+        let l = RateLimitLayer::global(1, Duration::from_secs(60));
+        assert!(l.peek("k").await.is_ok());
+        assert!(l.take("k").await.is_ok());
+        assert!(l.peek("k").await.is_err());
+        l.give_back("k").await;
+        assert!(l.peek("k").await.is_ok());
+        assert!(l.take("k").await.is_ok());
     }
 
     #[tokio::test]

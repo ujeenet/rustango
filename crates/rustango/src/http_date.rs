@@ -1,18 +1,15 @@
-//! Django-shape HTTP date parser + formatter.
+//! HTTP date parser and formatter.
 //!
-//! Mirrors `django.utils.http.{http_date, parse_http_date}` — used
-//! for `Last-Modified`, `If-Modified-Since`, `If-Unmodified-Since`,
-//! `Expires`, `Date` and similar HTTP date headers.
+//! Use it for `Last-Modified`, `If-Modified-Since`, `Expires`, `Date` and
+//! other HTTP date headers.
 //!
-//! Per RFC 7231 §7.1.1.1, an HTTP server must EMIT IMF-fixdate
-//! (the RFC 1123 form) but must ACCEPT all three historical
-//! formats:
+//! RFC 7231 §7.1.1.1 says a server must send IMF-fixdate but must
+//! accept all three old formats:
 //!
-//! * **IMF-fixdate** (RFC 1123, modern preferred):
+//! * **IMF-fixdate** (RFC 1123, the one to send):
 //!   `"Sun, 06 Nov 1994 08:49:37 GMT"`
-//! * **RFC 850** (obsolete, two-digit year, hyphenated date,
-//!   weekday spelled out): `"Sunday, 06-Nov-94 08:49:37 GMT"`
-//! * **ANSI C asctime()** (no zone, no comma): `"Sun Nov  6 08:49:37 1994"`
+//! * **RFC 850**, obsolete: `"Sunday, 06-Nov-94 08:49:37 GMT"`
+//! * **ANSI C asctime()**, no zone: `"Sun Nov  6 08:49:37 1994"`
 //!
 //! ```ignore
 //! use rustango::http_date::{http_date, parse_http_date};
@@ -27,17 +24,15 @@
 //! assert_eq!(parse_http_date("Sun Nov  6 08:49:37 1994"), Some(784111777));
 //! ```
 
-/// Format a Unix timestamp (seconds since epoch) as an IMF-fixdate
-/// HTTP date header — `"Sun, 06 Nov 1994 08:49:37 GMT"`. Django's
-/// `http_date(epoch_seconds)`.
+/// Format Unix seconds as an IMF-fixdate header, like
+/// `"Sun, 06 Nov 1994 08:49:37 GMT"`.
 ///
-/// Output is always UTC / GMT (RFC 7231 mandate); local-tz timestamps
-/// must be converted before calling.
+/// The output is always GMT, as RFC 7231 requires, so convert a local
+/// time before calling.
 ///
-/// Timestamps that overflow `i64` (e.g. far-future fanciful values)
-/// are clamped to "now" per a `chrono::Utc::now` fallback — the
-/// alternative is panicking from a Unix-time outside chrono's range,
-/// which is worse than rendering "now" in a Last-Modified header.
+/// A value too large for `i64` falls back to the epoch, and a value
+/// outside chrono's range falls back to now. Both beat a panic in a
+/// `Last-Modified` header.
 #[must_use]
 pub fn http_date(secs: u64) -> String {
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(i64::try_from(secs).unwrap_or(0), 0)
@@ -45,19 +40,14 @@ pub fn http_date(secs: u64) -> String {
     dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
-/// Parse any of the three RFC 7231 §7.1.1.1 HTTP date shapes
-/// (RFC 1123 IMF-fixdate, RFC 850, ANSI C asctime) into Unix epoch
-/// seconds. Django's `parse_http_date(s)`.
+/// Parse any of the three HTTP date shapes from RFC 7231 §7.1.1.1
+/// into Unix seconds.
 ///
-/// Returns `None` on:
-/// * empty / whitespace-only input
-/// * a format we don't recognize (we don't try heroic recovery —
-///   sending a `Last-Modified` your peer can't parse is preferable
-///   to silently accepting a date the peer didn't actually emit)
-/// * negative epoch values (pre-1970 — Django raises, we return `None`)
+/// Returns `None` for empty input, for a shape we do not recognise,
+/// and for dates before 1970.
 ///
-/// RFC 850 two-digit years use the Y2K rolling convention:
-/// `00..=49` → 2000-2049, `50..=99` → 1950-1999.
+/// A two-digit RFC 850 year follows chrono's split: `00..=68` is
+/// 2000-2068 and `69..=99` is 1969-1999.
 ///
 /// ```ignore
 /// use rustango::http_date::parse_http_date;
@@ -75,9 +65,8 @@ pub fn parse_http_date(s: &str) -> Option<u64> {
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%a, %d %b %Y %H:%M:%S GMT") {
         return positive_secs(naive);
     }
-    // 2. RFC 2822 (used by chrono): "Sun, 06 Nov 1994 08:49:37 +0000"
-    //    — accepted for back-compat with the existing static-files
-    //    parser that pre-dated this module.
+    // 2. RFC 2822: "Sun, 06 Nov 1994 08:49:37 +0000". Kept because the
+    //    static-files parser accepted it before this module existed.
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(trimmed) {
         let ts = dt.timestamp();
         return if ts >= 0 {
@@ -86,16 +75,13 @@ pub fn parse_http_date(s: &str) -> Option<u64> {
             None
         };
     }
-    // 3. RFC 850: "Sunday, 06-Nov-94 08:49:37 GMT" — two-digit year,
-    //    hyphenated date, full weekday name. chrono's `%y` rolls Y2K
-    //    at the 00/69 break by default; we override below if needed.
+    // 3. RFC 850: "Sunday, 06-Nov-94 08:49:37 GMT". Two-digit year,
+    //    hyphens, full weekday name.
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%A, %d-%b-%y %H:%M:%S GMT") {
         return positive_secs(naive);
     }
-    // 4. ANSI C asctime(): "Sun Nov  6 08:49:37 1994"
-    //    — note the DOUBLE space when day-of-month is one digit
-    //    (asctime pads to two chars). `%e` handles both single- and
-    //    double-digit days; chrono interprets it as "blank-padded".
+    // 4. ANSI C asctime(): "Sun Nov  6 08:49:37 1994". A one-digit day
+    //    is space-padded, which `%e` accepts.
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%a %b %e %H:%M:%S %Y") {
         return positive_secs(naive);
     }
@@ -103,9 +89,7 @@ pub fn parse_http_date(s: &str) -> Option<u64> {
     None
 }
 
-/// Convert a parsed `NaiveDateTime` (treated as UTC) into a
-/// non-negative Unix-seconds count. Internal helper —
-/// pre-1970 values surface as `None`.
+/// Turn a parsed UTC datetime into Unix seconds. Pre-1970 → `None`.
 fn positive_secs(naive: chrono::NaiveDateTime) -> Option<u64> {
     let ts = naive.and_utc().timestamp();
     if ts < 0 {
@@ -127,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn format_canonical_django_example() {
+    fn format_canonical_rfc_example() {
         // 784111777 = Sun, 06 Nov 1994 08:49:37 GMT (RFC 7231 example).
         assert_eq!(http_date(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
     }
@@ -173,8 +157,8 @@ mod tests {
 
     #[test]
     fn parse_rfc_850_y2k_rolls_after_69() {
-        // `%y` in chrono uses the 00/69 split. `94` → 1994, `05` → 2005.
-        // Feb 3 2005 was a Thursday — chrono strict-parses the weekday.
+        // chrono's `%y` split: `94` → 1994, `05` → 2005. Feb 3 2005
+        // was a Thursday, and chrono checks the weekday.
         let ts_2005 = parse_http_date("Thursday, 03-Feb-05 12:00:00 GMT").unwrap();
         // 2005-02-03 12:00:00 UTC = 1107432000
         assert_eq!(ts_2005, 1_107_432_000);
@@ -216,8 +200,7 @@ mod tests {
 
     #[test]
     fn parse_pre_1970_is_none() {
-        // Django raises ValueError on pre-1970 dates; we surface as None
-        // for ergonomic `?` propagation in handlers.
+        // Pre-1970 dates are not representable here; return None.
         assert_eq!(parse_http_date("Mon, 01 Jan 1900 00:00:00 GMT"), None);
     }
 
@@ -225,7 +208,7 @@ mod tests {
 
     #[test]
     fn all_three_formats_round_trip_to_same_epoch() {
-        // The canonical RFC 7231 example — same instant, three shapes.
+        // The RFC 7231 example: one instant, three shapes.
         let imf = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
         let rfc850 = parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT").unwrap();
         let asctime = parse_http_date("Sun Nov  6 08:49:37 1994").unwrap();
@@ -236,8 +219,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_surrounding_whitespace() {
-        // Servers occasionally leak a leading or trailing space; the
-        // header was still meant to be parsed.
+        // Some servers leak a leading or trailing space.
         assert_eq!(
             parse_http_date("  Sun, 06 Nov 1994 08:49:37 GMT  "),
             Some(784_111_777)

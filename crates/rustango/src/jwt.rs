@@ -1,22 +1,17 @@
 //! Minimal JWT (HS256) — sign, verify, decode.
 //!
-//! Standalone alternative to [`crate::tenancy::jwt_lifecycle`] (which
-//! wraps this with refresh + JTI blacklist + sliding rotation, but is
-//! gated on the `tenancy` feature). Reach for this module when you
-//! want plain JWTs for:
+//! Use this for plain JWTs: magic-link tokens, service-to-service
+//! tokens, or a token you hand to a third party.
 //!
-//! - Magic-link tokens that carry a few claims (user id, purpose, exp)
-//! - Service-to-service tokens (sister to [`crate::hmac_auth`] —
-//!   pick HMAC for AWS-style request signing, JWT for stateless
-//!   bearer tokens)
-//! - Single-sign-on tokens you hand to a third party
+//! For refresh tokens, a JTI blocklist and sliding rotation, use
+//! [`crate::tenancy::jwt_lifecycle`], which wraps this module but
+//! needs the `tenancy` feature.
 //!
 //! ## Algorithm
 //!
-//! HS256 only — symmetric, single shared secret. RS256 / ES256 (public
-//! / private keypair) are out of scope: the rustls / ring deps would
-//! triple the always-on dep tree, and most callers picking JWT in a
-//! single-service codebase use HS256 anyway.
+//! HS256 only, so both sides share one secret. RS256 and ES256 would
+//! pull in a much larger dependency tree, and a single service rarely
+//! needs a key pair.
 //!
 //! ## Quick start
 //!
@@ -57,15 +52,19 @@ pub enum JwtError {
     BadSignature,
     #[error("token expired (exp={0})")]
     Expired(u64),
+    /// No `exp` claim. A token without one never expires, so `decode`
+    /// refuses it; mint with `.ttl()` or decode with
+    /// [`decode_allowing_no_exp`].
+    #[error("token has no exp claim and would never expire")]
+    MissingExp,
     #[error("token not yet valid (nbf={0})")]
     NotYetValid(u64),
     #[error("decode error: {0}")]
     Decode(String),
 }
 
-/// JWT claims — wraps a JSON object so callers can mix standard
-/// claims (`sub`, `exp`, `iat`, `iss`, `aud`, `nbf`, `jti`) with
-/// arbitrary extension fields.
+/// JWT claims. A JSON object, so you can mix the standard claims
+/// (`sub`, `exp`, `iat`, `iss`, `aud`, `nbf`, `jti`) with your own.
 #[derive(Debug, Clone, Default)]
 pub struct Claims {
     inner: Map<String, Value>,
@@ -81,8 +80,8 @@ impl Claims {
         c
     }
 
-    /// Empty claims (no subject, no iat). Useful when callers want
-    /// total control over the payload.
+    /// Empty claims: no subject, no `iat`. Use it when you want full
+    /// control over the payload.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
@@ -149,8 +148,8 @@ impl Claims {
         c
     }
 
-    /// Set `jti` — token id, useful for blacklisting after use
-    /// (typical magic-link pattern).
+    /// Set `jti`, the token id. Use it to block a token after one
+    /// use, as a magic link does.
     #[must_use]
     pub fn jti(self, jti: impl Into<String>) -> Self {
         let mut c = self;
@@ -173,10 +172,9 @@ impl Claims {
 /// three-part base64url-encoded token: `header.payload.signature`.
 ///
 /// # Errors
-/// [`JwtError::Decode`] when `secret.len() < 32`. HMAC accepts any key
-/// length, but a short/empty key is guessable and the resulting token
-/// is forgeable, so we refuse to sign with one (audit N5; matches the
-/// 32-byte floor `tenancy::auth_routes` enforces).
+/// [`JwtError::Decode`] when `secret.len() < 32`. HMAC itself accepts
+/// any key length, but a short key can be guessed, and then anyone
+/// can forge a token. So this refuses to sign with one.
 pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
     if secret.len() < 32 {
         return Err(JwtError::Decode(
@@ -194,13 +192,18 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 
 /// Decode + verify an HS256 JWT. Checks signature, `exp`, and `nbf`.
 ///
-/// Does NOT check `iss` / `aud` — if you set them when issuing, you
-/// **MUST** validate them yourself against expected values on the
-/// returned claims; a valid signature alone does not prove the token
-/// was minted for *your* service/audience (audit L1). There is also no
-/// clock-skew leeway: `exp`/`nbf` are compared against the exact current
-/// second. If your issuer and verifier clocks can drift, add a small
-/// tolerance via [`decode_at`] with an adjusted `now`.
+/// `exp` is **required**: a token without one never expires, and
+/// forgetting `.ttl()` is indistinguishable from meaning to omit it.
+/// Use [`decode_allowing_no_exp`] for a deliberate service token.
+///
+/// It does **not** check `iss` or `aud`. If you set them when
+/// issuing, you must check them yourself on the returned claims. A
+/// valid signature alone does not prove the token was made for your
+/// service.
+///
+/// There is no clock-skew leeway either: `exp` and `nbf` are compared
+/// to the exact current second. If your clocks can drift, call
+/// [`decode_at`] with an adjusted `now`.
 ///
 /// # Errors
 /// See [`JwtError`].
@@ -214,6 +217,39 @@ pub fn decode(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
 /// # Errors
 /// See [`JwtError`].
 pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now, true)
+}
+
+/// [`decode`] for a token that deliberately has no `exp` — a
+/// non-expiring service token. Every other check still runs.
+///
+/// This is the explicit branch: `decode` refuses such a token, because
+/// forgetting `.ttl()` and meaning to omit it look identical once the
+/// token is signed (#1538).
+///
+/// # Errors
+/// See [`JwtError`].
+pub fn decode_allowing_no_exp(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now_secs(), false)
+}
+
+/// [`decode_allowing_no_exp`] with an explicit "current" time.
+///
+/// # Errors
+/// See [`JwtError`].
+pub fn decode_at_allowing_no_exp(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtError> {
+    decode_inner(token, secret, now, false)
+}
+
+/// The one decode path. `require_exp` is the only difference between
+/// the public wrappers, so the signature and `nbf` checks cannot drift
+/// apart between them.
+fn decode_inner(
+    token: &str,
+    secret: &[u8],
+    now: u64,
+    require_exp: bool,
+) -> Result<Claims, JwtError> {
     let mut it = token.split('.');
     let header_b = it.next().ok_or(JwtError::Malformed)?;
     let payload_b = it.next().ok_or(JwtError::Malformed)?;
@@ -253,6 +289,10 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
         if now > exp {
             return Err(JwtError::Expired(exp));
         }
+    } else if require_exp {
+        // Absent `exp` used to skip the check entirely, so a token
+        // minted without `.ttl()` was valid forever (#1538).
+        return Err(JwtError::MissingExp);
     }
     if let Some(nbf) = claims.get::<u64>("nbf") {
         if now < nbf {
@@ -263,12 +303,12 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
     Ok(claims)
 }
 
-/// Decode WITHOUT verifying the signature or temporal claims. Useful
-/// for inspecting a token to find which key id signed it (when you
-/// rotate keys), then calling [`decode`] with the right secret.
+/// Read a token without checking its signature or its `exp`/`nbf`.
+/// Use it to find which key signed a token during key rotation, then
+/// call [`decode`] with that secret.
 ///
-/// **Never trust the result for authorization** — there's no integrity
-/// guarantee.
+/// **Never use the result for authorization.** Nothing here proves
+/// the token is genuine.
 ///
 /// # Errors
 /// See [`JwtError`].
@@ -283,8 +323,7 @@ pub fn decode_unverified(token: &str) -> Result<Claims, JwtError> {
     Claims::from_json(&payload_bytes)
 }
 
-// HMAC-SHA256 lives in [`crate::crypto`] — same shape, one
-// implementation for hmac_auth + jwt + storage::s3 to share.
+// HMAC-SHA256 lives in `crate::crypto`, shared by every caller.
 use crate::crypto::hmac_sha256;
 
 fn now_secs() -> u64 {
@@ -301,7 +340,7 @@ mod tests {
 
     #[test]
     fn round_trip_encode_decode() {
-        let mut c = Claims::new("user-42");
+        let mut c = Claims::new("user-42").ttl(Duration::from_secs(3600));
         c.set("role", "admin");
         c.set("count", 7_i64);
         let token = encode(&c, SECRET).unwrap();
@@ -319,8 +358,8 @@ mod tests {
 
     #[test]
     fn short_secret_rejected() {
-        // Audit N5 — a sub-32-byte key is guessable/forgeable; encode
-        // must refuse it, not just the empty case.
+        // A key under 32 bytes is guessable, so `encode` must refuse
+        // it, not only an empty one.
         let c = Claims::new("x");
         assert!(matches!(
             encode(&c, b"only-31-bytes-not-enough-yikes!"),
@@ -379,6 +418,49 @@ mod tests {
         assert!(matches!(err, JwtError::Expired(_)));
     }
 
+    /// A token minted without `.ttl()` carries no `exp`, and the old
+    /// `if let Some(exp)` skipped the check entirely — so it was valid
+    /// forever (#1538). `decode` now refuses it.
+    #[test]
+    fn a_token_with_no_exp_is_refused() {
+        let t = encode(&Claims::new("forever"), SECRET).unwrap();
+        assert!(
+            matches!(decode(&t, SECRET), Err(JwtError::MissingExp)),
+            "a token with no exp never expires and must not decode"
+        );
+        // Far-future `now`: still refused, because the problem is the
+        // absent claim, not the clock.
+        assert!(matches!(
+            decode_at(&t, SECRET, u64::MAX),
+            Err(JwtError::MissingExp)
+        ));
+    }
+
+    /// The deliberate non-expiring service token stays reachable, but
+    /// only by asking for it.
+    #[test]
+    fn the_no_exp_opt_out_still_decodes_and_still_checks_everything_else() {
+        let t = encode(&Claims::new("service"), SECRET).unwrap();
+        let v = decode_allowing_no_exp(&t, SECRET).expect("opt-out decodes");
+        assert_eq!(v.subject(), Some("service"));
+
+        // Opting out of `exp` does not opt out of the signature.
+        assert!(matches!(
+            decode_allowing_no_exp(&t, b"wrong-secret-bytes"),
+            Err(JwtError::BadSignature)
+        ));
+        // …nor of `nbf`.
+        let future = encode(
+            &Claims::new("service").not_before(now_secs() + 3600),
+            SECRET,
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_allowing_no_exp(&future, SECRET),
+            Err(JwtError::NotYetValid(_))
+        ));
+    }
+
     #[test]
     fn ttl_helper_sets_iat_and_exp() {
         let c = Claims::new("x").ttl(Duration::from_secs(3600));
@@ -389,7 +471,11 @@ mod tests {
 
     #[test]
     fn not_before_rejected_when_future() {
-        let c = Claims::new("x").not_before(now_secs() + 3600);
+        // Carries an `exp` so the rejection is `nbf`, not the missing
+        // expiry — otherwise this passes without exercising `nbf`.
+        let c = Claims::new("x")
+            .ttl(Duration::from_secs(7200))
+            .not_before(now_secs() + 3600);
         let t = encode(&c, SECRET).unwrap();
         assert!(matches!(decode(&t, SECRET), Err(JwtError::NotYetValid(_))));
     }
@@ -425,6 +511,7 @@ mod tests {
     #[test]
     fn issuer_audience_jti_round_trip() {
         let c = Claims::new("x")
+            .ttl(Duration::from_secs(3600))
             .issuer("api.example.com")
             .audience("client.example.com")
             .jti("token-1");
@@ -450,7 +537,9 @@ mod tests {
 
     #[test]
     fn empty_claims_round_trip_when_no_sub() {
-        let c = Claims::empty();
+        // `Claims::empty()` sets nothing at all, so it needs an
+        // explicit expiry to reach `decode` now.
+        let c = Claims::empty().ttl(Duration::from_secs(3600));
         let t = encode(&c, SECRET).unwrap();
         let v = decode(&t, SECRET).unwrap();
         assert_eq!(v.subject(), None);

@@ -1,0 +1,5 @@
+FROM rust:1
+
+WORKDIR /app
+
+RUN cargo install cargo-watch

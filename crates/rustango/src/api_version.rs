@@ -1,5 +1,5 @@
-//! API versioning extractor — read the requested API version from URL,
-//! header, or query parameter.
+//! Read the requested API version from the URL, a header or a query
+//! parameter.
 //!
 //! ## Quick start
 //!
@@ -29,21 +29,21 @@ use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::Router;
 
-/// Strategy for extracting the API version from a request.
+/// Where to look for the API version.
 #[derive(Clone, Debug)]
 pub enum VersionStrategy {
-    /// Read the version from a request header (e.g. `"X-API-Version"`).
+    /// A request header, such as `"X-API-Version"`.
     Header(&'static str),
-    /// Read the version from a query parameter (e.g. `"version"`).
+    /// A query parameter, such as `"version"`.
     Query(&'static str),
-    /// Read the version from the URL path's first segment (e.g. `/v1/users` → `"v1"`).
+    /// The first path segment, so `/v1/users` gives `"v1"`.
     UrlPrefix,
-    /// Always use this version (useful for tests / fallback).
+    /// A fixed version. Handy in tests.
     Fixed(&'static str),
 }
 
 impl VersionStrategy {
-    /// Extract the version from a request. Returns `None` if missing.
+    /// Read the version from a request, or `None` if it is absent.
     pub fn extract(&self, parts: &Parts) -> Option<String> {
         match self {
             Self::Header(name) => parts
@@ -74,7 +74,7 @@ impl VersionStrategy {
         }
     }
 
-    /// Wrap as an axum middleware that injects [`ApiVersion`] into request extensions.
+    /// Middleware that puts [`ApiVersion`] on the request.
     #[must_use]
     pub fn as_layer<S: Clone + Send + Sync + 'static>(
         self,
@@ -111,8 +111,8 @@ impl<S: Clone + Send + Sync + 'static> tower::Layer<Router<S>> for VersionLayerB
     }
 }
 
-/// Extracted API version. `None` if the strategy didn't find one and
-/// no `Fixed` fallback was configured.
+/// The API version for this request. It is an empty string when the
+/// strategy found nothing, or when no strategy is mounted.
 #[derive(Debug, Clone)]
 pub struct ApiVersion(pub String);
 
@@ -135,11 +135,11 @@ impl<S: Send + Sync> FromRequestParts<S> for ApiVersion {
     }
 }
 
-/// Helper: respond if the requested version isn't in the supported set.
-/// Returns `Ok(version)` when supported, `Err(unsupported_version)` otherwise.
+/// Check `requested` against the versions you support.
 ///
 /// # Errors
-/// Returns the rejected version string for the caller to surface in 400 / 406.
+/// Returns the rejected version string, so you can put it in a 400
+/// or 406 response.
 pub fn require_supported<'a>(requested: &str, supported: &'a [&'a str]) -> Result<&'a str, String> {
     supported
         .iter()

@@ -22,7 +22,9 @@ async fn fresh_pool() -> Option<(Pool, MutexGuard<'static, ()>)> {
     // panicking test won't strand the lock — but we still want a
     // single owner at a time.
     let guard = TABLE_LOCK.lock().await;
-    let pg = sqlx::PgPool::connect(&url).await.ok()?;
+    let pg = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
     sqlx::query(r#"DROP TABLE IF EXISTS "oc_widget" CASCADE"#)
         .execute(&pg)
         .await
@@ -60,7 +62,7 @@ async fn callback_fires_after_commit() {
     let counter_clone = Arc::clone(&counter);
 
     rustango::atomic!(&pool, |tx| {
-        if let PoolTx::Postgres(t) = tx {
+        if let PoolTx::Postgres(t) = &mut *tx.lock().await? {
             sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
                 .bind("alpha")
                 .execute(&mut **t)
@@ -92,7 +94,7 @@ async fn callback_does_not_fire_after_rollback() {
     let counter_clone = Arc::clone(&counter);
 
     let result: Result<(), ExecError> = rustango::atomic!(&pool, |tx| {
-        if let PoolTx::Postgres(t) = tx {
+        if let PoolTx::Postgres(t) = &mut *tx.lock().await? {
             sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
                 .bind("beta")
                 .execute(&mut **t)
@@ -175,11 +177,8 @@ async fn on_commit_outside_atomic_panics() {
 
 // ---------- nested atomic blocks ----------
 //
-// Each `atomic!` call sets its own task-local queue, so callbacks
-// registered inside an inner block belong to the INNER atomic and
-// follow ITS commit/rollback decision. The outer block's queue is
-// shielded — restored when the inner scope ends. These tests pin
-// the property since it's load-bearing for any nested-tx user code.
+// A nested `atomic!` on the same pool is a savepoint. Its callbacks wait for the
+// outermost commit and drop if any enclosing level rolls back.
 
 #[tokio::test]
 async fn nested_atomic_inner_rollback_isolated_from_outer() {
@@ -236,7 +235,7 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
         on_commit(move || {
             outer_clone.fetch_add(1, Ordering::SeqCst);
         });
-        // Inner commits successfully — its callback fires.
+        // Inner savepoint releases; its callback waits for the outer commit.
         rustango::atomic!(&pool, |_inner_tx| {
             on_commit(move || {
                 inner_clone.fetch_add(1, Ordering::SeqCst);
@@ -245,7 +244,12 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
         })
         .await
         .unwrap();
-        // Outer then bails out — its OWN callback drops.
+        assert_eq!(
+            on_commit_pending(),
+            2,
+            "inner callback moved to the outer queue"
+        );
+        // Outer then bails out — both callbacks drop.
         Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
     })
     .await;
@@ -253,8 +257,8 @@ async fn nested_atomic_outer_rollback_drops_both_queues() {
     assert!(result.is_err(), "outer should roll back");
     assert_eq!(
         inner.load(Ordering::SeqCst),
-        1,
-        "inner already fired before outer rolled back (correct — inner had its own scope)"
+        0,
+        "inner callback must NOT fire — the outer transaction rolled back"
     );
     assert_eq!(
         outer.load(Ordering::SeqCst),

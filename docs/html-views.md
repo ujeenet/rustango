@@ -6,9 +6,9 @@ detail page, and create/edit/delete forms — from one declaration. It's the
 clients, an HTML view emits a rendered page for a browser. Both are built from
 the same `#[derive(Model)]`, and you can serve a model *both* ways at once.
 
-These are **Rustango**'s equivalent of Django's generic class-based views
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) or Laravel's
-resource controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
+There are five ready-made views — `ListView`, `DetailView`, `CreateView`,
+`UpdateView`, `DeleteView` — the page-serving equivalent of Laravel's resource
+controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
 templates.
 
 [![HTML views in Rustango: one model feeds ListView, DetailView and CreateView/UpdateView/DeleteView, each rendering a Tera template into a server-rendered page](img/html-views.png)](img/html-views.png)
@@ -55,7 +55,6 @@ This is the first decision. Both turn a model into endpoints; they differ in
 | On bad input | `400` + a field-keyed JSON error map | re-render the form with the errors shown |
 | Reads a list as | a paginated JSON envelope | a `<table>`/loop in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
-| Django analogue | DRF `ModelViewSet` | generic class-based views |
 
 You don't have to choose globally — pick per resource, and you can mount **both
 on the same model** (see [below](#serving-one-model-both-ways)). Rules of thumb:
@@ -97,8 +96,9 @@ the view handles paging, ordering, filtering and search from query params.
 ```rust
 use rustango::template_views::ListView;
 use std::sync::Arc;
-use tera::Tera;
 
+// Escapes every template, not only `.html` ones.
+let tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 let app = ListView::for_model(Post::SCHEMA)
     .page_size(20)                       // rows per page (?page=N to navigate)
     .order_by("published_at", true)      // default sort, true = DESC
@@ -124,10 +124,22 @@ page {{ page }} / {{ total_pages }}
 {% if has_next %}<a href="?page={{ page + 1 }}">next →</a>{% endif %}
 ```
 
-`?page=`, `?status=`, `?search=` and `?ordering=` work the same as on a ViewSet
-list — the difference is purely that the result is a rendered page rather than a
-JSON envelope. Use `.context_object_name("posts")` if you'd rather loop over
-`posts` than `object_list` in the template.
+`?page=`, `?status=` and `?search=` work the same as on a ViewSet list — the
+difference is purely that the result is a rendered page rather than a JSON
+envelope. Use `.context_object_name("posts")` if you'd rather loop over `posts`
+than `object_list` in the template.
+
+**`?ordering=` is the exception.** A `ListView`'s allowlist starts *empty*, so
+the parameter is ignored until you name the sortable columns yourself:
+
+```rust
+ListView::<Post>::new().ordering_fields(&["title", "created_at"])
+```
+
+Without that call the list falls back to the builder's own `.order_by(...)`, or
+to PK-ASC so pagination stays deterministic. Only a single column is accepted,
+with a leading `-` for descending; multi-column sorting needs a hand-rolled
+handler.
 
 ---
 
@@ -173,18 +185,32 @@ let app = CreateView::for_model(Post::SCHEMA)
 ```
 
 The form template (`posts_form.html`) is shared with UpdateView. `is_update`
-tells the two apart, and `errors` carries any validation messages back:
+tells the two apart, and **`form`** carries both the fields and any validation
+messages:
 
 ```html
 <form method="post">
-  <input name="title" value="{{ object.title | default(value='') }}">
-  <textarea name="body">{{ object.body | default(value='') }}</textarea>
-  {% for field, msgs in errors %}
-    <p class="error">{{ field }}: {{ msgs | join(sep=', ') }}</p>
+  {{ csrf_input | safe }}
+  {% for field in form.fields %}
+    <label for="{{ field.name }}">{{ field.name }}</label>
+    <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
+           {% if field.required %}required{% endif %}
+           {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+    {% if form.errors[field.name] %}
+      <p class="error">{{ form.errors[field.name] }}</p>
+    {% endif %}
   {% endfor %}
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Two things are easy to get wrong here. `form.errors` maps a field name to **one
+string**, not a list — `join` on it is an error. And there is no top-level
+`errors` variable; iterating one is a Tera render failure, so the page returns
+500 rather than showing the message.
+
+`{{ csrf_input | safe }}` needs the filter: `html_tera` autoescapes every template, so without
+it the token renders as text and every POST is rejected.
 
 **Validation.** Schema rules (type, `max_length`, NOT NULL…) are enforced
 automatically. Add your own with a closure validator — on `Err`, the form
@@ -251,12 +277,22 @@ Every view stamps a consistent context so templates port cleanly between them:
 |---|---|
 | `ListView` | `object_list` (the page's rows), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (the row) |
-| `CreateView` / `UpdateView` | `object` (empty on create, prefilled on update), `is_update` (bool), `errors`, `values` |
+| `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **no `object`** |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (the row), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (the row to confirm) |
 
 Rows are exposed as plain maps keyed by column name (`{{ post.title }}`), with
 SQL `NULL` rendered as `null`. Use `.context_object_name("posts" / "post")` to
 add a friendlier alias alongside `object_list` / `object`.
+
+Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
+`max_length` and `value`. `form.errors` is keyed by field name and holds one
+message per field, not a list. Every view also stamps `csrf_token` and
+`csrf_input`, and every view router rejects a POST without a matching token.
+
+`CreateView` stamps no `object`, so `{{ object.title }}` on a create form is
+undefined rather than empty — use `{{ field.value }}` from `form.fields`, which
+is populated on both.
 
 ---
 

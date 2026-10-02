@@ -1,18 +1,21 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_dark.png">
-    <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_light.png" alt="Rustango — the Rust framework with Django spirit" width="640">
+    <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_light.png" alt="Rustango — the batteries-included web framework for Rust" width="640">
   </picture>
 </p>
 
 # Rustango
 
-**A Django-shaped, batteries-included web framework for Rust.**
+**A batteries-included web framework for Rust: declare a model once, and get an ORM, auto-migrations, an auto-admin, multi-tenancy, and a REST API out of it.**
 
-Rustango gives you the productivity of Django or Laravel with the speed and type-safety of Rust: a tri-dialect ORM, auto-migrations, an auto-generated admin, multi-tenancy, first-class auth, and every standard middleware — all shipped, all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** out of the box.
+**Runs on [axum](https://github.com/tokio-rs/axum) and [tokio](https://tokio.rs).** Handlers are plain axum handlers and everything Rustango adds is a `tower` layer or an `axum::Router`, so any axum extractor, middleware or crate from that ecosystem drops straight in.
+
+One `#[derive(Model)]` is the whole contract — from it Rustango emits typed queries, migration diffs, admin screens, serializers, and CRUD endpoints. A tri-dialect ORM, first-class auth, and every standard middleware ship in the box: all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** from the same source.
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
-🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
+🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
+🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---
 
@@ -21,16 +24,18 @@ Rustango gives you the productivity of Django or Laravel with the speed and type
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.58"
+rustango = "0.59"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.58", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.59", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.58", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.59", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.58" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.59" }` needs no extra wiring.
+
+**Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
 
 ## An app on SQLite in 30 lines
 
@@ -58,12 +63,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn list(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
-    Json(User::objects().fetch_pool(&pool).await.unwrap())
+    Json(User::objects().fetch(&pool).await.unwrap())
 }
 ```
 
 ```sh
-DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run --features sqlite,runserver
+# Backend selection lives in your Cargo.toml — see Install above.
+# `cargo run --features sqlite` would name a feature of *your* crate, not rustango's.
+DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run
 ```
 
 The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL with `DATABASE_URL=mysql://…` — no changes. Every SQLite connection turns on sensible defaults automatically (`PRAGMA foreign_keys = ON`, `journal_mode = WAL` for file-backed DBs, `busy_timeout = 5s`).
@@ -72,7 +79,7 @@ The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL 
 
 - **One ORM, three backends.** Models, queries, migrations, relations, and aggregates emit correct SQL for Postgres, MySQL 8+, and SQLite from the same code.
 - **Batteries included.** Auth (sessions + JWT + OAuth2/OIDC + HMAC + API keys + TOTP), an auto-admin, multi-tenancy, caching, background jobs, email, file storage, signals, i18n, an MCP server, and OpenAPI — not add-ons, in the box.
-- **Django ergonomics.** A project scaffolder (`cargo rustango new`), `make:*` generators, `manage` CLI, `#[derive(Model)]` / `#[derive(ViewSet)]` / `#[derive(Serializer)]`, and admin config blocks that feel familiar coming from Django, DRF, or Laravel.
+- **Declare it, don't wire it.** A project scaffolder (`cargo rustango new`), `make:*` generators, a `manage` CLI, `#[derive(Model)]` / `#[derive(ViewSet)]` / `#[derive(Serializer)]`, and admin config blocks — an app is described in attributes, not assembled by hand.
 - **Opt-out, not opt-in.** Everything is a cargo feature. A JSON-only API binary compiles out the admin, templates, and tenancy entirely.
 
 ---
@@ -93,7 +100,7 @@ The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL 
 - [The `manage` CLI](#the-manage-cli)
 - [Configuration](#configuration)
 - [Testing](#testing)
-- [What's in the box](#whats-in-the-box)
+- [Features](#features)
 - [Documentation](#documentation)
 
 ---
@@ -111,8 +118,9 @@ cargo rustango new shop --template tenant    # multi-tenancy + operator console
 ```bash
 cd myblog
 cp .env.example .env                         # edit DATABASE_URL
-docker compose up -d                         # starts Postgres
-cargo run -- migrate                         # generate + apply migrations
+docker compose up -d postgres                # starts Postgres only
+cargo run -- makemigrations                  # generate migrations from your models
+cargo run -- migrate                         # apply pending migrations
 cargo run                                    # http://localhost:8080
 ```
 
@@ -161,16 +169,16 @@ Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](do
 
 ## The ORM
 
-`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is Django-shape (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`, `.prefetch_related()`), and the **same code runs on all three backends** through the `Pool` enum.
+`#[derive(Model)]` registers a struct in a global inventory and emits typed query, save, and `FromRow` code. The query builder is lazy and chainable (`.filter()`, `.exclude()`, `.order_by()`, `.annotate()`, `.select_related()`, `.prefetch_related()`) — nothing hits the database until you `.fetch()` — and the **same code runs on all three backends** through the `Pool` enum.
 
 ```rust
 // Filter, order, paginate
 let recent = Post::objects()
-    .filter("published_at", Op::Lt, Utc::now())
-    .exclude("status", Op::Eq, "draft")
+    .filter("published_at__lt", Utc::now())
+    .exclude("status", "draft")
     .order_by(&[("published_at", true)])   // true = DESC
     .limit(20)
-    .fetch_pool(&pool).await?;
+    .fetch(&pool).await?;
 
 // Aggregate (scalar): .values(&[]) → one row, no GROUP BY
 let stats = Post::objects()
@@ -182,16 +190,16 @@ let stats = Post::objects()
 
 Supported: every field type (ints, floats, `String`, `bool`, `DateTime`/`Date`, `Uuid`, `Json`, `Decimal`, plus PG-only `Array`/`Range`/`HStore`/`Vector`/`Geometry`), nullable `Option<T>`, `Auto<T>` primary keys, `ForeignKey<T>` / one-to-one / many-to-many, generic FKs + composite-key FKs (ContentTypes), soft-delete, `unique_together` / `index_together`, container-level default scopes, subquery/`EXISTS` filters, bulk insert/update, transactions, and raw SQL escape hatches. `EXPLAIN` works on any queryset.
 
-📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](crates/rustango/examples/cookbook_blog/COOKBOOK.md)
+📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md)
 
 ## Migrations
 
-`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones and can `unapply` to roll back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
+`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones, and `downgrade` rolls back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
 
 ```bash
 cargo run -- makemigrations
 cargo run -- migrate
-cargo run -- migrate --unapply <name>
+cargo run -- downgrade                       # roll back the last migration
 ```
 
 📖 [Adopt an existing schema](docs/manage.md) with `manage inspectdb` — it emits `#[derive(Model)]` source for every table.
@@ -210,7 +218,7 @@ Also included: a token-driven **theme system** with dark mode and per-tenant bra
 
 ## APIs — ViewSets, Serializers, JWT, OpenAPI
 
-`#[derive(ViewSet)]` gives you full REST CRUD — list (page or cursor pagination), retrieve, create (incl. DRF-style bulk create), update, partial update, destroy (soft when the model opts in) — with per-action permission gates:
+`#[derive(ViewSet)]` gives you full REST CRUD — list (page or cursor pagination), retrieve, create (one row or a whole array in a single POST), update, partial update, destroy (soft when the model opts in) — with per-action permission gates:
 
 ```rust
 #[derive(ViewSet)]
@@ -228,13 +236,13 @@ pub struct PostViewSet;
 let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 ```
 
-`#[derive(Serializer)]` is a DRF-shape JSON façade (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets, and responses follow JSON:API + RFC 7807 Problem Details. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
+`#[derive(Serializer)]` is a declarative JSON façade over a model (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets, and responses follow JSON:API + RFC 7807 Problem Details. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
 
 📖 [ViewSets](docs/viewsets.md) · [serializers](docs/serializers.md) · [JWT](docs/auth-jwt-api.md) · [OpenAPI](docs/openapi.md) · [QUERY method](docs/query-method.md)
 
 ## HTML views & forms
 
-Django-shape class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. CSRF auto-mounts for form-driven views.
+Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. Every view router with a POST route checks the CSRF token.
 
 📖 [HTML views](docs/html-views.md)
 
@@ -249,7 +257,7 @@ Django-shape class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateV
 
 Database-mode is the default and works identically everywhere; schema-mode is a Postgres-only pool optimization. Set `schema` on MySQL/SQLite and the framework returns a clear error pointing you back to database-mode.
 
-📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
+📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
 
 ## Authentication & permissions
 
@@ -273,18 +281,18 @@ One hardened middleware chain: request IDs, access logging, rate limiting (in-pr
 ## Signals, i18n, MCP
 
 - **Signals** — model lifecycle (`pre_save` / `post_save` / `pre_delete` / `post_delete`) and request lifecycle (`request_started` / `request_finished` / `got_request_exception`).
-- **i18n** — `Translator` is Django's `gettext` family in Rust: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](docs/i18n.md)
+- **i18n** — `Translator` is a `gettext`-style translation API: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](docs/i18n.md)
 - **MCP server** — the `mcp` feature turns an app into a Model Context Protocol server: AI agents authenticate as tenant-scoped identities and call your framework-exposed tools over JSON-RPC 2.0. [mcp](docs/mcp.md)
 
 ## The `manage` CLI
 
-`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `shell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
+Your app's binary doubles as its admin CLI — `cargo run -- <cmd>`. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
 
 📖 [manage reference](docs/manage.md)
 
 ## Configuration
 
-Layered config: a `<env>_settings.toml` pipeline (base → env → local → environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
+Layered config: a `<env>_settings.toml` pipeline (`default.toml` → `<env>_settings.toml` → `RUSTANGO__*` environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
 
 ## Testing
 
@@ -294,63 +302,122 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 
 ---
 
-## What's in the box
+## Features
 
-Everything below ships in this repository. Each is a cargo feature, so a
-build takes only what it uses — a JSON-only API binary compiles out the
-admin, templates and tenancy entirely.
+Always on: the ORM, the query builder, the SQL layer and migrations.
+Everything else is a cargo feature.
 
-**Data**
-- ORM with relations, aggregates, prefetch, bulk insert/update, upsert,
-  soft delete, and an expression DSL (`F`, `Case`/`When`, subqueries,
-  window functions)
-- Postgres, MySQL 8+ and SQLite through the same `&Pool`
-- Auto-generated migrations with schema snapshots, data operations,
-  squash reconciliation, and `--dry-run`
-- ContentTypes, generic foreign keys, and generic M2M
-- Postgres types: arrays, ranges, `hstore`, JSON, geometry, vectors
+`default = ["postgres", "batteries"]` turns on most of the list below.
+The ones it does not, opt in by name: `mysql`, `sqlite`, `tenancy`,
+`csrf`, `sso`, `admin-sso`, `passkey`, `cache-redis`, `cache-page`,
+`email-smtp`, `mcp`, `testkit` and `test_utils`.
 
-**HTTP**
-- ViewSets and Serializers (DRF-shaped), with OpenAPI 3.1 auto-derive
-- HTML views, forms with CSRF, and Tera templates
-- Sessions, request timeouts, body limits, CORS, compression, security
-  headers, CSP nonces, rate limiting, and idempotency keys
-- Server-sent events, WebSockets, and the HTTP `QUERY` method
+**Backends** — pick one; every framework surface works the same on all three.
 
-**Auth**
-- Sessions, JWT (refresh, revocation, custom claims), OAuth2/OIDC, HMAC
-  request signing, API keys, TOTP, and passkeys
-- Permissions, groups, object-level checks, and account lockout
-- Single sign-on for the admin and for application users
+| Feature | |
+|---|---|
+| `postgres` | PostgreSQL, TLS included. The default. |
+| `mysql` | MySQL 8.0+. |
+| `sqlite` | SQLite 3.35+, with WAL and foreign keys on. |
+
+**Data & storage**
+
+| Feature | |
+|---|---|
+| `casts` | Typed field conversions. |
+| `media` | Media library with collections and tags. |
+| `storage` | File storage abstraction. |
+| `storage-s3` | S3-compatible backend. |
+| `uploads` | Multipart upload handling. |
+| `signed_url` | Expiring signed URLs. |
+
+**Web**
+
+| Feature | |
+|---|---|
+| `runserver` | The development server. |
+| `manage` | `cargo run -- <verb>` CLI dispatcher. |
+| `template_views` | Generic CRUD view handlers. |
+| `forms` | Forms framework with multi-error validation. |
+| `sessions` | Server-side sessions. |
+| `compression` | Response compression. |
+| `sse` | Server-sent events. |
+| `websocket` | WebSocket support. |
+| `http-client` | Outbound HTTP client. |
+
+**APIs**
+
+| Feature | |
+|---|---|
+| `serializer` | Typed JSON serializers. |
+| `openapi` | OpenAPI schemas generated from serializers. |
+| `jwt` | JWT with refresh, blacklist and custom claims. |
+| `api_keys` | API key authentication. |
+| `hmac-auth` | HMAC request signing. |
+| `oauth2` | OAuth2 provider. |
+| `webhook` | Webhook registration. |
+| `webhook-delivery` | Delivery with retries. |
+
+**Admin**
+
+| Feature | |
+|---|---|
+| `admin` | The auto-admin site. |
+| `admin-sso` | OIDC single sign-on for admins. |
+
+**Auth & security**
+
+| Feature | |
+|---|---|
+| `auth_flows` | Login, logout, password reset. |
+| `passwords` | Password hashing and validators. |
+| `totp` | TOTP two-factor authentication. |
+| `passkey` | WebAuthn / passkeys. |
+| `sso` | OIDC single sign-on for app users. |
+| `csrf` | CSRF middleware for form POSTs. |
+| `csp-nonce` | Per-response CSP nonces. |
+| `secrets` | Secret management and rotation. |
 
 **Operations**
-- Auto-admin — every `#[derive(Model)]` is administrable with no
-  registration step
-- Multi-tenancy: schema-mode and database-mode, an operator console,
-  provisioning from the console, the CLI or a signed webhook, and
-  per-tenant connection pools
-- Audit log, background jobs (in-memory and Postgres-backed), a
-  scheduler, and distributed locks
-- Caching (in-memory, Redis, database), email (console, file,
-  in-memory, SMTP), file storage (local, in-memory, S3-compatible)
-- Signals, i18n, notifications, webhooks, and an MCP server for AI
-  agents
 
-**Developer experience**
-- `cargo rustango new` project scaffolder, with a wizard
-- `manage` CLI: migrations, `make:*` generators, database utilities,
-  tenancy verbs, and an interactive menu
-- Layered TOML settings with environment overrides
-- Test client, model factories, and schema builders
+| Feature | |
+|---|---|
+| `cache` | Cache framework. |
+| `cache-redis` | Redis backend. |
+| `cache-page` | Whole-page response caching. |
+| `jobs` | In-process background job queue. |
+| `jobs-postgres` | Database-backed queue, surviving restarts. |
+| `scheduler` | Fixed-interval tasks. |
+| `signals` | Model lifecycle signals. |
+| `email` | Email framework. |
+| `email-smtp` | SMTP transport. |
+| `notifications` | User notifications. |
+| `config` | Layered settings and deploy audit. |
 
-See the [documentation](#documentation) for the full surface.
+**Multi-tenancy**
+
+| Feature | |
+|---|---|
+| `tenancy` | Tenant registry, per-tenant databases, operator console. Schema mode is PostgreSQL only. |
+
+**Tooling**
+
+| Feature | |
+|---|---|
+| `mcp` | Model Context Protocol server for AI agents. |
+| `testkit` | Schema builders and model factories for tests. |
+| `test_utils` | Test-only constructors for downstream crates. |
+
+Internationalisation, signals, content types, permissions and the audit
+log need no feature flag. `cargo rustango new --help` prints the opt-in
+list as the scaffolder sees it.
 
 ---
 
 ## Documentation
 
 - **Guides & tutorials**: <https://rustango.com>
-- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
+- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
 - **In-repo guides** ([`docs/`](docs/)): [getting started](docs/getting-started.md) · [models](docs/models.md) · [ORM](docs/orm.md) · [migrations & CLI](docs/manage.md) · [admin](docs/admin.md) · [viewsets](docs/viewsets.md) · [serializers](docs/serializers.md) · [auth](docs/auth-flows.md) · [security](docs/security.md) · [middleware](docs/middleware.md) · [caching](docs/caching.md) · [email](docs/email.md) · [files](docs/files.md) · [jobs](docs/jobs.md) · [i18n](docs/i18n.md) · [MCP](docs/mcp.md) · [testing](docs/testing.md) · [glossary](docs/glossary.md)
 - **API reference**: <https://docs.rs/rustango>
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md)

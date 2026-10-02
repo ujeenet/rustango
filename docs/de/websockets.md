@@ -12,8 +12,8 @@ selbst aktualisiert, ein Chat. Der Server muss zum Browser *pushen*, ohne gefrag
   Client auch sendet (Chat, kollaboratives Editieren, Präsenz).
 
 Beide fächern sich über denselben In-Process-**Broadcast-Bus** ([`EventBus`]) auf, sodass
-„sende dies an jeden verbundenen Client" ein einziger Aufruf ist, unabhängig vom Transport. Wenn du
-von Django kommst, ist das Channels; von Laravel, Echo/Reverb; von Node,
+„sende dies an jeden verbundenen Client" ein einziger Aufruf ist, unabhängig vom Transport. In
+anderen Ökosystemen kennst du das vielleicht als Echo/Reverb oder als
 `ws` + `EventSource` — dieselben Ideen, ein Bus dahinter.
 
 > **Quelle:** `rustango::sse` (`EventBus`) — hinter dem **`sse`**-Feature; und
@@ -96,7 +96,13 @@ async fn events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = bus.subscribe();
     let stream = async_stream::stream! {
-        while let Ok(msg) = rx.recv().await {
+        loop {
+            let msg = match rx.recv().await {
+                Ok(msg) => msg,
+                // A slow client skipped messages; keep it connected.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             let json = serde_json::to_string(&msg).unwrap_or_default();
             yield Ok(Event::default().event("notification").data(json));
         }
@@ -130,7 +136,7 @@ Konsumenten; `ws_handler` betreibt eine Verbindung, bis der Client sich trennt.
 ```rust
 use std::time::Duration;
 use axum::{extract::{State, WebSocketUpgrade}, response::Response, routing::get, Router};
-use rustango::{sse::EventBus, ws::{ws_handler, WsHub}};
+use rustango::{sse::EventBus, ws::WsHub};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,7 +146,8 @@ let bus: EventBus<Tick> = EventBus::new(100);
 let hub = WsHub::new(bus).keepalive(Duration::from_secs(20));
 
 async fn ws_route(ws: WebSocketUpgrade, State(hub): State<WsHub<Tick>>) -> Response {
-    ws.on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+    // Caps the frame reader at `max_message_bytes` before buffering.
+    hub.upgrade(ws)
 }
 
 let app = Router::new()

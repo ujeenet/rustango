@@ -1,12 +1,15 @@
 //! End-to-end live test for `ViewSet` per-action throttling on SQLite
-//! (DRF `throttle_classes` parity, #1010). Fixed-window, process-local,
-//! keyed by client (ConnectInfo → X-Forwarded-For → global). Asserts the
+//! (issue #1010). Fixed-window, process-local,
+//! keyed by client (trusted IP → socket → global). Asserts the
 //! limit trips with a 429 + `Retry-After`, buckets are per-client, and
 //! throttles are per-action.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
+use std::net::SocketAddr;
+
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Auto, Pool};
@@ -41,13 +44,18 @@ async fn router(throttle: ViewSetThrottle) -> axum::Router {
         .router_pool("/posts", Pool::Sqlite(sq))
 }
 
-/// A GET with an optional `X-Forwarded-For` client identity.
-fn get(xff: Option<&str>) -> Request<Body> {
-    let mut b = Request::builder().method(Method::GET).uri("/posts");
-    if let Some(ip) = xff {
-        b = b.header("x-forwarded-for", ip);
+/// A GET from the socket address `ip`, if any.
+fn get(ip: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/posts")
+        .body(Body::empty())
+        .unwrap();
+    if let Some(ip) = ip {
+        let addr: SocketAddr = format!("{ip}:4000").parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
     }
-    b.body(Body::empty()).unwrap()
+    req
 }
 
 async fn status(app: &axum::Router, req: Request<Body>) -> StatusCode {
@@ -104,13 +112,15 @@ async fn throttle_is_per_action() {
     );
 
     // create is a different action — not throttled.
-    let create = Request::builder()
+    let mut create = Request::builder()
         .method(Method::POST)
         .uri("/posts")
-        .header("x-forwarded-for", "3.3.3.3")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"title":"hi"}"#))
         .unwrap();
+    create
+        .extensions_mut()
+        .insert(ConnectInfo("3.3.3.3:4000".parse::<SocketAddr>().unwrap()));
     assert!(
         app.clone()
             .oneshot(create)
@@ -120,4 +130,110 @@ async fn throttle_is_per_action() {
             .is_success(),
         "create must not be throttled by the list rule"
     );
+}
+
+/// A forged `X-Forwarded-For` does not pick a fresh bucket (#1745).
+#[tokio::test]
+async fn forged_forwarded_for_does_not_escape_the_throttle() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let forged = |xff: &str| {
+        let mut req = get(Some("4.4.4.4"));
+        req.headers_mut()
+            .insert("x-forwarded-for", xff.parse().unwrap());
+        req
+    };
+    assert_eq!(status(&app, forged("5.5.5.1")).await, StatusCode::OK);
+    assert_eq!(status(&app, forged("5.5.5.2")).await, StatusCode::OK);
+    assert_eq!(
+        status(&app, forged("5.5.5.3")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // With no socket address either, the header still names no bucket.
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    for n in 1..=2 {
+        let mut req = get(None);
+        req.headers_mut()
+            .insert("x-forwarded-for", format!("6.6.6.{n}").parse().unwrap());
+        assert_eq!(status(&app, req).await, StatusCode::OK);
+    }
+    let mut req = get(None);
+    req.headers_mut()
+        .insert("x-forwarded-for", "6.6.6.3".parse().unwrap());
+    assert_eq!(status(&app, req).await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// One IPv6 client rotating inside its /64 stays in one bucket.
+#[tokio::test]
+async fn ipv6_clients_share_a_bucket_per_64() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    for n in 1..=2 {
+        let req = get(Some(&format!("[2001:db8:1:2::{n}]")));
+        assert_eq!(status(&app, req).await, StatusCode::OK);
+    }
+    assert_eq!(
+        status(&app, get(Some("[2001:db8:1:2::3]"))).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // The next /64 is another client.
+    assert_eq!(
+        status(&app, get(Some("[2001:db8:1:3::1]"))).await,
+        StatusCode::OK
+    );
+}
+
+/// Behind a trusted proxy each forwarded client gets its own bucket,
+/// not the proxy's (#1745).
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn trusted_clients_behind_one_proxy_get_their_own_buckets() {
+    use rustango::real_ip::TrustedRealIp;
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let via_proxy = |client: &str| {
+        let mut req = get(Some("10.0.0.1"));
+        req.extensions_mut()
+            .insert(TrustedRealIp(client.parse().unwrap()));
+        req
+    };
+    assert_eq!(status(&app, via_proxy("7.7.7.1")).await, StatusCode::OK);
+    assert_eq!(status(&app, via_proxy("7.7.7.1")).await, StatusCode::OK);
+    assert_eq!(
+        status(&app, via_proxy("7.7.7.1")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(status(&app, via_proxy("7.7.7.2")).await, StatusCode::OK);
+}
+
+/// A request from `ip` with `method` and a JSON `body`.
+fn send(method: Method, ip: &str, body: &str) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri("/posts")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let addr: SocketAddr = format!("{ip}:4000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+/// QUERY returns the list, so it spends the list budget (#1997).
+#[cfg(feature = "admin")]
+#[tokio::test]
+async fn query_spends_the_list_throttle() {
+    let app = router(ViewSetThrottle::all(2, 60)).await;
+    let query = || send(Method::from_bytes(b"QUERY").unwrap(), "8.8.4.4", "{}");
+    assert_eq!(status(&app, get(Some("8.8.4.4"))).await, StatusCode::OK);
+    assert_eq!(status(&app, query()).await, StatusCode::OK);
+    assert_eq!(status(&app, query()).await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// A bulk create spends one unit per row (#1999).
+#[tokio::test]
+async fn bulk_create_spends_one_unit_per_row() {
+    let app = router(ViewSetThrottle::all(3, 60)).await;
+    let bulk = r#"[{"title":"a"},{"title":"b"},{"title":"c"}]"#;
+    let resp = app.clone().oneshot(send(Method::POST, "8.8.8.8", bulk));
+    assert_eq!(resp.await.unwrap().status(), StatusCode::CREATED);
+    let one = send(Method::POST, "8.8.8.8", r#"{"title":"d"}"#);
+    assert_eq!(status(&app, one).await, StatusCode::TOO_MANY_REQUESTS);
 }

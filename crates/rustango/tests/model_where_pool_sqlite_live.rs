@@ -1,8 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::where_(col, val, pool)` shortcut — Eloquent
-//! `Model::where($col, $val)->get()` / Django
-//! `Model.objects.filter(col=val).all()` parity.
+//! `Model::where_(col, val, pool)` shortcut — every row matching a
+//! single column equality.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

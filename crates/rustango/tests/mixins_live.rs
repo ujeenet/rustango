@@ -17,8 +17,8 @@ use rustango::sql::sqlx;
 use rustango::Model;
 use tokio::sync::Mutex;
 
-// `Auto<i64>` PK + auto_now_add + auto_now + soft_delete. Mirrors the
-// "BaseModel" shape a Django user would inherit.
+// `Auto<i64>` PK + auto_now_add + auto_now + soft_delete — the
+// "BaseModel" bundle most models want.
 //
 // Mixin fields are wrapped in `Auto<T>` so the existing skip-on-INSERT
 // path drops them from the column list and the DB DEFAULT fires.
@@ -56,7 +56,11 @@ fn lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn setup_post(pool: &sqlx::PgPool) {

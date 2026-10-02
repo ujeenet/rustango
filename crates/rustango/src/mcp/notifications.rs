@@ -1,20 +1,22 @@
-//! Server→client notifications (epic #1013, #1087) — **scoped** so they
-//! never cross tenant/agent boundaries (review fix, #1092/#1093).
+//! Notifications from server to client, **scoped** so they never
+//! cross a tenant or agent boundary.
 //!
-//! A process-global [`EventBus`] carries [`ScopedFrame`]s — a JSON-RPC
-//! notification body tagged with the `tenant` it belongs to and, for
-//! per-agent events, the `agent_id`. The authenticated `GET {prefix}` SSE
-//! stream subscribes once and relays a frame only when
-//! [`frame_visible`] passes for the connected agent. `list_changed` for a
-//! single agent's grants carries `agent_id: Some`; tenant-wide catalog
-//! changes carry `None` (visible to every agent in that tenant).
+//! One [`EventBus`] per process carries [`ScopedFrame`]s: a JSON-RPC
+//! notification tagged with its `tenant` and, for a per-agent event,
+//! its `agent_id`. The SSE stream subscribes once and relays a frame
+//! only when [`frame_visible`] says the connected agent may see it.
 //!
-//! ## Caveat (documented limitation)
-//! The bus is in-memory and process-local: a change made by a *separate*
-//! process — e.g. `manage grant-skill` — does not reach a running server's
-//! clients. In-process grants (apps calling `grant_skill_pool` in a request
-//! handler) do. Cross-process the contract is "re-list on next
-//! `initialize`"; a shared (Redis) bus would lift it.
+//! A change to one agent's grants carries `agent_id: Some`. A change
+//! to the whole tenant's catalog carries `None`, so every agent in
+//! that tenant gets it.
+//!
+//! ## Limit
+//!
+//! The bus lives in memory, in one process. A change made elsewhere,
+//! say by `manage grant-skill`, never reaches a running server's
+//! clients; a grant made inside a request handler does. Across
+//! processes the client has to re-list on its next `initialize`. A
+//! shared bus, on Redis, would remove this limit.
 
 use std::sync::OnceLock;
 
@@ -22,26 +24,26 @@ use serde_json::json;
 
 use crate::sse::EventBus;
 
-/// A notification frame tagged with its tenant/agent scope.
+/// A notification plus the scope it belongs to.
 #[derive(Clone, Debug)]
 pub struct ScopedFrame {
-    /// Tenant slug the frame belongs to.
+    /// The tenant slug this frame is for.
     pub tenant: String,
-    /// `Some(agent_id)` for a per-agent event; `None` for tenant-wide.
+    /// One agent's id, or `None` for the whole tenant.
     pub agent_id: Option<i64>,
-    /// The serialized JSON-RPC notification message.
+    /// The JSON-RPC notification, already serialized.
     pub body: String,
 }
 
-/// The process-global MCP notification bus.
+/// This process's notification bus.
 #[must_use]
 pub fn bus() -> &'static EventBus<ScopedFrame> {
     static BUS: OnceLock<EventBus<ScopedFrame>> = OnceLock::new();
     BUS.get_or_init(|| EventBus::new(256))
 }
 
-/// Whether a frame should be delivered to a subscriber authenticated as
-/// `(tenant, agent_id)`: same tenant, and either tenant-wide or this agent.
+/// Whether this agent may see a frame: it must be the same tenant,
+/// and the frame must be tenant-wide or for this agent.
 #[must_use]
 pub fn frame_visible(frame: &ScopedFrame, tenant: &str, agent_id: i64) -> bool {
     frame.tenant == tenant && frame.agent_id.map_or(true, |a| a == agent_id)
@@ -56,18 +58,18 @@ fn notify(tenant: &str, agent_id: Option<i64>, method: &str) {
     });
 }
 
-/// Notify that an agent's (or, with `agent_id: None`, a tenant's) tool list
-/// changed (`notifications/tools/list_changed`).
+/// Say the tool list changed, for one agent or, with `None`, for the
+/// whole tenant.
 pub fn notify_tools_list_changed(tenant: &str, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/tools/list_changed");
 }
 
-/// Notify that the prompt list changed.
+/// Say the prompt list changed.
 pub fn notify_prompts_list_changed(tenant: &str, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/prompts/list_changed");
 }
 
-/// Notify that the resource list changed.
+/// Say the resource list changed.
 pub fn notify_resources_list_changed(tenant: &str, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/resources/list_changed");
 }

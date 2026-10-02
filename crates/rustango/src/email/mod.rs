@@ -44,6 +44,12 @@
 //!     }
 //! }
 //! ```
+//!
+//! [`ConsoleMailer`]: crate::email::ConsoleMailer
+//! [`InMemoryMailer`]: crate::email::InMemoryMailer
+//! [`FileMailer`]: crate::email::FileMailer
+//! [`NullMailer`]: crate::email::NullMailer
+//! [`SmtpMailer`]: crate::email::smtp::SmtpMailer
 
 use std::sync::{Arc, Mutex};
 
@@ -68,15 +74,14 @@ pub struct Email {
     pub body: String,
     pub html_body: Option<String>,
     pub headers: Vec<(String, String)>,
-    /// Django-parity attachments — file blobs attached to the
+    /// Attachments — file blobs attached to the
     /// outgoing message. Populated via [`Email::attach`] /
     /// [`Email::attach_text`].
     #[serde(default)]
     pub attachments: Vec<Attachment>,
 }
 
-/// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
-/// one attached blob. `mimetype` is the MIME type lettre stamps on
+/// One attached blob. `mimetype` is the MIME type lettre stamps on
 /// the SinglePart; when `None` we default to `application/octet-stream`
 /// (RFC-9110 recommendation for opaque blobs).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -163,8 +168,7 @@ impl Email {
         self
     }
 
-    /// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
-    /// attach a binary blob. `mimetype = None` means
+    /// Attach a binary blob. `mimetype = None` means
     /// `application/octet-stream`. Backends serialize the attachment
     /// according to their capabilities:
     ///
@@ -189,7 +193,7 @@ impl Email {
         self
     }
 
-    /// Django-parity convenience — attach a UTF-8 text blob with
+    /// Convenience — attach a UTF-8 text blob with
     /// `text/plain` MIME. Equivalent to `attach(filename, content,
     /// Some("text/plain"))` but spares the caller the `Some(_)`.
     #[must_use]
@@ -200,9 +204,9 @@ impl Email {
 
     /// Validate the minimum required fields: at least one recipient +
     /// non-empty subject, and reject `\\r` / `\\n` in single-line header
-    /// fields (Django-shape `BadHeaderError` — defends against email
-    /// header injection attacks where attacker-controlled subject or
-    /// from-address forges extra `To:` / `Bcc:` lines).
+    /// fields. That defends against header-injection attacks, where
+    /// an attacker-controlled subject or from-address forges extra
+    /// `To:` / `Bcc:` lines.
     pub fn validate(&self) -> Result<(), MailError> {
         if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
             return Err(MailError::InvalidMessage("no recipients".into()));
@@ -233,17 +237,9 @@ impl Email {
         Ok(())
     }
 
-    /// Django-parity `EmailMessage.send(connection=None)` — send this
-    /// message via the supplied mailer. Direct translation of the
-    /// Django method most users reach for first:
-    ///
-    /// ```python
-    /// # Django
-    /// EmailMessage(subject='hi', body='...', to=['a@b.com']).send()
-    /// ```
+    /// Send this message via the supplied mailer.
     ///
     /// ```ignore
-    /// // rustango
     /// Email::new()
     ///     .subject("hi")
     ///     .body("...")
@@ -260,8 +256,8 @@ impl Email {
     }
 }
 
-/// Django-parity `email.utils.formataddr((name, address))` — format an
-/// RFC 5322 address with display name. Returns `"Display Name <email@example.com>"`
+/// Format an RFC 5322 address with a display name. Returns
+/// `"Display Name <email@example.com>"`
 /// when `name` is provided, or just `address` when `name` is `None`
 /// or empty.
 ///
@@ -299,8 +295,7 @@ pub fn formataddr(name: Option<&str>, address: &str) -> String {
     }
 }
 
-/// Django-parity inverse of [`formataddr`] — Python's
-/// `email.utils.parseaddr(address)`. Splits a `"Display Name
+/// The inverse of [`formataddr`]. Splits a `"Display Name
 /// <user@example.com>"` style header value into `(name, address)`.
 ///
 /// Returns `(name, address)` as owned `String`s. When the input
@@ -378,6 +373,7 @@ fn unquote_display_name(raw: &str) -> String {
 // ------------------------------------------------------------------ MailError
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MailError {
     #[error("invalid message: {0}")]
     InvalidMessage(String),
@@ -385,18 +381,31 @@ pub enum MailError {
     BadHeader(String),
     #[error("transport error: {0}")]
     Transport(String),
+    /// The server refused the message or a recipient for good (SMTP
+    /// 550–555). Auth and connect failures stay [`Self::Transport`].
+    #[error("rejected: {0}")]
+    Rejected(String),
+    /// The `[mail]` settings cannot build the backend they ask for.
+    #[error("mail config: {0}")]
+    Config(String),
+}
+
+impl MailError {
+    /// Only a transport failure can succeed on a later try (#1923).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transport(_))
+    }
 }
 
 /// Reject `\r` / `\n` in single-line header fields. Returns
-/// [`MailError::BadHeader`] (Django parity — Django raises
-/// `BadHeaderError` from `EmailMessage.__init__` when the same
-/// pattern is detected). Defends against email header injection
+/// [`MailError::BadHeader`]. Defends against header-injection
 /// attacks where attacker input lands in `Subject:` / `From:` /
 /// `To:` and forges extra envelope headers via embedded newlines.
 fn check_no_crlf(field: &str, value: &str) -> Result<(), MailError> {
     if value.contains('\n') || value.contains('\r') {
         return Err(MailError::BadHeader(format!(
-            "newline in {field} (Django BadHeaderError — possible header injection)"
+            "newline in {field} — possible header injection"
         )));
     }
     Ok(())
@@ -517,8 +526,7 @@ impl Mailer for InMemoryMailer {
 /// timestamped `.eml` file in a configured directory instead of
 /// sending it.
 ///
-/// Mirrors Django's `django.core.mail.backends.filebased.EmailBackend`
-/// (issue #417). Useful when you want to inspect rendered email
+/// Useful when you want to inspect rendered email
 /// content (password-reset links, signup confirmations) during
 /// development without wiring an SMTP relay or piping stdout into a
 /// log file.
@@ -551,10 +559,9 @@ impl FileMailer {
 
 /// Serialize an `Email` to RFC-822-ish text. Headers first, blank
 /// line, then body. HTML alternative (when present) is appended as a
-/// `--- HTML alternative ---` block — this matches the human-readable
-/// shape Django's file backend uses for dev inspection. We are NOT
-/// producing a fully-spec-compliant multipart MIME message; this is a
-/// debugging dump format.
+/// `--- HTML alternative ---` block, which reads well during dev
+/// inspection. This is NOT a spec-compliant multipart MIME message;
+/// it is a debugging dump format.
 fn serialize_eml(email: &Email) -> String {
     let mut out = String::with_capacity(256 + email.body.len());
     if let Some(f) = &email.from {
@@ -641,47 +648,10 @@ impl Mailer for NullMailer {
     }
 }
 
-/// Build a [`BoxedMailer`] from a loaded
-/// [`crate::config::MailSettings`] section (#87 wiring, v0.29).
-///
-/// Backend selection from `s.backend`:
-/// - `"console"` (default) → [`ConsoleMailer`]
-/// - `"memory"` → [`InMemoryMailer`] (tests / staging snapshots)
-/// - `"null"` / `"none"` → [`NullMailer`]
-/// - `"smtp"` → falls back to [`ConsoleMailer`] with a warning —
-///   `SmtpMailer` is documented but not yet implemented; until
-///   that ships, projects that need real SMTP wire it themselves
-///   via [`BoxedMailer`]
-/// - any other / unset → [`ConsoleMailer`] (dev-friendly default;
-///   warn for typos)
-///
-/// `s.smtp_host` and `s.from_address` are accepted by the section
-/// but currently unused at the backend layer — `from_address`
-/// belongs on the per-message [`Email::from`] field, not the
-/// backend; `smtp_host` lights up when `SmtpMailer` ships.
-///
-/// ```ignore
-/// let cfg = rustango::config::Settings::load_from_env()?;
-/// let mailer: rustango::email::BoxedMailer =
-///     rustango::email::from_settings(&cfg.mail);
-/// ```
-/// Django-shape `send_mail(subject, message, from_email, recipient_list)` —
-/// fire-and-forget single-message helper. Returns `Ok(())` on
+/// Fire-and-forget single-message helper. Returns `Ok(())` on
 /// success.
 ///
-/// Direct translation of the most common Django mail call:
-///
-/// ```python
-/// # Django
-/// send_mail('Subject here',
-///           'Here is the message.',
-///           'from@example.com',
-///           ['to@example.com'],
-///           fail_silently=False)
-/// ```
-///
 /// ```ignore
-/// // rustango
 /// rustango::email::send_mail(
 ///     &*mailer,
 ///     "Subject here",
@@ -692,8 +662,7 @@ impl Mailer for NullMailer {
 /// ```
 ///
 /// `from_email = None` lets the mailer fall through to its own
-/// configured default (matching Django's `DEFAULT_FROM_EMAIL`
-/// fallback). `recipient_list` must be non-empty — the mailer's
+/// configured default. `recipient_list` must be non-empty — the mailer's
 /// `Email::validate()` surfaces a `MailError::InvalidMessage` otherwise.
 ///
 /// # Errors
@@ -715,10 +684,9 @@ pub async fn send_mail(
     mailer.send(&email).await
 }
 
-/// Django-shape `send_mass_mail(datatuple)` — bulk-send a batch of
-/// messages. `datatuple` in Django is `[(subject, message, from, [to,
-/// ...]), ...]`; rustango takes a slice of pre-built `Email`s, which
-/// is the more idiomatic Rust shape and avoids per-tuple boilerplate.
+/// Bulk-send a batch of messages. Takes a slice of pre-built
+/// `Email`s, so each one carries its own subject, sender and
+/// recipients.
 ///
 /// Sequential by default — backends with native pipelining (lettre's
 /// SMTP transport over a kept-open connection) get the same call shape
@@ -727,7 +695,7 @@ pub async fn send_mail(
 ///
 /// Returns `Ok(count)` where `count` is the number of successfully
 /// sent messages. Per-message errors short-circuit on the first
-/// failure, matching Django's `fail_silently=False` default.
+/// failure — errors are not swallowed.
 ///
 /// # Errors
 /// Forwarded from the mailer's `send` call on the first failing message.
@@ -740,14 +708,12 @@ pub async fn send_many(mailer: &dyn Mailer, emails: &[Email]) -> Result<usize, M
     Ok(sent)
 }
 
-/// Django-shape `mail_admins(subject, message)` — sends to the
-/// addresses configured in `MailSettings.admins`. Returns Ok(0) when
-/// the list is empty (a no-op without warning, matching Django's
-/// "no ADMINS → silent skip" behavior). Issue #416.
+/// Send to the addresses configured in `MailSettings.admins`.
+/// Returns Ok(0) when the list is empty — a silent no-op, so an
+/// unconfigured deployment does not error on every alert.
 ///
-/// `subject` is prefixed with `"[admin] "` to match Django's default
-/// `EMAIL_SUBJECT_PREFIX`. Override the subject yourself if you need
-/// a different prefix.
+/// `subject` is prefixed with `"[admin] "`. Set
+/// `email_subject_prefix` to brand it differently.
 ///
 /// `from` falls back to `MailSettings.from_address`; if neither is
 /// set the mailer's `Email::validate()` will surface a
@@ -756,6 +722,8 @@ pub async fn send_many(mailer: &dyn Mailer, emails: &[Email]) -> Result<usize, M
 /// # Errors
 /// Forwarded from the mailer's `send` call. Returns `Ok(count)` on
 /// success — `count` is the number of recipients the message went to.
+/// All recipients share one message: over SMTP one refused address
+/// fails the send for every one of them.
 #[cfg(feature = "config")]
 pub async fn mail_admins(
     mailer: &dyn Mailer,
@@ -774,9 +742,8 @@ pub async fn mail_admins(
     .await
 }
 
-/// Django-shape `mail_managers(subject, message)` — sends to the
-/// addresses configured in `MailSettings.managers`. Same shape as
-/// [`mail_admins`]; subject is prefixed with `"[manager] "`. Issue #416.
+/// Send to the addresses configured in `MailSettings.managers`. Same
+/// shape as [`mail_admins`]; subject is prefixed with `"[manager] "`.
 #[cfg(feature = "config")]
 pub async fn mail_managers(
     mailer: &dyn Mailer,
@@ -796,9 +763,8 @@ pub async fn mail_managers(
 }
 
 /// Pick the `From:` address for a server-generated mail
-/// (`mail_admins`, `mail_managers`, error notifications). Django
-/// `SERVER_EMAIL` parity — falls back to `DEFAULT_FROM_EMAIL`
-/// (`from_address`) when unset.
+/// (`mail_admins`, `mail_managers`, error notifications). Falls back
+/// to `from_address` when unset.
 #[cfg(feature = "config")]
 fn server_from_address(s: &crate::config::MailSettings) -> Option<&str> {
     s.server_email.as_deref().or(s.from_address.as_deref())
@@ -816,10 +782,9 @@ async fn send_to_list(
     if list.is_empty() {
         return Ok(0);
     }
-    // Django `EMAIL_SUBJECT_PREFIX` parity — when set, it wins over
-    // the historical `[admin] ` / `[manager] ` fallback so projects
-    // can brand server mail with `"[Acme] "` (note the trailing
-    // space matches Django's convention).
+    // `email_subject_prefix`, when set, wins over the `[admin] ` /
+    // `[manager] ` fallback, so projects can brand server mail with
+    // `"[Acme] "` — include the trailing space.
     let prefix = s.email_subject_prefix.as_deref().unwrap_or(fallback_prefix);
     let mut email = Email::new()
         .subject(format!("{prefix}{subject}"))
@@ -835,80 +800,65 @@ async fn send_to_list(
     Ok(list.len())
 }
 
+/// Build a [`BoxedMailer`] from the `[mail]` section.
+///
+/// `backend`: `"console"` (default), `"memory"`, `"null"` / `"none"`,
+/// `"file"` (needs `file_email_dir`) or `"smtp"` ([`smtp::SmtpMailer`],
+/// feature `email-smtp`).
+///
+/// ```ignore
+/// let cfg = rustango::config::Settings::load_from_env()?;
+/// let mailer = rustango::email::from_settings(&cfg.mail)?;
+/// ```
+///
+/// # Errors
+/// [`MailError::Config`] when `backend = "smtp"` cannot be built: no
+/// `smtp_host`, a bad `from_address` or `smtp_tls`, or no `email-smtp`
+/// feature; also for `file` without `file_email_dir` or an unknown
+/// backend. Falling back to the console put reset links in logs (#1923).
 #[cfg(feature = "config")]
-#[must_use]
-pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
-    match s.backend.as_deref() {
-        Some("smtp") => smtp_from_settings_or_warn(s),
+pub fn from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
+    Ok(match s.backend.as_deref() {
+        Some("smtp") => smtp_from_settings(s)?,
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
-        Some("file") => file_from_settings_or_warn(s),
+        Some("file") => match s.file_email_dir.as_deref() {
+            Some(dir) => Arc::new(FileMailer::new(dir)),
+            // An error, like smtp: the console would put mail in logs (#1948).
+            None => {
+                return Err(MailError::Config(
+                    "mail.backend = \"file\" but [mail].file_email_dir is unset".into(),
+                ))
+            }
+        },
         Some("console") | None => Arc::new(ConsoleMailer),
         Some(other) => {
-            tracing::warn!(
-                target: "rustango::email",
-                backend = %other,
-                "unknown mail.backend value; falling back to ConsoleMailer",
-            );
-            Arc::new(ConsoleMailer)
+            return Err(MailError::Config(format!(
+                "unknown mail.backend `{other}`; use console, memory, null, file or smtp"
+            )))
         }
-    }
+    })
 }
 
-/// File-backend resolver — needs `[mail].file_email_dir` to be set,
-/// otherwise warns and falls back to `ConsoleMailer` so the app still
-/// boots. Issue #417.
-#[cfg(feature = "config")]
-fn file_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
-    match s.file_email_dir.as_deref() {
-        Some(dir) => Arc::new(FileMailer::new(dir)),
-        None => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"file\" but [mail].file_email_dir is unset; \
-                 falling back to ConsoleMailer.",
-            );
-            Arc::new(ConsoleMailer)
-        }
-    }
-}
-
-/// SMTP-backend resolver. When the `email-smtp` feature is on,
-/// builds an [`SmtpMailer`] from the section — and falls back to
-/// [`ConsoleMailer`] with a tracing warning if the build fails (so
-/// apps don't refuse to boot on a malformed `[mail]` section). When
-/// the feature is off, emits the same legacy warning the pre-#48
-/// build did and falls back to [`ConsoleMailer`].
+/// `backend = "smtp"`: an [`SmtpMailer`] or an error, never the console.
 #[cfg(all(feature = "config", feature = "email-smtp"))]
-fn smtp_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
+fn smtp_from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
     match smtp::from_settings(s) {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"smtp\" but [mail].smtp_host is unset; falling back to ConsoleMailer."
-            );
-            Arc::new(ConsoleMailer)
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "rustango::email",
-                error = %e,
-                "mail.backend = \"smtp\" but SmtpMailer build failed; falling back to ConsoleMailer."
-            );
-            Arc::new(ConsoleMailer)
-        }
+        Ok(Some(m)) => Ok(m),
+        Ok(None) => Err(MailError::Config(
+            "mail.backend = \"smtp\" but [mail].smtp_host is unset".into(),
+        )),
+        Err(e) => Err(MailError::Config(format!(
+            "mail.backend = \"smtp\" cannot be built: {e}"
+        ))),
     }
 }
 
 #[cfg(all(feature = "config", not(feature = "email-smtp")))]
-fn smtp_from_settings_or_warn(_s: &crate::config::MailSettings) -> BoxedMailer {
-    tracing::warn!(
-        target: "rustango::email",
-        "mail.backend = \"smtp\" but the `email-smtp` feature isn't enabled in this build; \
-         falling back to ConsoleMailer. Enable `email-smtp` to ship a real SMTP transport.",
-    );
-    Arc::new(ConsoleMailer)
+fn smtp_from_settings(_s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
+    Err(MailError::Config(
+        "mail.backend = \"smtp\" but this build has no `email-smtp` feature".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -980,7 +930,7 @@ mod tests {
     async fn from_settings_memory_backend_captures_send() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("memory".into());
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -1000,7 +950,7 @@ mod tests {
     async fn from_settings_null_backend_drops_send() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("null".into());
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -1011,14 +961,26 @@ mod tests {
             .expect("null backend never errors on valid email");
     }
 
-    /// Unknown / unset backend falls back to ConsoleMailer (which
+    /// A `file` backend with no directory, or an unknown backend, is an
+    /// error rather than a console that logs the mail (#1948).
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_backend_without_a_dir_or_an_unknown_backend_is_an_error() {
+        let mut s = crate::config::MailSettings::default();
+        s.backend = Some("file".into());
+        assert!(matches!(from_settings(&s), Err(MailError::Config(_))));
+        s.backend = Some("smtpp".into());
+        assert!(matches!(from_settings(&s), Err(MailError::Config(_))));
+    }
+
+    /// Unset backend falls back to ConsoleMailer (which
     /// prints — we just check the call succeeds; capturing stdout
     /// in a unit test would race with parallel runners).
     #[cfg(feature = "config")]
     #[tokio::test]
     async fn from_settings_unset_falls_back_to_console() {
         let s = crate::config::MailSettings::default();
-        let m = from_settings(&s);
+        let m = from_settings(&s).expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
@@ -1027,26 +989,45 @@ mod tests {
         m.send(&email).await.expect("console mailer ok");
     }
 
-    /// SMTP backend: when `email-smtp` feature is enabled,
-    /// `from_settings` with an `smtp_host` builds a real
-    /// [`crate::email::SmtpMailer`] (no network contact — just
-    /// constructs the transport). When the feature is off, the
-    /// same call falls back to `ConsoleMailer` with a warning.
-    ///
-    /// We only assert that the mailer was successfully created (no
-    /// `.send()` — there's no real relay at `mail.example.com` in
-    /// the test environment).
-    #[cfg(feature = "config")]
+    /// `smtp` with a host builds a mailer; no contact is made.
+    #[cfg(all(feature = "config", feature = "email-smtp"))]
     #[tokio::test]
     async fn from_settings_smtp_builds_mailer_when_host_given() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("smtp".into());
         s.smtp_host = Some("mail.example.com".into());
         s.smtp_tls = Some("starttls".into());
-        let m = from_settings(&s);
-        // The mailer was constructed. On `email-smtp` builds this is a
-        // SmtpMailer; on non-smtp builds it is ConsoleMailer. Either
-        // way the `Arc<dyn Mailer>` is valid — we just don't send.
-        drop(m);
+        from_settings(&s).expect("smtp mailer");
+    }
+
+    /// A broken `smtp` section is an error, not a console that sends
+    /// reset links to the log (#1923).
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_broken_smtp_section_is_an_error() {
+        let smtp = |f: fn(&mut crate::config::MailSettings)| {
+            let mut s = crate::config::MailSettings::default();
+            s.backend = Some("smtp".into());
+            s.smtp_host = Some("mail.example.com".into());
+            f(&mut s);
+            from_settings(&s).map(|_| ())
+        };
+        assert!(matches!(
+            smtp(|s| s.smtp_host = None),
+            Err(MailError::Config(_))
+        ));
+        assert!(matches!(
+            smtp(|s| s.from_address = Some("not an address".into())),
+            Err(MailError::Config(_))
+        ));
+        // `tls` reads as STARTTLS to most people but meant implicit TLS.
+        assert!(matches!(
+            smtp(|s| s.smtp_tls = Some("tls".into())),
+            Err(MailError::Config(_))
+        ));
+        assert!(matches!(
+            smtp(|s| s.smtp_tls = Some("bogus".into())),
+            Err(MailError::Config(_))
+        ));
     }
 }

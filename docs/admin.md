@@ -1,8 +1,8 @@
 # The admin
 
-**Rustango** generates a complete admin UI from your models — the same idea as
-Django's admin or a Laravel Nova/Filament panel, but with **zero per-model
-boilerplate**. Add `#[derive(Model)]`, mount the admin once, and every model gets
+**Rustango** generates a complete admin UI from your models — a ready-made
+back-office for your data, with **zero per-model boilerplate**. Add
+`#[derive(Model)]`, mount the admin once, and every model gets
 a list view with search, filters, sorting, pagination and bulk actions; a
 create/edit form grouped into fieldsets; inline child editing; a per-row audit
 trail; and a live model reference. Everything below is configured declaratively
@@ -153,7 +153,9 @@ the publish/archive action picker.
 **Filtering.** Click any value in a `list_filter` facet card to scope the list;
 the active filter shows as a chip with a **clear** link, and the row count and
 facet counts update. Filters, search, sorting and the date hierarchy all
-compose in the query string and can be combined.
+compose in the query string and can be combined. `?<field>=` works only on a
+`list_filter`, displayed, FK or inline-parent column, never a secret one, and
+`?<field>__isnull=1` lists the NULL rows.
 
 [![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](img/admin-list-filtered.png)](img/admin-list-filtered.png)
 
@@ -230,8 +232,8 @@ escaped text on the form instead of inputs.
 
 ## Inlines
 
-Inlines show a child model's rows on the parent's page (Django inlines).
-Register one at module scope:
+Inlines show a child model's rows on the parent's page. Register one at module
+scope:
 
 ```rust
 rustango::register_admin_inline!(
@@ -248,7 +250,9 @@ On the parent's **detail** page the children render as a read-only table; on the
 **edit** page they become an editable FormSet (add / change / delete rows in
 place). Options: `kind` (`Tabular` — one table row per child, or `Stacked` — a
 fieldset per child), `label`, `fields` (default: every scalar except the FK),
-`extra` (blank rows offered for adding), `max_num`, and `readonly_fields`.
+`extra` (blank rows offered for adding), `max_num` (a save that adds rows past
+it is refused), and `readonly_fields`. Inline rows pass the child's `view` hook,
+secret fields are never shown, and an extra row with a typed natural PK inserts.
 
 [![A post's detail page: read-only fields, the Comments inline table, and the audit-trail card showing the create entry as a JSON diff](img/admin-detail.png)](img/admin-detail.png)
 
@@ -355,14 +359,15 @@ rustango::register_admin_list_filter!(
 
 ## Custom views, querysets and permissions
 
-Three more registration macros mirror Django's `ModelAdmin` hooks:
+Three more registration macros hook into a model's admin pages:
 
 - **Custom admin pages** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
   mounts an extra page/action at `/<prefix>/posts/duplicate`. The handler is an
   async `fn(Pool, Request) -> Response`. (Reserved suffixes like `new`,
   `__action`, `__autocomplete`, `{pk}`, `{pk}/edit`, `{pk}/delete` are skipped
-  with a warning.)
+  with a warning.) Under `with_user_perms` a GET needs `{table}.view` and a
+  POST/PUT/PATCH/DELETE `{table}.change`; add `perm = "publish"` to require `{table}.publish`.
 - **Queryset scoping** —
   `register_admin_queryset!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
   narrows what a request can see (e.g. only the current user's rows). Multiple
@@ -407,7 +412,8 @@ one of two ways:
 When session auth is on, the sidebar footer shows a **"Signed in as _username_"**
 line and a **Logout** button (a `POST` form). Standalone admins post to
 `{admin_prefix}/logout` by default; a tenant admin sits behind the tenancy
-layer's own logout route, so point the button there with `Builder::logout_url`:
+layer's own logout route, so point the button there with `Builder::logout_url`.
+Logout stamps the user's `sessions_revoked_at`, so it ends their sessions on every device:
 
 ```rust
 let admin = admin::Builder::new(pool)
@@ -460,7 +466,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
-| `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. |
+| `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo above the title. |
 | `brand_name(s)` / `brand_tagline(s)` | Per-tenant brand overrides. |
@@ -499,7 +505,7 @@ Custom routes registered with `register_admin_view!` mount at
 
 ## The model reference
 
-Every admin ships a live model reference (Django's admindocs) at
+Every admin ships a live model reference at
 `<prefix>/__docs` — a read-only catalogue of every registered model with its
 fields, columns, types, flags (PK, unique, …) and relations. Nothing to
 configure; it's generated from your models, so it never drifts from the schema.

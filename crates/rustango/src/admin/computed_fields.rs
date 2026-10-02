@@ -1,21 +1,10 @@
-//! Computed fields — Django-style computed columns on the admin list view.
+//! Computed columns for the admin list view.
 //!
-//! Models declare a computed field by name in `admin(list_display = "…")`
-//! alongside the regular column names; the renderer dispatches to a
-//! user-supplied closure via the inventory registry. The closure
-//! receives the row as a `serde_json::Value` (a `{ field_name: value }`
-//! map produced by [`crate::sql::select_rows_as_json`] — works
-//! the same on Postgres / MySQL / SQLite) so it can pull any column
-//! it wants and produce pre-escaped display HTML.
-//!
-//! ## v0.36 breaking change
-//!
-//! Pre-v0.36 the closure received `&sqlx::postgres::PgRow`. v0.36
-//! switched to `&serde_json::Value` so admin's row-rendering path is
-//! tri-dialect (the closure no longer cares which backend produced
-//! the row). Migration: replace
-//! `let body: String = row.try_get("body").unwrap_or_default();`
-//! with `let body = row.get("body").and_then(|v| v.as_str()).unwrap_or_default();`.
+//! A model names a computed field in `admin(list_display = "…")` next
+//! to its real columns, and the renderer calls a closure from the
+//! inventory registry. The closure gets the row as a
+//! `serde_json::Value` map of `{ field_name: value }`, the same on
+//! every backend, and returns display HTML that is already escaped.
 //!
 //! ## Example
 //!
@@ -41,56 +30,42 @@
 //! );
 //! ```
 //!
-//! The list view will show a "Words" column populated by the closure.
-//! Names that collide with declared fields lose — the column takes
-//! precedence, the computed field is ignored.
+//! The list view then shows a "Words" column filled by the closure. A
+//! declared field wins any name clash: the computed field is ignored.
 
-/// Function signature a computed field implements. Receives the row
-/// as a `serde_json::Value` (a `{ field_name → value }` map) and
-/// returns the pre-escaped HTML to drop into the cell.
-///
-/// v0.36: switched from `fn(&PgRow) -> String` to
-/// `fn(&serde_json::Value) -> String` for tri-dialect admin. The
-/// JSON map is produced by [`crate::sql::row_to_json`] /
-/// `row_to_json_my` / `row_to_json_sqlite` per the active backend.
+/// Renderer for a computed field. Takes the row as a
+/// `serde_json::Value` map and returns the cell's HTML, already
+/// escaped.
 pub type ComputedFieldRenderFn = fn(&serde_json::Value) -> String;
 
-/// Function signature a computed field's optional link callable
-/// implements. Receives the same row JSON the renderer does and
-/// returns the cell's link target URL — `None` to render the cell
-/// inline. Issue #349 — Django parity for `list_display` callables
-/// that advertise a click target (e.g. an FK detail page).
+/// Optional link callable for a computed field. Takes the same row
+/// JSON as the renderer and returns the cell's link target, or `None`
+/// to render the cell without a link.
 pub type ComputedFieldLinkFn = fn(&serde_json::Value) -> Option<String>;
 
-/// One computed-field registration. Inventory-collected; submit one
-/// per `register_admin_computed!` invocation.
+/// One computed-field registration, collected by inventory. Each
+/// `register_admin_computed!` submits one.
 pub struct ComputedField {
-    /// SQL table name the field applies to — must match
-    /// `ModelSchema::table` exactly.
+    /// SQL table the field belongs to. Must equal `ModelSchema::table`.
     pub table: &'static str,
-    /// Identifier used in `admin(list_display = "…")`. Must not
-    /// collide with a declared field name (declared fields win).
+    /// Name used in `admin(list_display = "…")`. A declared field with
+    /// the same name wins.
     pub name: &'static str,
-    /// Display label shown in the column header. Empty string falls
-    /// back to `name`.
+    /// Column header. Empty falls back to `name`.
     pub label: &'static str,
-    /// Renderer. Pure HTML out — caller is responsible for any
-    /// escaping needed.
+    /// Renderer. Its output goes into the cell as HTML, so it must do
+    /// its own escaping.
     pub render: ComputedFieldRenderFn,
-    /// Issue #349 — optional per-row link callable. When present and
-    /// returns `Some(url)`, the admin list view wraps the rendered
-    /// cell in `<a href="{url}">…</a>`. When `None` (the default)
-    /// the cell behaves exactly as before, deferring to the
-    /// container-level `list_display_links` for whether to link.
+    /// Optional per-row link. On `Some(url)` the list view wraps the
+    /// cell in `<a href="{url}">…</a>`. On `None`, the default,
+    /// `list_display_links` decides whether the cell links.
     pub link: Option<ComputedFieldLinkFn>,
 }
 
 inventory::collect!(ComputedField);
 
-/// Return every computed field registered for `table`. Cheap; the
-/// inventory iterator is `O(N)` over all registrations but `N` is
-/// small (bounded by the number of computed columns declared across
-/// the whole binary).
+/// Every computed field registered for `table`. The scan is `O(N)`
+/// over all registrations in the binary, which stays small.
 #[must_use]
 pub fn for_table(table: &str) -> Vec<&'static ComputedField> {
     inventory::iter::<ComputedField>
@@ -99,7 +74,7 @@ pub fn for_table(table: &str) -> Vec<&'static ComputedField> {
         .collect()
 }
 
-/// Lookup a single computed field by `(table, name)`.
+/// Find one computed field by `(table, name)`.
 #[must_use]
 pub fn find(table: &str, name: &str) -> Option<&'static ComputedField> {
     inventory::iter::<ComputedField>
@@ -122,9 +97,9 @@ pub fn find(table: &str, name: &str) -> Option<&'static ComputedField> {
 /// );
 /// ```
 ///
-/// Issue #349 — pass `link = |row| Option<String>` to advertise a
-/// per-row click target. When `Some(url)` comes back, the admin
-/// list view wraps the rendered cell in `<a href="{url}">…</a>`.
+/// Pass `link = |row| Option<String>` to give the cell a click target.
+/// On `Some(url)` the list view wraps the cell in
+/// `<a href="{url}">…</a>`.
 ///
 /// ```ignore
 /// rustango::register_admin_computed!(
@@ -148,8 +123,7 @@ pub fn find(table: &str, name: &str) -> Option<&'static ComputedField> {
 /// ```
 #[macro_export]
 macro_rules! register_admin_computed {
-    // 4-arg form — no link. Backwards-compatible with every existing
-    // call site; the new `link` field stays `None`.
+    // 4-arg form: no link, so the `link` field stays `None`.
     ($table:expr, $name:expr, $label:expr, $render:expr $(,)?) => {
         $crate::inventory::submit! {
             $crate::admin::computed_fields::ComputedField {
@@ -161,10 +135,9 @@ macro_rules! register_admin_computed {
             }
         }
     };
-    // 5-arg form — with explicit `link = …` callable. The link
-    // expression must be of type `fn(&serde_json::Value) -> Option<String>`
-    // (typically a closure; rust will coerce a non-capturing one to
-    // the fn-pointer type expected by `ComputedFieldLinkFn`).
+    // 5-arg form, with a `link = …` callable. The expression must be a
+    // `fn(&serde_json::Value) -> Option<String>`; a closure that
+    // captures nothing coerces to that fn pointer.
     (
         $table:expr,
         $name:expr,
@@ -190,9 +163,8 @@ mod tests {
 
     #[test]
     fn iter_compiles_with_zero_entries() {
-        // No `register_admin_computed!` in this test binary → empty
-        // iter. The point is the inventory link doesn't panic when
-        // nothing's submitted.
+        // This test binary registers nothing, so the iterator is
+        // empty. The point is that it does not panic.
         let v = for_table("nonexistent_table");
         assert!(v.is_empty());
         let m = find("nonexistent_table", "anything");

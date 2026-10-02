@@ -1,19 +1,12 @@
-//! Admin-side audit handlers and helpers.
+//! Admin-side audit handlers and helpers:
 //!
-//! Extracted from `admin/views.rs` in v0.13.0 — the audit slices
-//! (v0.12.5 activity feed, v0.12.6 retention, v0.12.7 per-row
-//! history link, v0.12.8 keep-last cleanup) had grown the views
-//! module past 1400 lines. This module owns:
+//! * `audit_log_view`: `GET /__audit`, the cross-row activity feed.
+//! * `audit_cleanup_submit`: `POST /__audit/cleanup` retention.
+//! * `emit_admin_audit`: snapshot-shaped emit for create and bulk.
+//! * `admin_audit_diff_entry`: diff-shaped entry for update.
 //!
-//! * `audit_log_view` — `GET /__audit` cross-row activity feed.
-//! * `audit_cleanup_submit` — `POST /__audit/cleanup` retention.
-//! * `emit_admin_audit` — snapshot-shaped audit emit for create + bulk.
-//! * `emit_admin_audit_diff` — diff-shaped emit for update.
-//!
-//! View handlers in `views.rs` (`create_submit`, `update_submit`,
-//! `delete_submit`, `action_submit`) call into this module after
-//! the data write, so behaviour and JSON shape match what shipped
-//! in v0.12.x — only the file layout changed.
+//! Create emits after the insert; an edit writes its entry in the
+//! UPDATE's transaction (#2060).
 
 use std::collections::HashMap;
 
@@ -22,43 +15,126 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde_json::Value;
 
 use super::errors::AdminError;
-use super::helpers::chrome_context;
+use super::helpers::{chrome_context, ListQuery};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
+use crate::audit::AuditPerm;
 
 /// Page size for the `/__audit` activity feed. Matches the per-table
 /// admin list views (50 by default).
 const AUDIT_PAGE_SIZE: i64 = 50;
 
-/// Cap on facet values rendered per column on `/__audit`. Mirrors
-/// the `FACET_TRUNCATE` knob used by `compute_facets` for per-table
-/// list views; opt out per-column with `?facet_show_all=<col>`.
+/// Cap on facet values rendered per column on `/__audit`. Same knob as
+/// `FACET_TRUNCATE` in the per-table list views. Opt out for one column
+/// with `?facet_show_all=<col>`.
 const AUDIT_FACET_TRUNCATE: usize = 15;
 
-/// `GET /__audit` — cross-row activity feed of `rustango_audit_log`.
-/// Newest first, paginated. Supports `?entity_table=...`,
-/// `?entity_pk=...`, `?operation=...`, `?source=...` filter params;
-/// the right rail shows distinct values + counts and toggle URLs
-/// (mirrors the `list_filter` UI shape).
+/// Read access to the audit feed. Only [`AppState::audit_reader`] builds
+/// one, so every admin read of the log goes through the permission gate.
+pub(crate) struct AuditReader<'a> {
+    pool: &'a crate::sql::Pool,
+    /// Tables whose rows the user may see. `None` = every table.
+    tables: Option<Vec<String>>,
+}
+
+impl AuditReader<'_> {
+    pub(crate) async fn list(
+        &self,
+        filter: &crate::audit::AuditFilter,
+        page_size: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
+        crate::audit::list_in(self.pool, filter, self.tables.as_deref(), page_size, offset).await
+    }
+
+    pub(crate) async fn count(
+        &self,
+        filter: &crate::audit::AuditFilter,
+    ) -> Result<i64, sqlx::Error> {
+        crate::audit::count_in(self.pool, filter, self.tables.as_deref()).await
+    }
+
+    /// One row's history. The caller already checked `{table}.view`.
+    pub(crate) async fn for_entity(
+        &self,
+        table: &str,
+        pk: &str,
+    ) -> Result<Vec<crate::audit::AuditEntry>, sqlx::Error> {
+        crate::audit::fetch_for_entity_pool(self.pool, table, pk).await
+    }
+
+    pub(crate) async fn facet_counts(
+        &self,
+        column: &str,
+    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        crate::audit::facet_counts_in(self.pool, column, self.tables.as_deref()).await
+    }
+}
+
+impl AppState {
+    /// `None` unless the user is a superuser or holds [`AuditPerm::View`];
+    /// then rows are limited to tables they hold `{table}.view` on.
+    pub(crate) fn audit_reader(&self) -> Option<AuditReader<'_>> {
+        let tables = match &self.config.user_perms {
+            None => None,
+            Some(perms) if AuditPerm::View.granted_by(perms) => Some(
+                perms
+                    .iter()
+                    .filter_map(|c| c.strip_suffix(".view"))
+                    .filter(|t| self.is_visible(t))
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            Some(_) => return None,
+        };
+        Some(AuditReader {
+            pool: &self.pool,
+            tables,
+        })
+    }
+
+    /// `true` for a superuser or a holder of [`AuditPerm::Delete`].
+    /// Cleanup is not table-scoped: it trims every table's rows.
+    pub(crate) fn can_clean_audit(&self) -> bool {
+        self.config
+            .user_perms
+            .as_ref()
+            .is_none_or(|p| AuditPerm::Delete.granted_by(p))
+    }
+}
+
+/// The feed's mounted path: `audit_url` is relative to the admin prefix.
+fn audit_path(state: &AppState) -> String {
+    format!("{}{}", state.config.admin_prefix, state.config.audit_url)
+}
+
+fn audit_forbidden(action: &'static str) -> AdminError {
+    AdminError::Forbidden {
+        table: "rustango_audit_log".to_owned(),
+        action,
+    }
+}
+
+/// `GET /__audit`: cross-row activity feed of `rustango_audit_log`,
+/// newest first and paginated. Filters on `?entity_table=`,
+/// `?entity_pk=`, `?operation=` and `?source=`. The right rail shows
+/// distinct values, counts and toggle URLs, like `list_filter` does.
 pub(crate) async fn audit_log_view(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let page = params
-        .get("page")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1)
-        .max(1);
-    let offset = (page - 1) * AUDIT_PAGE_SIZE;
+    let reader = state
+        .audit_reader()
+        .ok_or_else(|| audit_forbidden("view"))?;
+    let page = crate::list_params::parse_page(&params);
+    let offset = crate::list_params::page_offset(page, AUDIT_PAGE_SIZE);
 
-    // v0.37 — pull the active filter set off the query string into
-    // an `AuditFilter` so the listing helpers in `crate::audit` can
-    // render their SQL via the dialect emitter. `entity_pk` is
-    // filterable too — drives the "View full history" link on each
-    // row's detail page — but it's not in the facet rail (per-PK
-    // distinct-value cardinality is unbounded; appears only as an
-    // active-filter pill).
+    // Collect the active filters into an `AuditFilter` for the listing
+    // helpers in `crate::audit`. `entity_pk` is filterable (it drives
+    // the "View full history" link on a row's detail page) but it is
+    // not in the facet rail: per-PK cardinality is unbounded, so it
+    // only shows up as an active-filter pill.
     let filter = crate::audit::AuditFilter {
         entity_table: params
             .get("entity_table")
@@ -82,20 +158,24 @@ pub(crate) async fn audit_log_view(
         }
     }
 
-    // Total count + page of rows + per-facet groupby — all via the
-    // tri-dialect helpers in `crate::audit`. The SQL is rendered
-    // through `dialect.placeholder()` / `dialect.quote_ident()` so
-    // this view works against any backend the framework supports.
-    let total = crate::audit::count(&state.pool, &filter).await.unwrap_or(0);
-    let entries = crate::audit::list(&state.pool, &filter, AUDIT_PAGE_SIZE, offset)
+    // Every feed link derives from this, prefix included (#1916).
+    let mut feed_query = ListQuery::new(audit_path(&state));
+    for (k, v) in &active_field_filters {
+        feed_query.push(*k, v.clone());
+    }
+
+    // Count, page of rows and facet group-bys all go through the
+    // helpers in `crate::audit`, which render SQL per dialect, so this
+    // view works on any supported backend.
+    let total = reader.count(&filter).await.unwrap_or(0);
+    let entries = reader
+        .list(&filter, AUDIT_PAGE_SIZE, offset)
         .await
         .unwrap_or_default();
 
-    // Per-facet distinct values + counts. Always runs against the
-    // unfiltered table so operators can navigate to any value
-    // without losing them. v0.13.1: count desc with alpha tie-break
-    // — most active value first, deterministic output across
-    // requests.
+    // Distinct values and counts per facet. Always read from the
+    // unfiltered table, so an operator can still reach any value.
+    // Ordered by count, then alphabetically, for a stable render.
     let mut facets_ctx: Vec<Value> = Vec::new();
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
     for col in ["entity_table", "operation", "source"] {
@@ -103,32 +183,16 @@ pub(crate) async fn audit_log_view(
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
-        let facet_pairs = crate::audit::facet_counts(&state.pool, col)
-            .await
-            .unwrap_or_default();
+        let facet_pairs = reader.facet_counts(col).await.unwrap_or_default();
         let mut values: Vec<Value> = facet_pairs
             .iter()
             .map(|(raw, count)| {
                 let is_active = active_value.map(|v| v == raw).unwrap_or(false);
-                let mut params: Vec<(String, String)> = Vec::new();
-                for (k, v) in &active_field_filters {
-                    if *k == col {
-                        continue;
-                    }
-                    params.push(((*k).into(), v.clone()));
-                }
+                let mut toggle = feed_query.without(&[col]);
                 if !is_active {
-                    params.push((col.into(), raw.clone()));
+                    toggle = toggle.with(col, raw.clone());
                 }
-                let mut url = state.config.audit_url.clone();
-                if !params.is_empty() {
-                    url.push('?');
-                    let qs: Vec<String> = params
-                        .iter()
-                        .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
-                        .collect();
-                    url.push_str(&qs.join("&"));
-                }
+                let url = toggle.url();
                 serde_json::json!({
                     "raw": raw.clone(),
                     "display": render::escape(raw),
@@ -158,18 +222,7 @@ pub(crate) async fn audit_log_view(
             values = active_first;
         }
         let show_all_url = if more_count > 0 {
-            let mut params: Vec<(String, String)> = Vec::new();
-            for (k, v) in &active_field_filters {
-                params.push(((*k).into(), v.clone()));
-            }
-            params.push(("facet_show_all".into(), col.into()));
-            let mut url = format!("{}?", state.config.audit_url);
-            let qs: Vec<String> = params
-                .iter()
-                .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
-                .collect();
-            url.push_str(&qs.join("&"));
-            Some(url)
+            Some(feed_query.clone().with("facet_show_all", col).url())
         } else {
             None
         };
@@ -191,15 +244,18 @@ pub(crate) async fn audit_log_view(
         .iter()
         .map(|e| {
             let (action_name, cleaned) = split_action_marker(&e.changes);
-            // v0.31.1 (#5): use the configured admin prefix instead of
-            // hardcoded `/__admin`. Friendly defaults (`/admin`) had
-            // broken audit-log "view this record" links.
+            // Use the configured prefix, not a hardcoded `/__admin`,
+            // so "view this record" links work on any prefix.
             let admin_prefix = state.config.admin_prefix.as_str();
             serde_json::json!({
                 "id": e.id,
                 "entity_table": e.entity_table,
                 "entity_pk": e.entity_pk,
-                "detail_url": format!("{admin_prefix}/{}/{}", e.entity_table, e.entity_pk),
+                "detail_url": format!(
+                    "{admin_prefix}/{}/{}",
+                    url_encode_q(&e.entity_table),
+                    url_encode_q(&e.entity_pk)
+                ),
                 "operation": e.operation,
                 "action_name": action_name,
                 "source": e.source,
@@ -210,11 +266,7 @@ pub(crate) async fn audit_log_view(
         .collect();
 
     // Pager URL preserves the active facets.
-    let mut pager_extras = String::new();
-    for (k, v) in &active_field_filters {
-        use std::fmt::Write as _;
-        let _ = write!(pager_extras, "&{}={}", url_encode_q(k), url_encode_q(v));
-    }
+    let pager_extras = feed_query.suffix();
 
     let active_filters_ctx: Vec<Value> = active_field_filters
         .iter()
@@ -230,6 +282,7 @@ pub(crate) async fn audit_log_view(
         "page": page,
         "last_page": last_page,
         "pager_extras": pager_extras,
+        "can_clean_audit": state.can_clean_audit(),
     });
     Ok(Html(render_with_chrome(
         "audit_log.html",
@@ -238,15 +291,17 @@ pub(crate) async fn audit_log_view(
     )))
 }
 
-/// `POST /__audit/cleanup` — apply a retention policy to the audit
-/// log. Reads `mode` from the form (`"older_than"` or `"keep_last"`,
-/// default `"older_than"`) and the corresponding numeric input. The
-/// cleanup itself emits an audit entry so the trail is
-/// self-describing.
+/// `POST /__audit/cleanup`: apply a retention policy to the audit log.
+/// The form's `mode` is `"older_than"` (the default) or `"keep_last"`,
+/// with the matching numeric input. The cleanup emits its own audit
+/// entry, so the trail records that it ran.
 pub(crate) async fn audit_cleanup_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
+    if !state.can_clean_audit() {
+        return Err(audit_forbidden("delete"));
+    }
     let mode = form.get("mode").map(String::as_str).unwrap_or("older_than");
     let (_removed, changes) = match mode {
         "keep_last" => {
@@ -307,43 +362,24 @@ pub(crate) async fn audit_cleanup_submit(
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
-    Ok(Redirect::to(&state.config.audit_url).into_response())
+    Ok(Redirect::to(&audit_path(&state)).into_response())
 }
 
-/// Diff-shaped audit emit for admin UPDATE writes. Reads the
-/// pre-update row that `update_submit` SELECTed before the UPDATE,
-/// builds a `{ "field": { "before": v, "after": v } }` JSON via
-/// `audit::diff_changes`, and emits an Update entry. Falls back to
-/// the snapshot path when the before-row is missing (rare:
-/// concurrent delete between SELECT and UPDATE).
-///
-/// v0.37 — `before_row` is now `Option<&serde_json::Value>` (the JSON
-/// bridge from slice 2 of v0.36) instead of `Option<&PgRow>`, so the
-/// caller can fetch via `select_one_row_as_json` on any backend.
-pub(crate) async fn emit_admin_audit_diff(
-    state: &AppState,
+/// Diff-shaped audit entry for an admin UPDATE: `{ "field": { "before": v,
+/// "after": v } }` from the row `update_submit` locked before the write.
+/// `None` when nothing changed.
+pub(crate) fn admin_audit_diff_entry(
     model: &'static crate::core::ModelSchema,
     pk_str: &str,
-    before_row: Option<&serde_json::Value>,
+    row: &serde_json::Value,
     form: &HashMap<String, String>,
-) {
-    let Some(row) = before_row else {
-        emit_admin_audit(state, model, pk_str, crate::audit::AuditOp::Update, form).await;
-        return;
-    };
-    // v0.13.0: typed JSON values (numbers as numbers, bools as
-    // bools) match the macro-emit path's shape so app-code writes
-    // and admin form POSTs produce the same diff JSON. `before` reads
-    // typed values from the SELECTed row; `after` parses form
-    // payloads back to the typed shape via `coerce_form_to_json`,
-    // falling back to the row's prior value for absent keys.
-    //
-    // v0.37 — row reads route through the dialect-agnostic JSON
-    // bridge (`render::read_value_as_json_from_json`) so this works
-    // across PG / MySQL / SQLite. The row's column values are
-    // already typed (numbers, bools, strings, nulls) inside the
-    // serde_json::Value tree, so the helper just looks up the field
-    // name + normalizes per `FieldType`.
+) -> Option<crate::audit::PendingEntry> {
+    // Both sides use typed JSON (numbers as numbers, bools as bools),
+    // so an app-code write and an admin form POST produce the same
+    // diff. `before` reads the SELECTed row; `after` coerces the form
+    // values, and falls back to the row for keys the form omits.
+    // Row reads go through `render::read_value_as_json_from_json`,
+    // which is dialect-agnostic and normalizes per `FieldType`.
     let before_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
         .filter(|f| {
@@ -368,28 +404,16 @@ pub(crate) async fn emit_admin_audit_diff(
             (f.name, v)
         })
         .collect();
-    let entry = crate::audit::PendingEntry {
-        entity_table: model.table,
-        entity_pk: pk_str.to_owned(),
-        operation: crate::audit::AuditOp::Update,
-        source: crate::audit::current_source(),
-        changes: crate::audit::diff_changes(&before_pairs, &after_pairs),
-    };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
-        tracing::warn!(
-            target: "rustango::admin::audit",
-            error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_str,
-            "admin audit emit failed (data write already committed)",
-        );
-    }
+    crate::audit::PendingEntry::update_diff(
+        model.table,
+        pk_str.to_owned(),
+        &before_pairs,
+        &after_pairs,
+    )
 }
 
-/// Build an audit `PendingEntry` from a form submission and emit it
-/// to `rustango_audit_log`. Best-effort — failures here log a
-/// warning but don't fail the user-visible request, since the data
-/// write already succeeded.
+/// Write [`admin_audit_entry`] to `rustango_audit_log`. Best-effort: the
+/// data write already succeeded, so a failure here only logs a warning.
 pub(crate) async fn emit_admin_audit(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
@@ -397,11 +421,32 @@ pub(crate) async fn emit_admin_audit(
     op: crate::audit::AuditOp,
     form: &HashMap<String, String>,
 ) {
-    // Snapshot every field present in the form (skip anything that
-    // didn't show up — e.g. `_selected` / unchecked checkboxes).
-    // v0.13.0: form values coerce to typed JSON so create-snapshots
-    // match the diff/macro shapes (numbers as numbers, bools as
-    // bools, strings as strings).
+    emit_best_effort(state, &admin_audit_entry(model, pk_str, op, form)).await;
+}
+
+/// Write `entry` after its data write committed; a failure only warns.
+pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %entry.entity_table,
+            entity_pk = %entry.entity_pk,
+            "admin audit emit failed (data write already committed)",
+        );
+    }
+}
+
+/// Snapshot audit entry from a form submission.
+fn admin_audit_entry(
+    model: &'static crate::core::ModelSchema,
+    pk_str: &str,
+    op: crate::audit::AuditOp,
+    form: &HashMap<String, String>,
+) -> crate::audit::PendingEntry {
+    // Snapshot every field the form carries and skip the rest, such as
+    // unchecked checkboxes. Values coerce to typed JSON so a create
+    // snapshot has the same shape as a diff.
     let pairs: Vec<(&str, Value)> = model
         .scalar_fields()
         .filter(|f| {
@@ -414,35 +459,21 @@ pub(crate) async fn emit_admin_audit(
                 .map(|v| (f.name, render::coerce_form_to_json(f, v)))
         })
         .collect();
-    let entry = crate::audit::PendingEntry {
+    crate::audit::PendingEntry {
         entity_table: model.table,
         entity_pk: pk_str.to_owned(),
         operation: op,
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
-    };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
-        tracing::warn!(
-            target: "rustango::admin::audit",
-            error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_str,
-            "admin audit emit failed (data write already committed)",
-        );
     }
 }
 
-/// Pull the `__action` marker out of a `changes` JSON object so the
-/// audit panel can render it as a distinct badge rather than treating
-/// it as a regular changed field. Returns `(action_name,
-/// cleaned_changes)` — the cleaned JSON has `__action` removed if it
-/// was present, leaving the actual user-visible changes.
+/// Split the `__action` marker out of a `changes` object. Returns
+/// `(action_name, cleaned_changes)`, so the panel can show the action
+/// as a badge instead of as a changed field.
 ///
-/// Bulk-action audit rows (v0.12.4) carry `__action: "<name>"`
-/// alongside the row's pre-action snapshot. Self-audit rows from
-/// `/__audit/cleanup` (v0.12.6) carry it on a synthetic
-/// `entity_table = "rustango_audit_log"` row. Both want the badge
-/// rendering, neither wants the marker shown as a "change".
+/// Bulk-action rows and the self-audit row from `/__audit/cleanup` both
+/// carry this marker.
 pub(crate) fn split_action_marker(changes: &Value) -> (Option<String>, Value) {
     if let Value::Object(map) = changes {
         if let Some(Value::String(name)) = map.get("__action") {
@@ -454,8 +485,6 @@ pub(crate) fn split_action_marker(changes: &Value) -> (Option<String>, Value) {
     (None, changes.clone())
 }
 
-// #806 — the local 7-char `url_encode_q` was narrower than the
-// canonical `crate::url_codec::url_encode` and left `/` `@` plus
-// non-ASCII bytes unencoded. Route through the canonical encoder
-// under the local name.
+// The canonical encoder under the local name. An earlier local version
+// left `/`, `@` and non-ASCII bytes unencoded.
 use crate::url_codec::url_encode as url_encode_q;

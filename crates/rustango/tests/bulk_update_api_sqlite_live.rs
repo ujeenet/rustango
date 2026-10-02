@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite test for the ergonomic `Model::bulk_update(objs, fields)`
-//! API — Django's `QuerySet.bulk_update`.
+//! API — one statement that writes the named fields of many rows.
 //!
 //! The SQL/IR/executor stack (`BulkUpdateQuery` + `bulk_update_pool` +
 //! the per-dialect `write_bulk_update_*` writers) already existed and is

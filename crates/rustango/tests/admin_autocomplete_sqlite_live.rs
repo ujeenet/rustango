@@ -1,4 +1,4 @@
-//! Django-parity #358 — admin `autocomplete_fields`.
+//! Issue #358 — admin `autocomplete_fields`.
 //!
 //! Verifies:
 //!   * macro attr + schema field

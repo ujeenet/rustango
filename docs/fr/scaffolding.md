@@ -1,6 +1,6 @@
 # Scaffolding
 
-**Rustango** dispose de deux niveaux de génération de code, tous deux inspirés des générateurs que vous connaissez déjà avec Django et Laravel — de sorte que vous n'avez presque jamais à câbler de code répétitif à la main :
+**Rustango** dispose de deux niveaux de génération de code — de sorte que vous n'avez presque jamais à câbler de code répétitif à la main :
 
 1. **Le générateur de projet** — `cargo rustango new` crée un tout nouveau projet à partir d'un template.
 2. **Les générateurs internes au projet** — `manage startapp` et la famille `manage make:*` ajoutent des apps, des vues, des sérialiseurs, des jobs, et bien plus au sein d'un projet existant.
@@ -26,7 +26,21 @@
 cargo install cargo-rustango
 ```
 
-Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` (de la même manière que `django-admin` ou l'installeur `laravel` vous donnent une commande globale).
+Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` — une commande globale disponible partout, même en dehors d'un projet.
+
+### La version du générateur est celle que votre projet obtient
+
+`cargo rustango new` écrit `rustango = "MAJOR.MINOR"` dans le `Cargo.toml` généré, en reprenant **la version du générateur**, et non la plus récente publiée sur crates.io. Quel que soit le générateur que vous installez, c'est la version que votre projet épingle.
+
+C'est presque toujours ce que vous voulez, et c'est pour cela que la commande d'installation ci-dessus n'est pas épinglée : le générateur le plus récent écrit l'épinglage le plus récent, et les deux ne peuvent pas diverger.
+
+Cela vaut la peine de le savoir lorsque vous voulez délibérément une version plus ancienne — pour coller à un projet qui y est déjà, ou pour reproduire un rapport. Épinglez le générateur, pas le projet :
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Vérifiez laquelle vous avez avec `cargo rustango --version`. Mettre à jour plus tard, c'est la même commande avec `--force`, et cela n'affecte que les projets que vous générez ensuite — l'épinglage d'un projet existant est une ligne dans son propre `Cargo.toml`, que vous modifiez vous-même.
 
 ---
 
@@ -125,6 +139,8 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `sso` / `admin-sso` | Authentification unique OIDC, pour les utilisateurs / pour le site d'admin |
 | `passkey` | Authentification WebAuthn / passkey |
 | `cache-redis` / `cache-page` | Backend de cache Redis / mise en cache de pages entières |
+| `jobs` / `jobs-postgres` | File de tâches en arrière-plan, en processus / adossée à la base et donc résistante aux redémarrages |
+| `scheduler` | Tâches d'arrière-plan à intervalle fixe |
 | `email-smtp` | Transport SMTP pour le framework e-mail |
 | `mcp` | Serveur Model Context Protocol pour les agents IA |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
@@ -142,7 +158,7 @@ Chaque template écrit un projet Cargo autonome :
   Cargo.toml            # the rustango dependency + features for this template
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
-  rust-toolchain.toml   # pins the Rust toolchain
+  rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
   docker-compose.yml    # a Postgres service to develop against
   Dockerfile            # production image
   README.md
@@ -185,8 +201,8 @@ Ainsi, `cargo run` démarre le serveur, et `cargo run -- <verb>` exécute les mi
 En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 - **api** — pas d'admin ; `urls::api()` se contente d'agréger vos propres routes.
-- **fullstack** — `urls.rs` expose également `admin_router(pool)` (construit à partir de `admin::Builder::new(pool).build()`) afin que l'admin automatique se monte sur `/admin`.
-- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés (à la manière de Django) lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
+- **fullstack** — le même `urls.rs`, plus la fonctionnalité admin compilée dedans. L'admin n'est **pas** câblé pour vous : rien de ce qui est généré ne l'appellerait, donc le générateur n'émet aucun `admin_router`. Ajoutez-en un vous-même et imbriquez-le — [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique) l'explique en détail. Prenez un `rustango::sql::Pool` pour que l'assistant ne nomme aucun pilote.
+- **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
 
 ### Configuration en couches
 
@@ -207,7 +223,7 @@ cargo run -- --help         # see every manage verb
 
 ## Ajouter un module fonctionnel : `manage startapp`
 
-C'est l'équivalent du `startapp` de Django — il échafaude un module autonome regroupant des modèles, des vues et des routes liés entre eux :
+Il échafaude un module autonome regroupant des modèles, des vues et des routes liés entre eux :
 
 ```sh
 cargo run -- startapp blog
@@ -226,16 +242,16 @@ Options :
 
 Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La référence complète, drapeau par drapeau, se trouve dans la [référence CLI manage](manage.md) ; les formes les plus courantes sont :
 
-| Commande | Génère | Comparable à |
-|---|---|---|
-| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD façon DRF | DRF `ViewSet` |
-| `make:serializer <Name> [--model <M>]` | Un sérialiseur pour la mise en forme des requêtes/réponses | Sérialiseur DRF |
-| `make:api_routes <app>` | Un agrégateur de routes API pour une app | — |
-| `make:form <Name>` | Un formulaire HTML avec validation | `Form` Django |
-| `make:job <Name>` | Un gestionnaire de job en arrière-plan | Job Laravel / Celery |
-| `make:notification <Name>` | Une notification multi-canal | Notification Laravel |
-| `make:middleware <Name>` | Un squelette de middleware | Middleware Django / Laravel |
-| `make:test <Name>` | Un module de test utilisant le client de test in-process | — |
+| Commande | Génère |
+|---|---|
+| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD |
+| `make:serializer <Name> [--model <M>]` | Un sérialiseur pour la mise en forme des requêtes/réponses |
+| `make:api_routes <app>` | Un agrégateur de routes API pour une app |
+| `make:form <Name>` | Un formulaire HTML avec validation |
+| `make:job <Name>` | Un gestionnaire de job en arrière-plan |
+| `make:notification <Name>` | Une notification multi-canal |
+| `make:middleware <Name>` | Un squelette de middleware |
+| `make:test <Name>` | Un module de test utilisant le client de test in-process |
 
 ```sh
 cargo run -- make:viewset PostViewSet --model Post

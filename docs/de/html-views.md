@@ -7,9 +7,9 @@ JSON für API-Clients ausgibt, gibt ein HTML-View eine gerenderte Seite für ein
 werden aus demselben `#[derive(Model)]` gebaut, und du kannst ein Modell *beides* zugleich
 ausliefern.
 
-Dies sind das Äquivalent von **Rustango** zu Djangos generischen klassenbasierten Views
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) oder Laravels
-Resource-Controllern, die Blade-Views zurückgeben. Sie rendern über [Tera](https://keats.github.io/tera/)-Templates.
+Die einzelnen View-Typen (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`) decken je einen Standardfall ab und rendern über
+[Tera](https://keats.github.io/tera/)-Templates.
 
 [![HTML-Views in Rustango: Ein Modell speist ListView, DetailView und CreateView/UpdateView/DeleteView, die jeweils ein Tera-Template zu einer serverseitig gerenderten Seite rendern](../img/html-views.png)](../img/html-views.png)
 
@@ -55,7 +55,6 @@ darin, *was herauskommt* und *wer aufruft*.
 | Bei fehlerhafter Eingabe | `400` + eine feldbasierte JSON-Fehlerkarte | rendert das Formular mit den angezeigten Fehlern neu |
 | Liest eine Liste als | eine paginierte JSON-Hülle | eine `<table>`/Schleife in deinem Template |
 | Üblicherweise authentifiziert per | Tokens / JWT / API-Keys | Session-Cookies |
-| Django-Analogon | DRF `ModelViewSet` | generische klassenbasierte Views |
 
 Du musst nicht global wählen — wähle pro Ressource, und du kannst **beide auf demselben Modell**
 einhängen (siehe [unten](#ein-modell-auf-beide-arten-ausliefern)). Faustregeln:
@@ -171,18 +170,32 @@ let app = CreateView::for_model(Post::SCHEMA)
 ```
 
 Das Formular-Template (`posts_form.html`) wird mit UpdateView geteilt. `is_update`
-unterscheidet die beiden, und `errors` trägt etwaige Validierungsmeldungen zurück:
+unterscheidet die beiden, und **`form`** trägt sowohl die Felder als auch etwaige
+Validierungsmeldungen:
 
 ```html
 <form method="post">
-  <input name="title" value="{{ object.title | default(value='') }}">
-  <textarea name="body">{{ object.body | default(value='') }}</textarea>
-  {% for field, msgs in errors %}
-    <p class="error">{{ field }}: {{ msgs | join(sep=', ') }}</p>
+  {{ csrf_input | safe }}
+  {% for field in form.fields %}
+    <label for="{{ field.name }}">{{ field.name }}</label>
+    <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
+           {% if field.required %}required{% endif %}
+           {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+    {% if form.errors[field.name] %}
+      <p class="error">{{ form.errors[field.name] }}</p>
+    {% endif %}
   {% endfor %}
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Zwei Dinge sind hier leicht falsch zu machen. `form.errors` bildet einen Feldnamen auf
+**einen String** ab, nicht auf eine Liste — `join` darauf ist ein Fehler. Und es gibt keine
+`errors`-Variable auf oberster Ebene; über eine solche zu iterieren ist ein Tera-Render-Fehler,
+sodass die Seite 500 zurückgibt, statt die Meldung anzuzeigen.
+
+`{{ csrf_input | safe }}` braucht den Filter: Tera escapt `.html` automatisch, ohne ihn wird
+das Token als Text gerendert und jedes POST abgelehnt.
 
 **Validierung.** Schema-Regeln (Typ, `max_length`, NOT NULL…) werden automatisch
 erzwungen. Füge mit einem Closure-Validator eigene hinzu — bei `Err` wird das Formular
@@ -249,12 +262,22 @@ Jeder View stempelt einen konsistenten Kontext ein, damit Templates sauber zwisc
 |---|---|
 | `ListView` | `object_list` (die Zeilen der Seite), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (die Zeile) |
-| `CreateView` / `UpdateView` | `object` (leer beim Erstellen, vorausgefüllt beim Aktualisieren), `is_update` (bool), `errors`, `values` |
+| `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **kein `object`** |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (die Zeile), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (die zu bestätigende Zeile) |
 
 Zeilen werden als schlichte, nach Spaltennamen indizierte Maps bereitgestellt (`{{ post.title }}`),
 wobei SQL-`NULL` als `null` gerendert wird. Verwende `.context_object_name("posts" / "post")`, um
 neben `object_list` / `object` einen freundlicheren Alias hinzuzufügen.
+
+Jeder Eintrag in `form.fields` trägt `name`, `column`, `ty`, `required`, `max_length` und
+`value`. `form.errors` ist nach Feldnamen indiziert und enthält eine Meldung pro Feld, keine
+Liste. Jeder View stempelt zusätzlich `csrf_token` und `csrf_input` ein, und jeder
+View-Router weist einen POST ohne passendes Token ab.
+
+`CreateView` stempelt kein `object` ein, daher ist `{{ object.title }}` in einem
+Erstellformular undefiniert statt leer — verwende `{{ field.value }}` aus `form.fields`, das
+in beiden Fällen befüllt ist.
 
 ---
 

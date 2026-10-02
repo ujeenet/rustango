@@ -1,24 +1,17 @@
-//! Database-backed job queue.
+//! Database-backed job queue. Runs on PostgreSQL, MySQL 8.0+ or
+//! SQLite through [`crate::sql::Pool`]. The type is named
+//! `PgJobQueue` for back-compat; it is not PG-only.
 //!
-//! v0.38 — tri-dialect. Originally PG-only via `SELECT … FOR UPDATE
-//! SKIP LOCKED`. The struct is still called `PgJobQueue` for back-
-//! compat (every existing import `use rustango::jobs::pg::PgJobQueue;`
-//! keeps working), but its internal pool is now
-//! [`crate::sql::Pool`] — the queue runs on PostgreSQL, MySQL 8.0+,
-//! or SQLite.
+//! ## How a job is picked up
 //!
-//! ## Per-backend pickup semantics
-//!
-//! | Backend | Atomicity strategy | Worker concurrency |
+//! | Backend | Strategy | Worker concurrency |
 //! |---------|---|---|
 //! | PostgreSQL | `WITH next AS (… FOR UPDATE SKIP LOCKED) UPDATE … RETURNING` | Many writers, no contention. |
-//! | MySQL 8.0+ | Same `FOR UPDATE SKIP LOCKED` shape via `WITH … UPDATE`. | Many writers (requires MySQL 8). |
-//! | SQLite | `UPDATE … WHERE id = (SELECT id … LIMIT 1) RETURNING …` inside a transaction. SQLite serializes writers globally, so the pickup is implicitly mutually-exclusive. | One writer at a time — best for low/medium throughput. |
+//! | MySQL 8.0+ | The same `FOR UPDATE SKIP LOCKED` shape. | Many writers. |
+//! | SQLite | `UPDATE … WHERE id = (SELECT id … LIMIT 1) RETURNING …` in a transaction. SQLite already serializes writers, so pickup is exclusive. | One writer at a time. Best for low or medium load. |
 //!
-//! Worker tasks pick the next ready job so two replicas never grab
-//! the same row (PG/MySQL) or only one writer is active at a time
-//! (SQLite). Retries land back in the same table with `run_at` pushed
-//! into the future by exponential backoff.
+//! Two replicas never grab the same row. A retry stays in the same
+//! table with `run_at` pushed into the future by the backoff.
 //!
 //! ## Quick start
 //!
@@ -41,7 +34,7 @@
 //! queue.dispatch(&SendWelcomeEmail { user_id: 42 }).await?;
 //! ```
 //!
-//! ## Schema (Postgres flavor — other backends use equivalent types)
+//! ## Schema (Postgres types shown; other backends use equivalents)
 //!
 //! ```sql
 //! CREATE TABLE rustango_jobs (
@@ -58,14 +51,17 @@
 //! );
 //! ```
 //!
-//! Use [`PgJobQueue::ensure_table_pool`] at boot, or roll your own
+//! Call [`PgJobQueue::ensure_table_pool`] at boot, or write your own
 //! migration that emits the same DDL.
 //!
 //! ## Lock recovery
 //!
-//! [`PgJobQueue::reclaim_stuck_jobs_pool`] resets `locked_at = NULL`
-//! for any row whose lock is older than the threshold. Call it on a
-//! scheduler to recover from worker crashes.
+//! [`PgJobQueue::reclaim_stuck_jobs_pool`] clears `locked_at` on rows
+//! locked longer than a threshold. Run it on a schedule so jobs from a
+//! crashed worker get picked up again. A running job refreshes its lock
+//! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
+//! above that. `attempt` counts at pickup: a job that crashes its
+//! process still spends an attempt.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -81,13 +77,11 @@ use tokio::task::JoinHandle;
 use super::{DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue};
 use crate::sql::Pool;
 
-/// Database-backed job queue. Internally generic over the backend
-/// (PostgreSQL / MySQL 8+ / SQLite) via [`crate::sql::Pool`].
+/// Database-backed job queue over [`crate::sql::Pool`] (PostgreSQL,
+/// MySQL 8+ or SQLite).
 ///
-/// Cheap to clone (everything is `Arc`-wrapped internally). Workers
-/// are not spawned until [`PgJobQueue::start`] is called.
-///
-/// Name kept as `PgJobQueue` for back-compat with v0.37 imports.
+/// Cheap to clone; the state is all behind `Arc`. Workers start only
+/// when you call [`PgJobQueue::start`].
 pub struct PgJobQueue {
     pool: Pool,
     registry: Arc<Mutex<HandlerRegistry>>,
@@ -100,6 +94,7 @@ pub struct PgJobQueue {
     /// new jobs run with sub-second latency under low load.
     notify: Arc<Notify>,
     worker_id_prefix: String,
+    heartbeat_interval: Duration,
 }
 
 const CREATE_JOBS_TABLE_SQL_PG: &str = "\
@@ -134,32 +129,43 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
 );
 CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`)";
 
-const CREATE_JOBS_TABLE_SQL_SQLITE: &str = "\
+/// `run_at` and `created_at` take their DEFAULT from the dialect, not
+/// from a literal here, so the format cannot drift from the one the
+/// reader expects. `dispatch` binds both columns; the default is only
+/// a backstop for hand-written INSERTs.
+fn create_jobs_table_sql_sqlite(dialect: &dyn crate::sql::Dialect) -> String {
+    let now = dialect.current_timestamp_default();
+    format!(
+        "\
 CREATE TABLE IF NOT EXISTS rustango_jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT     NOT NULL,
     payload      TEXT     NOT NULL,
     attempt      INTEGER  NOT NULL DEFAULT 0,
     max_attempts INTEGER  NOT NULL,
-    run_at       TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    run_at       TEXT     NOT NULL DEFAULT {now},
     locked_at    TEXT,
     locked_by    TEXT,
     last_error   TEXT,
-    created_at   TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at   TEXT     NOT NULL DEFAULT {now}
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
-    ON rustango_jobs (run_at) WHERE locked_at IS NULL";
+    ON rustango_jobs (run_at) WHERE locked_at IS NULL"
+    )
+}
 
 impl PgJobQueue {
     /// Build a queue from a [`crate::sql::Pool`] with `worker_count`
-    /// worker tasks. Call [`Self::start`] to spawn them. v0.38 —
-    /// tri-dialect entry point.
+    /// worker tasks. Call [`Self::start`] to spawn them.
     #[must_use]
     pub fn with_workers_pool(pool: impl Into<Pool>, worker_count: usize) -> Self {
+        // `q<n>` keeps two queues in one process from sharing a lease owner.
+        static QUEUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id_prefix = format!(
-            "host:{}:pid:{}",
+            "host:{}:pid:{}:q{}",
             hostname().unwrap_or_else(|| "unknown".into()),
-            std::process::id()
+            std::process::id(),
+            QUEUE_SEQ.fetch_add(1, Ordering::Relaxed)
         );
         Self {
             pool: pool.into(),
@@ -171,17 +177,18 @@ impl PgJobQueue {
             shutdown: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             worker_id_prefix: id_prefix,
+            heartbeat_interval: Duration::from_secs(10),
         }
     }
 
-    /// PG-typed back-compat shim around [`Self::with_workers_pool`].
+    /// PG-typed shim around [`Self::with_workers_pool`].
     #[cfg(feature = "postgres")]
     #[must_use]
     pub fn with_workers(pool: PgPool, worker_count: usize) -> Self {
         Self::with_workers_pool(Pool::Postgres(pool), worker_count)
     }
 
-    /// Default: 4 workers, 1-second poll interval. PG back-compat shim.
+    /// Default: 4 workers, 1-second poll interval. PG-typed shim.
     #[cfg(feature = "postgres")]
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
@@ -194,14 +201,29 @@ impl PgJobQueue {
         Self::with_workers_pool(pool, 4)
     }
 
-    /// How long workers wait between checks when the queue is empty.
-    /// Lower = lower latency, higher idle DB load. Default: 1 second.
-    /// New jobs nudge the workers via [`tokio::sync::Notify`] so this
-    /// only matters when the queue is dry.
+    /// How long a worker waits between checks when the queue is empty.
+    /// Default: 1 second. A lower value cuts latency but adds idle DB
+    /// load. `dispatch` wakes workers directly, so this only matters
+    /// when there is no work.
     #[must_use]
     pub fn poll_interval(mut self, d: Duration) -> Self {
         self.poll_interval = d;
         self
+    }
+
+    /// How often a running job refreshes its `locked_at`. Default: 10
+    /// seconds, at least 1 ms. Reclaim only rows locked well longer than
+    /// this, or a long job runs twice.
+    #[must_use]
+    pub fn heartbeat_interval(mut self, d: Duration) -> Self {
+        // `tokio::time::interval` panics on zero.
+        self.heartbeat_interval = d.max(Duration::from_millis(1));
+        self
+    }
+
+    /// The `locked_by` of worker `n`.
+    fn worker_id(&self, n: usize) -> String {
+        format!("{}:w{n}", self.worker_id_prefix)
     }
 
     /// Set a callback invoked for jobs that exhaust retries or return
@@ -216,7 +238,7 @@ impl PgJobQueue {
         *self.dead_letter.lock().await = Some(boxed);
     }
 
-    /// PG-typed back-compat shim around [`Self::ensure_table_pool`].
+    /// PG-typed shim around [`Self::ensure_table_pool`].
     ///
     /// # Errors
     /// Returns the underlying sqlx error if the DDL fails.
@@ -225,26 +247,23 @@ impl PgJobQueue {
         Self::ensure_table_pool(&Pool::Postgres(pool.clone())).await
     }
 
-    /// Create the `rustango_jobs` table + pickup index if absent.
-    /// Idempotent. v0.38 — tri-dialect: per-dialect DDL strings.
-    /// MySQL skips the partial index `WHERE locked_at IS NULL` (no
-    /// partial-index support); PG + SQLite keep it.
+    /// Create the `rustango_jobs` table and its pickup index if they
+    /// are missing. Safe to call every boot. MySQL gets a plain index
+    /// because it has no partial indexes; PG and SQLite get the
+    /// `WHERE locked_at IS NULL` one.
     ///
     /// # Errors
     /// Underlying sqlx DDL error.
     pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
         let ddl = match pool.dialect().name() {
-            "postgres" => CREATE_JOBS_TABLE_SQL_PG,
-            "mysql" => CREATE_JOBS_TABLE_SQL_MYSQL,
-            "sqlite" => CREATE_JOBS_TABLE_SQL_SQLITE,
-            _ => CREATE_JOBS_TABLE_SQL_PG,
+            "mysql" => CREATE_JOBS_TABLE_SQL_MYSQL.to_owned(),
+            "sqlite" => create_jobs_table_sql_sqlite(pool.dialect()),
+            _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
-        // #561 — split-by-`;` + dispatch + swallow-dup-index loop
-        // is shared via `crate::sql::run_ddl_idempotent`.
-        crate::sql::run_ddl_idempotent(pool, ddl).await
+        crate::sql::run_ddl_idempotent(pool, &ddl).await
     }
 
-    /// PG-typed back-compat shim around [`Self::reclaim_stuck_jobs_pool`].
+    /// PG-typed shim around [`Self::reclaim_stuck_jobs_pool`].
     #[cfg(feature = "postgres")]
     pub async fn reclaim_stuck_jobs(
         pool: &PgPool,
@@ -253,12 +272,9 @@ impl PgJobQueue {
         Self::reclaim_stuck_jobs_pool(&Pool::Postgres(pool.clone()), older_than).await
     }
 
-    /// Reset `locked_at = NULL` on any row locked longer than
-    /// `older_than`. Call from a scheduled task (e.g. every minute) to
-    /// recover from worker crashes that left rows reserved but not
-    /// finished. v0.38 — tri-dialect; the cutoff timestamp is computed
-    /// in Rust and bound as a parameter so no per-backend
-    /// `NOW() - INTERVAL` SQL is needed.
+    /// Clear `locked_at` on any row locked longer than `older_than`,
+    /// so jobs left reserved by a crashed worker run again. Call it on
+    /// a schedule, for example once a minute.
     ///
     /// Returns the number of rows reclaimed.
     ///
@@ -277,12 +293,10 @@ impl PgJobQueue {
                 SET locked_at = NULL, locked_by = NULL \
               WHERE locked_at IS NOT NULL AND locked_at < {p}"
         );
-        // #561 — was a 3-arm `match pool`. `SqlValue::DateTime`
-        // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL, and
-        // RFC3339 TEXT on SQLite (via the executor's `bind_match!`
-        // macros) — same shapes as the per-arm hand-bind, including
-        // the SQLite `.to_rfc3339()` path the old SQLite arm did
-        // explicitly.
+        // The cutoff is computed in Rust and bound, so no backend
+        // needs its own `NOW() - INTERVAL` SQL. `SqlValue::DateTime`
+        // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL and
+        // RFC3339 TEXT on SQLite.
         crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(cutoff)])
             .await
             .map_err(|e| match e {
@@ -303,21 +317,25 @@ impl JobQueue for PgJobQueue {
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(T::MAX_ATTEMPTS).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
-        let (p1, p2, p3) = (
+        let (p1, p2, p3, p4, p5) = (
             dialect.placeholder(1),
             dialect.placeholder(2),
             dialect.placeholder(3),
+            dialect.placeholder(4),
+            dialect.placeholder(5),
         );
+        // Bind `run_at` / `created_at` instead of letting the column
+        // default fill them. An older table may still default to
+        // `CURRENT_TIMESTAMP`, and SQLite cannot ALTER a default. Such
+        // a row sorts below every canonical one and would jump the
+        // `ORDER BY run_at, id` pickup queue forever.
+        let now = Utc::now();
         let sql = format!(
-            "INSERT INTO rustango_jobs (name, payload, max_attempts) VALUES ({p1}, {p2}, {p3})"
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at) \
+             VALUES ({p1}, {p2}, {p3}, {p4}, {p5})"
         );
-        // #561 — was a 3-arm `match pool` each doing the bind +
-        // execute by hand (PG `&Value`, MySQL `sqlx::types::Json(&v)`,
-        // SQLite `serde_json::to_string` → TEXT). The executor's
-        // `bind_match!` macros already wrap `SqlValue::Json(v)` in
-        // `sqlx::types::Json(v)` on every backend, which encodes as
-        // JSONB on PG, JSON on MySQL, and TEXT on SQLite — same
-        // on-disk shape as the per-arm hand-bind.
+        // `SqlValue::Json` stores as JSONB on PG, JSON on MySQL and
+        // TEXT on SQLite, so one call covers all three backends.
         crate::sql::raw_execute_pool(
             &self.pool,
             &sql,
@@ -325,12 +343,14 @@ impl JobQueue for PgJobQueue {
                 SqlValue::String(T::NAME.to_owned()),
                 SqlValue::Json(value),
                 SqlValue::I32(max_attempts),
+                SqlValue::DateTime(now),
+                SqlValue::DateTime(now),
             ],
         )
         .await
         .map_err(|e| JobError::Queue(e.to_string()))?;
-        // Wake up to one waiting worker so the new job starts running
-        // before the next poll tick.
+        // Wake one waiting worker so the job starts before the next
+        // poll tick.
         self.notify.notify_one();
         Ok(())
     }
@@ -347,18 +367,12 @@ impl JobQueue for PgJobQueue {
             let shutdown = self.shutdown.clone();
             let notify = self.notify.clone();
             let poll = self.poll_interval;
-            let worker_id = format!("{}:w{}", self.worker_id_prefix, n);
+            let worker = Worker {
+                id: self.worker_id(n),
+                heartbeat: self.heartbeat_interval,
+            };
             let h = tokio::spawn(async move {
-                worker_loop(
-                    pool,
-                    registry,
-                    dead_letter,
-                    shutdown,
-                    notify,
-                    poll,
-                    worker_id,
-                )
-                .await;
+                worker_loop(pool, registry, dead_letter, shutdown, notify, poll, worker).await;
             });
             workers.push(h);
         }
@@ -369,19 +383,21 @@ impl JobQueue for PgJobQueue {
         // Wake every worker so they all observe the shutdown flag and exit.
         self.notify.notify_waiters();
         let mut workers = self.workers.lock().await;
-        for h in workers.drain(..) {
-            // Give in-flight jobs ~5 seconds to finish before aborting.
-            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        for (n, mut h) in workers.drain(..).enumerate() {
+            // Give in-flight jobs ~5 seconds to finish, then abort.
+            if tokio::time::timeout(Duration::from_secs(5), &mut h)
+                .await
+                .is_err()
+            {
+                h.abort();
+                let _ = h.await;
+                // Hand the aborted job back now rather than at the next reclaim.
+                release_worker_rows(&self.pool, &self.worker_id(n)).await;
+            }
         }
     }
 
     async fn pending_count(&self) -> usize {
-        // #561 — was a 3-arm `match pool` doing the same
-        // `sqlx::query_scalar::<_, i64>(...).fetch_one(<pool>)` once
-        // per backend. The framework already ships
-        // `raw_query_pool::<(i64,)>(sql, binds, pool)` which routes
-        // through the executor's bind+decode plumbing on every
-        // backend with one call site.
         let sql = "SELECT COUNT(*) AS n FROM rustango_jobs WHERE locked_at IS NULL";
         crate::sql::raw_query_pool::<(i64,)>(sql, Vec::new(), &self.pool)
             .await
@@ -393,7 +409,12 @@ impl JobQueue for PgJobQueue {
 
 // --------------------------------------------------------------------- worker loop
 
-#[allow(clippy::too_many_arguments)]
+/// One worker's identity: the `locked_by` it writes and checks.
+struct Worker {
+    id: String,
+    heartbeat: Duration,
+}
+
 async fn worker_loop(
     pool: Pool,
     registry: Arc<Mutex<HandlerRegistry>>,
@@ -401,12 +422,12 @@ async fn worker_loop(
     shutdown: Arc<AtomicBool>,
     notify: Arc<Notify>,
     poll_interval: Duration,
-    worker_id: String,
+    worker: Worker,
 ) {
     while !shutdown.load(Ordering::SeqCst) {
-        match pick_one(&pool, &worker_id).await {
+        match pick_one(&pool, &worker.id).await {
             Ok(Some(row)) => {
-                run_one(&pool, &registry, &dead_letter, row).await;
+                run_one(&pool, &registry, &dead_letter, &worker, row).await;
                 // Loop again immediately — there might be more.
             }
             Ok(None) => {
@@ -448,7 +469,7 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                       LIMIT 1
                  )
                  UPDATE rustango_jobs
-                    SET locked_at = $3, locked_by = $1
+                    SET locked_at = $3, locked_by = $1, attempt = attempt + 1
                   WHERE id IN (SELECT id FROM next)
                  RETURNING id, name, payload, attempt, max_attempts",
             )
@@ -469,16 +490,13 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
             use sqlx::Row as _;
-            // MySQL 8.0+ supports SKIP LOCKED. Two-step in a transaction:
-            // 1) SELECT … FOR UPDATE SKIP LOCKED to atomically reserve
-            //    a row id; 2) UPDATE that id; 3) SELECT the full row.
-            // MySQL doesn't support UPDATE … RETURNING.
+            // MySQL has no `UPDATE … RETURNING`, so do it in three
+            // steps inside one transaction: reserve an id with
+            // `FOR UPDATE SKIP LOCKED`, update it, then read the row.
             let mut tx = my.begin().await?;
-            // MySQL clause order: LIMIT must come *before*
-            // `FOR UPDATE SKIP LOCKED` (PG/SQLite accept either order;
-            // MySQL is strict and rejects the reverse with a 1064
-            // syntax error — that bug silently shipped in v0.38 and
-            // is why MySQL workers never picked up dispatched jobs).
+            // `LIMIT` must come before `FOR UPDATE SKIP LOCKED`.
+            // MySQL rejects the other order with a 1064 syntax error,
+            // even though PG and SQLite accept both.
             let id_row: Option<(i64,)> = sqlx::query_as(
                 "SELECT id FROM `rustango_jobs`
                   WHERE locked_at IS NULL AND run_at <= ?
@@ -493,12 +511,15 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                 tx.commit().await?;
                 return Ok(None);
             };
-            sqlx::query("UPDATE `rustango_jobs` SET locked_at = ?, locked_by = ? WHERE id = ?")
-                .bind(now)
-                .bind(worker_id)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE `rustango_jobs` \
+                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(worker_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
             let row = sqlx::query(
                 "SELECT id, name, payload, attempt, max_attempts \
                  FROM `rustango_jobs` WHERE id = ?",
@@ -519,15 +540,19 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
             use sqlx::Row as _;
-            // SQLite serializes writers globally, so the pickup is
-            // implicitly mutually-exclusive. Use a transaction with
-            // BEGIN IMMEDIATE (sqlx's `begin()` for sqlite acquires
-            // a write lock) + UPDATE … WHERE id = (SELECT id …) RETURNING.
+            // sqlx's `begin()` takes a write lock on SQLite, and
+            // SQLite serializes writers anyway, so this pickup is
+            // exclusive on its own.
             let mut tx = sq.begin().await?;
-            let now_str = now.to_rfc3339();
+            // Use the canonical encoding, not `to_rfc3339()`. This
+            // string is compared against `run_at`, which has a fixed
+            // six-digit fraction. chrono's RFC3339 width varies with
+            // the value, and `+` sorts below `.`, so a due job could
+            // read as not yet due.
+            let now_str = crate::sql::encode_datetime(now);
             let row = sqlx::query(
                 "UPDATE rustango_jobs
-                    SET locked_at = ?, locked_by = ?
+                    SET locked_at = ?, locked_by = ?, attempt = attempt + 1
                   WHERE id = (
                       SELECT id FROM rustango_jobs
                        WHERE locked_at IS NULL AND run_at <= ?
@@ -560,51 +585,172 @@ async fn run_one(
     pool: &Pool,
     registry: &Arc<Mutex<HandlerRegistry>>,
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
+    worker: &Worker,
     job: PickedJob,
 ) {
     let handler = registry.lock().await.lookup_owned(&job.name);
     let Some((handler, static_name)) = handler else {
+        // This process cannot run it; the pickup must not spend an attempt.
         tracing::warn!(job = %job.name, id = job.id, "no handler registered — leaving locked");
+        give_back_attempt(pool, worker, job.id).await;
         return;
     };
 
-    let result = handler(job.payload.clone()).await;
+    // `attempt` already counts this run. Past the cap means earlier runs
+    // died with their worker; running it again could crash the next one.
+    if job.attempt > job.max_attempts {
+        let msg = "no attempts left: an earlier run stopped without finishing";
+        handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
+        return;
+    }
+
+    let (result, held) =
+        run_with_heartbeat(pool, worker, job.id, handler(job.payload.clone())).await;
+    if !held {
+        // Another worker may own the row now; its outcome is not ours to write.
+        tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
+        return;
+    }
 
     match result {
         Ok(()) => {
-            delete_job(pool, job.id).await;
+            finish_job(pool, worker, job.id).await;
         }
         Err(JobError::Retryable(msg)) => {
-            let next_attempt = job.attempt + 1;
-            if next_attempt >= job.max_attempts {
-                handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
+            if job.attempt >= job.max_attempts {
+                handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
             } else {
-                let backoff_ms = 1000u64.saturating_mul(1u64 << (next_attempt as u32).min(10));
+                let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
+                let backoff_ms = super::retry_backoff_ms(failed);
                 let next_run: DateTime<Utc> = Utc::now()
                     + chrono::Duration::milliseconds(i64::try_from(backoff_ms).unwrap_or(i64::MAX));
-                schedule_retry(pool, job.id, next_attempt, next_run, &msg).await;
+                schedule_retry(pool, worker, job.id, next_run, &msg).await;
             }
         }
         Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
             let msg = e.to_string();
-            handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
+            handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
         }
     }
 }
 
-async fn delete_job(pool: &Pool, id: i64) {
+/// Drive `run`, refreshing the row's `locked_at` every heartbeat so a
+/// reclaim sweep does not hand a live job to a second worker. The flag
+/// is `false` once a heartbeat found the lease gone.
+async fn run_with_heartbeat<F>(pool: &Pool, worker: &Worker, id: i64, run: F) -> (F::Output, bool)
+where
+    F: std::future::Future,
+{
+    let mut run = std::pin::pin!(run);
+    // Its own future, so a heartbeat waiting on a connection never stops `run` (#1961).
+    let lease = std::pin::pin!(async {
+        let mut beat = tokio::time::interval(worker.heartbeat);
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        beat.tick().await; // the first tick is immediate
+        loop {
+            beat.tick().await;
+            if !heartbeat(pool, worker, id).await {
+                return;
+            }
+        }
+    });
+    tokio::select! {
+        out = &mut run => (out, true),
+        () = lease => (run.await, false),
+    }
+}
+
+/// Refresh the lease. `false` only when the row is no longer this
+/// worker's; a failed write is logged and treated as still held.
+async fn heartbeat(pool: &Pool, worker: &Worker, id: i64) -> bool {
     use crate::core::SqlValue;
-    let p = pool.dialect().placeholder(1);
-    let sql = format!("DELETE FROM rustango_jobs WHERE id = {p}");
-    // #561 — was a 3-arm `match pool` doing identical `bind(id).execute()`
-    // per backend. Route through the shared `raw_execute_pool`.
-    let _ = crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(id)]).await;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = {} WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+        d.placeholder(3),
+    );
+    let binds = vec![
+        SqlValue::DateTime(Utc::now()),
+        SqlValue::I64(id),
+        SqlValue::String(worker.id.clone()),
+    ];
+    match crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        Ok(0) => {
+            tracing::warn!(id, worker = %worker.id, "job lease lost while running");
+            false
+        }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!(id, error = %e, "job heartbeat failed");
+            true
+        }
+    }
+}
+
+/// Undo the pickup's `attempt + 1`, keeping the lock.
+async fn give_back_attempt(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET attempt = attempt - 1 WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    log_finish(
+        "attempt give-back",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
+}
+
+/// Unlock every row `worker_id` still holds.
+async fn release_worker_rows(pool: &Pool, worker_id: &str) {
+    use crate::core::SqlValue;
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL WHERE locked_by = {}",
+        pool.dialect().placeholder(1),
+    );
+    let binds = vec![SqlValue::String(worker_id.to_owned())];
+    if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        tracing::error!(worker = worker_id, error = %e, "releasing an aborted job failed");
+    }
+}
+
+/// Log a finishing write that failed or found the lease gone.
+fn log_finish(what: &str, id: i64, worker: &Worker, res: Result<u64, crate::sql::ExecError>) {
+    match res {
+        Ok(0) => tracing::warn!(id, worker = %worker.id, "job lease lost; {what} skipped"),
+        Ok(_) => {}
+        Err(e) => tracing::error!(id, error = %e, "job {what} failed"),
+    }
+}
+
+/// Delete a finished job — only while this worker still holds it.
+async fn finish_job(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "DELETE FROM rustango_jobs WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    log_finish(
+        "delete",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
 }
 
 async fn schedule_retry(
     pool: &Pool,
+    worker: &Worker,
     id: i64,
-    next_attempt: i32,
     next_run: DateTime<Utc>,
     last_error: &str,
 ) {
@@ -612,68 +758,65 @@ async fn schedule_retry(
     let d = pool.dialect();
     let sql = format!(
         "UPDATE rustango_jobs \
-            SET attempt = {p1}, run_at = {p2}, \
-                locked_at = NULL, locked_by = NULL, \
-                last_error = {p3} \
-          WHERE id = {p4}",
+            SET run_at = {p1}, locked_at = NULL, locked_by = NULL, last_error = {p2} \
+          WHERE id = {p3} AND locked_by = {p4}",
         p1 = d.placeholder(1),
         p2 = d.placeholder(2),
         p3 = d.placeholder(3),
         p4 = d.placeholder(4),
     );
-    // #561 — was a 3-arm `match pool`; the only divergence was the
-    // SQLite arm binding `next_run.to_rfc3339()` as a string while
-    // PG / MySQL passed the `DateTime<Utc>` directly. `SqlValue::DateTime`
-    // on every backend produces the right encoding via the executor's
-    // `bind_match!` macros (RFC3339 string on SQLite, native
-    // TIMESTAMPTZ / DATETIME(6) on PG / MySQL), so a single shared
-    // path now works for all three.
-    let _ = crate::sql::raw_execute_pool(
-        pool,
-        &sql,
-        vec![
-            SqlValue::I32(next_attempt),
-            SqlValue::DateTime(next_run),
-            SqlValue::String(last_error.to_owned()),
-            SqlValue::I64(id),
-        ],
-    )
-    .await;
+    let binds = vec![
+        SqlValue::DateTime(next_run),
+        SqlValue::String(last_error.to_owned()),
+        SqlValue::I64(id),
+        SqlValue::String(worker.id.clone()),
+    ];
+    log_finish(
+        "retry",
+        id,
+        worker,
+        crate::sql::raw_execute_pool(pool, &sql, binds).await,
+    );
 }
 
 async fn handle_dead_letter(
     pool: &Pool,
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
+    worker: &Worker,
     job: &PickedJob,
     static_name: &'static str,
     error: &str,
 ) {
+    // Confirm the lease first: the callback must not fire for a row
+    // another worker now owns.
+    if !heartbeat(pool, worker, job.id).await {
+        return;
+    }
     let cb = dead_letter.lock().await.clone();
     if let Some(cb) = cb {
-        cb(JobDeadLetter {
+        let dl = JobDeadLetter {
             name: static_name,
             payload: job.payload.clone(),
-            attempts: u32::try_from(job.attempt + 1).unwrap_or(0),
+            attempts: u32::try_from(job.attempt).unwrap_or(0),
             error: error.to_owned(),
-        })
-        .await;
+        };
+        super::deliver_dead_letter(cb, dl).await;
     } else {
         tracing::error!(
             job = static_name,
-            attempts = job.attempt + 1,
+            attempts = job.attempt,
             error,
             "job queue dead-letter (no callback configured)"
         );
     }
-    delete_job(pool, job.id).await;
+    finish_job(pool, worker, job.id).await;
 }
 
 // --------------------------------------------------------------------- helpers
 
 impl HandlerRegistry {
-    /// Variant of `lookup` that returns the registered &'static str
-    /// alongside the handler. Workers need the static name to feed
-    /// JobDeadLetter without losing &'static-ness.
+    /// Like `lookup`, but also returns the registered `&'static str`.
+    /// `JobDeadLetter` needs a static name.
     fn lookup_owned(&self, name: &str) -> Option<(super::HandlerFn, &'static str)> {
         let (handler, _) = self.handlers.get(name)?;
         let static_name = self.handlers.keys().find(|k| **k == name).copied()?;
@@ -681,11 +824,7 @@ impl HandlerRegistry {
     }
 }
 
-// #561 — `is_mysql_dup_index_error` is now consumed only inside
-// `crate::sql::run_ddl_idempotent` (the shared DDL runner). The
-// import here is unused after the `ensure_table_pool` collapse.
-
-/// Best-effort `gethostname` without pulling a dep — read the env var
+/// Best-effort hostname with no extra dependency: read the env var
 /// most container runtimes set.
 fn hostname() -> Option<String> {
     std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
@@ -693,15 +832,14 @@ fn hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    //! No-DB unit tests. Live PG / SQLite / MySQL coverage lives in
-    //! `tests/jobs_*_live.rs`. These tests just cover the pure-Rust bits
-    //! that compile on every backend.
+    //! Pure-Rust tests that need no database. Live PG / MySQL /
+    //! SQLite coverage lives in `tests/jobs_*_live.rs`.
 
     use super::*;
 
     fn dummy_pool() -> Pool {
-        // A pool that never actually connects — used only so we can
-        // construct `PgJobQueue` for non-IO assertions.
+        // Never connects. Only lets us build a `PgJobQueue` for
+        // assertions that do no I/O.
         #[cfg(feature = "postgres")]
         {
             Pool::Postgres(
@@ -744,6 +882,13 @@ mod tests {
         assert_eq!(q.poll_interval, Duration::from_millis(250));
     }
 
+    /// A zero interval would panic in `tokio::time::interval`.
+    #[tokio::test]
+    async fn heartbeat_interval_is_at_least_a_millisecond() {
+        let q = PgJobQueue::with_workers_pool(dummy_pool(), 0).heartbeat_interval(Duration::ZERO);
+        assert_eq!(q.heartbeat_interval, Duration::from_millis(1));
+    }
+
     #[tokio::test]
     async fn dead_letter_callback_can_be_set() {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
@@ -772,6 +917,36 @@ mod tests {
         assert!(r.is_some());
         let (_, name) = r.unwrap();
         assert_eq!(name, "demo:job");
+    }
+
+    /// #1961: a job holding the only connection must not stall its heartbeat.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn heartbeat_waits_beside_a_job_holding_the_connection() {
+        let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        let pool = Pool::Sqlite(sqlite.clone());
+        PgJobQueue::ensure_table_pool(&pool).await.expect("table");
+        let worker = Worker {
+            id: "w".into(),
+            heartbeat: Duration::from_millis(20),
+        };
+        let job = async {
+            let _conn = sqlite.acquire().await.expect("conn");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let started = std::time::Instant::now();
+        let ((), held) = run_with_heartbeat(&pool, &worker, 1, job).await;
+        assert!(held);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stalled for {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

@@ -1,45 +1,34 @@
-//! Top-level permissions facade — typed convenience over the
-//! existing `tenancy::permissions` engine + integration with the
-//! [`crate::contenttypes`] registry from v0.15-F.1.
+//! Permissions, reached by model type.
 //!
-//! The full permissions surface — `Role`, `RolePermission`,
-//! `UserRole`, `UserPermission`, `has_perm` / `has_any_perm` /
-//! `has_all_perms`, the `assign_role` / `grant_role_perm` /
-//! `auto_create_permissions` helpers — lives in
-//! [`crate::tenancy::permissions`] (it shipped under the tenancy
-//! umbrella historically because the tables live in the registry
-//! DB). This module re-exports it from the conceptually-cleaner
-//! top-level path and adds a small typed layer that lets callers
-//! reach for permissions by their `T: Model` type instead of
-//! string-typing the codename:
+//! The engine itself (`Role`, `has_perm`, `grant_role_perm`, and the
+//! rest) lives in [`crate::tenancy::permissions`], because its tables
+//! live in the registry database. This module re-exports it under a
+//! shorter path and adds helpers that take `T: Model` so you do not
+//! have to write the codename string by hand:
 //!
 //! ```ignore
-//! // Old (still supported):
+//! // By string, still supported:
 //! rustango::tenancy::permissions::has_perm(uid, "post.change", &pool).await?;
 //!
-//! // New, typed (Option G of v0.16.0):
+//! // By model type:
 //! rustango::permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;
 //! ```
 //!
-//! The codename layout is unchanged (`{table}.{action}`) — the
-//! typed helpers just build the string from `T::SCHEMA.table`. No
-//! schema migration; legacy callers keep working.
+//! Codenames stay `{table}.{action}`; the typed helpers just build that
+//! string from `T::SCHEMA.table`.
 //!
-//! ## Why this is the v0.16.0 Option G "land"
+//! ## Security
 //!
-//! Permissions/roles substantively shipped under tenancy in earlier
-//! versions; the user-visible upgrade is the typed entry point.
-//! The original v0.15+ plan also called for `(content_type_id,
-//! action)`-keyed permissions instead of string codenames — that
-//! avoids the rename-cascade problem (renaming a model's table
-//! invalidates every permission row tied to its old codename).
-//! The typed helpers below are the migration step: they hide the
-//! string codename behind `T: Model` so future versions can swap
-//! the storage to `(content_type_id, action)` without breaking
-//! callers.
+//! Two things defeat a check here. An active user with `is_superuser`
+//! passes every one, whatever their roles say. And renaming a model's
+//! table changes its codename, so old permission rows stop matching
+//! and silently grant nothing; re-run `auto_create_permissions` and
+//! migrate the rows after a rename.
 //!
-//! Requires the `tenancy` Cargo feature (the underlying tables
-//! live in the tenancy bootstrap migration).
+//! A check returning `false` only means "no permission". It does not
+//! hide the object, so still filter your queries by tenant and owner.
+//!
+//! Needs the `tenancy` Cargo feature.
 
 #![cfg(feature = "tenancy")]
 
@@ -48,7 +37,7 @@ use crate::core::Model;
 use crate::sql::sqlx::PgPool;
 use crate::tenancy::TenancyError;
 
-// ----- re-export the engine for the canonical path -----
+// ----- re-export the engine under the canonical path -----
 
 #[cfg(feature = "postgres")]
 pub use crate::tenancy::permissions::{
@@ -64,29 +53,24 @@ pub use crate::tenancy::permissions::{
     UserPermission, UserRole,
 };
 
-// ----- typed entry points (v0.16.0 Option G) -----
+// ----- typed entry points -----
 
-/// Build the four standard CRUD codenames for `T` —
-/// `[<table>.add, <table>.change, <table>.delete, <table>.view]`
-/// resolved from `T::SCHEMA.table`. Typed counterpart of
-/// [`model_codenames`] that doesn't make callers remember the table
-/// name string.
+/// The four CRUD codenames for `T`: `add`, `change`, `delete`, `view`,
+/// each prefixed with `T::SCHEMA.table`. Typed form of
+/// [`model_codenames`].
 #[must_use]
 pub fn model_codenames_for<T: Model>() -> [String; 4] {
     model_codenames(T::SCHEMA.table)
 }
 
-/// Build a single-action codename for `T` — `<table>.<action>`.
-/// `action` is conventionally one of `"add"` / `"change"` /
-/// `"delete"` / `"view"` but the framework doesn't restrict it —
-/// any project-defined action codename works.
+/// One codename for `T`: `<table>.<action>`. `action` is usually
+/// `add`, `change`, `delete` or `view`, but any string works.
 #[must_use]
 pub fn codename_for<T: Model>(action: &str) -> String {
     format!("{}.{action}", T::SCHEMA.table)
 }
 
-/// `has_perm(uid, "<table>.<action>", pool)` keyed off the model
-/// type — one call, no string-typing.
+/// [`has_perm`] for `<table>.<action>`, keyed by model type.
 ///
 /// ```ignore
 /// if rustango::permissions::has_perm_for_model::<Post>(user.id, "change", &pool).await? {
@@ -94,8 +78,8 @@ pub fn codename_for<T: Model>(action: &str) -> String {
 /// }
 /// ```
 ///
-/// v0.38 — PG back-compat shim over [`has_perm_for_model_pool`]. New
-/// code should reach for the tri-dialect `_pool` variant directly.
+/// Postgres only. New code should call [`has_perm_for_model_pool`],
+/// which works on every backend.
 ///
 /// # Errors
 /// As [`has_perm`].
@@ -108,9 +92,8 @@ pub async fn has_perm_for_model<T: Model>(
     has_perm(uid, &codename_for::<T>(action), pool).await
 }
 
-/// Tri-dialect counterpart of [`has_perm_for_model`]: same model-typed
-/// API but takes the unified [`crate::sql::Pool`] enum so the call
-/// site works on PG, SQLite, and MySQL through the same surface.
+/// [`has_perm_for_model`] over [`crate::sql::Pool`], so the same call
+/// works on Postgres, SQLite and MySQL.
 ///
 /// # Errors
 /// As [`has_perm_pool`].
@@ -122,11 +105,9 @@ pub async fn has_perm_for_model_pool<T: Model>(
     has_perm_pool(uid, &codename_for::<T>(action), pool).await
 }
 
-/// Grant `<table>.<action>` to `role_id` keyed off the model type.
-/// Idempotent (the underlying [`grant_role_perm`] uses `ON CONFLICT
-/// DO NOTHING`).
+/// Grant `<table>.<action>` to `role_id`. Safe to call twice.
 ///
-/// v0.38 — PG back-compat shim over [`grant_role_perm_for_model_pool`].
+/// Postgres only; prefer [`grant_role_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`grant_role_perm`].
@@ -139,7 +120,7 @@ pub async fn grant_role_perm_for_model<T: Model>(
     grant_role_perm(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// Tri-dialect counterpart of [`grant_role_perm_for_model`].
+/// [`grant_role_perm_for_model`] for any backend.
 ///
 /// # Errors
 /// As [`grant_role_perm_pool`].
@@ -151,10 +132,10 @@ pub async fn grant_role_perm_for_model_pool<T: Model>(
     grant_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// Revoke `<table>.<action>` from `role_id` keyed off the model
-/// type. Idempotent (no-op when the row didn't exist).
+/// Revoke `<table>.<action>` from `role_id`. Does nothing if the row
+/// is already gone.
 ///
-/// v0.38 — PG back-compat shim over [`revoke_role_perm_for_model_pool`].
+/// Postgres only; prefer [`revoke_role_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`revoke_role_perm`].
@@ -167,7 +148,7 @@ pub async fn revoke_role_perm_for_model<T: Model>(
     revoke_role_perm(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// Tri-dialect counterpart of [`revoke_role_perm_for_model`].
+/// [`revoke_role_perm_for_model`] for any backend.
 ///
 /// # Errors
 /// As [`revoke_role_perm_pool`].
@@ -179,11 +160,10 @@ pub async fn revoke_role_perm_for_model_pool<T: Model>(
     revoke_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// Set a per-user override for `<table>.<action>` keyed off the
-/// model type. `granted = true` is an explicit grant; `granted =
-/// false` is an explicit denial that overrides any role grant.
+/// Override `<table>.<action>` for one user. `true` grants it;
+/// `false` denies it and beats any grant the user's roles give.
 ///
-/// v0.38 — PG back-compat shim over [`set_user_perm_for_model_pool`].
+/// Postgres only; prefer [`set_user_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`set_user_perm`].
@@ -197,7 +177,7 @@ pub async fn set_user_perm_for_model<T: Model>(
     set_user_perm(uid, &codename_for::<T>(action), granted, pool).await
 }
 
-/// Tri-dialect counterpart of [`set_user_perm_for_model`].
+/// [`set_user_perm_for_model`] for any backend.
 ///
 /// # Errors
 /// As [`set_user_perm_pool`].
@@ -210,11 +190,10 @@ pub async fn set_user_perm_for_model_pool<T: Model>(
     set_user_perm_pool(uid, &codename_for::<T>(action), granted, pool).await
 }
 
-/// Clear a per-user override for `<table>.<action>` keyed off the
-/// model type — the user falls back to their role-derived
-/// permissions for that codename.
+/// Drop the per-user override for `<table>.<action>`. The user falls
+/// back to what their roles give.
 ///
-/// v0.38 — PG back-compat shim over [`clear_user_perm_for_model_pool`].
+/// Postgres only; prefer [`clear_user_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`clear_user_perm`].
@@ -227,7 +206,7 @@ pub async fn clear_user_perm_for_model<T: Model>(
     clear_user_perm(uid, &codename_for::<T>(action), pool).await
 }
 
-/// Tri-dialect counterpart of [`clear_user_perm_for_model`].
+/// [`clear_user_perm_for_model`] for any backend.
 ///
 /// # Errors
 /// As [`clear_user_perm_pool`].

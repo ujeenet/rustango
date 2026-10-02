@@ -1,5 +1,5 @@
-//! Django parity — `Index(fields=[...], condition=Q(...))` partial index.
-//! rustango spells the attribute as `#[rustango(index_when(...))]` —
+//! Partial indexes — an index over only the rows matching a
+//! predicate, spelled `#[rustango(index_when(...))]` —
 //! sibling of `unique_when` which emits the UNIQUE variant.
 //!
 //! Both forms drop a `WHERE <expr>` tail on the `CREATE INDEX` so PG +
@@ -16,7 +16,7 @@ use rustango::Model;
     table = "idxwhen_post",
     // Non-unique partial index — useful when 90% of rows have the same
     // `status = "draft"` and you only want fast lookups on the 10%
-    // published. Django shape: `Index(fields=["status"], condition=Q(deleted_at__isnull=True))`.
+    // published — so the index only covers rows that aren't deleted.
     index_when(
         columns = "status",
         condition = "deleted_at IS NULL",

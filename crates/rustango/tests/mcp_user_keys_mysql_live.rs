@@ -27,7 +27,10 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("MYSQL_TEST_URL").ok()?;
-    let pool: Pool = sqlx::MySqlPool::connect(&url).await.ok()?.into();
+    let pool: Pool = sqlx::MySqlPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}"))
+        .into();
     let my = pool.as_mysql().unwrap();
     // Clean slate for the agent tables (FK checks off so child-order doesn't
     // matter). `migrate_framework` recreates them from the models each run.

@@ -1,123 +1,327 @@
 #!/usr/bin/env bash
 #
-# Bump the workspace version everywhere it is written down.
+# Bump the workspace version everywhere it is claimed.
 #
-#   bin/bump-version.sh 0.59.0
+#   bin/bump-version.sh 0.57.5              # show the hits, then apply
+#   bin/bump-version.sh 0.57.5 --dry-run    # show the hits, change nothing
+#   bin/bump-version.sh 0.57.5 --yes        # apply without the confirmation
 #
-# A release bump touches twenty places across thirteen files — four
-# manifests, a crate README, the docs manifest, and a `manage version` /
-# MCP handshake transcript in each of four locales. Missing one is not
-# visible on inspection: the page still reads correctly while naming a
-# version that is not shipping. That is how the transcripts came to sit
-# at 0.44.0 for thirteen releases, and how a 0.58.0 bump left the docs
-# at 0.57 and failed CI on every open PR.
+# One version string is authoritative — `[workspace.package] version` in the
+# root Cargo.toml — but it is *repeated* in places `cargo` will not fix for
+# you, and a release where they disagree is the exact failure this repo keeps
+# hitting: the docs claimed the wrong version for thirteen releases before
+# `docs_versions.rs` started failing on it.
 #
-# `docs_versions` catches the omission. This removes the chance to make
-# it.
+# Three kinds of site, handled three different ways:
 #
-# ## What it deliberately does NOT touch
+#   1. MANIFESTS — the root `[workspace.package] version`, the three
+#      `[workspace.dependencies]` pins, the `rustango-macros` pin in
+#      crates/rustango, and the `orm = { package = "rustango", … }` pin in
+#      rustango-renamed-smoke. Rewritten in place.
+#   2. PROSE — sample `manage version` / `manage about` transcripts, the MCP
+#      `serverInfo`, the `cargo install cargo-rustango --version …` line, in
+#      all four doc languages; on a series bump also `docs/index.toml` and
+#      the `X.Y` install pins. Rewritten in place; `docs_versions.rs` checks them.
+#   3. LOCKFILES — every Cargo.lock in the tree records `rustango` at the old
+#      version. NEVER hand-edited: `cargo metadata` regenerates each one, so
+#      the lockfile stays the file cargo actually produces.
 #
-# **CHANGELOG.md.** Its older sections name old versions on purpose —
-# "Introduced in 0.51.1", "0.51.0 and 0.51.1 were yanked". A global
-# search-and-replace would rewrite history into a lie. Same reason the
-# doc edits below match labelled transcripts rather than every
-# occurrence of the number: `MySQL 8.0.31` and `"openapi": "3.1.0"` are
-# not this crate's version.
+# CHANGELOG.md is excluded on purpose. Its older sections are history and
+# `## [0.57.1] — …` must keep saying 0.57.1 forever. Cut the new section by
+# hand; it needs prose anyway.
+#
+# The script prints every file it is about to touch and waits for a yes,
+# because a blanket version sweep is exactly the kind of edit that quietly
+# rewrites a sentence like "fixed in 0.56.3" when the numbers happen to line
+# up. Read the list.
 
 set -euo pipefail
-export PATH="$HOME/.cargo/bin:$PATH"
 
-red()   { printf '\033[31m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-gray()  { printf '\033[2m%s\033[0m\n'  "$*"; }
+NEW=""
+DRY=false
+ASSUME_YES=false
 
-NEW="${1:-}"
-if [ -z "$NEW" ]; then
-  red "usage: bin/bump-version.sh <new-version>   e.g. 0.59.0"
-  exit 1
-fi
-if ! printf '%s' "$NEW" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  red "version must be MAJOR.MINOR.PATCH — got '$NEW'"
-  exit 1
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY=true ;;
+    --yes|-y)  ASSUME_YES=true ;;
+    -*)        echo "unknown flag: $arg" >&2; exit 2 ;;
+    *)         [ -n "$NEW" ] && { echo "give exactly one version" >&2; exit 2; }
+               NEW="$arg" ;;
+  esac
+done
+
+[ -n "$NEW" ] || { sed -n '3,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+[[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a version: $NEW" >&2; exit 2; }
 
 cd "$(git rev-parse --show-toplevel)"
 
-# A dirty tree makes the bump's own diff unreviewable, which is the one
-# thing that has to be read before it ships.
-if [ -n "$(git status --porcelain)" ] && [ "${BUMP_ALLOW_DIRTY:-0}" != "1" ]; then
-  red "working tree is dirty — commit or stash first"
-  gray "  (override with BUMP_ALLOW_DIRTY=1 if you know why)"
-  exit 1
-fi
-
-OLD=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-NEW_MM="${NEW%.*}"      # 0.59.0 -> 0.59, the docs series label
+OLD=$(awk '/^\[workspace\.package\]/{f=1;next} f&&/^version[[:space:]]*=/{gsub(/[",]/,"",$3);print $3;exit}' Cargo.toml)
+[ -n "$OLD" ] || { echo "could not read [workspace.package] version from Cargo.toml" >&2; exit 1; }
+OLD_SERIES=${OLD%.*}
+NEW_SERIES=${NEW%.*}
 
 if [ "$OLD" = "$NEW" ]; then
-  red "already at $NEW"
-  exit 1
+  echo "already at $NEW — nothing to do"
+  exit 0
 fi
 
-gray "bumping $OLD -> $NEW"
+echo "bumping $OLD -> $NEW"
+echo
 
-# ---- manifests: the workspace version and every internal pin ----
-MANIFESTS=(
-  Cargo.toml
-  crates/rustango/Cargo.toml
-  crates/rustango-renamed-smoke/Cargo.toml
-  crates/rustango-renamed-smoke/README.md
+# Tracked files claiming the old version, minus the two categories that must
+# not be hand-edited. `-w`-style boundaries: a bare grep for 0.57.1 would also
+# match inside 10.57.12, so anchor on non-version characters either side.
+# `while read` rather than `mapfile`: macOS ships bash 3.2 and this script
+# has to run there without asking anyone to install a newer one.
+FILES=()
+while IFS= read -r line; do [ -n "$line" ] && FILES+=("$line"); done < <(
+  git grep -lE "(^|[^0-9.])(${OLD//./\\.}|${OLD_SERIES//./\\.})([^0-9.]|\$)" -- . \
+    ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true
 )
-for f in "${MANIFESTS[@]}"; do
-  perl -pi -e "s/\Q$OLD\E/$NEW/g" "$f"
+
+# The claim rewriter; the shapes are listed where it runs, below. With
+# report=1 it prints each line it would change instead of writing.
+# shellcheck disable=SC2016
+REWRITE='
+  BEGIN { ($o, $n, $os, $ns, $report) = splice(@ARGV, 0, 5) }
+  my $was = $_;
+  # Comments in these two files are examples and history, not claims (#1750).
+  my $example = $ARGV =~ m{^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs)$}
+    && /^\s*(#|\/\/)/;
+  unless ($example) {
+    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
+    s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
+    s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/;
+    s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/;
+    if ($os ne $ns) {
+      s/^(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/ if $ARGV eq "docs/index.toml";
+      if (/rustango/) {
+        s/(version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+        s/(\b(?:rustango-orm-macros|rustango-macros|cargo-rustango|rustango)\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+      }
+    }
+  }
+  if ($report) { print STDOUT "  $ARGV:$.: $_" if $_ ne $was } else { print }
+  close ARGV if eof;
+'
+
+SITES=""
+[ ${#FILES[@]} -gt 0 ] && SITES=$(perl -ne "$REWRITE" "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" 1 "${FILES[@]}" | cut -c1-160)
+if [ -z "$SITES" ]; then
+  echo "no site claims $OLD outside CHANGELOG.md and the lockfiles"
+else
+  echo "these $(printf '%s\n' "$SITES" | wc -l | tr -d ' ') sites claim $OLD; after the rewrite they read:"
+  printf '%s\n' "$SITES"
+  echo
+fi
+
+LOCKS=()
+while IFS= read -r line; do [ -n "$line" ] && LOCKS+=("$line"); done < <(git ls-files '*Cargo.lock')
+echo "and these lockfiles will be regenerated by cargo (not edited):"
+printf '  %s\n' "${LOCKS[@]}"
+echo
+
+if $DRY; then
+  echo "--dry-run: nothing changed"
+  exit 0
+fi
+
+if ! $ASSUME_YES; then
+  # `</dev/tty || reply=""` for the reason spelled out at the lockfile
+  # loop below, which had the same bug and was fixed alone: without it a
+  # non-interactive `read` hits EOF, returns non-zero, and under
+  # `set -euo pipefail` the script exits right there — the `*)` arm
+  # never runs, so a `make release` or CI step without a tty died with a
+  # bare exit 1 and no explanation. Reading from the tty also means a
+  # piped stdin cannot answer the prompt by accident.
+  reply=""
+  read -r -p "rewrite the files above? [y/N] " reply </dev/tty || reply=""
+  case "$reply" in [yY]|[yY][eE][sS]) ;; *) echo "aborted"; exit 1 ;; esac
+fi
+
+# Only rewrite VERSION CLAIMS, never prose that happens to name a version.
+#
+# The old sweep replaced every occurrence and relied on you reading the list.
+# That is not good enough: bumping 0.57.5 -> 0.57.6 silently rewrote eleven
+# files of *history* — "Before 0.57.5, `SqlValue::Null` bound as text",
+# "until 0.57.5 added `Cli::with_tenant_pools`" — each of which became false
+# the moment it moved. A sentence about what an old release did must keep
+# naming that release forever.
+#
+# So the match has to be anchored to something that makes it a claim about
+# the CURRENT version:
+#
+#   version = "X"        manifests, and the README pin in renamed-smoke
+#   "version": "X"       the MCP serverInfo block
+#   version:     X       the `manage about` transcript
+#   --version X          the `cargo install cargo-rustango` line
+#   rustango X           the `manage version` transcript, at line start
+#   rustango = "X"       a bare dependency pin, in a doc or a scaffolded
+#                        Cargo.toml. Restricted to this workspace's own
+#                        crate names: a third-party dep sitting at the
+#                        same version by coincidence is not our claim.
+#
+# On a series bump, also the major.minor shapes `docs_versions` checks:
+#
+#   version = "X.Y"      docs/index.toml, the published doc series
+#   version = "X.Y"      on a line naming rustango, e.g. an inline table
+#                        or `orm = { package = "rustango", version = … }`
+#   <crate> = "X.Y"      a bare pin on any crate this workspace publishes
+#
+# Anything else is left alone and reported below for you to check.
+[ ${#FILES[@]} -gt 0 ] && perl -i -ne "$REWRITE" "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" 0 "${FILES[@]}"
+
+# What still names the old version, now that the claims are rewritten. These
+# are prose, and prose about an old release is supposed to keep its number —
+# but a genuine claim in a shape this script does not know would also land
+# here, so they are printed rather than assumed correct.
+#
+# This list is the ONLY thing standing between an unrecognised claim shape and
+# a silently stale version. The verification below now covers all eight shapes
+# the rewriter handles — six full-version, plus the two series ones on a series
+# bump (#1605) — but it still cannot catch a shape neither side knows about.
+# That is why this is a stop-and-read rather than a log line: the earlier version
+# printed the list and then exited 1 on it, which was wrong but at least loud.
+# Dropping straight through to "clean" would have been the worse failure.
+LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
+  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' 2>/dev/null || true)
+
+# Lockfiles FIRST, before the list is shown and before anything can stop.
+#
+# The confirmation used to sit here, between the rewrite and this loop, which
+# meant every path that declined left bumped manifests beside stale lockfiles.
+# A non-interactive `read` hitting EOF is one such path, and under `set -e` it
+# does not even reach the `*)` arm — the failing `read` exits the script on the
+# spot, so nothing is printed about why. A Makefile, a CI step or any wrapper
+# invoking this without a tty produced exactly the half-applied tree the
+# script exists to avoid.
+echo "regenerating lockfiles"
+for lock in "${LOCKS[@]}"; do
+  manifest="${lock%Cargo.lock}Cargo.toml"
+  cargo metadata --format-version 1 --manifest-path "$manifest" >/dev/null
+  printf '  %s\n' "$lock"
 done
 
-# ---- docs manifest: major.minor, the URL the site publishes under ----
-perl -pi -e "s/^version = \"[0-9]+\.[0-9]+\"/version = \"$NEW_MM\"/" docs/index.toml
-
-# ---- README install pins ----
-#
-# `major.minor`, and the only version strings here that a reader *runs*
-# rather than reads: `cargo add` resolves them. They sat at 0.56 through
-# the whole of 0.57 because nothing updated or checked them.
-#
-# Scoped to lines naming `rustango`, so the axum / tokio / serde pins in
-# the same code block are left alone.
-OLD_MM="${OLD%.*}" NEW_MM="$NEW_MM" perl -pi -e '
-    if (/rustango/) { s/"\Q$ENV{OLD_MM}\E"/"$ENV{NEW_MM}"/g }
-' README.md
-
-# ---- transcripts, in every locale ----
-#
-# Matched by their label rather than by the bare number, so prose about
-# older releases is left alone:
-#
-#   rustango 0.58.0                          <- `manage version`
-#     version:        0.58.0                 <- `manage about`
-#   "name": "rustango", "version": "0.58.0"  <- MCP handshake
-for f in docs/manage.md docs/*/manage.md docs/mcp.md docs/*/mcp.md; do
-  [ -f "$f" ] || continue
-  perl -pi -e "s/(rustango )\Q$OLD\E/\${1}$NEW/g" "$f"
-  perl -pi -e "s/(version:\s+)\Q$OLD\E/\${1}$NEW/g" "$f"
-  perl -pi -e "s/(\"version\": \")\Q$OLD\E(\")/\${1}$NEW\${2}/g" "$f"
-done
-
-# ---- lockfiles ----
-gray "refreshing Cargo.lock"
-cargo metadata --no-deps --format-version 1 >/dev/null
-
-# ---- verify, rather than claim ----
-gray "verifying with the docs guards"
-if ! cargo test -p rustango --no-default-features --features sqlite,tenancy \
-      --test docs_versions 2>&1 | tail -8; then
-  red "docs_versions still fails — a version reference was missed"
-  gray "  the failure above names the file and line"
-  exit 1
+if [ -n "$LEFT" ]; then
+  echo
+  echo "left alone — these name $OLD in prose, which is usually right."
+  echo "READ THEM. A version claim in a shape this script does not know looks"
+  echo "exactly like prose from here, and nothing downstream will catch it:"
+  printf '%s\n' "$LEFT" | sed 's/^/  /' | cut -c1-140
+  echo
+  # Ask only when there is someone to ask. `-t 0` is not enough on its own:
+  # stdin can be a pipe while a terminal is still attached, so prefer
+  # /dev/tty and fall back to "say it loudly and continue".
+  if $ASSUME_YES; then
+    echo "(--yes: continuing without asking)"
+  elif [ -r /dev/tty ] && [ -t 1 ]; then
+    # `|| reply=""` is load-bearing under `set -e`: a failing `read` —
+    # Ctrl-D at the prompt — would otherwise kill the script on the spot,
+    # before the `case` runs, so the abort message never printed and the
+    # operator saw a silent non-zero exit. Treat EOF as "no".
+    reply=""
+    read -r -p "none of those is a stale claim? [y/N] " reply </dev/tty || reply=""
+    case "$reply" in
+      [yY]|[yY][eE][sS]) ;;
+      *) echo "aborted — the bump is fully applied; fix the claim and commit" >&2; exit 1 ;;
+    esac
+  else
+    echo "(no terminal to ask — the list above is the warning; check it before committing)" >&2
+  fi
 fi
 
 echo
-green "bumped $OLD -> $NEW"
-gray "changed:"
-git --no-pager diff --stat | sed 's/^/  /'
+echo "verifying nothing still claims $OLD"
+
+# Check the CLAIM SHAPES, not bare occurrences.
+#
+# This used to run the byte-identical grep that produces the "left alone"
+# list above, so the script printed those lines as deliberately kept and
+# then exited 1 naming the same lines — after it had already rewritten the
+# files and regenerated the lockfiles. A bump could not complete.
+#
+# Prose naming an old release is supposed to keep its number; that is the
+# whole reason the rewrite is anchored. So the verification has to ask the
+# narrower question the rewrite asks: does any *claim about the current
+# version* still say OLD? The alternation below is the six FULL-version
+# shapes the perl pass rewrites; the series shapes are checked just after.
+#
+EXAMPLES='^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs):[0-9]+:[[:space:]]*(#|//)'
+CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
+stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
+  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' | grep -vE "$EXAMPLES" || true)
+
+# The series sites, checked the way `docs_versions` checks them: the
+# docs/index.toml `version`, and on every tracked .md (bar CHANGELOG.md) and
+# lib.rs line naming rustango, the first `version = "X.Y"` or `<crate> = "X.Y"`.
+# Against NEW_SERIES, so it holds on a patch bump too (#1605, #1750).
+PIN_FILES=()
+while IFS= read -r line; do [ -n "$line" ] && PIN_FILES+=("$line"); done < <(
+  git ls-files '*.md' ':(exclude)CHANGELOG.md'; echo crates/rustango/src/lib.rs
+)
+# shellcheck disable=SC2016
+stale_series=$(perl -ne '
+  BEGIN { $s = shift }
+  if ($ARGV eq "docs/index.toml") {
+    print "$ARGV:$.: publishes under $1, expected $s\n" if /^version\s*=\s*"([^"]*)"/ && $1 ne $s;
+  } elsif (/rustango/) {
+    my ($v) = /version = "([^"]*)"/;
+    ($v) = /(?:rustango-orm-macros|rustango-macros|cargo-rustango|rustango) = "([^"]*)"/ unless defined $v;
+    print "$ARGV:$.: pins $v, expected $s\n" if defined $v && $v =~ /^\d+\.\d+$/ && $v ne $s;
+  }
+  close ARGV if eof;
+' "$NEW_SERIES" docs/index.toml "${PIN_FILES[@]}")
+if [ -n "$stale_series" ]; then
+  stale=$(printf '%s\n%s' "$stale" "$stale_series")
+fi
+
+# Lockfiles need a *narrower* check, not the same one. A third-party crate can
+# sit at the same version by coincidence — `wit-bindgen` really was at 0.57.1
+# while rustango was — so a bare grep for the number reports a false miss on
+# every lockfile. Check only the packages this workspace owns.
+# Read the member names out of the member manifests. `cargo metadata` would
+# also answer this, but its JSON repeats "name" for every dependency too, and
+# picking the workspace's own out of that without jq is more fragile than
+# reading four `[package] name =` lines.
+#
+# Only members that actually inherit it: `rustango-renamed-smoke` pins its own
+# `0.0.0` (it is `publish = false` and never ships), so asserting the workspace
+# version on it would fail every bump.
+OURS=""
+for manifest in crates/*/Cargo.toml; do
+  grep -q '^version\.workspace[[:space:]]*=[[:space:]]*true' "$manifest" || continue
+  member=$(awk '/^\[package\]/{f=1;next} f&&/^name[[:space:]]*=/{gsub(/[",]/,"",$3);print $3;exit}' "$manifest")
+  [ -n "$member" ] && OURS="$OURS $member"
+done
+for lock in "${LOCKS[@]}"; do
+  for pkg in $OURS; do
+    got=$(awk -v p="$pkg" '
+      /^\[\[package\]\]/ { inpkg=0 }
+      $0 == "name = \"" p "\"" { inpkg=1; next }
+      inpkg && /^version = / { gsub(/[",]/,"",$3); print $3; exit }' "$lock")
+    [ -z "$got" ] && continue          # that crate is not in this lockfile
+    [ "$got" = "$NEW" ] && continue
+    stale="$stale
+$lock: $pkg is $got, expected $NEW"
+  done
+done
+
+if [ -n "$(echo "$stale" | tr -d '[:space:]')" ]; then
+  echo "STILL CLAIMING $OLD:" >&2
+  echo "$stale" >&2
+  exit 1
+fi
+echo "  clean"
+
 echo
-gray "CHANGELOG.md is deliberately untouched — open a [$NEW] section by hand."
+echo "running the docs_versions guard"
+cargo test -p rustango --no-default-features --features sqlite,tenancy \
+  --test docs_versions 2>&1 | tail -3
+
+echo
+echo "bumped to $NEW. Still to do by hand:"
+echo "  - cut a '## [$NEW] — $(date -u +%Y-%m-%d)' section in CHANGELOG.md"
+echo "  - keep a fresh '## [Unreleased]' above it"

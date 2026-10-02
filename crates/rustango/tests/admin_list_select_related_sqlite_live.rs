@@ -1,4 +1,4 @@
-//! Django-parity #352 — `ModelAdmin.list_select_related`. Tests the
+//! Issue #352 — `ModelAdmin.list_select_related`. Tests the
 //! per-model opt-out of the auto-JOIN policy and the explicit
 //! whitelist form.
 

@@ -1,7 +1,7 @@
 //! Cookbook Chapter 2c — `#[rustango(unique_together = "...")]`.
 //!
 //! Two-column UNIQUE constraint emitted via the new container attr:
-//! same DB shape as Django's `class Meta: unique_together`.
+//! neither column is unique alone, the pair is.
 //!
 //! Run: `DATABASE_URL=... cargo test --test cookbook_chapter02c_unique_together -- --test-threads=1`
 

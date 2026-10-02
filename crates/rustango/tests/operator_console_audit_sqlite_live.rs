@@ -64,6 +64,7 @@ async fn boot() -> Booted {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await.expect("seed operator");
 
@@ -78,6 +79,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(

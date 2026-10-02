@@ -16,11 +16,15 @@
 //! unrecoverable, and `purge_database` has to be passed explicitly for
 //! a database-mode tenant: dropping a whole database is a bigger act
 //! than dropping a schema, and the caller should have to say so.
+//!
+//! [`Action::Deactivate`]: crate::tenancy::decommission::Action::Deactivate
+//! [`Action::Purge`]: crate::tenancy::decommission::Action::Purge
 
 use sqlx::Database;
 
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
+use super::org_host::OrgHost;
 use super::pools::TenantPools;
 use crate::core::Column as _;
 use crate::sql::{FetcherPool as _, UpdaterPool as _};
@@ -128,6 +132,30 @@ where
     let slug = &org.slug;
     let mode = StorageMode::parse(&org.storage_mode)
         .map_err(|e| TenancyError::Validation(e.to_owned()))?;
+    if mode == StorageMode::Database && !purge_database {
+        return Err(TenancyError::Validation(format!(
+            "tenant `{slug}` is database-mode — dropping its database is \
+             unrecoverable. Ask for the database to be purged explicitly, or \
+             deactivate instead."
+        )));
+    }
+    let id = org
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+    // Out of service before anything is destroyed (#1930): if a later
+    // step fails, the tenant is inactive and a retry finishes the job.
+    Org::objects()
+        .where_(Org::id.eq(id))
+        .update()
+        .set("active", false)
+        .execute_pool(registry)
+        .await?;
+    super::invalidate_org_cache();
+    pools.invalidate(slug).await;
+
+    // Every drop is `IF EXISTS`, so a retry after a partial purge is safe.
     match mode {
         StorageMode::Schema => {
             let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
@@ -142,15 +170,7 @@ where
             report.schema_dropped = Some(schema);
         }
         StorageMode::Database => {
-            if !purge_database {
-                return Err(TenancyError::Validation(format!(
-                    "tenant `{slug}` is database-mode — dropping its database is \
-                     unrecoverable. Ask for the database to be purged explicitly, or \
-                     deactivate instead."
-                )));
-            }
             let url = pools.resolved_database_url(org).await?;
-            pools.invalidate(slug).await;
             if org.backend_kind == "postgres" {
                 #[cfg(feature = "postgres")]
                 {
@@ -174,11 +194,22 @@ where
         }
     }
 
-    let id = org
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+    // Extra hosts first: their FK has no ON DELETE, so the Org delete
+    // fails while any remain (#1930).
+    let hosts = OrgHost::objects()
+        .where_(OrgHost::org_id.eq(id))
+        .compile_delete()
+        .map_err(crate::sql::ExecError::from)?;
+    crate::sql::delete_pool(registry, &hosts).await?;
+    super::invalidate_host_cache();
+    // Runs keep their history but forget the Org, so a later Org that
+    // reuses the id cannot look like the one they left half-made.
+    super::provision_store::ProvisioningRun::objects()
+        .where_(super::provision_store::ProvisioningRun::org_id.eq(Some(id)))
+        .update()
+        .set("org_id", None::<i64>)
+        .execute_pool(registry)
+        .await?;
     let deleted = org.clone().delete_pool(registry).await?;
     if deleted == 0 {
         return Err(TenancyError::Validation(format!(

@@ -1,23 +1,19 @@
-//! Bare-admin SSO login wiring — the `admin-sso` feature.
+//! Bare-admin SSO login wiring, behind the `admin-sso` feature.
 //!
-//! The reusable, admin-INDEPENDENT SSO core (types, `build_provider`,
-//! `verified_email`, the oauth2 re-exports, `SSO_FLOW_COOKIE`, …) now
-//! lives in [`crate::sso`]. This module keeps only the **bare-admin
-//! wiring**: the global-config SSO login router + handlers that build a
-//! [`ResolvedSso`] from a [`SsoProvider`](crate::sso::SsoProvider) row,
-//! run the handshake, link the verified email to an [`AdminUser`], and
-//! mint the admin session cookie.
+//! The reusable SSO core (types, `build_provider`, `verified_email`,
+//! `SSO_FLOW_COOKIE`) lives in [`crate::sso`]. This module only wires
+//! it to the bare admin: it builds a
+//! [`ResolvedSso`](crate::sso::ResolvedSso) from an
+//! [`SsoProvider`](crate::sso::SsoProvider) row, runs the handshake,
+//! signs in the [`AdminUser`] linked to the IdP subject, and mints the
+//! admin session cookie.
 //!
-//! Access is **link-to-existing** — SSO never auto-provisions an admin;
-//! an unknown or unverified email is refused.
+//! SSO never creates an admin account or links one by email: an admin
+//! adds the [`SsoLink`](crate::sso::SsoLink) row. The refusal log names the subject.
 //!
-//! The `pub use crate::sso::*;` re-export below preserves the historical
-//! `crate::admin::sso::{build_provider, ResolvedSso, …}` paths for
-//! downstream callers (e.g. [`crate::tenancy::sso`]).
+//! The re-export below keeps the older `crate::admin::sso::…` paths
+//! working for callers such as [`crate::tenancy::sso`].
 
-// Back-compat: re-export the admin-independent SSO core so the historical
-// `crate::admin::sso::*` paths keep resolving. The core moved to
-// `crate::sso` (the `sso` feature) to decouple member SSO from the admin.
 pub use crate::sso::*;
 
 use axum::{
@@ -31,7 +27,7 @@ use axum::{
 use super::session::{self, AdminSession, SESSION_COOKIE};
 use super::urls::AppState;
 use super::user::AdminUser;
-use crate::core::Model as _; // brings `AdminUser::SCHEMA` into scope
+use crate::sso::link::{Account, AccountLookup, EmailLookup};
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
@@ -41,10 +37,10 @@ struct CallbackParams {
     error: Option<String>,
 }
 
-/// Routes for the bare-admin SSO flow, mounted alongside `/login`.
+/// Routes for the bare-admin SSO flow, mounted next to `/login`.
 /// `GET /login/sso/{slug}` starts the handshake for one configured
-/// [`SsoProvider`](super::sso_provider::SsoProvider); `.../callback`
-/// completes it.
+/// [`SsoProvider`](super::sso_provider::SsoProvider), and
+/// `.../callback` completes it.
 pub(crate) fn sso_router(state: AppState) -> Router {
     Router::new()
         .route("/login/sso/{slug}", get(sso_begin))
@@ -61,16 +57,17 @@ fn login_path(state: &AppState) -> String {
     }
 }
 
-/// Absolute per-provider callback URL derived from the request host —
-/// `{scheme}://{host}{login_path}/sso/{slug}/callback`. Scheme honors
-/// `X-Forwarded-Proto`, else `https`.
-fn derive_bare_redirect(headers: &HeaderMap, state: &AppState, slug: &str) -> Option<String> {
+/// Per-provider callback URL built from the request host:
+/// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
+/// comes from `X-Forwarded-Proto` sent by a trusted proxy, else `https`.
+fn derive_bare_redirect(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    state: &AppState,
+    slug: &str,
+) -> Option<String> {
     let host = headers.get(header::HOST)?.to_str().ok()?;
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim())
-        .filter(|s| !s.is_empty())
+    let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .unwrap_or("https");
     Some(format!(
         "{scheme}://{host}{}/sso/{slug}/callback",
@@ -92,24 +89,17 @@ fn cookie_attrs(secure: bool) -> &'static str {
     }
 }
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';')
-        .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == name)
-        .map(|(_, v)| v.to_owned())
-}
-
-// GET /login/sso/{slug} — start the handshake for one provider.
+// GET /login/sso/{slug}: start the handshake for one provider.
 async fn sso_begin(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
-    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
     let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {
@@ -120,7 +110,7 @@ async fn sso_begin(
             return login_error(&state, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "begin: {e}");
@@ -140,11 +130,13 @@ async fn sso_begin(
     resp
 }
 
-// GET /login/sso/{slug}/callback — finish the handshake, link, mint.
+// GET /login/sso/{slug}/callback: finish the handshake, link the
+// account, mint the session.
 async fn sso_callback(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Query(params): Query<CallbackParams>,
 ) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
@@ -157,14 +149,14 @@ async fn sso_callback(
         return login_error(&state, "callback");
     };
     // Recover + verify the sealed flow from its cookie.
-    let Some(sealed) = read_cookie(&headers, SSO_FLOW_COOKIE) else {
+    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, SSO_FLOW_COOKIE) else {
         return login_error(&state, "expired");
     };
-    let flow = match open_flow(&sealed, secret.key()) {
+    let flow = match open_flow(sealed, secret.key()) {
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
-    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
     let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {
@@ -175,7 +167,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     };
-    let provider = match build_provider(&cfg).await {
+    let provider = match build_provider(&cfg.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "callback build: {e}");
@@ -189,31 +181,44 @@ async fn sso_callback(
             return login_error(&state, "handshake");
         }
     };
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(_) => return login_error(&state, "unverified"),
-    };
-
-    // Link to an existing admin user by email — never auto-provision.
-    let Some(user) = find_admin_user_by_email(&state.pool, &email).await else {
-        tracing::warn!(target: "rustango::admin::sso", "no admin account for {email}");
+    // Sign in by (provider, sub) link only: every admin account is staff,
+    // so a verified email never creates a link here.
+    let key = cfg.key(LinkSource::Admin);
+    let accounts = AdminAccounts(&state.pool);
+    let uid =
+        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, &accounts).await {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::warn!(
+                    target: "rustango::admin::sso",
+                    slug,
+                    provider_id = cfg.id,
+                    issuer = key.issuer(),
+                    subject = %normalized.provider_user_id,
+                    "sso refused: {e}"
+                );
+                return login_error(&state, "nouser");
+            }
+        };
+    let Ok(Some(user)) = accounts.user(uid).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
         return login_error(&state, "inactive");
     }
 
-    // Mint the *existing* admin session bound to the user's stored
-    // password hash — identical to a successful password login.
-    let auth_hash = session::password_fingerprint(secret, &user.password_hash);
+    // Mint the normal admin session, bound to the user's stored
+    // password hash, exactly as a successful password login does.
+    let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
     let cookie_value = session::encode(
         secret,
         AdminSession {
-            user_id: user.id,
+            user_id: uid,
             username: user.username,
             is_superuser: user.is_superuser,
         },
         &auth_hash,
+        user.sessions_revoked_at,
     );
     let session_cookie = format!(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
@@ -236,43 +241,45 @@ async fn sso_callback(
     resp
 }
 
-/// Minimal admin-user identity resolved by email for SSO linking.
-struct LinkedAdmin {
-    id: i64,
-    username: String,
-    password_hash: String,
-    is_superuser: bool,
-    active: bool,
+/// The bare admin's accounts. Every one is staff, so none links by email.
+struct AdminAccounts<'a>(&'a crate::sql::Pool);
+
+impl AdminAccounts<'_> {
+    /// The admin user with this id; a driver error is an error, not "missing".
+    async fn user(&self, id: i64) -> Result<Option<AdminUser>, String> {
+        use crate::sql::FetcherPool as _;
+        Ok(AdminUser::objects()
+            .filter("id", id)
+            .fetch(self.0)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next())
+    }
 }
 
-/// Look up an [`AdminUser`] by its (lowercased) email. Returns `None`
-/// when no row matches — the caller refuses the login (link-to-existing).
-async fn find_admin_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<LinkedAdmin> {
-    use crate::core::{SelectQuery, SqlValue};
-    let select = SelectQuery::by_pk(
-        AdminUser::SCHEMA,
-        "email",
-        SqlValue::String(email.to_owned()),
-    );
-    let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    let row = crate::sql::select_one_row_as_json(pool, &select, &fields)
-        .await
-        .ok()
-        .flatten()?;
-    Some(LinkedAdmin {
-        id: row.get("id").and_then(serde_json::Value::as_i64)?,
-        username: row.get("username").and_then(|v| v.as_str())?.to_owned(),
-        password_hash: row
-            .get("password_hash")
-            .and_then(|v| v.as_str())?
-            .to_owned(),
-        is_superuser: row
-            .get("is_superuser")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        active: row
-            .get("active")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-    })
+fn admin_account(u: &AdminUser) -> Option<Account> {
+    Some(Account::new(u.id.get().copied()?, true, u.active))
+}
+
+impl AccountLookup for AdminAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        Ok(self.user(id).await?.as_ref().and_then(admin_account))
+    }
+
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = AdminUser::objects()
+            .filter("email__iexact", email.to_owned())
+            .fetch(self.0)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(
+            match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+                Ok(Some(u)) => admin_account(u).map_or(EmailLookup::Missing, EmailLookup::Found),
+                Ok(None) => EmailLookup::Missing,
+                Err(()) => EmailLookup::Collides,
+            },
+        )
+    }
 }

@@ -1,5 +1,5 @@
-//! Live test for admin inlines — Django `TabularInline` /
-//! `StackedInline` read-only display on the parent detail page.
+//! Live test for admin inlines — tabular / stacked read-only display
+//! of child rows on the parent detail page.
 //! Issue #50 slice 1.
 //!
 //! Spins up two models (`il_blog` + `il_blog_post`), registers an
@@ -31,7 +31,11 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 #[derive(Model, Debug)]

@@ -1,0 +1,4 @@
+# Python bytecode for driver.py. Build output, not source — a 32 KB
+# `.pyc` was committed once already.
+__pycache__/
+*.pyc

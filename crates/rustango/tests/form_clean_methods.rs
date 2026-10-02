@@ -1,4 +1,4 @@
-//! Django-parity #372 + #373 — Form `clean_<field>` (per-field) and
+//! Issues #372 + #373 — Form `clean_<field>` (per-field) and
 //! `clean()` (cross-field) validation hooks.
 //!
 //! Issue #372: `#[form(clean = "fn")]` on a field declares a

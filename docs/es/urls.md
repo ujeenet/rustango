@@ -2,13 +2,12 @@
 
 Codificar URLs a mano (`/posts/42`) por todos los handlers y templates es frágil —
 cambia una ruta y cada literal se rompe en silencio. **Rustango** te da la
-respuesta de Django: **nombra un patrón de URL una vez, luego construye la URL por
+respuesta a eso: **nombra un patrón de URL una vez, luego construye la URL por
 su nombre en todas partes** — en Rust con `reverse(...)`, en templates con
-`{{ url(...) }}`, y en redirecciones con `redirect_to_view(...)`. La superficie de
-la API refleja los `reverse()` / `{% url %}` / `resolve_url()` / `redirect()` de
-Django.
+`{{ url(...) }}`, y en redirecciones con `redirect_to_view(...)`; `resolve_url(...)`
+acepta indistintamente un nombre o una ruta ya formada.
 
-[![URLs reverse al estilo Django: register_url! nombra un patrón, reverse() construye la URL en Rust, y {{ url(...) }} construye la URL en un template](../img/urls.png)](../img/urls.png)
+[![URLs reverse con nombre: register_url! nombra un patrón, reverse() construye la URL en Rust, y {{ url(...) }} construye la URL en un template](../img/urls.png)](../img/urls.png)
 
 > **Fuente:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) y `rustango::shortcuts`
@@ -81,7 +80,7 @@ el patrón no tiene, es un error (no un desajuste silencioso) — consulta
 
 ## Reverse en templates
 
-Los templates obtienen el `{% url %}` de Django como función Tera. Regístrala una
+Los templates obtienen una función `url` para Tera. Regístrala una
 vez en tu instancia `Tera` durante el setup (está detrás del feature
 `template_views`):
 
@@ -98,8 +97,7 @@ cadenas, números y booleanos):
 <a href="{{ url(name='user-posts', user_id=7, post_id=42) }}">…</a>
 ```
 
-Ese es el equivalente del `{% url 'post-detail' id=42 %}` de Django. Para el patrón
-de captura `{% url 'x' as var %}`, usa el `{% set %}` de Tera:
+Para guardar el resultado en una variable, usa el `{% set %}` de Tera:
 
 ```jinja
 {% set post_url = url(name='post-detail', id=post.id) %}
@@ -113,8 +111,8 @@ ruidosamente en lugar de producir en silencio una URL rota.
 
 ## Redirigir por nombre
 
-`rustango::shortcuts` refleja los helpers de redirección por nombre de vista de
-Django, de modo que los handlers nunca codifican un `Location` a mano:
+`rustango::shortcuts` ofrece helpers de redirección que trabajan con nombres de
+ruta, de modo que los handlers nunca codifican un `Location` a mano:
 
 ```rust
 use std::collections::HashMap;
@@ -126,7 +124,7 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` es el `resolve_url` de Django: si `spec` ya parece una
+`resolve_url(spec, &params)` acepta ambas cosas: si `spec` ya parece una
 URL (`/…`, `http://`, `https://`, `./`, `../`) se devuelve sin cambios; en caso
 contrario se trata como un nombre de ruta y se resuelve por reverse. Útil para un
 parámetro `?next=` o un ajuste que pueda contener *o bien* una ruta *o bien* un
@@ -146,8 +144,8 @@ devuelve un simple `302`.)
 
 No hay `include()` ni un namespace de app auto-aplicado — cada `register_url!`
 aterriza en un único registro global. El namespacing es una **convención en el
-nombre mismo**: prefija con `app:`, exactamente como llamarías al
-`reverse("app:detail")` de Django.
+nombre mismo**: prefija con `app:` y pasa el nombre completo a
+`reverse("app:detail")`.
 
 ```rust
 register_url!("blog:post-detail", "/blog/posts/{id}");
@@ -222,7 +220,7 @@ El enrutamiento *es* [axum](https://docs.rs/axum) 0.8, y axum empareja rutas con
 [`matchit`](https://docs.rs/matchit), un router de **radix-trie (árbol radix)**.
 Recorre la URL un segmento a la vez por un árbol de prefijos, de modo que un match
 cuesta O(longitud de la ruta) y es independiente de cuántas rutas hayas registrado.
-Un router de regex hace lo contrario: Django evalúa `urlpatterns` de arriba abajo,
+Un router de regex hace lo contrario: evalúa una lista de patrones de arriba abajo,
 ejecutando la regex de cada entrada contra la ruta hasta que una coincide. El trie
 compra emparejamiento en tiempo constante y una precedencia inequívoca de «gana el
 literal más específico» — a costa de no expresar restricciones de clase de
@@ -237,15 +235,14 @@ motor de regex de entrada.
 La forma `{int:id}` se acepta solo como **facilidad de portado** para `reverse()`:
 el constructor divide el placeholder por `:` y conserva solo el nombre, descartando
 el prefijo de tipo ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Eso permite que
-`reverse()` funcione sobre un patrón copiado literalmente de un
-`path("<int:id>/", …)` de Django — pero nada valida que el valor suministrado sea
+`reverse()` funcione sobre un patrón copiado literalmente de una definición de
+ruta tipada de otro framework — pero nada valida que el valor suministrado sea
 realmente un entero.
 
 ### Cómo expresar una ruta restringida
 
 Empareja el segmento con un simple `{placeholder}`, luego impón su forma donde se
-usa el valor. El `re_path(r'^articles/(?P<year>[0-9]{4})/$', …)` de Django se
-convierte en:
+usa el valor. Una ruta que solo deba aceptar años de cuatro cifras queda así:
 
 ```rust
 register_url!("article-by-year", "/articles/{year}");
@@ -261,8 +258,7 @@ async fn article_by_year(Path(year): Path<String>) -> impl IntoResponse {
 }
 ```
 
-Para rechazar *antes* de que el handler se ejecute (más cerca de la semántica de
-convertidores de Django), pon la comprobación en un extractor axum personalizado
+Para rechazar *antes* de que el handler se ejecute, pon la comprobación en un extractor axum personalizado
 (`FromRequestParts`) y toma ese tipo como argumento del handler en lugar de
 `Path<String>` — el framework no incluye ninguno, pero el trait de extractor de
 axum es la costura prevista. El crate `regex` ya es una dependencia (el ORM lo usa
@@ -283,7 +279,7 @@ para los lookups `__regex`), así que un extractor validador puede compilar una
   sincronizados.
 - **Los valores se percent-encodan** con `reverse`, así que son seguros para
   colocar en un header `Location` o un `href`.
-- **Sin convertidores regex/tipados** en los patrones (el `<int:pk>` de Django);
+- **Sin convertidores regex/tipados** en los patrones (del tipo `<int:pk>`);
   los placeholders son simples `{name}` y los valores se sustituyen tal cual
   (después de codificar). Consulta [Patrones regex y de ruta tipados](#patrones-regex-y-de-ruta-tipados)
   para el porqué, y cómo restringir una ruta en su lugar.

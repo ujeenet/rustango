@@ -5,7 +5,7 @@ transactional email. **Rustango** gives you a `Mailer` trait with swappable
 backends (console for dev, SMTP for production, an in-memory recorder for tests),
 a fluent `Email` builder with header-injection protection, and template
 rendering. Write `mailer.send(&email)` once; switch from printing to your
-terminal to real SMTP with a one-line change — like Django's email framework.
+terminal to real SMTP with a one-line change.
 
 [![Email in Rustango: an Email builder (to/subject/body/html) is validated against header injection, then sent through the Mailer trait — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in tests](img/email.png)](img/email.png)
 
@@ -70,7 +70,9 @@ hold a **`BoxedMailer`** (`Arc<dyn Mailer>`):
 | `NullMailer` | `email` | disable email entirely |
 
 Build it from config so it differs per environment (`ConsoleMailer` locally,
-`SmtpMailer` in prod) via `email::from_settings(&settings.email)`.
+`SmtpMailer` in prod) via `email::from_settings(&settings.mail)?`. With
+`backend = "smtp"` it fails if the mailer cannot be built (no `smtp_host`, a bad
+`from_address`, `smtp_tls` other than `none` / `starttls` / `implicit`).
 
 ---
 
@@ -110,7 +112,7 @@ smuggled into a header is how attackers add a hidden `Bcc`:
 // Missing recipients or an empty subject → MailError::InvalidMessage
 Email::new().subject("hi").validate()?;          // Err: no recipients
 
-// A CRLF in any header field → MailError::BadHeader (Django's BadHeaderError)
+// A CRLF in any header field → MailError::BadHeader
 Email::new()
     .to("a@example.com")
     .subject("Hello\r\nBcc: victim@example.com")  // injection attempt
@@ -147,7 +149,8 @@ For anything beyond a line of text, render the body from a [Tera](html-views.md)
 template instead of inlining HTML. The `email_templates` feature's `EmailRenderer`
 follows a `name.subject.txt` / `name.txt` / `name.html` convention — one template
 set produces the subject, the plain-text part, and the HTML part together, so the
-three never drift. The `Mailable` trait packages "a thing that knows how to turn
+three never drift. The HTML part autoescapes; the subject and text part render raw.
+The `Mailable` trait packages "a thing that knows how to turn
 itself into an `Email`" for reusable messages.
 
 ---
@@ -184,7 +187,7 @@ The `email_jobs` feature wires this up for you.
 `send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
 
 **`MailError`:** `InvalidMessage` (incomplete) · `BadHeader` (CRLF injection) ·
-`Transport` (backend/delivery failure).
+`Transport` (backend/delivery failure, the only one `EmailJob` retries) · `Config` (bad `[mail]` section).
 
 ---
 

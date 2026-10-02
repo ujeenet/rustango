@@ -131,3 +131,22 @@ async fn decr_goes_negative_through_the_same_script() {
     assert_eq!(redis.incr("bal", 5, None).await.unwrap(), 5);
     assert_eq!(redis.decr("bal", 8, None).await.unwrap(), -3);
 }
+
+/// `set_forever` must not take the backend default TTL (flag state, #1956).
+#[tokio::test]
+async fn set_forever_ignores_the_default_ttl() {
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("REDIS_TEST_URL") else {
+        return;
+    };
+    let redis = RedisCache::with_default_ttl(&url, Some(Duration::from_secs(1)))
+        .await
+        .expect("connect REDIS_TEST_URL");
+    redis.clear().await.expect("start from an empty db");
+
+    redis.set_forever("kept", "1").await.unwrap();
+    redis.set("lapses", "1", None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(redis.exists("kept").await.unwrap());
+    assert!(!redis.exists("lapses").await.unwrap());
+}

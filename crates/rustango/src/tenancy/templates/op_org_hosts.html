@@ -49,6 +49,7 @@ one tenant only.</p>
         <span class="field-helper">set on the <a href="/orgs/{{ slug }}/edit">edit page</a></span>
         {% else %}
         <form method="post" action="/orgs/{{ slug }}/hosts/toggle" class="inline-form">
+          {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="hostname" value="{{ h.hostname }}">
           {% if h.enabled %}
           <button type="submit" class="btn btn-secondary">Park</button>
@@ -59,6 +60,7 @@ one tenant only.</p>
         </form>
         <form method="post" action="/orgs/{{ slug }}/hosts/remove" class="inline-form"
               onsubmit="return confirm('Remove {{ h.hostname }}? Traffic to it stops resolving to {{ slug }}.');">
+          {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="hostname" value="{{ h.hostname }}">
           <button type="submit" class="btn btn-danger">Remove</button>
         </form>
@@ -70,6 +72,7 @@ one tenant only.</p>
 </table>
 
 <form method="post" action="/orgs/{{ slug }}/hosts/add" class="edit-form">
+  {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Add a hostname</legend>
     <table>

@@ -1,4 +1,4 @@
-//! Django-parity #410 — `m2m_changed` signal fires from
+//! Issue #410 — `m2m_changed` signal fires from
 //! `M2MManager::{add_pool, remove_pool, set_pool, clear_pool}`
 //! against a live SQLite junction table.
 
@@ -70,8 +70,28 @@ async fn add_fires_with_add_action_and_single_dst_pk() {
     assert_eq!(got[0].through, "post_tags");
     assert_eq!(got[0].src_col, "post_id");
     assert_eq!(got[0].dst_col, "tag_id");
-    assert_eq!(got[0].src_pk, 1);
-    assert_eq!(got[0].dst_pks, vec![7]);
+    assert_eq!(got[0].src_pk, SqlValue::I64(1));
+    assert_eq!(got[0].dst_pks, vec![SqlValue::I64(7)]);
+}
+
+/// `without_signals` silences `m2m_changed` like every other signal (#1929).
+#[tokio::test]
+async fn without_signals_suppresses_m2m_changed() {
+    let _g = suite_lock().lock().await;
+    clear_all();
+    let captured: Arc<Mutex<Vec<M2mChangedContext>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    connect_m2m_changed(move |ctx| {
+        let sink = sink.clone();
+        async move {
+            sink.lock().await.push(ctx);
+        }
+    });
+    let pool = pool_with_junction().await;
+    rustango::signals::without_signals(mgr(1).add(7, &pool))
+        .await
+        .unwrap();
+    assert!(captured.lock().await.is_empty(), "m2m_changed fired");
 }
 
 #[tokio::test]
@@ -98,7 +118,7 @@ async fn remove_fires_with_remove_action() {
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);
     assert!(matches!(got[0].action, M2mAction::Remove));
-    assert_eq!(got[0].dst_pks, vec![7]);
+    assert_eq!(got[0].dst_pks, vec![SqlValue::I64(7)]);
 }
 
 #[tokio::test]
@@ -121,7 +141,7 @@ async fn set_fires_with_set_action_and_full_new_set() {
     let got = captured.lock().await;
     assert_eq!(got.len(), 1, "set fires once, got: {got:?}");
     assert!(matches!(got[0].action, M2mAction::Set));
-    assert_eq!(got[0].dst_pks, vec![7, 8, 9]);
+    assert_eq!(got[0].dst_pks, [7, 8, 9].map(SqlValue::I64));
 }
 
 #[tokio::test]
@@ -142,7 +162,7 @@ async fn set_with_empty_slice_fires_set_with_empty_pks() {
     mgr(1).add(7, &pool).await.unwrap();
     captured.lock().await.clear();
 
-    mgr(1).set(&[], &pool).await.unwrap();
+    mgr(1).set::<i64>(&[], &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);

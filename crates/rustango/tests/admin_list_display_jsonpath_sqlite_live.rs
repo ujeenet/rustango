@@ -1,4 +1,4 @@
-//! Django-parity #348 — `list_display` supports `data.<key>` dotted
+//! Issue #348 — `list_display` supports `data.<key>` dotted
 //! paths into JSON columns.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]

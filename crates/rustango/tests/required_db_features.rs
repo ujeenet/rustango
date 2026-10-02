@@ -1,4 +1,4 @@
-//! Django parity — `Meta.required_db_features` lets a model declare
+//! `Meta.required_db_features` lets a model declare
 //! capability tokens it depends on (e.g. `"json_path"`, `"hstore"`,
 //! `"listen_notify"`). `manage check --deploy` walks every model and
 //! warns when the active dialect's `Dialect::supports(token)` returns

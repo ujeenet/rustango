@@ -71,6 +71,75 @@ impl<'a> PoolTx<'a> {
         }
     }
 
+    /// Run a bind-free statement unprepared. MySQL refuses `SAVEPOINT`
+    /// as a prepared statement (error 1295).
+    pub(crate) async fn execute_unprepared(&mut self, sql: &str) -> Result<(), sqlx::Error> {
+        use sqlx::Executor as _;
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+        }
+    }
+
+    /// `false` when the server already ended this transaction: PG after a
+    /// failed statement (its COMMIT would silently roll back), MySQL after a
+    /// deadlock, timeout rollback or implicit DDL commit (later statements
+    /// autocommit). Two round trips on MySQL, one on PG; SQLite reports
+    /// its rollbacks through [`Self::on_sqlite_rollback`] instead.
+    pub(crate) async fn still_open(&mut self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(_) => self.execute_unprepared("SELECT 1").await.is_ok(),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(tx) => {
+                // sqlx checks the server's in-transaction flag after its
+                // SAVEPOINT; MySQL has no `@@in_transaction` to read.
+                use sqlx::Connection as _;
+                match (**tx).begin().await {
+                    Ok(probe) => probe.commit().await.is_ok(),
+                    Err(_) => false,
+                }
+            }
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(_) => true,
+        }
+    }
+
+    /// Call `f` whenever SQLite rolls this connection's transaction back
+    /// (not on `ROLLBACK TO`). A no-op on other backends.
+    pub(crate) async fn on_sqlite_rollback(
+        &mut self,
+        f: impl FnMut() + Send + 'static,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => {
+                (**tx).lock_handle().await?.set_rollback_hook(f);
+                Ok(())
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                drop(f);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the hook [`Self::on_sqlite_rollback`] set.
+    pub(crate) async fn clear_sqlite_rollback(&mut self) {
+        #[cfg(feature = "sqlite")]
+        #[allow(irrefutable_let_patterns)]
+        if let PoolTx::Sqlite(tx) = self {
+            if let Ok(mut h) = (**tx).lock_handle().await {
+                h.remove_rollback_hook();
+            }
+        }
+    }
+
     /// Return the dialect for this transaction's backend — same
     /// dispatch as [`crate::sql::Pool::dialect`] but sourced from the
     /// `PoolTx` variant rather than the pool. Used internally by the
@@ -124,7 +193,7 @@ impl<'a> PoolTx<'a> {
 ///
 /// # Errors
 /// Driver errors from `BEGIN`.
-pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
+pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),
@@ -132,5 +201,17 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
         Pool::Mysql(my) => Ok(PoolTx::Mysql(my.begin().await?)),
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin().await?)),
+    }
+}
+
+/// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`.
+pub(crate) async fn write_transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    match pool {
+        // Take the write lock up front: a deferred tx that reads first
+        // fails at once on a busy WAL database instead of waiting.
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?)),
+        #[allow(unreachable_patterns)]
+        _ => transaction_pool(pool).await,
     }
 }

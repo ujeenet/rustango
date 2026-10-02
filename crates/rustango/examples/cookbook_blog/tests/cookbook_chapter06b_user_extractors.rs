@@ -133,6 +133,32 @@ fn parse_api_key(output: &std::process::Output) -> String {
 /// so we set `search_path` on connect to make the `rustango_users` /
 /// `rustango_api_keys` lookups inside the auth backends route to the
 /// right place.
+/// Resolves every request to the one schema-mode tenant this chapter
+/// provisions. A real app resolves from the host; the point here is
+/// that `require_auth` reads *a resolved tenant* rather than a pool
+/// the router captured at construction time.
+#[derive(Clone)]
+struct CookbookTenant;
+
+#[async_trait::async_trait]
+impl rustango::tenancy::OrgResolver for CookbookTenant {
+    async fn resolve(
+        &self,
+        _parts: &axum::http::request::Parts,
+        _registry: &rustango::sql::Pool,
+    ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
+        Ok(Some(rustango::tenancy::Org {
+            id: rustango::sql::Auto::default(),
+            slug: TENANT.to_owned(),
+            display_name: TENANT.to_owned(),
+            storage_mode: "schema".into(),
+            backend_kind: "postgres".into(),
+            database_url: None,
+            ..rustango::testkit::org()
+        }))
+    }
+}
+
 async fn tenant_pool(db: &str) -> sqlx::PgPool {
     let opts: PgConnectOptions = db.parse().expect("parse db url");
     let opts = opts.options([("search_path", &format!("{TENANT},public") as &str)]);
@@ -202,10 +228,34 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     assert_eq!(resp.status().as_u16(), 401, "anonymous /whoami should be 401");
 
     // Step 2 — log in via the tenant `/login` cookie route.
+    //
+    // GET the form first, as a browser does: it seeds the CSRF cookie
+    // and carries the matching token in a hidden field (#1607). The
+    // cookie jar holds the cookie; the form has to echo the token.
+    let csrf = {
+        let html = client
+            .get(format!("http://{BIND}/login"))
+            .header("Host", &host)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        html.split(r#"name="_csrf" value=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default()
+            .to_owned()
+    };
     let resp = client
         .post(format!("http://{BIND}/login"))
         .header("Host", &host)
-        .form(&[("username", USERNAME), ("password", PASSWORD)])
+        .form(&[
+            ("username", USERNAME),
+            ("password", PASSWORD),
+            ("_csrf", csrf.as_str()),
+        ])
         .send()
         .await
         .unwrap();
@@ -253,10 +303,14 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     // (`ModelBackend` for HTTP Basic, `ApiKeyBackend` for bearer).
     // ====================================================================
     //
-    // `require_auth` takes a single `PgPool`. For a multi-tenant deploy
-    // that means resolving the per-tenant pool first (here we hand-build
-    // one with `search_path` pointed at the tenant's schema) and wiring
-    // it into the middleware at route-construction time.
+    // `require_auth` resolves the tenant per request and takes no pool.
+    //
+    // It used to take one, and this chapter used to prescribe wiring a
+    // hand-built `search_path` pool into the middleware at
+    // route-construction time — ten lines below an assertion that a
+    // cross-tenant cookie must not authenticate. That recipe *was* the
+    // cross-tenant authentication bypass: one pool for every request
+    // means one tenant's database answers every host's credentials.
 
     // Issue an API key for alice via `manage create-api-key`. This
     // exercises the schema-mode tenant pool fix in
@@ -291,9 +345,24 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
             None => (StatusCode::UNAUTHORIZED, "anonymous").into_response(),
         }
     }
+    // `require_auth` takes no pool as of 0.57.11. The tenant context
+    // below is what it reads instead, per request.
+    let ctx = std::sync::Arc::new(rustango::extractors::TenantContext {
+        pools: std::sync::Arc::new(rustango::tenancy::TenantPools::new(
+            sqlx::PgPool::connect(&db).await.expect("registry pool"),
+        )),
+        resolver: rustango::tenancy::ChainResolver::new().push(CookbookTenant),
+        session_secret: rustango::tenancy::session::SessionSecret::from_bytes(
+            b"cookbook_ch06b_session_32bytes!!".to_vec(),
+        ),
+        operator_secret: rustango::tenancy::session::SessionSecret::from_bytes(
+            b"cookbook_ch06b_operator_32byte!!".to_vec(),
+        ),
+    });
     let app: Router = Router::new()
         .route("/profile", get(profile))
-        .require_auth(backends, pool.clone().into());
+        .require_auth(backends)
+        .layer(axum::Extension(ctx));
 
     // (a) No credentials → 401.
     let (status, _body) = oneshot(app.clone(), Method::GET, "/profile", None, None).await;

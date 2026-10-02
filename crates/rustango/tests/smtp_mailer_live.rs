@@ -25,6 +25,19 @@ use tokio::sync::oneshot;
 ///
 /// Returns `(port, body_rx)`. Spawn before connecting the mailer.
 async fn spawn_mock() -> (u16, oneshot::Receiver<String>) {
+    spawn_mock_with(b"250 Ok\r\n").await
+}
+
+/// [`spawn_mock`] whose `RCPT TO` reply is `rcpt_reply`.
+async fn spawn_mock_with(rcpt_reply: &'static [u8]) -> (u16, oneshot::Receiver<String>) {
+    spawn_mock_full(b"250 mock.test\r\n", rcpt_reply).await
+}
+
+/// [`spawn_mock_with`] that also sets the EHLO reply; `AUTH` gets a 535.
+async fn spawn_mock_full(
+    ehlo_reply: &'static [u8],
+    rcpt_reply: &'static [u8],
+) -> (u16, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = oneshot::channel();
@@ -59,11 +72,18 @@ async fn spawn_mock() -> (u16, oneshot::Receiver<String>) {
 
             let upper = line.to_ascii_uppercase();
             if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-                // Single-line EHLO so lettre doesn't think we
-                // advertise STARTTLS / AUTH.
-                write.write_all(b"250 mock.test\r\n").await.unwrap();
-            } else if upper.starts_with("MAIL FROM") || upper.starts_with("RCPT TO") {
+                // Single-line EHLO by default, so lettre doesn't
+                // think we advertise STARTTLS / AUTH.
+                write.write_all(ehlo_reply).await.unwrap();
+            } else if upper.starts_with("AUTH") {
+                write
+                    .write_all(b"535 5.7.8 Authentication failed\r\n")
+                    .await
+                    .unwrap();
+            } else if upper.starts_with("MAIL FROM") {
                 write.write_all(b"250 Ok\r\n").await.unwrap();
+            } else if upper.starts_with("RCPT TO") {
+                write.write_all(rcpt_reply).await.unwrap();
             } else if upper.starts_with("DATA") {
                 write
                     .write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
@@ -225,4 +245,130 @@ async fn smtp_mailer_sends_html_alternative() {
     );
     assert!(body.contains("plain text part"), "plaintext part missing");
     assert!(body.contains("<p>html part</p>"), "html part missing");
+}
+
+/// `Email.headers` reach the wire; they were dropped with a warning (#1923).
+#[tokio::test]
+async fn smtp_mailer_forwards_custom_headers() {
+    let (port, body_rx) = spawn_mock().await;
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(port)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("headers")
+        .body("body")
+        .header("List-Unsubscribe", "<https://example.com/u/1>")
+        .header("X-Tag", "welcome");
+    tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+        .await
+        .expect("send within timeout")
+        .expect("send ok");
+    let body = tokio::time::timeout(Duration::from_secs(5), body_rx)
+        .await
+        .expect("body received")
+        .expect("oneshot delivered");
+    assert!(
+        body.contains("List-Unsubscribe: <https://example.com/u/1>"),
+        "{body}"
+    );
+    assert!(body.contains("X-Tag: welcome"), "{body}");
+}
+
+/// A custom header cannot replace an envelope one such as `Bcc`.
+#[tokio::test]
+async fn smtp_mailer_refuses_a_custom_envelope_header() {
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(2525)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b")
+        .header("bcc", "eve@example.com");
+    let err = mailer.send(&email).await.expect_err("reserved header");
+    assert!(
+        matches!(err, rustango::email::MailError::BadHeader(_)),
+        "{err}"
+    );
+}
+
+/// CRLF in a custom header value cannot smuggle in another header.
+#[tokio::test]
+async fn smtp_mailer_refuses_crlf_in_a_custom_header() {
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(2525)
+        .tls(TlsMode::None)
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b")
+        .header("X-Tag", "a\r\nBcc: eve@example.com");
+    let err = mailer.send(&email).await.expect_err("crlf header");
+    assert!(
+        matches!(err, rustango::email::MailError::BadHeader(_)),
+        "{err}"
+    );
+}
+
+/// A 5xx is final, a 4xx is worth a retry (#1948).
+#[tokio::test]
+async fn only_a_transient_smtp_refusal_is_retryable() {
+    for (reply, retryable) in [
+        (&b"550 No such user\r\n"[..], false),
+        (&b"451 Try again later\r\n"[..], true),
+    ] {
+        let (port, _rx) = spawn_mock_with(reply).await;
+        let mailer = SmtpMailer::builder("127.0.0.1")
+            .port(port)
+            .tls(TlsMode::None)
+            .build()
+            .expect("build ok");
+        let email = Email::new()
+            .from("noreply@example.com")
+            .to("alice@example.com")
+            .subject("s")
+            .body("b");
+        let err = tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+            .await
+            .expect("send within timeout")
+            .expect_err("the server refused");
+        assert_eq!(err.is_retryable(), retryable, "{err}");
+    }
+}
+
+/// A bad password is a config fault, not a refused message: retryable.
+#[tokio::test]
+async fn an_smtp_auth_failure_is_not_a_rejection() {
+    let (port, _rx) =
+        spawn_mock_full(b"250-mock.test\r\n250 AUTH PLAIN LOGIN\r\n", b"250 Ok\r\n").await;
+    let mailer = SmtpMailer::builder("127.0.0.1")
+        .port(port)
+        .tls(TlsMode::None)
+        .credentials("app", "wrong")
+        .build()
+        .expect("build ok");
+    let email = Email::new()
+        .from("noreply@example.com")
+        .to("alice@example.com")
+        .subject("s")
+        .body("b");
+    let err = tokio::time::timeout(Duration::from_secs(5), mailer.send(&email))
+        .await
+        .expect("send within timeout")
+        .expect_err("auth refused");
+    assert!(
+        matches!(err, rustango::email::MailError::Transport(_)),
+        "{err}"
+    );
+    assert!(err.to_string().contains("535"), "{err}");
 }

@@ -1,8 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite test for the macro-emitted
-//! `Model::pluck::<U>(col, pool)` shortcut — Eloquent
-//! `Model::pluck($column)` / Django
-//! `Model.objects.values_list('col', flat=True)` parity.
+//! `Model::pluck::<U>(col, pool)` shortcut — one column of every
+//! row, as a flat `Vec<U>`.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

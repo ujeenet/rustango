@@ -2,8 +2,8 @@
 //! Live SQLite tests for the reverse-FK accessor pair (#816).
 //!
 //! Each FK declaration on a child model auto-emits a `<name>_pool`
-//! method on the parent type. The default name is `<child>_set` (Django
-//! `<child>_set`); a `#[rustango(default_related_name = "...")]`
+//! method on the parent type. The default name is `<child>_set`;
+//! a `#[rustango(default_related_name = "...")]`
 //! container attribute on the child overrides it with the
 //! caller-supplied identifier.
 

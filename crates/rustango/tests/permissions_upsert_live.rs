@@ -13,7 +13,7 @@
 
 use rustango::core::Column as _;
 use rustango::sql::sqlx;
-use rustango::sql::{Auto, Pool};
+use rustango::sql::Pool;
 use rustango::tenancy::permissions::{
     assign_role, get_or_create_role, grant_role_perm, set_user_perm, RolePermission,
     UserPermission, UserRole,
@@ -35,7 +35,11 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
@@ -71,16 +75,10 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
     let mut user = User {
-        id: Auto::default(),
         username,
         password_hash: "test-hash".to_owned(),
-        #[cfg(feature = "admin-sso")]
-        email: None,
-        is_superuser: false,
-        active: true,
-        created_at: chrono::Utc::now(),
-        data: serde_json::json!({}),
-        password_changed_at: None,
+        // The rest from testkit, so a feature-gated field cannot break the literal.
+        ..rustango::testkit::user()
     };
     user.insert(pool).await.unwrap();
     *user.id.get().expect("PK assigned by RETURNING")

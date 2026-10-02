@@ -1,11 +1,9 @@
-//! Form sets — Django's `formset_factory` / `modelformset_factory`
-//! shape. Issue #49.
+//! Form sets — parse N copies of the same [`crate::forms::Form`]
+//! from a single HTTP request payload.
 //!
-//! Parse N copies of the same [`crate::forms::Form`] from a single
-//! HTTP request payload. Each row is keyed
-//! `<prefix>-<N>-<field>` (Django convention: prefix `form` by
-//! default, so `form-0-title`, `form-1-title`, `form-2-title` for
-//! three rows of a `Title` field).
+//! Each row is keyed `<prefix>-<N>-<field>`. The usual prefix is
+//! `form`, so three rows of a `title` field arrive as `form-0-title`,
+//! `form-1-title` and `form-2-title`.
 //!
 //! ```ignore
 //! use rustango::forms::formset::parse_formset;
@@ -27,8 +25,8 @@
 //!
 //! ## Management form
 //!
-//! Django requires every formset payload to carry a "management
-//! form" — three integer fields that bound the row range:
+//! Every payload also carries a "management form" — three integer
+//! fields that bound the row range:
 //!
 //! - `<prefix>-TOTAL_FORMS`: how many rows the client submitted.
 //!   **Required** — `parse_formset` errors if missing or malformed.
@@ -57,6 +55,7 @@ use super::{Form, FormErrors};
 /// "your form rendering is broken" message rather than blaming the
 /// user's input.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FormSetError {
     /// `<prefix>-TOTAL_FORMS` was absent. The form likely didn't
     /// render through the formset's management-form helper.
@@ -66,20 +65,47 @@ pub enum FormSetError {
     /// integer.
     #[error("formset: `{prefix}-TOTAL_FORMS` is not a non-negative integer (got `{got}`)")]
     InvalidTotalForms { prefix: String, got: String },
+    /// `<prefix>-TOTAL_FORMS` is above [`MAX_FORMS`]: refused before any
+    /// allocation or row loop sized by it (#1892).
+    #[error("formset: `{prefix}-TOTAL_FORMS` is {got}, above the limit of {max}")]
+    TooManyForms {
+        prefix: String,
+        got: usize,
+        max: usize,
+    },
 }
 
+/// Most rows one formset accepts; rendered as `MAX_NUM_FORMS`.
+pub const MAX_FORMS: usize = 1000;
+
 /// Pull the `TOTAL_FORMS` count out of the payload. Returns
-/// [`FormSetError`] if the field is missing or malformed.
+/// [`FormSetError`] if the field is missing, malformed or above [`MAX_FORMS`].
 pub fn total_forms(data: &HashMap<String, String>, prefix: &str) -> Result<usize, FormSetError> {
     let key = format!("{prefix}-TOTAL_FORMS");
     let raw = data
         .get(&key)
         .ok_or_else(|| FormSetError::MissingTotalForms(prefix.to_owned()))?;
-    raw.parse::<usize>()
+    let n = raw
+        .parse::<usize>()
         .map_err(|_| FormSetError::InvalidTotalForms {
             prefix: prefix.to_owned(),
             got: raw.clone(),
-        })
+        })?;
+    if n > MAX_FORMS {
+        return Err(FormSetError::TooManyForms {
+            prefix: prefix.to_owned(),
+            got: n,
+            max: MAX_FORMS,
+        });
+    }
+    Ok(n)
+}
+
+/// `<prefix>-INITIAL_FORMS`: rows below it are existing ones. `None`
+/// when absent or not a number.
+#[must_use]
+pub fn initial_forms(data: &HashMap<String, String>, prefix: &str) -> Option<usize> {
+    data.get(&format!("{prefix}-INITIAL_FORMS"))?.parse().ok()
 }
 
 /// Extract the per-row payload at index `idx`. Strips the
@@ -171,11 +197,12 @@ pub fn management_form_html(prefix: &str, initial: usize, total: usize) -> Strin
             r#"<input type="hidden" name="{p}-TOTAL_FORMS" value="{t}">"#,
             r#"<input type="hidden" name="{p}-INITIAL_FORMS" value="{i}">"#,
             r#"<input type="hidden" name="{p}-MIN_NUM_FORMS" value="0">"#,
-            r#"<input type="hidden" name="{p}-MAX_NUM_FORMS" value="1000">"#,
+            r#"<input type="hidden" name="{p}-MAX_NUM_FORMS" value="{m}">"#,
         ),
         p = prefix,
         t = total,
         i = initial,
+        m = MAX_FORMS,
     )
 }
 
@@ -192,6 +219,20 @@ mod tests {
         let mut data = HashMap::new();
         data.insert("form-TOTAL_FORMS".into(), "3".into());
         assert_eq!(total_forms(&data, "form").unwrap(), 3);
+    }
+
+    #[test]
+    fn total_forms_above_the_cap_errors() {
+        for raw in ["1001", "1000000000000", &u64::MAX.to_string()] {
+            let data = HashMap::from([("form-TOTAL_FORMS".to_owned(), raw.to_owned())]);
+            let r = total_forms(&data, "form");
+            assert!(
+                matches!(r, Err(FormSetError::TooManyForms { .. })),
+                "{raw}: {r:?}"
+            );
+        }
+        let data = HashMap::from([("form-TOTAL_FORMS".to_owned(), "1000".to_owned())]);
+        assert_eq!(total_forms(&data, "form").unwrap(), 1000);
     }
 
     #[test]

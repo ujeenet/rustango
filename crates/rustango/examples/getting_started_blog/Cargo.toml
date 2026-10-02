@@ -23,7 +23,14 @@ path = "src/main.rs"
 [dependencies]
 # In-repo example → path dep on the framework. A real project generated
 # by `cargo rustango new` uses `rustango = "0.43"` from crates.io instead.
-rustango = { path = "../.." }
+#
+# `default-features = false` + `batteries` is load-bearing, not tidiness.
+# rustango's own default pulls in `postgres`, so leaving it on meant this
+# crate could select `sqlite` while the framework still had `postgres`.
+# The derive gates its FromRow impls on THIS crate's features and the
+# trait bounds gate on rustango's, so the two disagreed and every query
+# failed to compile (#1272, #1293). One backend, chosen in one place.
+rustango = { path = "../..", default-features = false, features = ["batteries"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

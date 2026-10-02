@@ -1,4 +1,4 @@
-//! Django-parity #416 — `mail_admins` / `mail_managers` helpers.
+//! Issue #416 — `mail_admins` / `mail_managers` helpers.
 //!
 //! Verifies the helper functions send to the right address list,
 //! respect the empty-list no-op, and apply the right subject prefix.
@@ -66,11 +66,11 @@ async fn mail_admins_uses_admin_list_not_manager_list() {
     assert_eq!(sent[0].to, vec!["dba@example.com"]);
 }
 
-// ------------------------------------------------------------------ SERVER_EMAIL + EMAIL_SUBJECT_PREFIX (Django parity)
+// ------------------------------------------------------------------ SERVER_EMAIL + EMAIL_SUBJECT_PREFIX
 
 #[tokio::test]
 async fn server_email_overrides_from_address_on_admin_mail() {
-    // Django parity: SERVER_EMAIL wins over DEFAULT_FROM_EMAIL on
+    // SERVER_EMAIL wins over DEFAULT_FROM_EMAIL on
     // server-generated mail (mail_admins / mail_managers).
     let mailer = InMemoryMailer::new();
     let mut s = settings_with(&["alice@example.com"], &[]);
@@ -122,14 +122,13 @@ async fn email_subject_prefix_also_applies_to_managers() {
 }
 
 #[tokio::test]
-async fn unset_email_subject_prefix_uses_django_default_shape() {
+async fn unset_email_subject_prefix_uses_the_fallback() {
     let mailer = InMemoryMailer::new();
     let s = settings_with(&["alice@example.com"], &[]);
     mail_admins(&mailer, &s, "Disk full", "/var is 100%")
         .await
         .unwrap();
     let sent = mailer.sent();
-    // No prefix configured → fallback `[admin] ` (rustango's
-    // historical default, distinct from Django's `[Django] `).
+    // No prefix configured → fallback `[admin] `.
     assert_eq!(sent[0].subject, "[admin] Disk full");
 }

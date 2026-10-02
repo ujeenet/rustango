@@ -1,11 +1,11 @@
-//! Django-shape `LocaleMiddleware` — tower layer that picks the
-//! active locale per request and injects it into request extensions.
+//! `LocaleMiddleware` — a tower layer that picks the active locale
+//! per request and injects it into request extensions.
 //!
-//! Issue #406. Mirrors Django's
-//! [`django.middleware.locale.LocaleMiddleware`](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.locale.LocaleMiddleware)
-//! pick order, excluding URL prefix (see note below):
+//! The pick order, excluding URL prefix (see the note below):
 //!
-//! 1. Session / cookie (configurable cookie name; default `django_language`).
+//! 1. Session / cookie. The name is configurable; it defaults to
+//!    `django_language`, which stays as-is because deployed clients
+//!    already send that cookie.
 //! 2. `Accept-Language` header via [`super::negotiate_language`].
 //! 3. The configured default locale.
 //!
@@ -16,7 +16,7 @@
 //!
 //! let layer = LocaleMiddleware::new(&["en", "fr", "es"])
 //!     .default("en")
-//!     .cookie_name("django_language");
+//!     .cookie_name("django_language".to_string());
 //!
 //! let app = axum::Router::new()
 //!     .route("/", get(handler))
@@ -49,9 +49,8 @@
 //!     .nest("/fr", locale_router("fr"));
 //! ```
 //!
-//! This is the Django-idiomatic pattern for issue #424 too — Django
-//! generates locale-prefixed routes via `i18n_patterns()`. Composing
-//! `Router::nest` per locale is the axum-shaped equivalent.
+//! That is how you get locale-prefixed routes: compose
+//! `Router::nest` once per locale.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -62,7 +61,7 @@ use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::http::{Request, Response};
 
-use super::negotiate_language;
+use super::{negotiate_language, Locale};
 
 const DEFAULT_COOKIE: &str = "django_language";
 
@@ -112,9 +111,9 @@ impl<S: Send + Sync> FromRequestParts<S> for ActiveLocale {
 
 #[derive(Clone)]
 struct LocaleConfig {
-    /// Lowercase locale identifiers the app supports.
+    /// Supported locales, normalised by [`Locale::new`].
     available: Vec<String>,
-    /// Fallback locale when nothing matches. Always lowercased.
+    /// Fallback locale when nothing matches, normalised the same way.
     default: String,
     /// Cookie name to read; `None` to disable cookie lookup.
     cookie_name: Option<String>,
@@ -132,7 +131,7 @@ impl LocaleMiddleware {
     /// [`Self::default`].
     #[must_use]
     pub fn new(available: &[&str]) -> Self {
-        let avail: Vec<String> = available.iter().map(|s| s.to_lowercase()).collect();
+        let avail: Vec<String> = available.iter().map(|s| Locale::new(*s).0).collect();
         let default = avail.first().cloned().unwrap_or_else(|| "en".into());
         Self {
             config: Arc::new(LocaleConfig {
@@ -146,7 +145,7 @@ impl LocaleMiddleware {
     /// Override the fallback locale.
     #[must_use]
     pub fn default(mut self, locale: &str) -> Self {
-        Arc::make_mut(&mut self.config).default = locale.to_lowercase();
+        Arc::make_mut(&mut self.config).default = Locale::new(locale).0;
         self
     }
 
@@ -165,10 +164,11 @@ impl LocaleMiddleware {
 
         // 1. Cookie
         if let Some(name) = cfg.cookie_name.as_deref() {
-            if let Some(value) = cookie_value(req.headers(), name) {
-                let lower = value.to_lowercase();
-                if cfg.available.iter().any(|a| *a == lower) {
-                    return lower;
+            if let Some(value) = crate::cookies::cookie_from_headers(req.headers(), name) {
+                // Same form as the Accept-Language path: `pt_BR` ≡ `pt-BR`.
+                let locale = Locale::new(value).0;
+                if cfg.available.contains(&locale) {
+                    return locale;
                 }
             }
         }
@@ -185,24 +185,6 @@ impl LocaleMiddleware {
         // 3. Default fallback
         cfg.default.clone()
     }
-}
-
-fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    for h in headers.get_all(axum::http::header::COOKIE) {
-        let raw = match h.to_str() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        for pair in raw.split(';') {
-            let pair = pair.trim();
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == name {
-                    return Some(v.to_owned());
-                }
-            }
-        }
-    }
-    None
 }
 
 impl<S> tower::Layer<S> for LocaleMiddleware {
@@ -238,8 +220,17 @@ where
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let picked = self.middleware.pick(&req);
         req.extensions_mut().insert(ActiveLocale(picked));
+        let by_cookie = self.middleware.config.cookie_name.is_some();
         let fut = self.inner.call(req);
-        Box::pin(fut)
+        // The locale came from these headers, so a shared cache must key on them (#1924).
+        Box::pin(async move {
+            let mut resp = fut.await?;
+            crate::vary::add_vary(resp.headers_mut(), "Accept-Language");
+            if by_cookie {
+                crate::vary::add_vary(resp.headers_mut(), "Cookie");
+            }
+            Ok(resp)
+        })
     }
 }
 
@@ -256,6 +247,30 @@ mod tests {
             b = b.header(axum::http::header::COOKIE, c);
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    /// #1924 — the response names the headers the locale was picked from.
+    #[tokio::test]
+    async fn response_varies_on_accept_language_and_cookie() {
+        use tower::{Layer as _, ServiceExt as _};
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+        });
+        let mw = LocaleMiddleware::new(&["en", "fr"]);
+        let resp = mw
+            .layer(svc)
+            .oneshot(req("/", Some("fr"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["vary"], "Accept-Language, Cookie");
+
+        let mw = LocaleMiddleware::new(&["en", "fr"]).cookie_name(None);
+        let resp = mw
+            .layer(svc)
+            .oneshot(req("/", Some("fr"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["vary"], "Accept-Language");
     }
 
     // ---- #429 RTL convenience on the extractor ----
@@ -293,6 +308,22 @@ mod tests {
         let mw = LocaleMiddleware::new(&["en", "fr"]).default("en");
         let r = req("/", Some("ja"), None);
         assert_eq!(mw.pick(&r), "en");
+    }
+
+    #[test]
+    fn cookie_and_header_agree_on_underscore_locales() {
+        let mw = LocaleMiddleware::new(&["en", "pt_BR"]).default("EN");
+        assert_eq!(
+            mw.pick(&req("/", None, Some("django_language=pt_BR"))),
+            "pt-br"
+        );
+        assert_eq!(
+            mw.pick(&req("/", None, Some("django_language=pt-BR"))),
+            "pt-br"
+        );
+        assert_eq!(mw.pick(&req("/", Some("pt-BR"), None)), "pt-br");
+        let mw = LocaleMiddleware::new(&["pt-BR"]).default("pt_BR");
+        assert_eq!(mw.pick(&req("/", None, None)), "pt-br");
     }
 
     #[test]

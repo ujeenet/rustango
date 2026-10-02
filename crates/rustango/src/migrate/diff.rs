@@ -1,34 +1,25 @@
 //! Diff two `SchemaSnapshot`s into a list of DDL statements.
 //!
-//! v0.2 scope: detect new tables, dropped tables, new columns, dropped
-//! columns. Type / constraint changes and renames are explicitly
-//! deferred — they can't be inferred from a snapshot diff (rename vs
-//! drop+add are indistinguishable) and need a more explicit migration
-//! authoring story (Django's `RenameField` operation).
+//! Detects added and dropped tables, columns, indexes, constraints
+//! and junction tables, plus column type, nullability, default,
+//! length and uniqueness changes.
 //!
-//! Output is `Vec<String>` of fully-formed Postgres DDL the runner can
-//! execute one statement at a time. New-table CREATE TABLEs come before
-//! ADD COLUMNs (so a new table referenced by a new column already
-//! exists), and DROP COLUMNs come before DROP TABLEs for the same
-//! reason. FK constraints for new tables are emitted last.
+//! **Statement order is a contract.** Indexes, constraints and junction
+//! tables drop before the columns and tables they hang off. `CREATE
+//! TABLE` comes before `ADD COLUMN`, so a new column can reference a new
+//! table. Tables drop child first. FK constraints for new tables come last.
 //!
-//! `ADD COLUMN ... NOT NULL` is supported only when the field carries
-//! a `default` (rendered as `DEFAULT <expr>` so Postgres can backfill
-//! existing rows). Without a default, `AddColumn` of a non-null field
-//! is rejected with an explanatory error pointing at the two fixes:
-//! make the field `Option<T>`, or set `#[rustango(default = "…")]`.
+//! `ADD COLUMN ... NOT NULL` only works when the field has a
+//! `default`, which backfills the existing rows. Without one it is
+//! an error, and the message names the two fixes: make the field
+//! `Option<T>`, or add `#[rustango(default = "…")]`.
 
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
+use super::snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
 
-/// One thing that should change to move from `prev` to `current`.
-///
-/// Serializes externally-tagged: `{"CreateTable": "foo"}`,
-/// `{"AddColumn": {"table": "foo", "column": "bar"}}`. That's what
-/// migration files store under `Operation::Schema`.
 fn default_index_method_diff() -> String {
     "btree".to_owned()
 }
@@ -37,6 +28,11 @@ fn default_exclusion_method() -> String {
     "gist".to_owned()
 }
 
+/// One thing that must change to move from `prev` to `current`.
+///
+/// Serialized externally tagged, as `{"CreateTable": "foo"}` or
+/// `{"AddColumn": {"table": "foo", "column": "bar"}}`. This is what
+/// a migration file stores under `Operation::Schema`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
@@ -49,60 +45,58 @@ pub enum SchemaChange {
         table: String,
         column: String,
     },
-    /// Change a column's underlying type — `i32 → i64`, `String → Uuid`, etc.
-    /// Carried as the dialect-neutral name string (matches `FieldSnapshot.ty`
-    /// rather than the closed `FieldType` enum so externally-supplied
-    /// migration files don't break when v0.4+ adds new types). Render emits
-    /// `ALTER TABLE ... ALTER COLUMN ... TYPE <pg_type> USING <col>::<pg_type>`.
+    /// Change a column's type, such as `i32` to `i64`.
+    ///
+    /// The types are the neutral name strings from
+    /// `FieldSnapshot.ty`, not the closed `FieldType` enum, so an
+    /// existing migration file keeps loading when a new type is
+    /// added.
     AlterColumnType {
         table: String,
         column: String,
         from: String,
         to: String,
     },
-    /// Toggle a column between nullable and NOT NULL. `nullable` is the
-    /// **new** state. Render emits `SET NOT NULL` (when false) or
-    /// `DROP NOT NULL` (when true).
+    /// Switch a column between nullable and NOT NULL. `nullable` is
+    /// the **new** state.
     AlterColumnNullable {
         table: String,
         column: String,
         nullable: bool,
     },
-    /// Change a column's `DEFAULT` clause. `Some(expr)` sets the default
-    /// to the given Postgres expression; `None` drops the default.
-    /// `from`/`to` is enough to invert without consulting a snapshot.
+    /// Change a column's `DEFAULT`. `Some(expr)` sets it, `None`
+    /// drops it. Both sides are carried so the op inverts without a
+    /// snapshot.
     AlterColumnDefault {
         table: String,
         column: String,
         from: Option<String>,
         to: Option<String>,
     },
-    /// Change a String column's `max_length` (VARCHAR(N) ↔ TEXT, or
-    /// between two VARCHAR sizes). Render emits `TYPE VARCHAR(N)` or
-    /// `TYPE TEXT` accordingly.
+    /// Change a string column's `max_length`, so between two
+    /// `VARCHAR` sizes or between `VARCHAR(N)` and `TEXT`.
     AlterColumnMaxLength {
         table: String,
         column: String,
         from: Option<u32>,
         to: Option<u32>,
     },
-    /// Rename a table. Not emitted by `detect_changes` — rename vs
-    /// drop+add is ambiguous from a snapshot diff (Django's reasoning).
-    /// Authored manually via `manage makemigrations --empty <name>`
-    /// then editing the JSON.
+    /// Rename a table. `detect_changes` never emits this: a snapshot
+    /// diff cannot tell a rename from a drop plus an add. Write it by
+    /// hand with `manage makemigrations --empty <name>`, then edit
+    /// the JSON.
     RenameTable {
         old_name: String,
         new_name: String,
     },
-    /// Rename a column. Same authoring constraint as `RenameTable`.
+    /// Rename a column. Hand-authored, like `RenameTable`.
     RenameColumn {
         table: String,
         old_column: String,
         new_column: String,
     },
-    /// Add or drop a `UNIQUE` constraint on a single column.
-    /// `unique` is the **new** state. Render emits
-    /// `ADD CONSTRAINT … UNIQUE` or `DROP CONSTRAINT`.
+    /// Add or drop a `UNIQUE` constraint on one column. `unique` is
+    /// the **new** state.
     AlterColumnUnique {
         table: String,
         column: String,
@@ -114,31 +108,36 @@ pub enum SchemaChange {
         table: String,
         columns: Vec<String>,
         unique: bool,
-        /// Access method as a lowercase token (`btree` / `gin` /
-        /// `gist` / …). Defaults to `"btree"` when absent — keeps
-        /// migration JSON files written before issue #34 forward-
-        /// compatible.
+        /// Access method, lowercase: `btree`, `gin`, `gist` and so
+        /// on. Missing means `btree`, so older files still load.
         #[serde(default = "default_index_method_diff")]
         method: String,
-        /// Optional partial-index `WHERE` clause — Django
-        /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
-        /// `None` for plain indexes; `Some(expr)` emits
-        /// `CREATE UNIQUE INDEX ... WHERE <expr>` on PG / SQLite.
-        /// MySQL has no partial-index syntax — the writer drops the
-        /// WHERE clause with a doc-level warning.
+        /// `WHERE` clause for a partial index. `None` gives a plain
+        /// index. **MySQL has no partial-index syntax**, so the
+        /// writer drops the clause there and warns.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         where_clause: Option<String>,
-        /// Django `Index(include=[...])` covering-index columns. PG
-        /// 11+ ships `INCLUDE (...)` syntax — non-key columns travel
-        /// with the index leaf for index-only scans. MySQL/SQLite
-        /// lack it; the renderer drops the clause with a warning.
-        /// Empty `Vec` (the default) means "no covering columns".
+        /// Covering-index columns, for Postgres 11's `INCLUDE (...)`.
+        /// **MySQL and SQLite lack it**, so the writer drops the
+        /// clause there and warns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,
     },
     /// Drop an index by name.
+    ///
+    /// **`table` is needed on MySQL**, whose syntax is
+    /// `DROP INDEX <name> ON <table>`. PG and SQLite drop by name
+    /// alone. `makemigrations` emits one `DropIndex` per index when
+    /// a model goes away, so without the table those migrations
+    /// cannot run on MySQL.
+    ///
+    /// `#[serde(default)]` keeps older files loading. They still
+    /// apply on PG and SQLite, and give a clear message on MySQL
+    /// rather than a serde error.
     DropIndex {
         name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        table: String,
     },
     /// Add a table-level CHECK constraint.
     AddCheckConstraint {
@@ -151,43 +150,38 @@ pub enum SchemaChange {
         name: String,
         table: String,
     },
-    /// Add a Postgres `EXCLUDE` constraint — Django's
-    /// `ExclusionConstraint`. **PG-only** (MySQL + SQLite have no
-    /// equivalent; render emits nothing + logs a warning so the
-    /// rest of the migration still applies). Issue #32.
+    /// Add a Postgres `EXCLUDE` constraint.
     ///
-    /// Renders as `ALTER TABLE <table> ADD CONSTRAINT <name>
-    /// EXCLUDE USING <method> (<elements>) [WHERE (<where>)]`,
-    /// where each element is a `(column, operator)` pair like
-    /// `("room_id", "=")` or `("during", "&&")`. The canonical
-    /// shape for booking-conflict prevention is:
+    /// **Postgres only.** MySQL and SQLite have no equivalent, so
+    /// the writer emits nothing and warns, and the rest of the
+    /// migration still applies.
+    ///
+    /// A typical booking-conflict constraint reads
     /// `EXCLUDE USING gist (room_id WITH =, during WITH &&)`.
     AddExclusionConstraint {
         name: String,
         table: String,
-        /// Index method (`gist` / `btree_gist` / `spgist`). Defaults
-        /// to `gist` when absent — most exclusion constraints rely
-        /// on GiST's range-overlap support.
+        /// Index method: `gist`, `btree_gist` or `spgist`. Missing
+        /// means `gist`, which supports range overlap.
         #[serde(default = "default_exclusion_method")]
         using: String,
-        /// `(column, operator)` pairs in declaration order. The
-        /// operator is the PG comparison op for that column —
-        /// usually `=` for equality columns, `&&` for range
-        /// overlap, `@>` for containment.
+        /// `(column, operator)` pairs in declaration order, where
+        /// the operator is the PG comparison for that column: `=`
+        /// for equality, `&&` for range overlap, `@>` for
+        /// containment.
         elements: Vec<(String, String)>,
-        /// Optional `WHERE` predicate that narrows the constraint
-        /// to a subset of rows (e.g. only active bookings).
-        /// `None` = unconditional.
+        /// `WHERE` predicate limiting the constraint to some rows.
+        /// `None` applies it to all of them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         where_clause: Option<String>,
     },
-    /// Drop an `EXCLUDE` constraint by name. PG-only. Issue #32.
+    /// Drop an `EXCLUDE` constraint by name. Postgres only.
     DropExclusionConstraint {
         name: String,
         table: String,
     },
-    /// Create a many-to-many junction table. Render emits a `CREATE TABLE`
-    /// with two `BIGINT NOT NULL` FK columns and a composite `PRIMARY KEY`.
+    /// Create a many-to-many junction table: two `BIGINT NOT NULL`
+    /// FK columns and a composite `PRIMARY KEY`.
     CreateM2MTable {
         through: String,
         src_table: String,
@@ -199,12 +193,10 @@ pub enum SchemaChange {
     DropM2MTable {
         through: String,
     },
-    /// Add a composite (multi-column) foreign-key constraint declared
-    /// via `#[rustango(fk_composite(...))]`. Sub-slice F.5b. Render
-    /// emits `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY (...)
-    /// REFERENCES ...(...)` and routes the statement through
-    /// `deferred_fks` so the referenced table exists by the time the
-    /// constraint is created.
+    /// Add a multi-column foreign key from
+    /// `#[rustango(fk_composite(...))]`. The statement is deferred
+    /// to the end of the batch, so the referenced table exists by
+    /// the time the constraint is created.
     AddCompositeFk {
         table: String,
         name: String,
@@ -212,33 +204,162 @@ pub enum SchemaChange {
         from: Vec<String>,
         on: Vec<String>,
     },
-    /// Drop a composite FK by constraint name. Render emits
-    /// `ALTER TABLE ... DROP CONSTRAINT IF EXISTS ...`.
+    /// Drop a composite FK by constraint name.
     DropCompositeFk {
         table: String,
         name: String,
     },
 }
 
-/// Compute the ordered list of changes from `prev` → `current`.
+impl SchemaChange {
+    /// The table this change writes.
+    pub(crate) fn table(&self) -> &str {
+        match self {
+            Self::CreateTable(t)
+            | Self::DropTable(t)
+            | Self::DropM2MTable { through: t }
+            | Self::CreateM2MTable { through: t, .. }
+            | Self::RenameTable { old_name: t, .. }
+            | Self::AddColumn { table: t, .. }
+            | Self::DropColumn { table: t, .. }
+            | Self::AlterColumnType { table: t, .. }
+            | Self::AlterColumnNullable { table: t, .. }
+            | Self::AlterColumnDefault { table: t, .. }
+            | Self::AlterColumnMaxLength { table: t, .. }
+            | Self::RenameColumn { table: t, .. }
+            | Self::AlterColumnUnique { table: t, .. }
+            | Self::CreateIndex { table: t, .. }
+            | Self::DropIndex { table: t, .. }
+            | Self::AddCheckConstraint { table: t, .. }
+            | Self::DropCheckConstraint { table: t, .. }
+            | Self::AddExclusionConstraint { table: t, .. }
+            | Self::DropExclusionConstraint { table: t, .. }
+            | Self::AddCompositeFk { table: t, .. }
+            | Self::DropCompositeFk { table: t, .. } => t,
+        }
+    }
+
+    /// Whether this change writes `table` or adds an FK to it. FK targets
+    /// live in `snapshot`, the migration's after-state.
+    pub(crate) fn touches(&self, table: &str, snapshot: &super::SchemaSnapshot) -> bool {
+        let fk_to = |f: &FieldSnapshot| f.fk.as_ref().is_some_and(|r| r.to == table);
+        self.table() == table
+            || match self {
+                Self::RenameTable { new_name, .. } => new_name == table,
+                Self::CreateM2MTable {
+                    src_table,
+                    dst_table,
+                    ..
+                } => src_table == table || dst_table == table,
+                Self::AddCompositeFk { to, .. } => to == table,
+                Self::CreateTable(t) => snapshot.table(t).is_some_and(|s| {
+                    s.fields.iter().any(fk_to) || s.composite_fks.iter().any(|c| c.to == table)
+                }),
+                Self::AddColumn { table: t, column } => snapshot
+                    .table(t)
+                    .and_then(|s| s.field(column))
+                    .is_some_and(fk_to),
+                _ => false,
+            }
+    }
+}
+
+/// Compute the ordered list of changes from `prev` to `current`.
 ///
-/// Order:
-/// 1. `CreateTable` (new tables)
-/// 2. `AddColumn` (new columns on existing tables)
-/// 3. `AlterColumn*` (metadata changes on same-named columns)
-/// 4. `DropColumn` (dropped columns on remaining tables)
-/// 5. `DropTable` (dropped tables)
+/// **The order is a contract:** drop what hangs off a table or column
+/// (indexes, checks, excludes, composite FKs, then M2M junctions), create
+/// tables, add columns, alter columns, drop columns, drop tables child
+/// first, then create the dependents. MySQL commits each DDL statement, so
+/// a drop that fails after its column or table went cannot roll back (#1879).
 ///
-/// Renames (`RenameTable`, `RenameColumn`) are **never** emitted by
-/// `detect_changes` — rename vs drop+add is ambiguous from a
-/// snapshot diff (Django's reasoning). Authors hand-write rename
-/// migrations via `manage makemigrations --empty <name>` and edit
-/// the JSON directly. Likewise, FK/PK/CHECK changes still surface
-/// the v0.3.1 polish #3 hard error today; full FK/CHECK alters land
-/// in a follow-up.
+/// Renames are **never** emitted: a snapshot diff cannot tell a
+/// rename from a drop plus an add. Write those by hand with
+/// `manage makemigrations --empty <name>`. Changes this cannot
+/// express are reported by [`detect_unsupported_field_changes`]
+/// instead of being silently skipped.
 #[must_use]
 pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<SchemaChange> {
     let mut changes = Vec::new();
+    // Created after the tables and columns; the drop halves of changed
+    // objects go in the first phase with the other drops.
+    let mut creates = Vec::new();
+    // Recreated composite FKs go last, after the unique index they reference.
+    let mut fk_creates = Vec::new();
+
+    // Dropped or edited composite FKs on tables that stay, before the
+    // unique index they reference; a dropped table takes its own. An edit
+    // that keeps the name is a Drop + Add, like an index (#1881).
+    for pt in &prev.tables {
+        let Some(ct) = current.table(&pt.name) else {
+            continue;
+        };
+        for pf in &pt.composite_fks {
+            let now = ct.composite_fks.iter().find(|c| c.name == pf.name);
+            if now == Some(pf) {
+                continue;
+            }
+            changes.push(SchemaChange::DropCompositeFk {
+                table: pt.name.clone(),
+                name: pf.name.clone(),
+            });
+            fk_creates.extend(now.map(|c| add_composite_fk(&ct.name, c)));
+        }
+    }
+    // Dropped and changed indexes. A changed one (same name, new shape)
+    // lowers to a Drop + Create pair, or the database keeps the old one.
+    for idx in &prev.indexes {
+        let changed = current.index(&idx.name).map(|c| {
+            (c.columns != idx.columns
+                || c.unique != idx.unique
+                || c.table != idx.table
+                || c.method != idx.method
+                || c.where_clause != idx.where_clause
+                || c.include != idx.include)
+                .then_some(c)
+        });
+        if matches!(changed, None | Some(Some(_))) {
+            // `idx.table`: an index that moved tables is dropped where it is now.
+            changes.push(SchemaChange::DropIndex {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+            });
+        }
+        if let Some(Some(c)) = changed {
+            creates.push(create_index(c));
+        }
+    }
+    // Dropped or edited CHECK constraints.
+    for c in &prev.checks {
+        let now = current.check(&c.name);
+        if now != Some(c) {
+            changes.push(SchemaChange::DropCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+            });
+            creates.extend(now.map(add_check));
+        }
+    }
+    // Dropped or edited PG EXCLUDE constraints.
+    for x in &prev.excludes {
+        let now = current.excludes.iter().find(|c| c.name == x.name);
+        if now != Some(x) {
+            changes.push(SchemaChange::DropExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+            });
+            creates.extend(now.map(add_exclude));
+        }
+    }
+    // Dropped or edited M2M junctions, before the tables they reference.
+    for mt in &prev.m2m_tables {
+        let now = current.m2m_table(&mt.through);
+        if now != Some(mt) {
+            changes.push(SchemaChange::DropM2MTable {
+                through: mt.through.clone(),
+            });
+            creates.extend(now.map(create_m2m));
+        }
+    }
 
     // New tables.
     for t in &current.tables {
@@ -260,9 +381,8 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Metadata changes on same-named columns. Replaces the v0.3.1
-    // polish hard error: type/nullable/default/max_length changes
-    // now produce concrete AlterColumn ops instead of bailing.
+    // Metadata changes on columns that kept their name: type,
+    // nullability, default and max_length become AlterColumn ops.
     for ct in &current.tables {
         let Some(pt) = prev.table(&ct.name) else {
             continue;
@@ -288,155 +408,34 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Dropped tables.
-    for pt in &prev.tables {
-        if current.table(&pt.name).is_none() {
-            changes.push(SchemaChange::DropTable(pt.name.clone()));
-        }
+    // Dropped tables, each before the tables it references.
+    for name in dropped_tables_child_first(prev, current) {
+        changes.push(SchemaChange::DropTable(name.to_owned()));
     }
-    // New indexes — present in current, absent from prev.
+
+    // New indexes, then the recreated halves of changed objects.
     for idx in &current.indexes {
         if prev.index(&idx.name).is_none() {
-            changes.push(SchemaChange::CreateIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
-                columns: idx.columns.clone(),
-                unique: idx.unique,
-                method: idx.method.clone(),
-                where_clause: idx.where_clause.clone(),
-                include: idx.include.clone(),
-            });
+            changes.push(create_index(idx));
         }
     }
-    // Dropped indexes — present in prev, absent from current.
-    for idx in &prev.indexes {
-        if current.index(&idx.name).is_none() {
-            changes.push(SchemaChange::DropIndex {
-                name: idx.name.clone(),
-            });
-        }
-    }
-    // Changed indexes — same name in both, but columns / table /
-    // unique flag differ. Without this branch, a model edit that
-    // tweaks an index in place (without renaming it) would land a
-    // silently-stale index in the database. The diff lowers each
-    // such change to a Drop + Create pair so the new shape is
-    // applied atomically.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns != idx.columns
-                || prev_idx.unique != idx.unique
-                || prev_idx.table != idx.table
-                || prev_idx.method != idx.method
-                || prev_idx.where_clause != idx.where_clause
-            {
-                changes.push(SchemaChange::DropIndex {
-                    name: idx.name.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
-    // Also detect include-only changes so a fresh covering set
-    // re-emits as Drop + Create.
-    for idx in &current.indexes {
-        if let Some(prev_idx) = prev.index(&idx.name) {
-            if prev_idx.columns == idx.columns
-                && prev_idx.unique == idx.unique
-                && prev_idx.table == idx.table
-                && prev_idx.method == idx.method
-                && prev_idx.where_clause == idx.where_clause
-                && prev_idx.include != idx.include
-            {
-                changes.push(SchemaChange::DropIndex {
-                    name: idx.name.clone(),
-                });
-                changes.push(SchemaChange::CreateIndex {
-                    name: idx.name.clone(),
-                    table: idx.table.clone(),
-                    columns: idx.columns.clone(),
-                    unique: idx.unique,
-                    method: idx.method.clone(),
-                    where_clause: idx.where_clause.clone(),
-                    include: idx.include.clone(),
-                });
-            }
-        }
-    }
+    changes.append(&mut creates);
     // New CHECK constraints.
     for c in &current.checks {
         if prev.check(&c.name).is_none() {
-            changes.push(SchemaChange::AddCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-                expr: c.expr.clone(),
-            });
+            changes.push(add_check(c));
         }
     }
-    // Dropped CHECK constraints.
-    for c in &prev.checks {
-        if current.check(&c.name).is_none() {
-            changes.push(SchemaChange::DropCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-            });
-        }
-    }
-    // New PG EXCLUDE constraints (issue #319). Dropped EXCLUDEs surface
-    // only when the constraint name disappears from the model — the
-    // migration writer emits a `DropExclusionConstraint`. Same posture
-    // as CHECK: we never rewrite an existing constraint, only add and
-    // drop. To change one, operator drops + re-adds via the next
-    // makemigrations cycle.
-    let prev_exclude_names: std::collections::HashSet<&str> =
-        prev.excludes.iter().map(|x| x.name.as_str()).collect();
-    let current_exclude_names: std::collections::HashSet<&str> =
-        current.excludes.iter().map(|x| x.name.as_str()).collect();
+    // New PG EXCLUDE constraints (issue #319).
     for x in &current.excludes {
-        if !prev_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::AddExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-                using: x.using.clone(),
-                elements: x.elements.clone(),
-                where_clause: x.where_clause.clone(),
-            });
-        }
-    }
-    for x in &prev.excludes {
-        if !current_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::DropExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
-            });
+        if !prev.excludes.iter().any(|p| p.name == x.name) {
+            changes.push(add_exclude(x));
         }
     }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
         if prev.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::CreateM2MTable {
-                through: mt.through.clone(),
-                src_table: mt.src_table.clone(),
-                src_col: mt.src_col.clone(),
-                dst_table: mt.dst_table.clone(),
-                dst_col: mt.dst_col.clone(),
-            });
-        }
-    }
-    // Dropped M2M junction tables.
-    for mt in &prev.m2m_tables {
-        if current.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::DropM2MTable {
-                through: mt.through.clone(),
-            });
+            changes.push(create_m2m(mt));
         }
     }
     // New composite FK constraints (added on existing tables, or on
@@ -449,32 +448,92 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             .unwrap_or(&[]);
         for cf in &ct.composite_fks {
             if !prev_fks.iter().any(|p| p.name == cf.name) {
-                changes.push(SchemaChange::AddCompositeFk {
-                    table: ct.name.clone(),
-                    name: cf.name.clone(),
-                    to: cf.to.clone(),
-                    from: cf.from.clone(),
-                    on: cf.on.clone(),
-                });
+                changes.push(add_composite_fk(&ct.name, cf));
             }
         }
     }
-    // Dropped composite FK constraints (still-present tables only —
-    // a `DropTable` already cascades the constraint).
-    for pt in &prev.tables {
-        let Some(ct) = current.table(&pt.name) else {
-            continue;
-        };
-        for pf in &pt.composite_fks {
-            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
-                changes.push(SchemaChange::DropCompositeFk {
-                    table: pt.name.clone(),
-                    name: pf.name.clone(),
-                });
-            }
-        }
-    }
+    changes.append(&mut fk_creates);
     changes
+}
+
+pub(super) fn create_index(idx: &super::snapshot::IndexSnapshot) -> SchemaChange {
+    SchemaChange::CreateIndex {
+        name: idx.name.clone(),
+        table: idx.table.clone(),
+        columns: idx.columns.clone(),
+        unique: idx.unique,
+        method: idx.method.clone(),
+        where_clause: idx.where_clause.clone(),
+        include: idx.include.clone(),
+    }
+}
+
+fn add_check(c: &super::snapshot::CheckSnapshot) -> SchemaChange {
+    SchemaChange::AddCheckConstraint {
+        name: c.name.clone(),
+        table: c.table.clone(),
+        expr: c.expr.clone(),
+    }
+}
+
+fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
+    SchemaChange::AddExclusionConstraint {
+        name: x.name.clone(),
+        table: x.table.clone(),
+        using: x.using.clone(),
+        elements: x.elements.clone(),
+        where_clause: x.where_clause.clone(),
+    }
+}
+
+fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
+    SchemaChange::CreateM2MTable {
+        through: mt.through.clone(),
+        src_table: mt.src_table.clone(),
+        src_col: mt.src_col.clone(),
+        dst_table: mt.dst_table.clone(),
+        dst_col: mt.dst_col.clone(),
+    }
+}
+
+fn add_composite_fk(table: &str, cf: &super::snapshot::CompositeFkSnapshot) -> SchemaChange {
+    SchemaChange::AddCompositeFk {
+        table: table.to_owned(),
+        name: cf.name.clone(),
+        to: cf.to.clone(),
+        from: cf.from.clone(),
+        on: cf.on.clone(),
+    }
+}
+
+/// Tables in `prev` but not `current`, each before any it references.
+/// A cycle falls back to name order.
+fn dropped_tables_child_first<'a>(
+    prev: &'a SchemaSnapshot,
+    current: &SchemaSnapshot,
+) -> Vec<&'a str> {
+    let references = |t: &TableSnapshot, target: &str| {
+        t.name != target
+            && (t
+                .fields
+                .iter()
+                .any(|f| f.fk.as_ref().is_some_and(|r| r.to == target))
+                || t.composite_fks.iter().any(|c| c.to == target))
+    };
+    let mut left: Vec<&TableSnapshot> = prev
+        .tables
+        .iter()
+        .filter(|t| current.table(&t.name).is_none())
+        .collect();
+    let mut out = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        let i = left
+            .iter()
+            .position(|t| !left.iter().any(|o| references(o, &t.name)))
+            .unwrap_or(0);
+        out.push(left.remove(i).name.as_str());
+    }
+    out
 }
 
 fn push_alter_changes(
@@ -483,6 +542,20 @@ fn push_alter_changes(
     cf: &FieldSnapshot,
     out: &mut Vec<SchemaChange>,
 ) {
+    // `AlterColumnType` to a string renders TEXT and a length change
+    // renders VARCHAR/TEXT, so the length change goes on the string side:
+    // before the type when leaving a string, after it when entering one.
+    // Run the other way it undid the type change (#1878).
+    let max_length = (pf.max_length != cf.max_length).then(|| SchemaChange::AlterColumnMaxLength {
+        table: table.to_owned(),
+        column: cf.column.clone(),
+        from: pf.max_length,
+        to: cf.max_length,
+    });
+    let leaving_string = pf.ty != cf.ty && cf.ty != "string";
+    if leaving_string {
+        out.extend(max_length.clone());
+    }
     if pf.ty != cf.ty {
         out.push(SchemaChange::AlterColumnType {
             table: table.to_owned(),
@@ -490,6 +563,9 @@ fn push_alter_changes(
             from: pf.ty.clone(),
             to: cf.ty.clone(),
         });
+    }
+    if !leaving_string {
+        out.extend(max_length);
     }
     if pf.nullable != cf.nullable {
         out.push(SchemaChange::AlterColumnNullable {
@@ -504,14 +580,6 @@ fn push_alter_changes(
             column: cf.column.clone(),
             from: pf.default.clone(),
             to: cf.default.clone(),
-        });
-    }
-    if pf.max_length != cf.max_length {
-        out.push(SchemaChange::AlterColumnMaxLength {
-            table: table.to_owned(),
-            column: cf.column.clone(),
-            from: pf.max_length,
-            to: cf.max_length,
         });
     }
     if pf.unique != cf.unique {
@@ -584,11 +652,41 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.max, cf.max
         ));
     }
-    if pf.fk != cf.fk {
+    // FK identity and FK action are compared separately, because only
+    // the identity has ever been representable in a snapshot.
+    //
+    // `on_delete` was added to `RelationSnapshot` in #1549. Every
+    // snapshot written before it has `on_delete: None`, so a plain
+    // `pf.fk != cf.fk` reports "fk changed" for every FK that declares
+    // an action the moment the upgrade lands — and all three
+    // `make_migrations` entry points reject a non-empty result. An
+    // upgrade with zero model changes then fails outright, listing
+    // framework tables the user never wrote, with advice that cannot be
+    // followed: there is no `AlterField`/`AlterFk` operation to author.
+    //
+    // Eleven framework FKs declare `cascade` (ten of them in `tenancy`),
+    // and `fold_in_framework_tables` puts them in every project's
+    // snapshot, so this reached every existing tenancy app.
+    //
+    // `None → Some(_)` is therefore the upgrade, not a change. A real
+    // action change — `Some(a) → Some(b)` — is still reported, which is
+    // strictly more than was detectable before #1549, when the value was
+    // discarded and no action change was visible at all.
+    let fk_identity = |r: Option<&crate::migrate::RelationSnapshot>| {
+        r.map(|r| (r.kind.clone(), r.to.clone(), r.on.clone()))
+    };
+    if fk_identity(pf.fk.as_ref()) != fk_identity(cf.fk.as_ref()) {
         out.push(format!(
             "`{table}.{col}` fk changed: {:?} → {:?}",
             pf.fk, cf.fk
         ));
+    } else if let (Some(p), Some(c)) = (pf.fk.as_ref(), cf.fk.as_ref()) {
+        if p.on_delete.is_some() && p.on_delete != c.on_delete {
+            out.push(format!(
+                "`{table}.{col}` fk on_delete changed: {:?} → {:?}",
+                p.on_delete, c.on_delete
+            ));
+        }
     }
     if pf.auto != cf.auto {
         out.push(format!(
@@ -687,7 +785,38 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect)
+    render_changes_split_inner(changes, current, dialect, None, false)
+}
+
+/// As [`render_changes_split_with_dialect`], but every FK target is
+/// qualified with `schema`, so it cannot resolve through `search_path`
+/// to a same-named table elsewhere (#1645).
+pub(crate) fn render_changes_split_in_schema(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect, schema, false)
+}
+
+/// As [`render_changes_split_in_schema`] for tables with no rows, where a
+/// NOT NULL column needs no default (#2066).
+pub(crate) fn render_changes_split_for_empty(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect, schema, true)
+}
+
+/// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
+fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &str) -> String {
+    match schema {
+        Some(s) => format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(table)),
+        None => dialect.quote_ident(table),
+    }
 }
 
 /// Reject `AlterColumn*` operations on dialects whose DDL we
@@ -729,26 +858,104 @@ fn guard_alter_column_dialect(
     ))
 }
 
+/// Who holds each UNIQUE name in `current`. Two columns that shorten to
+/// one name are refused: PG would reject the second, and SQLite's
+/// `DROP INDEX` for one would drop the other's.
+struct UniqueNames {
+    holders: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl UniqueNames {
+    fn new(current: &SchemaSnapshot) -> Self {
+        let mut holders: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for t in &current.tables {
+            for f in t
+                .fields
+                .iter()
+                .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+            {
+                holders
+                    .entry(super::ddl::unique_constraint_name(&t.name, &f.column))
+                    .or_default()
+                    .push(format!("`{}.{}`", t.name, f.column));
+            }
+        }
+        for idx in &current.indexes {
+            holders
+                .entry(idx.name.clone())
+                .or_default()
+                .push(format!("index `{}`", idx.name));
+        }
+        Self { holders }
+    }
+
+    /// The UNIQUE name for `table.column`, unless something else holds it.
+    fn get(&self, table: &str, column: &str) -> Result<String, String> {
+        let name = super::ddl::unique_constraint_name(table, column);
+        let me = format!("`{table}.{column}`");
+        let others: Vec<&str> = self
+            .holders
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|h| *h != me)
+            .collect();
+        if others.is_empty() {
+            return Ok(name);
+        }
+        Err(format!(
+            "the UNIQUE on {me} is named `{name}`, which {} also uses; \
+             rename a table or column, or declare one as a named unique index",
+            others.join(", ")
+        ))
+    }
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+    empty_tables: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
+    let unique_names = UniqueNames::new(current);
     for change in changes {
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
                     format!("CreateTable for `{name}` but no snapshot entry for it")
                 })?;
+                for f in table
+                    .fields
+                    .iter()
+                    .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
+                {
+                    unique_names.get(name, &f.column)?;
+                }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
-                        .extend(constraints_sql_from_snapshot(table, dialect));
+                        .extend(constraints_sql_from_snapshot(table, dialect, schema));
                 }
             }
             SchemaChange::DropColumn { table, column } => {
+                // SQLite refuses to drop an indexed column; AddColumn's
+                // unique index is the one this renderer creates (#1877).
+                // Skipped when another column now holds the name.
+                if let Some(name) = unique_names
+                    .get(table, column)
+                    .ok()
+                    .filter(|_| dialect.name() == "sqlite")
+                {
+                    out.immediate.push(format!(
+                        "DROP INDEX IF EXISTS {}",
+                        dialect.quote_ident(&name)
+                    ));
+                }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     dialect.quote_ident(table),
@@ -762,7 +969,7 @@ fn render_changes_split_inner(
                 let f = t.field(column).ok_or_else(|| {
                     format!("AddColumn for `{table}.{column}` but field missing in snapshot")
                 })?;
-                if !f.nullable && f.default.is_none() {
+                if !f.nullable && f.default.is_none() && !empty_tables {
                     return Err(format!(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
                          Postgres can't backfill existing rows. Pick one:\n  \
@@ -780,7 +987,40 @@ fn render_changes_split_inner(
                          right fix for any table that has production data.",
                     ));
                 }
-                out.immediate.push(add_column_sql(table, f, dialect));
+                // MySQL with a binlog refuses `ADD COLUMN … DEFAULT (UUID())` (1674).
+                if dialect.name() == "mysql" && is_uuid_default(f) {
+                    out.immediate
+                        .extend(add_column_backfilled(table, f, dialect));
+                } else if dialect.name() == "mysql" && !f.nullable && f.default.is_none() {
+                    // MySQL fills a NOT NULL ADD with '' or 0; MODIFY fails on a NULL row instead.
+                    out.immediate
+                        .extend(add_column_then_not_null(table, f, dialect));
+                } else {
+                    out.immediate.push(add_column_sql(table, f, dialect));
+                }
+                if f.fk.is_some()
+                    && dialect.inline_fks_in_create_table()
+                    && inline_fk_on_add_column(f, dialect).is_none()
+                {
+                    out.warnings.push(format!(
+                        "`{table}.{column}` is added without its FOREIGN KEY: SQLite refuses \
+                         REFERENCES with a non-NULL default on a table with rows. Rebuild \
+                         the table by hand to add it (#559)."
+                    ));
+                }
+                // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
+                if f.unique && !f.primary_key {
+                    let name = unique_names.get(table, column)?;
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                }
+                if let Some(rel) =
+                    f.fk.as_ref()
+                        .filter(|_| !dialect.inline_fks_in_create_table())
+                {
+                    out.deferred_fks
+                        .push(field_fk_sql(table, column, rel, dialect, schema));
+                }
             }
             SchemaChange::DropTable(name) => {
                 // CASCADE is Postgres-only — MySQL's parser rejects the
@@ -812,6 +1052,12 @@ fn render_changes_split_inner(
                 nullable,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
+                // Option<T> → T with a default: fill the NULLs first, or
+                // SET NOT NULL fails on them (#1881).
+                let field = current.table(table).and_then(|t| t.field(column));
+                if let Some(f) = field.filter(|f| !*nullable && f.default.is_some()) {
+                    out.immediate.push(fill_nulls_sql(table, f, dialect));
+                }
                 let action = if *nullable {
                     "DROP NOT NULL"
                 } else {
@@ -848,13 +1094,25 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                // SQLite gives `VARCHAR(n)` and `TEXT` the same TEXT
+                // affinity and never enforces the length, so this
+                // change has no storage effect there. Emitting nothing
+                // is the honest rendering; the guard below used to
+                // reject it, failing a migration over DDL that would
+                // have been a no-op (#1220). MySQL *does* enforce the
+                // length and still needs `MODIFY COLUMN` (#559).
+                if dialect.name() == "sqlite" {
+                    continue;
+                }
                 guard_alter_column_dialect(dialect, "AlterColumnMaxLength", table, column)?;
                 let pg_to = match to {
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
                 };
+                // No `USING`: a `::VARCHAR(n)` cast truncates, and without
+                // it PG refuses to shrink over longer values (#1878).
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
             SchemaChange::AlterColumnUnique {
@@ -863,19 +1121,37 @@ fn render_changes_split_inner(
                 unique,
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
+                let name = unique_names.get(table, column)?;
                 if *unique {
-                    out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
-                    ));
+                    out.immediate
+                        .push(dialect.add_unique_constraint_sql(table, &name, column));
                 } else {
                     out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" DROP CONSTRAINT "{table}_{column}_key""#,
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(&name),
                     ));
                 }
             }
+            // Both renames are genuinely portable — MySQL and SQLite
+            // (3.25+) support them — so unlike the `AlterColumn*` arms
+            // above there is nothing to guard. What they need is the
+            // dialect's quoting, which they did not have: the literal
+            // `"` here is a string delimiter on MySQL, so
+            // `ALTER TABLE "post" RENAME TO "article"` is `ERROR 1064`,
+            // the same failure as #1461 in the `DropCheckConstraint`
+            // arm of this same match (#559).
+            //
+            // Named rather than counted, because the count has now been
+            // wrong twice: it said "two arms further down" (#1507), and
+            // the correction said "three arms sit between them" when it
+            // is four (#1606 review). A position that moves whenever an
+            // arm is added does not belong in a comment.
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{old_name}" RENAME TO "{new_name}""#,
+                    "ALTER TABLE {} RENAME TO {}",
+                    dialect.quote_ident(old_name),
+                    dialect.quote_ident(new_name),
                 ));
             }
             SchemaChange::RenameColumn {
@@ -884,7 +1160,10 @@ fn render_changes_split_inner(
                 new_column,
             } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(old_column),
+                    dialect.quote_ident(new_column),
                 ));
             }
             SchemaChange::CreateIndex {
@@ -971,18 +1250,26 @@ fn render_changes_split_inner(
                     using,
                 ));
             }
-            SchemaChange::DropIndex { name } => {
+            SchemaChange::DropIndex { name, table } => {
                 // MySQL needs `DROP INDEX <name> ON <table>` and rejects
-                // `IF EXISTS`. The variant doesn't carry the table — fail
-                // loudly until #559 promotes `DropIndex` to include it.
+                // `IF EXISTS` on it. PostgreSQL and SQLite drop by name.
                 if dialect.name() == "mysql" {
-                    return Err(format!(
-                        "DropIndex for `{name}` is not yet supported on dialect `mysql`. \
-                         MySQL requires the table name (`DROP INDEX <name> ON <table>`) but \
-                         the `SchemaChange::DropIndex` variant only carries `name`. \
-                         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the \
-                         dialect-correct DDL for your migration. Tracked in #559."
+                    if table.is_empty() {
+                        return Err(format!(
+                            "DropIndex for `{name}` carries no table, and MySQL needs one \
+                             (`DROP INDEX <name> ON <table>`). This migration file was \
+                             written before #1588 added the field. Add \
+                             `\"table\": \"<owning table>\"` beside `\"name\"` in the \
+                             DropIndex op, or regenerate the migration. PostgreSQL and \
+                             SQLite apply the file unchanged."
+                        ));
+                    }
+                    out.immediate.push(format!(
+                        "DROP INDEX {} ON {}",
+                        dialect.quote_ident(name),
+                        dialect.quote_ident(table),
                     ));
+                    continue;
                 }
                 out.immediate.push(format!(
                     "DROP INDEX IF EXISTS {}",
@@ -1007,19 +1294,23 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCheckConstraint { name, table } => {
-                if dialect.name() == "sqlite" {
+                // The dialect owns both halves: whether it can drop a
+                // constraint at all, and how it spells it. `None` is
+                // SQLite saying it has no `ALTER TABLE DROP CONSTRAINT`.
+                //
+                // This arm used to test `dialect.name() == "sqlite"`
+                // itself and then hand-write the statement — which is
+                // how it came to send PostgreSQL syntax to MySQL (#559).
+                let Some(sql) = dialect.drop_check_constraint_sql(table, name) else {
                     return Err(format!(
                         "DropCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the CHECK. Tracked in #559."
+                         that rebuilds the table without the CHECK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                };
+                out.immediate.push(sql);
             }
             SchemaChange::AddExclusionConstraint {
                 name,
@@ -1083,11 +1374,13 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
-                let q_src_table = dialect.quote_ident(src_table);
-                let q_dst_table = dialect.quote_ident(dst_table);
+                let q_src_table = fk_target(dialect, schema, src_table);
+                let q_dst_table = fk_target(dialect, schema, dst_table);
                 let q_id = dialect.quote_ident("id");
-                let q_src_fk = dialect.quote_ident(&format!("{through}_{src_col}_fkey"));
-                let q_dst_fk = dialect.quote_ident(&format!("{through}_{dst_col}_fkey"));
+                let q_src_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
+                let q_dst_fk =
+                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
@@ -1157,23 +1450,21 @@ fn render_changes_split_inner(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({from_cols}) REFERENCES {} ({on_cols})",
                     dialect.quote_ident(table),
                     dialect.quote_ident(name),
-                    dialect.quote_ident(to),
+                    fk_target(dialect, schema, to),
                 ));
             }
             SchemaChange::DropCompositeFk { table, name } => {
-                if dialect.name() == "sqlite" {
+                // Same single owner as the CHECK arm above.
+                let Some(sql) = dialect.drop_foreign_key_sql(table, name) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the FK. Tracked in #559."
+                         that rebuilds the table without the FK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                };
+                out.immediate.push(sql);
             }
         }
     }
@@ -1269,16 +1560,6 @@ fn create_table_sql_from_snapshot_with_dialect(
         if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
         }
-        // Per-column UNIQUE constraint from #[rustango(unique)]. Without
-        // this clause the snapshot's `unique: true` flag was honoured by
-        // the diff path (AlterColumnUnique) but silently dropped when a
-        // CreateTable rendered the initial DDL — surfaced live by the
-        // cookbook /authors/new playwright session, where two Authors
-        // with the same email INSERT-ed cleanly despite the model
-        // declaring `#[rustango(unique)]`.
-        if f.unique && !f.primary_key {
-            sql.push_str(" UNIQUE");
-        }
         if f.min.is_some() || f.max.is_some() {
             sql.push_str(" CHECK (");
             let mut wrote = false;
@@ -1307,13 +1588,15 @@ fn create_table_sql_from_snapshot_with_dialect(
         // FK graphs resolve across the whole migration batch.
         if dialect.inline_fks_in_create_table() {
             if let Some(rel) = &f.fk {
-                let _ = write!(
-                    sql,
-                    " REFERENCES {} ({})",
-                    dialect.quote_ident(&rel.to),
-                    dialect.quote_ident(&rel.on),
-                );
+                sql.push_str(&inline_references(rel, dialect));
             }
+        }
+    }
+    // Named, table-level: `AlterColumnUnique` drops it by this name (#1880).
+    for f in &t.fields {
+        if f.unique && !f.primary_key && f.generated_as.is_none() {
+            sql.push_str(", ");
+            sql.push_str(&super::ddl::unique_clause(dialect, &t.name, &f.column));
         }
     }
     if dialect.inline_fks_in_create_table() {
@@ -1336,22 +1619,15 @@ fn create_table_sql_from_snapshot_with_dialect(
 fn constraints_sql_from_snapshot(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> Vec<String> {
     let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
         .fields
         .iter()
         .filter_map(|f| {
-            f.fk.as_ref().map(|rel| {
-                let constraint = format!("{}_{}_fkey", t.name, f.column);
-                format!(
-                    "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-                    dialect.quote_ident(&constraint),
-                    dialect.quote_ident(&f.column),
-                    dialect.quote_ident(&rel.to),
-                    dialect.quote_ident(&rel.on),
-                )
-            })
+            f.fk.as_ref()
+                .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
         .collect();
     for cf in &t.composite_fks {
@@ -1361,11 +1637,50 @@ fn constraints_sql_from_snapshot(
             "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
             dialect.quote_ident(&cf.name),
             from_cols.join(", "),
-            dialect.quote_ident(&cf.to),
+            fk_target(dialect, schema, &cf.to),
             on_cols.join(", "),
         ));
     }
     out
+}
+
+/// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
+fn inline_references(rel: &RelationSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let mut s = format!(
+        " REFERENCES {} ({})",
+        dialect.quote_ident(&rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — the declared action, or the constraint lands as
+    // NO ACTION and a declared cascade becomes a refusal.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT <table>_<column>_fkey FOREIGN KEY …`.
+fn field_fk_sql(
+    table: &str,
+    column: &str,
+    rel: &RelationSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    let mut s = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote_ident(table),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(table, column)),
+        dialect.quote_ident(column),
+        fk_target(dialect, schema, &rel.to),
+        dialect.quote_ident(&rel.on),
+    );
+    // #1549 — this is the path system migrations take, and
+    // it was silently dropping the declared action.
+    if let Some(action) = &rel.on_delete {
+        let _ = write!(s, " ON DELETE {action}");
+    }
+    s
 }
 
 /// Render a column `DEFAULT` expression for CREATE TABLE / ADD COLUMN.
@@ -1418,7 +1733,97 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         }
         sql.push(')');
     }
+    // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
+    if let Some(rel) = inline_fk_on_add_column(f, dialect) {
+        sql.push_str(&inline_references(rel, dialect));
+    }
     sql
+}
+
+/// `true` for a column whose DEFAULT is a random UUID (`gen_random_uuid()`).
+pub(crate) fn is_uuid_default(f: &FieldSnapshot) -> bool {
+    f.default.as_deref().is_some_and(crate::sql::is_uuid_expr)
+}
+
+/// `f` added nullable with no DEFAULT, a fresh UUID per row, then the
+/// DEFAULT and NOT NULL set by `MODIFY` (MySQL only).
+fn add_column_backfilled(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let bare = FieldSnapshot {
+        default: None,
+        nullable: true,
+        ..f.clone()
+    };
+    let value = render_column_default(
+        f.default.as_deref().unwrap_or_default(),
+        &f.ty,
+        f.max_length,
+        dialect,
+    );
+    let null = if f.nullable { "" } else { " NOT NULL" };
+    vec![
+        add_column_sql(table, &bare, dialect),
+        fill_nulls_sql(table, f, dialect),
+        format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}",
+            dialect.quote_ident(table),
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        ),
+    ]
+}
+
+/// `f` added nullable, then made NOT NULL by `MODIFY` (MySQL only).
+fn add_column_then_not_null(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let bare = FieldSnapshot {
+        nullable: true,
+        ..f.clone()
+    };
+    vec![
+        add_column_sql(table, &bare, dialect),
+        format!(
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            dialect.quote_ident(table),
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        ),
+    ]
+}
+
+/// `UPDATE` setting each NULL `f` to its DEFAULT, evaluated per row.
+pub(crate) fn fill_nulls_sql(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let value = render_column_default(
+        f.default.as_deref().unwrap_or_default(),
+        &f.ty,
+        f.max_length,
+        dialect,
+    );
+    format!(
+        "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
+        t = dialect.quote_ident(table),
+        c = dialect.quote_ident(&f.column),
+    )
+}
+
+/// SQLite's inline FK for `ADD COLUMN`. With `foreign_keys=ON` SQLite
+/// refuses `REFERENCES` beside a non-NULL default once the table has rows.
+fn inline_fk_on_add_column<'a>(
+    f: &'a FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<&'a RelationSnapshot> {
+    f.fk.as_ref()
+        .filter(|_| dialect.inline_fks_in_create_table() && f.default.is_none())
 }
 
 #[cfg(test)]
@@ -1479,7 +1884,7 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
     }
     // #344 — case-insensitive String columns route through
     // `dialect.ci_text_type` (PG → CITEXT, SQLite → TEXT COLLATE
-    // NOCASE, MySQL → TEXT COLLATE utf8mb4_general_ci).
+    // NOCASE, MySQL → LONGTEXT COLLATE utf8mb4_general_ci).
     if f.case_insensitive {
         if matches!(ty, Some(FieldType::String)) {
             return dialect.ci_text_type(f.max_length);
@@ -1516,6 +1921,38 @@ mod sql_type_tests {
             db_comment: None,
             fk: None,
         }
+    }
+
+    /// Added NOT NULL, MySQL would fill a row that slipped in after the empty check.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_not_null_add_on_empty_table_tightens_after() {
+        let snap = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "T".into(),
+                fields: vec![fs("i32", false)],
+                composite_fks: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let add = [SchemaChange::AddColumn {
+            table: "t".into(),
+            column: "x".into(),
+        }];
+        let out = render_changes_split_for_empty(&add, &snap, &crate::sql::MySql, None).unwrap();
+        assert_eq!(out.immediate.len(), 2, "{:?}", out.immediate);
+        assert!(
+            !out.immediate[0].contains("NOT NULL"),
+            "{}",
+            out.immediate[0]
+        );
+        assert!(
+            out.immediate[1].starts_with("ALTER TABLE `t` MODIFY COLUMN `x` ")
+                && out.immediate[1].ends_with(" NOT NULL"),
+            "{}",
+            out.immediate[1]
+        );
     }
 
     #[test]
@@ -1573,12 +2010,15 @@ mod sql_type_tests {
             assert_eq!(sq.immediate, vec![r#"DROP TABLE "foo""#.to_string()]);
         }
 
-        let drop_col = [SchemaChange::DropColumn {
-            table: "t".into(),
-            column: "c".into(),
-        }];
+        // Bound inside the gate: nothing else reads it, so at
+        // `--no-default-features --features sqlite` it is an unused
+        // binding rather than a fixture (#1370).
         #[cfg(feature = "mysql")]
         {
+            let drop_col = [SchemaChange::DropColumn {
+                table: "t".into(),
+                column: "c".into(),
+            }];
             let my =
                 render_changes_split_with_dialect(&drop_col, &snap, &crate::sql::MySql).unwrap();
             assert_eq!(
@@ -1586,6 +2026,60 @@ mod sql_type_tests {
                 vec!["ALTER TABLE `t` DROP COLUMN `c`".to_string()]
             );
         }
+    }
+
+    /// `a_b.c` and `a.b_c` both shorten to `a_b_c_key`.
+    fn clashing_uniques() -> SchemaSnapshot {
+        let uniq = |t: &str, c: &str| TableSnapshot {
+            name: t.into(),
+            model: t.into(),
+            fields: vec![FieldSnapshot {
+                name: c.into(),
+                column: c.into(),
+                unique: true,
+                nullable: true,
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        SchemaSnapshot {
+            tables: vec![uniq("a_b", "c"), uniq("a", "b_c")],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn clashing_unique_names_are_refused() {
+        use crate::migrate::SchemaChange;
+        let snap = clashing_uniques();
+        let err = render_changes_split_with_dialect(
+            &[SchemaChange::CreateTable("a_b".into())],
+            &snap,
+            &crate::sql::Postgres,
+        )
+        .expect_err("two UNIQUEs named a_b_c_key");
+        assert!(
+            err.contains("`a_b_c_key`") && err.contains("`a.b_c`"),
+            "{err}"
+        );
+    }
+
+    /// A dropped `a_b.c` must not drop `a.b_c`'s index.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_drop_column_keeps_another_tables_unique_index() {
+        use crate::migrate::SchemaChange;
+        let mut snap = clashing_uniques();
+        snap.tables.remove(0);
+        let drop = [SchemaChange::DropColumn {
+            table: "a_b".into(),
+            column: "c".into(),
+        }];
+        let out = render_changes_split_with_dialect(&drop, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate, vec![r#"ALTER TABLE "a_b" DROP COLUMN "c""#]);
+        let out =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert_eq!(out.immediate[0], r#"DROP INDEX IF EXISTS "a_b_c_key""#);
     }
 
     // -------- guard_alter_column_dialect (#559 protection) --------
@@ -1661,7 +2155,12 @@ mod sql_type_tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn alter_column_max_length_errors_on_sqlite() {
+    fn alter_column_max_length_is_a_no_op_on_sqlite() {
+        // #1220. This used to be `..._errors_on_sqlite`, asserting a
+        // rejection. SQLite gives `VARCHAR(n)` and `TEXT` the same
+        // affinity and never enforces the length, so there is no DDL
+        // to emit and nothing to fail — refusing it failed a
+        // migration over a change that does nothing.
         let snap = empty_snap();
         let changes = vec![SchemaChange::AlterColumnMaxLength {
             table: "t".into(),
@@ -1669,9 +2168,32 @@ mod sql_type_tests {
             from: Some(50),
             to: Some(100),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AlterColumnMaxLength must reject SQLite");
-        assert!(err.contains("AlterColumnMaxLength"));
+        let batch = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect("AlterColumnMaxLength must be accepted on SQLite");
+        assert!(
+            batch.immediate.is_empty() && batch.deferred_fks.is_empty(),
+            "no statement should be emitted, got {:?} / {:?}",
+            batch.immediate,
+            batch.deferred_fks,
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn alter_column_max_length_still_errors_on_mysql() {
+        // The control for the SQLite no-op: MySQL *does* enforce
+        // VARCHAR length, so silently emitting nothing there would
+        // leave the column wrong. It must keep pointing at #559.
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnMaxLength {
+            table: "t".into(),
+            column: "c".into(),
+            from: Some(50),
+            to: Some(100),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("MySQL enforces VARCHAR length and cannot no-op");
+        assert!(err.contains("AlterColumnMaxLength"), "{err}");
     }
 
     #[cfg(feature = "mysql")]
@@ -1748,9 +2270,12 @@ mod sql_type_tests {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
         }];
         let out =
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        // PostgreSQL drops by name; the table is carried for MySQL's
+        // sake and must not leak into this form.
         assert_eq!(
             out.immediate,
             vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
@@ -1763,6 +2288,7 @@ mod sql_type_tests {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
         }];
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite).unwrap();
         assert_eq!(
@@ -1771,19 +2297,67 @@ mod sql_type_tests {
         );
     }
 
+    /// MySQL renders `DROP INDEX <name> ON <table>` — the form it
+    /// actually accepts.
+    ///
+    /// This test replaces one that asserted the opposite. The old
+    /// `drop_index_mysql_rejects_until_variant_carries_table` pinned
+    /// the refusal as correct behaviour, so the bug in #1588 had a
+    /// green test defending it: `makemigrations` generated `DropIndex`
+    /// for every index of a dropped model, and the result was
+    /// un-appliable on MySQL straight out of the generator.
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_index_mysql_rejects_until_variant_carries_table() {
+    fn drop_index_mysql_names_the_table() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect("DropIndex renders on MySQL now that the variant carries the table");
+        // No `IF EXISTS` — MySQL rejects it on DROP INDEX.
+        assert_eq!(
+            out.immediate,
+            vec!["DROP INDEX `idx_post_slug` ON `post`".to_string()]
+        );
+    }
+
+    /// A migration file written before #1588 carries no `table`, and
+    /// `#[serde(default)]` gives it an empty one. On MySQL that cannot
+    /// be rendered, and the error has to name the file's problem rather
+    /// than emit `ON ``` and let the server complain.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn drop_index_mysql_without_a_table_says_which_file_to_fix() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+            table: String::new(),
         }];
         let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("DropIndex must reject MySQL — variant lacks table reference");
-        assert!(err.contains("DropIndex"));
-        assert!(err.contains("idx_post_slug"));
-        assert!(err.contains("mysql"));
-        assert!(err.contains("ON <table>"));
+            .expect_err("an empty table cannot render on MySQL");
+        assert!(err.contains("idx_post_slug"), "{err}");
+        assert!(err.contains("carries no table"), "{err}");
+        assert!(err.contains("\"table\""), "names the field to add: {err}");
+    }
+
+    /// …and the same legacy file still applies on PostgreSQL, because
+    /// that dialect never needed the table. An upgrade must not break
+    /// migrations that were working.
+    #[test]
+    fn drop_index_without_a_table_still_renders_on_postgres() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+            table: String::new(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
+        );
     }
 
     #[test]
@@ -1854,9 +2428,24 @@ mod sql_type_tests {
         assert!(err.contains("sqlite"));
     }
 
+    /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
+    ///
+    /// This test previously asserted
+    /// `` ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x` ``, which
+    /// MySQL 8.0.46 rejects outright:
+    ///
+    /// ```text
+    /// ERROR 1064 (42000): ... right syntax to use near 'IF EXISTS `ck_x`'
+    /// ```
+    ///
+    /// It was named `..._uses_backticks` and it did check the quoting —
+    /// the statement around the quoting was simply never run against a
+    /// server. That is the whole hazard of an emission test: it proves
+    /// the writer emitted what its author intended, never that the
+    /// server accepts it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_check_constraint_mysql_uses_backticks() {
+    fn drop_check_constraint_mysql_uses_drop_check() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCheckConstraint {
             name: "ck_x".into(),
@@ -1865,7 +2454,27 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x`".to_string()]
+            vec!["ALTER TABLE `t` DROP CHECK `ck_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
+        );
+    }
+
+    /// Postgres keeps the idempotent form; only the MySQL arm changed.
+    #[test]
+    fn drop_check_constraint_postgres_keeps_if_exists() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_x".into(),
+            table: "t".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT IF EXISTS "ck_x""#.to_string()]
         );
     }
 
@@ -1897,6 +2506,44 @@ mod sql_type_tests {
         assert!(stmt.contains(r#"ADD CONSTRAINT "fk_child_parent_composite""#));
         assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
         assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
+    }
+
+    /// #1645 — the m2m and composite arms qualify their targets too.
+    #[test]
+    fn in_schema_render_qualifies_every_fk_target() {
+        let snap = empty_snap();
+        let mut changes = make_create_m2m();
+        changes.extend(make_add_composite_fk());
+        let out =
+            render_changes_split_in_schema(&changes, &snap, &crate::sql::Postgres, Some("t1"))
+                .unwrap();
+        assert!(out.deferred_fks[0].contains(r#"REFERENCES "t1"."posts" ("id")"#));
+        assert!(out.deferred_fks[1].contains(r#"REFERENCES "t1"."tags" ("id")"#));
+        assert!(out.deferred_fks[2].contains(r#"REFERENCES "t1"."parent" ("a_id", "b_id")"#));
+    }
+
+    /// #1645 — the plain per-field FK arm qualifies its target.
+    #[test]
+    fn in_schema_render_qualifies_a_field_fk() {
+        let table: TableSnapshot = serde_json::from_value(serde_json::json!({
+            "name": "child", "model": "Child", "fields": [{
+                "name": "user_id", "column": "user_id", "ty": "i64",
+                "nullable": false, "primary_key": false,
+                "fk": { "kind": "fk", "to": "rustango_users", "on": "id" },
+            }],
+        }))
+        .unwrap();
+        let pg = &crate::sql::Postgres;
+        let fk = constraints_sql_from_snapshot(&table, pg, Some("t1"));
+        assert!(
+            fk[0].contains(r#"REFERENCES "t1"."rustango_users" ("id")"#),
+            "{fk:?}"
+        );
+        let fk = constraints_sql_from_snapshot(&table, pg, None);
+        assert!(
+            fk[0].contains(r#"REFERENCES "rustango_users" ("id")"#),
+            "{fk:?}"
+        );
     }
 
     #[cfg(feature = "mysql")]
@@ -1947,9 +2594,16 @@ mod sql_type_tests {
         );
     }
 
+    /// MySQL spells an FK drop `DROP FOREIGN KEY`, with no `IF EXISTS`.
+    ///
+    /// Same story as `drop_check_constraint_mysql_uses_drop_check`: this
+    /// asserted the Postgres shape, which is error 1064 on MySQL. The
+    /// correct branch already existed one module away, in
+    /// `ddl::drop_constraints_sql_with_dialect`, and `diff.rs` did not
+    /// use it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_composite_fk_mysql_uses_backticks() {
+    fn drop_composite_fk_mysql_uses_drop_foreign_key() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCompositeFk {
             table: "child".into(),
@@ -1958,7 +2612,11 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `child` DROP CONSTRAINT IF EXISTS `fk_x`".to_string()]
+            vec!["ALTER TABLE `child` DROP FOREIGN KEY `fk_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
         );
     }
 

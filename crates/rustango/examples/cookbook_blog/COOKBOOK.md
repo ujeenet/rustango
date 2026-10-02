@@ -16,6 +16,23 @@ Verified by:  the test that exercises the recipe
 The blog app under [src/](src/) is the source of truth — every recipe
 quotes from a real, compiling, test-covered file.
 
+Two honest caveats about that shape, so the console blocks below are not
+read for more than they say:
+
+- **A green run without `DATABASE_URL` proves almost nothing.** Fourteen
+  chapter suites open with `let Some(pool) = pool().await else { return };`,
+  so with no database their tests return immediately and libtest counts them
+  *passed*. The pass count is the same either way.
+  [`tests/a_green_run_without_a_database_proves_little.rs`](tests/a_green_run_without_a_database_proves_little.rs)
+  is the difference: it fails and names those suites when `DATABASE_URL` is
+  unset, so the two runs no longer look alike. Run the book's recipes the way
+  CI does — `docker compose up -d postgres`, export `DATABASE_URL`, then
+  `cargo test -- --test-threads=1`.
+- **`Verified by` is per-section only through Chapter 14.** Chapters 15–21
+  either cite their tests in the shorter `→ \`fn\`` form or, for 15–17, cite
+  none. Absence of a citation there means the citation was never written, not
+  that the chapter is unverified.
+
 ## Table of contents
 
 1. [Project shape & manage commands](#chapter-1--project-shape--manage-commands)
@@ -26,7 +43,7 @@ quotes from a real, compiling, test-covered file.
 6. [Auth + permissions](#chapter-6--auth--permissions)
 7. [Forms + serializer](#chapter-7--forms--serializer)
 8. [Admin](#chapter-8--admin)
-9. [ViewSets / DRF / OpenAPI](#chapter-9--viewsets--drf--openapi)
+9. [ViewSets / REST APIs / OpenAPI](#chapter-9--viewsets--rest-apis--openapi)
 10. [Templates + static](#chapter-10--templates--static)
 11. [Async / IO / extensions](#chapter-11--async--io--extensions)
 12. [Tri-dialect + cross-cutting](#chapter-12--tri-dialect--cross-cutting)
@@ -36,6 +53,12 @@ quotes from a real, compiling, test-covered file.
 16. [Every feature on every backend](#chapter-16--every-feature-on-every-backend)
 17. [MCP server](#chapter-17--mcp-server-expose-tools-to-ai-agents)
 18. [Internationalization (i18n)](#chapter-18--internationalization-i18n)
+19. [Rate limiting](#chapter-19--rate-limiting)
+20. [Health checks](#chapter-20--health-checks)
+21. [Secrets manager](#chapter-21--secrets-manager)
+
+Sub-chapters (9b, 9d, 9e) are not listed separately; they sit under their parent
+chapter's heading.
 
 ---
 
@@ -73,11 +96,11 @@ The rest of this chapter walks the verbs you'll reach for most.
 
 ### 1.1 `cargo rustango startproject` / `manage startapp`
 
-**What**: Scaffolder that emits the canonical Django-shape project layout.
+**What**: Scaffolder that emits the canonical project layout — one binary, an `apps/` tree, migrations, and config.
 
 **When**: Brand-new project, or adding a new sub-app to an existing one.
 
-**API**: [`cargo-rustango`](../../../cargo-rustango/src/main.rs) for `startproject`; [`manage::startapp`](../../src/manage/scaffold.rs) for `startapp`.
+**API**: [`cargo-rustango`](../../../cargo-rustango/src/main.rs) for `startproject`; [`migrate::scaffold::startapp`](../../src/migrate/scaffold.rs) for `startapp`.
 
 **Recipe**: this project matches the layout `cargo rustango new --template tenant` produces. A single `Cli::new()` dispatcher means there's no separate `manage` binary — `cargo run` starts the server, and `cargo run -- <verb>` runs everything else.
 
@@ -85,7 +108,7 @@ The rest of this chapter walks the verbs you'll reach for most.
 
 - A **singularized starter model** — `startapp posts` produces `pub struct Post` on table `"post"`. Conservative trailing-`s` strip on names of length ≥ 5 (`comments → comment`, `users → user`); `news` / `address` / `bus` / short names stay untouched. Rename the struct or table literal freely.
 - An `admin(...)` config block (`list_display = "name, active, created_at"`, `search_fields = "name"`, `ordering = "-created_at"`) so the list view is usable out of the box.
-- A `created_at: DateTime<Utc>` field with `#[rustango(auto_now_add)]` — Django convention.
+- A `created_at: DateTime<Utc>` field with `#[rustango(auto_now_add)]` — the insert stamps it for you.
 - A `starter_model_registered_in_inventory` smoke test in `tests.rs` asserting the model lands in `inventory::iter::<ModelEntry>` (the canonical signal that the auto-admin will pick it up).
 - Doc comments calling out that `permissions = true` is the default and the four CRUD codenames (`{table}.add`, `.change`, `.delete`, `.view`) are auto-seeded by `auto_create_permissions` during the next `migrate`.
 
@@ -106,7 +129,7 @@ cookbook_blog/
 └── tests/cookbook_chapter*.rs
 ```
 
-**Verified by**: `tests/cookbook_chapter01_manage.rs::layout_matches_django_shape`
+**Verified by**: `tests/cookbook_chapter01_manage.rs::layout_matches_scaffolder_shape`
 
 ---
 
@@ -146,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **Recipe**: forwarded by `Cli::run()` to `migrate::manage::run`. `cargo run -- makemigrations [<name>]`. `--dry-run` prints the planned ops without writing; `--empty <name>` emits a stub for hand-written `Operation::Data` work (e.g. `RenameTable`).
 
-**Verified by**: `tests/cookbook_chapter01_manage.rs::cli_dispatcher_recognises_makemigrations_verb`
+**Not verified**: the `manage` dispatcher builds the pool *before* it dispatches, so a verb cannot be exercised without a live database — and `cargo run` with no args serves until killed. There is no in-process harness for either, so this recipe has no backing test. `cli_help_works_without_database_url` covers only that the verb is listed in `--help`.
 
 ---
 
@@ -160,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **Recipe**: `cargo run -- check` — runs the bundled checks (system warnings, unapplied migrations).
 
-**Verified by**: `tests/cookbook_chapter01_manage.rs::cli_dispatcher_recognises_check_verb`
+**Not verified**: the `manage` dispatcher builds the pool *before* it dispatches, so a verb cannot be exercised without a live database — and `cargo run` with no args serves until killed. There is no in-process harness for either, so this recipe has no backing test. `cli_help_works_without_database_url` covers only that the verb is listed in `--help`.
 
 ---
 
@@ -174,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **Recipe** ([src/main.rs](src/main.rs)) — same one-liner as §1.2.
 
-**Verified by**: `tests/cookbook_chapter01_manage.rs::cli_no_args_dispatches_to_runserver`
+**Not verified**: the `manage` dispatcher builds the pool *before* it dispatches, so a verb cannot be exercised without a live database — and `cargo run` with no args serves until killed. There is no in-process harness for either, so this recipe has no backing test. `cli_help_works_without_database_url` covers only that the verb is listed in `--help`.
 
 ---
 
@@ -190,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **First-user auto-superuser**: when `create-user <slug> <name>` runs and a tenant has no users yet, the new row is forced to `is_superuser = true` regardless of `--superuser`. This avoids the cold-start trap where the first user lands on an admin with an empty sidebar (no permissions or roles assigned yet). A `note: auto-promoted because first user of tenant` line is printed so onboarding scripts can detect it.
 
-**Verified by**: `tests/cookbook_chapter01_manage.rs::cli_dispatcher_recognises_create_operator_verb`
+**Not verified**: the `manage` dispatcher builds the pool *before* it dispatches, so a verb cannot be exercised without a live database — and `cargo run` with no args serves until killed. There is no in-process harness for either, so this recipe has no backing test. `cli_help_works_without_database_url` covers only that the verb is listed in `--help`.
 
 ---
 
@@ -385,7 +408,7 @@ let cfg = rustango::config::Settings::load_from_env()?;
 // auth_routes — access_ttl_secs / refresh_ttl_secs
 let auth = rustango::tenancy::auth_routes::Config::default()
     .with_jwt_settings(&cfg.auth.jwt);
-api.merge(rustango::tenancy::auth_routes::jwt_router(auth));
+api.merge(rustango::tenancy::auth_routes::JwtAuth::new(auth).router());
 
 // security_headers — preset + csp + hsts override
 let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);
@@ -410,7 +433,7 @@ if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.se
 let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cache);
 
 // mailer backend selection — "console" / "memory" / "null" / "smtp"
-let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail);
+let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail)?;
 
 // jobs queue (memory only — JobQueue isn't object-safe so the trait
 // can't be a runtime backend picker; pg backend is wired manually):
@@ -594,7 +617,7 @@ pub struct Author {
 
 ### 2.17 `#[rustango(max_length = N)]`
 
-**What**: String columns become `VARCHAR(N)` instead of `TEXT`. Without it, plain `String` is `TEXT`.
+**What**: String columns become `VARCHAR(N)` instead of `TEXT`. Without it, plain `String` is `TEXT` (`LONGTEXT` on MySQL).
 
 **Recipe**: `#[rustango(max_length = 80)] pub name: String`.
 
@@ -614,7 +637,7 @@ pub struct Author {
 
 ### 2.18b `#[rustango(unique_together = "col1, col2")]` — composite UNIQUE
 
-**What**: Container-level Django-shape `unique_together`. Emits `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq ON <table> (col1, col2)` so the DB rejects duplicate pairs even though neither column on its own is unique. Sister attr `index_together = "..."` for non-unique composite indexes. Both auto-derive the index name from the column list.
+**What**: Container-level `unique_together`. Emits `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq ON <table> (col1, col2)` so the DB rejects duplicate pairs even though neither column on its own is unique. Sister attr `index_together = "..."` for non-unique composite indexes. Both auto-derive the index name from the column list **unless you pass `name =`** — see §2.18c.
 
 **Recipe** ([models.rs](src/apps/blog/models.rs)):
 
@@ -648,9 +671,46 @@ serializers).
 
 ---
 
+### 2.18c `unique_together(columns = "...", name = "...")` — explicit index name
+
+**What**: The parenthesized form of §2.18b, which names the index yourself instead of
+taking the auto-derived `<table>_<col1>_<col2>_uq`. Reach for it when the derived name
+exceeds the backend's identifier limit (PostgreSQL truncates at 63 bytes) or when the
+constraint has to match an index that already exists in a database you are adopting.
+Shipped in v0.19.2.
+
+**Recipe** ([models.rs](src/apps/blog/models.rs)):
+
+```rust
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_explicit_uq",
+    unique_together(columns = "a, b", name = "custom_uniqueness"),
+)]
+pub struct ExplicitlyNamedTogether {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub a: i64,
+    pub b: i64,
+}
+```
+
+The index is still `UNIQUE` over the same columns; only the name changes. `index_together`
+takes the same parenthesized form.
+
+**Verified by**: `tests/cookbook_chapter02c_unique_together.rs::unique_together_explicit_name_lands_in_schema`
+
+---
+
 ### 2.20 `#[rustango(fk = "table")]` — basic foreign key
 
-**What**: Adds a `BIGINT` FK column and a `REFERENCES <table>(id)` constraint. The `on = "..."` sub-attr overrides the target column name. See also Chapter 17 `fk = "self"` for tree shapes.
+**What**: Adds a `BIGINT` FK column and a `REFERENCES <table>(id)` constraint. The `on = "..."` sub-attr overrides the target column name.
+
+**Tree shapes.** `#[rustango(fk = "self")]` points a column at its own table — a
+`parent_id` on a category or comment tree. The sentinel resolves to the model's own
+table name at derive time, so you do not repeat it. No cookbook chapter covers it; the
+framework's own [`tests/self_fk_live.rs`](../../tests/self_fk_live.rs) is the worked
+example (`schema_self_fk_resolves_to_own_table`, `live_self_fk_round_trip`).
 
 **Recipe**: `#[rustango(fk = "cookbook_author", index)] pub author_id: i64`.
 
@@ -769,7 +829,7 @@ country.posts_through()
 
 Identifiers are **SQL column / table names** (not Rust field names) — sidesteps the multi-hop filter substrate gap. A Rust-field-name shorthand can sit on top once that substrate lands without breaking this surface. Optional `intermediate_pk_column = "..."` defaults to `"id"`.
 
-**Verified by**: [`tests/model_through_relation_sqlite_live.rs`](crates/rustango/tests/model_through_relation_sqlite_live.rs)
+**Verified by**: [`tests/model_through_relation_sqlite_live.rs`](../../tests/model_through_relation_sqlite_live.rs)
 
 ---
 
@@ -824,7 +884,7 @@ Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop fi
 
 **Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
 
-**Verified by**: [`tests/model_reverse_has_sqlite_live.rs`](crates/rustango/tests/model_reverse_has_sqlite_live.rs)
+**Verified by**: [`tests/model_reverse_has_sqlite_live.rs`](../../tests/model_reverse_has_sqlite_live.rs)
 
 ---
 
@@ -840,11 +900,7 @@ Scopes fold in at **every compile entry** — SELECT (`fetch_pool` / `Model::all
 use rustango::core::{Filter, Op, SqlValue, WhereExpr};
 
 fn active_only() -> WhereExpr {
-    WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    })
+    WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)))
 }
 
 #[derive(Model)]
@@ -868,7 +924,7 @@ Post::objects().without_global_scopes().fetch_pool(&pool).await?;
 
 Repeated `#[rustango(global_scope(...))]` attributes accumulate; duplicate names are rejected at macro-parse time. The `apply` value is a function path (resolves in the consumer's scope at macro expansion).
 
-**Verified by**: [`tests/model_global_scope_sqlite_live.rs`](crates/rustango/tests/model_global_scope_sqlite_live.rs)
+**Verified by**: [`tests/model_global_scope_sqlite_live.rs`](../../tests/model_global_scope_sqlite_live.rs)
 
 ---
 
@@ -894,7 +950,7 @@ pub struct Session {
 
 ### 2.30 `#[rustango(soft_delete)]` — tombstone deletes
 
-**What**: Mark an `Option<DateTime<Utc>>` field as the soft-delete tombstone. Currently captured in the model's `SCHEMA.soft_delete_column` so the ORM can layer the alive-when-NULL filter and override `delete()` to UPDATE the tombstone instead of `DELETE FROM`.
+**What**: Mark an `Option<DateTime<Utc>>` field as the soft-delete tombstone. `soft_delete(&pool)` stamps it (once; a second call changes nothing), `restore(&pool)` clears it, and `QuerySet::active()` filters on it. `delete()` still runs a real `DELETE FROM`.
 
 **Recipe**:
 
@@ -989,10 +1045,20 @@ let mut act = Activity {
 act.save(&pool).await?;
 ```
 
+> **`save` is Postgres-only; `save_pool` is the portable one.** `save` is
+> `#[cfg(feature = "postgres")]` and takes `&PgPool`, so it does not exist
+> on a SQLite or MySQL build — this chapter uses it because the recipes
+> here run on Postgres. `save_pool(&Pool)` is the same operation across all
+> three backends, and it is what Chapter 13 uses. The naming reads
+> backwards (the unsuffixed name is the *narrower* one) and cannot be
+> corrected without a deprecation cycle; [#1293](https://github.com/ujeenet/rustango/issues/1293)
+> tracks it. Writing portable code today means reaching for the `_pool`
+> suffix.
+
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
 ### 2.24b Typed `<name>_pool` accessor on the GFK target
-**What**: The `Model` derive emits one `<name>_pool(&pool)` async method per `#[rustango(generic_fk(name = "..."))]` declaration. Reads `self.<ct_column>` + `self.<pk_column>`, calls `ContentType::by_id`, and fetches the target row as a `serde_json::Value`. Stand-in for Django's `activity.target` lazy accessor.
+**What**: The `Model` derive emits one `<name>_pool(&pool)` async method per `#[rustango(generic_fk(name = "..."))]` declaration. Reads `self.<ct_column>` + `self.<pk_column>`, calls `ContentType::by_id`, and fetches the target row as a `serde_json::Value` — one lazy `activity.target` read, whatever type the row turns out to be.
 
 **Recipe**:
 
@@ -1011,7 +1077,7 @@ Returns `Ok(None)` gracefully when the ContentType is stale or the target row wa
 **Verified by**: `tests/gfk_typed_accessors.rs::typed_accessor_resolves_to_target_row_as_json`. Live in [`examples/gfk_demo`](../gfk_demo/).
 
 ### 2.24c Typed `set_<name>_for::<T>` setter
-**What**: Companion to 2.24b — `Model` derive emits `set_<name>_for::<T: Model>(&pool, target_pk)` per declaration. Resolves the ContentType for `T` via the cached registry and assigns both columns on `self`. Stand-in for Django's `activity.target = post` one-liner.
+**What**: Companion to 2.24b — `Model` derive emits `set_<name>_for::<T: Model>(&pool, target_pk)` per declaration. Resolves the ContentType for `T` via the cached registry and assigns both columns on `self` — `activity.set_target_for::<Post>(&pool, pk)` in place of writing the two columns by hand.
 
 **Recipe**:
 
@@ -1051,16 +1117,16 @@ Implementation prefetches the page's distinct CT ids once before the row loop (u
 
 **Verified by**: `tests/admin_gfk_list_render_live.rs`.
 
-### 2.25 Django Meta parity
-One recipe per attr — A set of container-level `Meta`-shape attributes. Every one is parsed by `#[derive(Model)]`, validated at compile time, and exposed on `ModelSchema::<field>` so future codegen / admin / DRF surfaces can read the metadata without re-parsing.
+### 2.25 Model metadata attributes
+One recipe per attr — a set of container-level metadata attributes that say something about the *table* rather than a column. Every one is parsed by `#[derive(Model)]`, validated at compile time, and exposed on `ModelSchema::<field>` so codegen / admin / API surfaces can read the metadata without re-parsing.
 
 #### 2.25.1 `#[rustango(managed = false)]`
-**What**: Django `Meta.managed = False` — `makemigrations` skips the model entirely (the operator owns the table's DDL). Useful for views, partitioned tables, foreign tables, or any schema the framework shouldn't touch.
+**What**: `makemigrations` skips the model entirely (the operator owns the table's DDL). Useful for views, partitioned tables, foreign tables, or any schema the framework shouldn't touch.
 
 **Recipe**: `#[rustango(table = "external_view", managed = false)]`. The model still gets ORM read access; nothing emits CREATE / ALTER / DROP.
 
 #### 2.25.2 `#[rustango(db_table_comment = "...")]`
-**What**: Django 4.2+ `Meta.db_table_comment` — attached to the DB catalog so ops tooling (data-lineage docs, schema explorers) sees it.
+**What**: A one-line description of the table, attached to the DB catalog so ops tooling (data-lineage docs, schema explorers) sees it.
 
 **Render shape**:
 - Postgres: post-table `COMMENT ON TABLE "<t>" IS '...'`
@@ -1072,7 +1138,7 @@ One recipe per attr — A set of container-level `Meta`-shape attributes. Every 
 ```
 
 #### 2.25.3 `#[rustango(get_latest_by = "col" | "-col")]`
-**What**: Django `Meta.get_latest_by` — default sort column for `QuerySet::latest_default(&pool)` / `earliest_default(&pool)` when the caller doesn't pass a field name explicitly. `-col` reverses (descending).
+**What**: Default sort column for `QuerySet::latest_default(&pool)` / `earliest_default(&pool)` when the caller doesn't pass a field name explicitly. `-col` reverses (descending).
 
 **Recipe**:
 
@@ -1086,19 +1152,19 @@ let oldest = Post::objects().earliest_default(&pool).await?;
 ```
 
 #### 2.25.4 `#[rustango(citext)]`
-**What**: Django postgres-contrib `CITextField` — case-insensitive comparisons without query-side `LOWER(...)` wrapping. Field-level (lives on a `String` column).
+**What**: Case-insensitive comparisons without query-side `LOWER(...)` wrapping. Field-level (lives on a `String` column).
 
 **Render shape**:
 - Postgres: column type becomes `CITEXT` (the dialect auto-emits `CREATE EXTENSION IF NOT EXISTS citext;` prelude)
 - SQLite: `TEXT COLLATE NOCASE`
-- MySQL: `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci`
+- MySQL: `VARCHAR(N)/LONGTEXT COLLATE utf8mb4_general_ci`
 
 ```rust
 #[rustango(max_length = 200, citext)] pub email: String,
 ```
 
 #### 2.25.5 `#[rustango(fk = "...", on_delete = "...")]`
-**What**: Django `ForeignKey(on_delete=...)` — referential-integrity action when the parent row is deleted.
+**What**: The referential-integrity action to take when the parent row is deleted.
 
 **Accepted values** (case-insensitive): `cascade` / `restrict` / `set_null` / `set_default` / `no_action`. Omitting falls back to the dialect default (`NO ACTION` everywhere). Macro errors at compile time if `on_delete` is set without `fk` / `o2o`, or if the action name is unknown.
 
@@ -1108,7 +1174,7 @@ pub post_id: i64,    // delete the parent post → comment goes too
 ```
 
 #### 2.25.6 `#[rustango(extra_permissions = "code:Label, ...")]`
-**What**: Django `Meta.permissions = [(codename, name), ...]` — extra permission codenames seeded alongside the auto-generated `add` / `change` / `delete` / `view`. `auto_create_permissions_pool` writes one row per pair under `<table>.<codename>`.
+**What**: Extra permission codenames, each with a human label, seeded alongside the auto-generated `add` / `change` / `delete` / `view`. `auto_create_permissions_pool` writes one row per pair under `<table>.<codename>`.
 
 ```rust
 #[rustango(table = "post", permissions, extra_permissions = "approve:Can approve posts, archive:Can archive posts")]
@@ -1117,14 +1183,14 @@ pub post_id: i64,    // delete the parent post → comment goes too
 Granted via the usual `set_user_perm_pool` / role machinery.
 
 #### 2.25.7 `#[rustango(default_permissions = "view,change")]`
-**What**: Django `Meta.default_permissions` — opt out of the full CRUD set. Empty (the default) seeds all four; `"view,change"` seeds only view + change. Useful for read-mostly reference tables where `add` / `delete` are operator-only.
+**What**: Opt out of the full CRUD permission set. Empty (the default) seeds all four; `"view,change"` seeds only view + change. Useful for read-mostly reference tables where `add` / `delete` are operator-only.
 
 ```rust
 #[rustango(table = "country", permissions, default_permissions = "view")]
 ```
 
 #### 2.25.8 `#[rustango(exclude(...))]`
-**What**: Django postgres-contrib `ExclusionConstraint` — "no two rows of group X may overlap in column Y" via PG `EXCLUDE USING gist (...)`. Container-level, multi-instance.
+**What**: "No two rows of group X may overlap in column Y", via PG `EXCLUDE USING gist (...)`. Container-level, multi-instance.
 
 ```rust
 #[rustango(
@@ -1145,7 +1211,7 @@ Granted via the usual `set_user_perm_pool` / role machinery.
 **PG-only**: MySQL/SQLite have no equivalent; the migration writer skips emission with a `tracing::warn!` so the rest of the migration applies cleanly.
 
 #### 2.25.9 `#[rustango(index_when(...))]`
-**What**: Django `Index(fields=[...], condition=Q(...))` — non-unique partial index. Sibling of `unique_when` (UNIQUE variant). Container-level.
+**What**: A non-unique partial index — indexes only the rows matching a condition. Sibling of `unique_when` (UNIQUE variant). Container-level.
 
 ```rust
 #[rustango(
@@ -1163,17 +1229,17 @@ Granted via the usual `set_user_perm_pool` / role machinery.
 - MySQL: plain `CREATE INDEX` with the condition dropped + a tracing warning
 
 #### 2.25.10 `#[rustango(default_related_name = "...")]`
-**What**: Django `Meta.default_related_name` — the accessor name reverse-relation managers use when an FK / M2M field doesn't override it. Validated at compile time as snake_case ASCII.
+**What**: The accessor name reverse-relation managers use when an FK / M2M field doesn't override it. Validated at compile time as snake_case ASCII.
 
 **Recipe**: `#[rustango(table = "post", default_related_name = "posts")]`. Stored on `ModelSchema::default_related_name`. Declarative-only today (rustango doesn't auto-emit reverse managers yet) — the metadata is the foundation for that work.
 
 #### 2.25.11 `#[rustango(base_manager_name = "...")]`
-**What**: Django `Meta.base_manager_name` — Manager subclass that `<instance>.<relation>_set` uses when resolving reverse-relation managers. Distinct from `default_manager_name` (what `Model.objects` returns at the class level).
+**What**: The manager type `<instance>.<relation>_set` uses when resolving reverse-relation managers. Distinct from `default_manager_name` (what `Model.objects` returns at the class level).
 
 **Recipe**: `#[rustango(base_manager_name = "PostManagerExt")]`. Validated as a Rust identifier so it's safe to re-emit as code later. Same declarative-only posture as `default_related_name`.
 
 #### 2.25.12 `#[rustango(required_db_vendor = "...")]`
-**What**: Django `Meta.required_db_vendor` — declares which DB backend the model is intended to run against. `manage check --deploy` walks every model and warns when the declared vendor doesn't match the active `pool.dialect().name()` — catches "I forgot to switch DATABASE_URL" at deploy time rather than the first runtime hit on a backend-specific feature.
+**What**: Declares which DB backend the model is intended to run against. `manage check --deploy` walks every model and warns when the declared vendor doesn't match the active `pool.dialect().name()` — catches "I forgot to switch DATABASE_URL" at deploy time rather than the first runtime hit on a backend-specific feature.
 
 **Accepted values**: `postgres` (aliases: `postgresql`, `pg`) / `mysql` (alias: `mariadb`) / `sqlite` (alias: `sqlite3`). Macro normalizes to the canonical dialect name.
 
@@ -1191,7 +1257,7 @@ Run `manage check --deploy` against a SQLite pool:
 ```
 
 #### 2.25.13 `#[rustango(required_db_features = "...")]`
-**What**: Django `Meta.required_db_features` — finer-grained sibling of `required_db_vendor`. Lists capability tokens the model depends on (e.g. `"json_path"`, `"listen_notify"`, `"hstore"`, `"gist_index"`, `"window_functions"`). `manage check --deploy` walks every model and warns when the active `Dialect::supports(token)` returns `false`.
+**What**: Finer-grained sibling of `required_db_vendor`. Lists capability tokens the model depends on (e.g. `"json_path"`, `"listen_notify"`, `"hstore"`, `"gist_index"`, `"window_functions"`). `manage check --deploy` walks every model and warns when the active `Dialect::supports(token)` returns `false`.
 
 **Tokens advertised by default impl** (portable across all three backends): `window_functions`, `recursive_cte`, `cte`, `json_extract`, `expression_index`, plus dialect-conditional `partial_index` + `returning`.
 
@@ -1220,7 +1286,7 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 `manage check --deploy` on a SQLite pool produces one warning per unsupported token + one for the vendor mismatch.
 
 #### 2.25.14 `include = "..."` on `index_when` / `unique_when`
-**What**: Django `Index(fields=..., include=[...])` covering-index parity. Optional sub-attr on both `index_when(...)` and `unique_when(...)`. Lists non-key columns that travel along with the index leaf so PG can serve queries entirely from the index without a heap visit (index-only scans).
+**What**: Turns the index into a covering index. Optional sub-attr on both `index_when(...)` and `unique_when(...)`. Lists non-key columns that travel along with the index leaf so PG can serve queries entirely from the index without a heap visit (index-only scans).
 
 **Render shape**:
 - **PG 11+**: `CREATE INDEX <name> ON <table> (key_cols) INCLUDE (non_key_cols)` — emitted before the WHERE-suffix.
@@ -1246,8 +1312,8 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 Reads `SELECT title, created_at FROM post WHERE status = 'published' AND deleted_at IS NULL` get index-only scans without touching the heap.
 
-#### 2.25.16 `#[rustango(order_with_respect_to = "...")]`
-**What**: Django `Meta.order_with_respect_to = "parent_fk"` — names the FK field this model's instances are ordered relative to. Django auto-generates a `_order` integer column + admin reordering UI when set.
+#### 2.25.15 `#[rustango(order_with_respect_to = "...")]`
+**What**: Names the FK field this model's instances are ordered relative to — rows are sequenced within their parent, not globally.
 
 ```rust
 #[derive(Model)]
@@ -1297,10 +1363,24 @@ test result: ok. 17 passed; 0 failed; 0 ignored
   `order_by_view_count_desc`
 * §3.36 `.limit(N).offset(M)` for pagination → `limit_offset_paginates`
 * §3.37 `.aggregate().annotate("alias", AggregateExpr::Count|Sum|Avg|...)`
-  + `fetch_aggregate(&q, &pool)` → `Vec<HashMap<String, SqlValue>>`
-  → `aggregate_count_and_sum`
+  + `rustango::sql::fetch_aggregate_on(&q, &pool)` →
+  `Vec<HashMap<String, SqlValue>>` → `aggregate_count_and_sum`.
+  Note the order: `fetch_aggregate_on` is **query-first**, and is
+  **Postgres-only** (`E: sqlx::Executor<Database = Postgres>`). The
+  portable spelling is `rustango::sql::fetch_aggregate_dict(&pool, &q)`
+  — **pool-first** — which takes `rustango::sql::Pool` and runs on all
+  three backends; that is what [`docs/orm.md`](../../../../docs/orm.md)
+  uses. Reach for `_on` only when you need the aggregate on a specific
+  connection or open transaction.
 * §3.42 `model.save(&pool)` does INSERT (PK Unset) or UPDATE (PK Set) →
-  `save_inserts_then_updates_in_place`
+  `save_inserts_then_updates_in_place`. **Postgres-only** — `save`,
+  `insert` and `delete` take `&sqlx::PgPool` behind
+  `#[cfg(feature = "postgres")]`, so on a `sqlite` or `mysql` build they
+  do not exist rather than fail. The portable spelling is `save_pool` /
+  `insert_pool` / `delete_pool`, which take `rustango::sql::Pool`; this
+  chapter pins `DATABASE_URL=postgres://…`, and Chapter 13 uses the
+  portable family throughout. The short name being the narrow one is an
+  inversion tracked in #1293.
 * §3.46 raw `sqlx::query_scalar / query_as` for SQL the QuerySet
   doesn't cover → `raw_sql_escape_via_sqlx`
 * §3.47 manual `pool.begin() ... tx.rollback()` — atomic rollback on
@@ -1310,7 +1390,7 @@ test result: ok. 17 passed; 0 failed; 0 ignored
 
 > **Note**: aggregates over big-integer columns (`SUM` / `AVG` of a
 > `BIGINT`) are cast to a decodable type on every dialect, so
-> `fetch_aggregate` returns the computed number rather than a
+> `fetch_aggregate_on` returns the computed number rather than a
 > surprise `NULL`.
 
 ### 3.50 QuerySet inspection + introspection
@@ -1387,11 +1467,11 @@ let row = Post::objects()
     .first(&pool).await?;
 ```
 
-**Verified by**: [`tests/model_find_or_new_sqlite_live.rs`](crates/rustango/tests/model_find_or_new_sqlite_live.rs),
-[`tests/model_find_many_or_fail_sqlite_live.rs`](crates/rustango/tests/model_find_many_or_fail_sqlite_live.rs),
-[`tests/model_insert_or_ignore_sqlite_live.rs`](crates/rustango/tests/model_insert_or_ignore_sqlite_live.rs),
-[`tests/queryset_aggregates_sqlite_live.rs`](crates/rustango/tests/queryset_aggregates_sqlite_live.rs),
-[`tests/queryset_lock_for_update_emission.rs`](crates/rustango/tests/queryset_lock_for_update_emission.rs).
+**Verified by**: [`tests/model_find_or_new_sqlite_live.rs`](../../tests/model_find_or_new_sqlite_live.rs),
+[`tests/model_find_many_or_fail_sqlite_live.rs`](../../tests/model_find_many_or_fail_sqlite_live.rs),
+[`tests/model_insert_or_ignore_sqlite_live.rs`](../../tests/model_insert_or_ignore_sqlite_live.rs),
+[`tests/queryset_aggregates_sqlite_live.rs`](../../tests/queryset_aggregates_sqlite_live.rs),
+[`tests/queryset_lock_for_update_emission.rs`](../../tests/queryset_lock_for_update_emission.rs).
 
 ### 3.52 Pagination + find-or-insert + single-value reach
 ```rust
@@ -1421,10 +1501,10 @@ let email: Option<String> = User::objects()
     .value::<String>("email", &pool).await?;
 ```
 
-**Verified by**: [`tests/model_paginate_sqlite_live.rs`](crates/rustango/tests/model_paginate_sqlite_live.rs),
-[`tests/queryset_paginate_sqlite_live.rs`](crates/rustango/tests/queryset_paginate_sqlite_live.rs),
-[`tests/model_find_or_insert_sqlite_live.rs`](crates/rustango/tests/model_find_or_insert_sqlite_live.rs),
-[`tests/queryset_value_sqlite_live.rs`](crates/rustango/tests/queryset_value_sqlite_live.rs).
+**Verified by**: [`tests/model_paginate_sqlite_live.rs`](../../tests/model_paginate_sqlite_live.rs),
+[`tests/queryset_paginate_sqlite_live.rs`](../../tests/queryset_paginate_sqlite_live.rs),
+[`tests/model_find_or_insert_sqlite_live.rs`](../../tests/model_find_or_insert_sqlite_live.rs),
+[`tests/queryset_value_sqlite_live.rs`](../../tests/queryset_value_sqlite_live.rs).
 
 ## Chapter 4 — Migrations
 
@@ -1571,7 +1651,7 @@ Defaults are conservative: `min_connections = 0`, `prewarm_active_tenants = fals
 ---
 
 ### 5.79 `RouteConfig` — configurable URL prefixes
-**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). Defaults are the underscore-prefixed `__login` / `__admin` / `__static__` / `__brand__` paths. `RouteConfig::friendly()` flips them all to underscore-free shapes (`/login`, `/admin`, `/audit`, `/_static`, `/_brand`) for projects that prefer Django-style URLs.
+**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). Defaults are the underscore-prefixed `__login` / `__admin` / `__static__` / `__brand__` paths. `RouteConfig::friendly()` flips them all to underscore-free shapes (`/login`, `/admin`, `/audit`, `/_static`, `/_brand`) for projects that prefer clean, public-looking URLs.
 
 **When**: Apps that want public-facing tenant admins on clean paths instead of the framework's `__`-prefixed defaults; or apps hosting a tenant admin alongside their own routes that already use `/admin/...`.
 
@@ -1625,7 +1705,7 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 **When**: Always — `server::Builder` sets it for you. Only call manually if you're hand-rolling the inner admin router (e.g. mounting the admin alongside an unusual host shape).
 
-**API**: [`admin::Builder::tenant_mode`](../../src/admin/urls.rs); [`admin::AppState::scope_visible`](../../src/admin/urls.rs); [`ModelScope::Registry` / `Tenant`](../../src/schema/mod.rs).
+**API**: [`admin::Builder::tenant_mode`](../../src/admin/urls.rs); [`admin::AppState::scope_visible`](../../src/admin/urls.rs); [`ModelScope::Registry` / `Tenant`](../../src/core/schema.rs).
 
 **Recipe**: opt-out only — most apps don't touch this. The check fires both on inventory-walk (sidebar enumeration) and on URL resolution (`lookup_model`), so a hand-typed `/__admin/rustango_orgs` URL on the tenant side returns 404 instead of leaking registry rows.
 
@@ -1743,7 +1823,7 @@ test result: ok. 7 passed; 0 failed; 0 ignored
   `jwt_rejects_wrong_secret_and_tampered_token`,
   `jwt_decode_at_rejects_expired_token`
 * §6.78 / 6.79 `permissions::codename_for::<T>("view"|"add"|"change"|"delete")`
-  → Django-shape `{app}.{action}_{model}` strings.
+  → `{app}.{action}_{model}` codename strings.
   → `permission_codename_for_model_resolves_app_action_model`
 
 ## Chapter 7 — Forms + serializer
@@ -1770,6 +1850,40 @@ cookbook_chapter07g_nested_serializer ..................... ok (4)
 cookbook_chapter07h_many_serializer ....................... ok (4)
 ```
 
+Three further Chapter 7 suites need a live database, so they are not in the block
+above — run them with `DATABASE_URL` set and `--test-threads=1`.
+
+### 7c / 7d — the non-admin, user-facing form route
+
+`/authors/new` and its edit counterpart are tenant-aware form routes outside the admin:
+they boot a real server, submit real form bodies over HTTP, and assert the redirect and
+the persisted row. This is the path an end user walks, as opposed to the admin's generated
+form.
+
+**Verified by**: [`tests/cookbook_chapter07c_browser_form.rs`](tests/cookbook_chapter07c_browser_form.rs)
+(create), [`tests/cookbook_chapter07d_edit_form.rs`](tests/cookbook_chapter07d_edit_form.rs)
+(open + edit an existing record).
+
+### 7e `validate_unique_together` — friendly errors for a composite UNIQUE
+
+**What**: The composite UNIQUE index from §2.18b rejects a duplicate `(org_id, user_id)`
+pair at the database, and without a pre-check the form re-render carries the raw
+`duplicate key value violates unique constraint "…"` string.
+`ModelFormFor::validate_unique_together(&pool, pk_value)` walks every composite-unique
+index on the model and SELECTs the conflicting tuple *before* the INSERT/UPDATE, turning a
+hit into per-field `FormErrors` keyed by every column in the conflict.
+
+**When**: Any form over a model carrying `unique_together`. This is the call §2.18b's
+caveat sends you here for.
+
+`pk_value` is what excludes the row being edited from its own conflict check — pass the
+current PK on update, and `None` on create.
+
+**Verified by**: [`tests/cookbook_chapter07e_unique_together_validator.rs`](tests/cookbook_chapter07e_unique_together_validator.rs)
+— `validator_accepts_when_no_existing_pair`,
+`validator_rejects_with_per_field_errors_on_create`, `validator_accepts_different_pair`,
+`validator_excludes_own_row_on_update`.
+
 * §7.95 `ModelFormFor::<T>::parse(&HashMap<String,String>)` — form-
   encoded payload → `(columns, values)` with per-field bound
   validation. Auto<T> PK and `auto_now_add` columns are skipped
@@ -1791,7 +1905,7 @@ cookbook_chapter07h_many_serializer ....................... ok (4)
 > `Auto<T>` primary keys — because the database fills them on INSERT.
 > Your form only has to carry the fields a user actually enters.
 
-### 7.99b `#[derive(Serializer)]` — DRF-shape JSON façade
+### 7.99b `#[derive(Serializer)]` — a JSON façade over a model
 
 6 tests in `tests/cookbook_chapter07b_serializer.rs` exercise the
 serializer derive against the cookbook's `Author` model. Run with
@@ -1908,7 +2022,11 @@ Reproducible by hand:
 
 ```sh
 # Terminal 1 — fresh DB + boot
-docker exec shop-postgres-1 psql -U rustango -c "CREATE DATABASE cookbook_browser_dev"
+# Container-agnostic: talks to whatever DATABASE_URL points at. (An
+# earlier revision shelled into `shop-postgres-1`, a container this
+# repo never creates.)
+psql "${DATABASE_URL:-postgres://rustango:rustango@localhost:5432/postgres}" \
+  -c "CREATE DATABASE cookbook_browser_dev"
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_browser_dev \
 RUSTANGO_APEX_DOMAIN=localhost \
 RUSTANGO_BIND=127.0.0.1:8765 \
@@ -1985,7 +2103,7 @@ rustango::register_admin_inline!(
 );
 ```
 
-The full Django FormSet shape is rendered: `<prefix>-TOTAL_FORMS`,
+The full management-form shape is rendered: `<prefix>-TOTAL_FORMS`,
 `<prefix>-INITIAL_FORMS`, `<prefix>-MAX_NUM_FORMS`, prefix-mangled
 `<prefix>-N-<field>` inputs.
 
@@ -1993,8 +2111,8 @@ The full Django FormSet shape is rendered: `<prefix>-TOTAL_FORMS`,
 
 ### 8.114 `register_admin_inline_generic!` — generic admin inlines
 **What**: Generic variant of 8.112/8.113. Keys on a
-`(content_type_id, object_pk)` pair instead of a single FK column —
-Django's `GenericTabularInline` / `GenericStackedInline` shape.
+`(content_type_id, object_pk)` pair instead of a single FK column, so
+one inline serves children that can hang off any parent model.
 
 **Recipe**:
 
@@ -2056,7 +2174,13 @@ Visit `http://localhost:8080/` and click through:
 
 One sqlite file, no tenancy, ~150 LOC across `main.rs` + `models.rs` + `seed.rs`.
 
-## Chapter 9b — Template views (Django-shape CBVs)
+## Chapter 9b — Template views (class-based views)
+
+**Verified by**: [`tests/cookbook_chapter09c_template_views.rs`](tests/cookbook_chapter09c_template_views.rs)
+— `list_paginates_and_renders_search_context`, `detail_renders_object_context`,
+`create_view_inserts_then_redirects_to_pk_url`, `delete_view_two_step_flow`. Note the
+file is numbered **09c**, not 09b; `cookbook_chapter09b_viewset_serializer.rs` is a
+different subject (Chapter 9's serializer marriage).
 
 **API**: [`template_views::ListView`](../../src/template_views.rs),
 [`template_views::DetailView`](../../src/template_views.rs),
@@ -2066,16 +2190,14 @@ One sqlite file, no tenancy, ~150 LOC across `main.rs` + `models.rs` + `seed.rs`
 
 The `template_views` module is the HTML-side sibling of `viewset` —
 generic class-based views that build a Tera-rendered `axum::Router`
-over any `#[derive(Model)]` schema. The full Django-shape CRUD
-surface ships: `ListView`, `DetailView`, `CreateView`, `UpdateView`,
-`DeleteView`.
+over any `#[derive(Model)]` schema. The full CRUD surface ships:
+`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`.
 
 ```rust
 use rustango::template_views::{ListView, DetailView};
 use std::sync::Arc;
-use tera::Tera;
 
-let mut tera = Tera::default();
+let mut tera = rustango::template_extensions::html_tera();
 tera.add_raw_template("posts_list.html", r#"
     {% for post in object_list %}<h2>{{ post.title }}</h2>{% endfor %}
     {% if has_prev %}<a href="?page={{ page - 1 }}">prev</a>{% endif %}
@@ -2135,7 +2257,7 @@ the user typed:
   error matches what the SQL layer would have caught on insert,
   but surfaced server-side without a round-trip)
 
-Default template names follow Django convention:
+Default template names are derived from the table:
 `<table>_list.html` / `<table>_detail.html` / `<table>_form.html`
 (shared by Create + Update) / `<table>_confirm_delete.html`. Override
 via `.template("custom.html")`. Restrict columns rendered into the
@@ -2158,17 +2280,12 @@ the `rustango_csrf` cookie when missing, so templates can render:
 </form>
 ```
 
-POST validation is a separate layer. The recommended
-shortcut is `Cli::with_csrf()` — see
-[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs).
-For projects not using `Cli`, mount `forms::csrf::layer()` directly
-on the router to enforce that the `_csrf` form field matches the
-cookie value. Without it the `csrf_token` context var still
-populates, but POSTs aren't validated.
+Every view router with a POST route checks the token itself: a POST
+whose `_csrf` field does not match the cookie gets `403`.
 
 ### Bulk actions on `ListView`
-Django-admin shape: row checkboxes + an action `<select>` that
-applies the same operation to every selected row. Opt in with
+Row checkboxes + an action `<select>` that applies the same
+operation to every selected row. Opt in with
 `.bulk_actions(true)`:
 
 ```rust,ignore
@@ -2245,8 +2362,8 @@ target is unregistered, lacks a `display` field, or points at a
 deleted row.
 
 #### Confirmation step for destructive actions
-`delete_selected` is a hard-to-undo operation; opt into a Django-
-admin-shape confirmation page with `.with_delete_confirmation(true)`:
+`delete_selected` is a hard-to-undo operation; opt into an
+interstitial confirmation page with `.with_delete_confirmation(true)`:
 
 ```rust,ignore
 ListView::for_model(Post::SCHEMA)
@@ -2263,9 +2380,8 @@ context. The confirm button submits the same form with
 back to the list.
 
 Custom actions registered via `.action(...)` are NOT gated by the
-flag — matches Django's convention (only `delete_selected` is
-confirmed by default). Build your own confirm-then-submit shape if
-a custom action needs it.
+flag — only `delete_selected` is confirmed. Build your own
+confirm-then-submit shape if a custom action needs it.
 
 ### Business validation — `.validator(...)` and `.form::<T>()`
 Schema-level checks (`max_length`, `min`, `max`) ship for free.
@@ -2340,7 +2456,7 @@ pattern matching the `viewset::tenant_router` shape.
 
 ---
 
-## Chapter 9 — ViewSets / DRF / OpenAPI
+## Chapter 9 — ViewSets / REST APIs / OpenAPI
 
 4 live tests against `ViewSet::for_model(...).router(...)` mounted
 in-process. Run with
@@ -2361,7 +2477,9 @@ in-process. Run with
 The ViewSet builder also exposes `.search_fields` (?search=…),
 `.ordering` (default ORDER BY), `.page_size`, `.cursor_pagination`,
 `.pagination(PaginationStyle)`, and `.permissions_for_model::<T>()`
-(see Chapter 6 §6.80 for the typed-perm shortcut). All exercised
+(which derives the four `{app}.{action}_{model}` codenames from the
+model — Chapter 6 §6.78 / 6.79 covers `permissions::codename_for::<T>`,
+the same derivation used one call at a time). All exercised
 live in rustango's own viewset / order_by_annotate_live tests.
 
 ## Chapter 9d — `tenant_router` for tenancy projects
@@ -2477,7 +2595,7 @@ Same builder shape as `with_health()`:
 rustango::manage::Cli::new()
     .api(urls::api())
     .with_static("/static", "./assets")        // CSS, JS, images
-    .with_static("/uploads", "./var/uploads")  // user-uploaded media
+    .with_uploads("/uploads", "./var/uploads") // user uploads: HTML/SVG download
     .run().await
 ```
 
@@ -2491,9 +2609,9 @@ For finer control (immutable hash-named bundles, `.well-known`
 whitelisting), keep mounting `static_router` directly on your own
 router and skip the shortcut.
 
-### Auto-mounting CSRF — for form-driven CBVs
-`template_views` `CreateView` / `UpdateView` / `DeleteView` need the
-`_csrf` cookie + form field cycle wired. Same shape:
+### Auto-mounting CSRF — for hand-written form handlers
+The `template_views` routers check the token themselves. Your own
+form-posting handlers need the layer on the API router:
 
 ```rust,ignore
 rustango::manage::Cli::new()
@@ -2591,8 +2709,8 @@ Auto<DateTime>` from `auto_now_add`). Postgres fills both in one
 `INSERT ... RETURNING`; MySQL has only single-column
 `LAST_INSERT_ID()`, so `save_pool` fills the PK and leaves the other
 `Auto` fields `Unset`. Re-fetch the row by PK to materialize the
-DB-defaulted timestamp — the same pattern as a Django app calling
-`.refresh_from_db()` after save when it needs a server-set value.
+DB-defaulted timestamp — the usual move whenever you need a
+server-set value right after the save.
 (This used to error hard; it now succeeds on both backends.)
 
 ---
@@ -2670,16 +2788,16 @@ Every `_pool` executor function has a SQLite arm now. The
 | `INSERT …, …, …` batch        | `bulk_insert_pool(&pool, &BulkInsertQuery)`  |
 | FK join (`select_related`)    | `QuerySet::select_related` (`LoadRelatedSqlite`) |
 | Parents + children prefetch   | `fetch_with_prefetch_pool`                   |
-| Filtered/ordered prefetch     | `fetch_with_prefetch_filtered` (Django `Prefetch(qs)`) |
+| Filtered/ordered prefetch     | `fetch_with_prefetch_filtered` (prefetch a narrowed child set) |
 | `BEGIN` / `COMMIT`            | `transaction_pool` → `PoolTx::Sqlite(tx)`    |
 | `GROUP BY` + `MIN/MAX/AVG/SUM/COUNT` | `QuerySet::aggregate().compile()` + `fetch_aggregate_pool` |
 | Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
 | Raw SQL (rows affected)       | `raw_execute_pool(&pool, sql, binds)`        |
 
-> **Tip**: for a table-wide *scalar* aggregate (Django's
-> `.aggregate(Min("age"))`), call `.values(&[])` before `.annotate(...)`.
-> `.annotate(...)` on its own groups by every model column (Django's
-> "each row + a derived aggregate" shape).
+> **Tip**: for a table-wide *scalar* aggregate — one row, `MIN(age)` over
+> the whole table — call `.values(&[])` before `.annotate(...)`.
+> `.annotate(...)` on its own groups by every model column, giving you
+> each row plus a derived aggregate instead.
 
 ### 13.154 ILIKE → `LOWER(col) LIKE LOWER(?)` translation
 
@@ -2745,14 +2863,14 @@ async fn fresh_pool() -> Pool {
 Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
               — 5 live tests using exactly this harness.
 
-### 13.157a `AppBuilder::from_env()` — bootstrap the app on SQLite
+### 13.157 `AppBuilder::from_env()` — bootstrap the app on SQLite
 
 What:        Single-pool bi-dialect builder. Reads `DATABASE_URL`,
              constructs a `Pool` (sqlite / postgres / mysql), runs
              your model schemas as `CREATE TABLE IF NOT EXISTS`,
-             mounts an axum router, serves. The Django-style
-             multi-tenant `Builder` is `PgPool`-bound; this is the
-             non-tenancy alternative.
+             mounts an axum router, serves. The multi-tenant
+             `Builder` is `PgPool`-bound; this is the non-tenancy
+             alternative.
 When:        You want the rustango framework to bootstrap your app
              on SQLite (or any backend) without rolling your own
              axum + pool wiring.
@@ -2808,7 +2926,7 @@ The pool is injected as `Extension<Arc<Pool>>` into every request,
 so handlers extract it directly — no per-app `with_state(...)`
 ceremony.
 
-### 13.157b `AppBuilder::from_pool` — inject any `Pool`
+### 13.158 `AppBuilder::from_pool` — inject any `Pool`
 
 When `from_env` is too rigid (custom `SqlitePoolOptions`,
 `max_connections(1)` for in-memory tests, dependency injection in
@@ -2821,16 +2939,16 @@ let pool: rustango::sql::Pool = sqlx_pool.into();
 let app = AppBuilder::from_pool(pool).bootstrap(&[…]).await?;
 ```
 
-### 13.157 Building rustango with the `sqlite` feature
+### 13.159 Building rustango with the `sqlite` feature
 
 Add `features = ["sqlite"]` to your `Cargo.toml` rustango dep, or
 combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.29", features = ["sqlite"] }
+rustango = { version = "0.59", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.29", features = ["postgres", "sqlite"] }
+rustango = { version = "0.59", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -2851,8 +2969,8 @@ chain to one line.
 ### 14.1 `manage inspectdb` — adopt rustango against an existing DB
 
 **What**: Connects to `DATABASE_URL`, walks `information_schema`,
-emits `#[derive(Model)]` source for every base table — Django's
-`inspectdb` shape. Pipes to a file the user reviews + edits.
+emits `#[derive(Model)]` source for every base table. Pipes to a
+file the user reviews + edits.
 
 **When**: You have an existing Postgres schema (legacy app,
 hand-rolled migrations from another framework, prod DB you want
@@ -2923,8 +3041,7 @@ dispatcher wiring.
 
 ### 14.3 HTML CBV: bulk actions + delete-confirmation + FK display
 
-`template_views::ListView` has three Django-admin-shape flags.
-They stack:
+`template_views::ListView` has three admin-grade flags. They stack:
 
 ```rust,ignore
 use rustango::template_views::{DeleteView, ListView};
@@ -3054,15 +3171,15 @@ log records the real peer address rather than `"-"`.
 
 For projects behind a reverse proxy:
 ```rust,ignore
-AccessLogLayer::default().trust_proxy_headers(true)
+AccessLogLayer::default().use_real_ip(true)
 ```
-honors `X-Forwarded-For` (leftmost = original client) → fall
-back to `X-Real-IP` → fall back to ConnectInfo. Off by default
-(both headers are spoofable by direct clients).
+logs the `TrustedRealIp` that `RealIpLayer::trust_proxies` resolved,
+else ConnectInfo. Raw forwarding headers are never read: a direct
+client can forge them.
 
 **API**: [`config::LoggingSettings`](../../src/config/sections.rs),
 [`logging::Setup::from_settings`](../../src/logging.rs),
-[`access_log::AccessLogLayer::trust_proxy_headers`](../../src/access_log.rs).
+[`access_log::AccessLogLayer::use_real_ip`](../../src/access_log.rs).
 
 ---
 
@@ -3113,7 +3230,7 @@ applies.)
 ### What changed
 
 The framework now mounts the admin via **explicit routes** (see
-[`build_admin_routes`](../../../crates/rustango/src/server/builder.rs)).
+[`build_admin_routes`](../../src/server/builder.rs)).
 The fallback_service is gone. Routes claimed by the admin:
 
 - `routes.admin_url` + `routes.admin_url/` + `routes.admin_url/{*rest}` — admin proper
@@ -3132,7 +3249,7 @@ tenant subdomain as the admin. The companion `rustango-cms`
 crate ships a working setup:
 
 ```rust
-let mut tera = Tera::new(&templates_glob)?;
+let mut tera = rustango::template_extensions::html_tera_from_glob(&templates_glob)?;
 rustango_cms::admin::register_templates(&mut tera)?;
 let tera = std::sync::Arc::new(tera);
 
@@ -3203,7 +3320,12 @@ template-driven site) alongside the tenant admin:
 ## Chapter 16 — Every feature on every backend
 
 "Tri-dialect everywhere": every framework surface runs on
-PostgreSQL, MySQL 8+, and SQLite out of the box. Concretely:
+PostgreSQL, MySQL 8+, and SQLite out of the box, with one exception —
+**schema-mode tenancy is Postgres-only**, because it dispatches on
+Postgres schemas, which the other two do not have. 16.221 gives the
+detail; `database` mode is the default and runs on all three.
+
+Concretely:
 
 ### 16.220 — Multi-tenant runserver on any backend
 
@@ -3292,7 +3414,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.38", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.59", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3326,20 +3448,22 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
 
 ## Known backend limitations
 
-- **SQLite — adding foreign keys:**
-  `ddl::create_constraints_sql_with_dialect` emits `ALTER TABLE …
-  ADD CONSTRAINT FOREIGN KEY`, which SQLite's parser rejects (FK
-  constraints must be inline at CREATE TABLE). The `sqlite_orm_demo`
-  example skips that loop on SQLite. A fuller fix would move FK
-  constraints into the inline column list when the dialect doesn't
-  support ALTER-style FK addition.
-- **SQLite — `apply_all_pool` and framework models:**
-  `apply_all_pool` walks the full `inventory::registered_models()`
-  list, which on a default build includes framework models (Org,
-  Operator, Job, …) whose DDL emits Postgres-shape SQL that fails on
-  SQLite. The demo emits DDL by hand for just its own models. A
-  `Dialect::supports_model(&ModelSchema)` filter would let
-  `apply_all_pool` skip incompatible models cleanly.
+Both limitations this section used to list have been fixed, and the
+section is kept only to say so — they were quoted often enough that
+their absence is worth stating.
+
+- **SQLite — adding foreign keys.** Fixed.
+  `create_constraints_sql_with_dialect` now returns nothing when the
+  dialect inlines FKs, and `inline_fk_clauses` emits them inside
+  `CREATE TABLE`. The earlier workaround skipped FKs on SQLite
+  entirely, which silently dropped referential integrity rather than
+  merely failing.
+- **SQLite — `apply_all_pool` and framework models.** Fixed.
+  It walks `bootstrap_models()` and the DDL is emitted per dialect, so
+  the framework's own tables create cleanly on SQLite. Verified by
+  running it against `sqlite::memory:` with tenancy and batteries on —
+  all nineteen managed framework models (`rustango_orgs`,
+  `rustango_operators`, `rustango_audit_log`, …) applied without error.
 
 ---
 
@@ -3352,7 +3476,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.43", features = ["mcp"] }
+rustango = { version = "0.59", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 
@@ -3461,8 +3585,8 @@ limit under `[mcp]` in your settings file.
 
 ## Chapter 18 — Internationalization (i18n)
 
-6 tests, **no DB** — `rustango::i18n::Translator`, Django's `gettext`
-family in Rust. Run with `cargo test --test cookbook_chapter18_i18n`.
+6 tests, **no DB** — `rustango::i18n::Translator`, a `gettext`-style
+translation API. Run with `cargo test --test cookbook_chapter18_i18n`.
 
 ```console
 $ cargo test --test cookbook_chapter18_i18n

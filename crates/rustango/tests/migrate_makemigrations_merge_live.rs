@@ -1,4 +1,4 @@
-//! Django-parity #346 — `manage makemigrations --merge` reconciles
+//! Issue #346 — `manage makemigrations --merge` reconciles
 //! a divergent migration chain by writing an empty-forward
 //! `NNNN_merge.json` file whose `prev` points at the lex-last leaf.
 //!

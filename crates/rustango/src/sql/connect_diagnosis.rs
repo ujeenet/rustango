@@ -33,7 +33,8 @@
 //! ## Credentials never appear
 //!
 //! A connection URL has a password in it, and these strings end up in
-//! terminals, logs and HTTP responses. [`redact`] is applied to every
+//! terminals, logs and HTTP responses.
+//! [`redact`](crate::sql::connect_diagnosis::redact) is applied to every
 //! endpoint this module renders.
 
 use std::fmt;
@@ -52,7 +53,7 @@ pub enum ConnectFault {
     /// Reached the server; it refused the credentials.
     AuthFailed,
     /// Reached the server and authenticated; the named database is not
-    /// there.
+    /// there, or (MySQL 1044) this user may not see it.
     NoSuchDatabase,
     /// Connected fine, but this role may not do what a tenant needs —
     /// create tables, most importantly. The failure a naive `SELECT 1`
@@ -88,8 +89,8 @@ impl ConnectFault {
                 "the server refused these credentials — check the username and password"
             }
             Self::NoSuchDatabase => {
-                "the server is reachable but has no such database — create it, or fix the \
-                 name in the URL"
+                "the server is reachable but this user sees no such database — create it, \
+                 grant this user access to it, or fix the name in the URL"
             }
             Self::PermissionDenied => {
                 "connected, but this role cannot create tables — grant it schema-level CREATE, \
@@ -183,10 +184,12 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
         return match my.number() {
             // 1045 access denied for user
             1045 => ConnectFault::AuthFailed,
-            // 1049 unknown database
-            1049 => ConnectFault::NoSuchDatabase,
-            // 1044 access denied to database, 1142 table command denied
-            1044 | 1142 => ConnectFault::PermissionDenied,
+            // 1049 unknown database. 1044 "access denied to database" too:
+            // MySQL sends it for a missing database the user has no global
+            // rights to see, so the two cannot be told apart (#1678).
+            1049 | 1044 => ConnectFault::NoSuchDatabase,
+            // 1142 table command denied
+            1142 => ConnectFault::PermissionDenied,
             _ => ConnectFault::Other,
         };
     }
@@ -232,6 +235,23 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
 /// exactly what the reader needs to see.
 #[must_use]
 pub fn redact(url: &str) -> String {
+    let url = redact_userinfo(url);
+    // sqlx also reads `password=` from the query; mask it after the
+    // userinfo pass so a `?` in the password cannot start the query.
+    let Some((base, query)) = url.split_once('?') else {
+        return url;
+    };
+    let query: Vec<String> = query
+        .split('&')
+        .map(|chunk| match chunk.split_once('=') {
+            Some((k, _)) if crate::url_codec::url_decode(k) == "password" => format!("{k}=***"),
+            _ => chunk.to_owned(),
+        })
+        .collect();
+    format!("{base}?{}", query.join("&"))
+}
+
+fn redact_userinfo(url: &str) -> String {
     // `scheme://user:password@host:port/db?params`. Only the segment
     // between the last `:` of the userinfo and the `@` is secret, and
     // userinfo is whatever precedes the *first* `@` after `://`.
@@ -281,6 +301,16 @@ mod tests {
             "sqlite:./dev.db?mode=rwc"
         );
         assert_eq!(redact("sqlite://./dev.db"), "sqlite://./dev.db");
+    }
+
+    #[test]
+    fn redact_masks_a_password_in_the_query() {
+        assert_eq!(
+            redact("postgres://db:5432/acme?sslmode=require&password=s3cret"),
+            "postgres://db:5432/acme?sslmode=require&password=***"
+        );
+        let out = redact("postgres://app:pw@db/acme?pass%77ord=s3cret");
+        assert!(!out.contains("s3cret") && !out.contains(":pw@"), "{out}");
     }
 
     /// An `@` inside the password must not be mistaken for the userinfo

@@ -2,8 +2,8 @@
 
 Un modelo es una struct de Rust que se asigna a una tabla de base de datos. Añade
 `#[derive(Model)]`, anota los campos, y **Rustango** genera el esquema, un punto de
-entrada de consultas con tipos seguros y los métodos `save`/`find`/`delete` — los modelos
-de Django o el Eloquent de Laravel, con el compilador verificando tus columnas. Esta es
+entrada de consultas con tipos seguros y los métodos `save`/`find`/`delete` — un modelo
+de tipo Active Record, con el compilador verificando tus columnas. Esta es
 la referencia de **declaración**: cada tipo de campo, cada opción de clave primaria y
 cada atributo `#[rustango(...)]`. Para *consultar* los modelos una vez declarados,
 consulta el [recetario del ORM](orm.md).
@@ -95,14 +95,14 @@ SQLite:
 | `f32` | `REAL` | `FLOAT` | `REAL` |
 | `f64` | `DOUBLE PRECISION` | `DOUBLE` | `REAL` |
 | `bool` | `BOOLEAN` | `TINYINT(1)` | `INTEGER` (0/1) |
-| `String` | `TEXT` | `TEXT` | `TEXT` |
+| `String` | `TEXT` | `LONGTEXT` | `TEXT` |
 | `String` + `max_length = N` | `VARCHAR(N)` | `VARCHAR(N)` | `TEXT` |
 | `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | `TEXT` (ISO-8601) |
 | `chrono::NaiveDate` | `DATE` | `DATE` | `TEXT` |
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -127,7 +127,7 @@ pub struct Gadget {
 ```
 
 > **Precisión decimal.** El `NUMERIC` de PostgreSQL es de precisión arbitraria; MySQL usa
-> `DECIMAL(38,10)` (38 dígitos, 10 fraccionarios — el ajuste portable más amplio); SQLite
+> `DECIMAL(65,28)` (cabe cualquier valor `rust_decimal`); SQLite
 > usa afinidad `NUMERIC`. Usa `rust_decimal::Decimal` para dinero, nunca `f64`.
 
 ### Tipos exclusivos de PostgreSQL
@@ -231,6 +231,9 @@ aleatorio, `default_uuid_v7` un v7 ordenable por tiempo (mejor para la localidad
 pub id: Auto<uuid::Uuid>,
 ```
 
+Un `INSERT` en crudo que omite una columna `auto_uuid` recibe el `DEFAULT` de la base: un v4 en Postgres y
+SQLite, pero el `UUID()` de MySQL es un v1 (basado en la hora y el host).
+
 ### Claves primarias compuestas
 
 Las claves primarias nativas de varias columnas **no están soportadas** — exactamente un
@@ -292,6 +295,9 @@ filas relacionadas con `select_related` (también en la guía del ORM).
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | validación de rango en escritura |
 | `blank` / `editable` | `#[rustango(editable = false)]` | comportamiento en formulario/admin |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | COMMENT de columna |
+
+INSERT y UPDATE comprueban estas reglas en valores literales. Un valor
+`set_expr(F(..))` lo calcula la base de datos, así que no se comprueba.
 
 `choices`, `default`, `auto_now_add` y borrado lógico juntos (todos verificados):
 
@@ -358,8 +364,16 @@ Declarados sobre el **modelo**:
   `.where_(Post::author_id.eq(42))` para filtros verificados en compilación.
 - **Buscadores** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (error si no existe); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Escritores** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (actualiza solo
-  algunas columnas), `insert_pool` (inserción explícita), `delete`.
+- **Escritores** — `save_pool` (INSERT o UPDATE), `insert_pool` (inserción
+  explícita), `delete_pool` y `save_partial(&["title"], &pool)` (actualiza solo
+  algunas columnas). Los `save` / `insert` / `delete` a secas **no** son alias de
+  estos: toman un `sqlx::PgPool` específico del driver y son
+  `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
+  existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
+  en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
+  invertido se sigue en
+  [#1293](https://github.com/ujeenet/rustango/issues/1293); consulta
+  [api-conventions](api-conventions.md#funciones).
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -399,7 +413,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `manager(ext = "Trait")` | ruta del trait | generar un trait de extensión de manager personalizado |
 | `manager_fn` | `"published"` | añadir un accesor de manager más allá de `objects()` |
 | `get_latest_by` | `"created_at"` | columna por defecto para `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | ordenación relativa al padre de Django |
+| `order_with_respect_to` | `"parent"` | ordenación de las filas hijas relativa al padre |
 | `index(...)` | `columns`, `method`, `name` | índice secundario (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | restricción de unicidad compuesta |
 | `index_together` | `"a, b"` | índice no único compuesto |
@@ -426,10 +440,15 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `default` | `"sql literal"` | DEFAULT de columna |
 | `null` | flag | nullable (o usa `Option<T>`) |
 | `unique` | flag | restricción de unicidad |
+| `index` / `index(...)` | flag, o `unique`, `name`, `method` | índice de una sola columna sobre este campo |
 | `choices` | `"v:Label, …"` | valores enumerados |
 | `min` / `max` | número | validación de rango |
 | `blank` | flag | permitir vacío en formularios/admin |
 | `editable` | `true`/`false` | editabilidad en formulario/admin |
+| `verbose_name` | `"Label"` | etiqueta legible del campo en formularios/admin |
+| `help_text` | `"…"` | texto de ayuda bajo el widget de formulario/admin |
+| `validators` | `"name, name"` | validadores con nombre a ejecutar en este campo |
+| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK |
 | `auto_now` | flag | establecer a ahora en cada guardado |
 | `auto_now_add` | flag | establecer a ahora en la inserción |
 | `auto_uuid` | flag | UUID v4 del lado Rust (en `Auto<Uuid>`) |

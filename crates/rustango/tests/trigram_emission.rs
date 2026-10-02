@@ -102,7 +102,7 @@ fn trigram_similar_rejects_on_sqlite_with_op_not_supported() {
     }
 }
 
-// ---------- Django-shape lookup parser ----------
+// ---------- string-lookup parser ----------
 
 #[test]
 fn trigram_similar_lookup_via_filter_string_parser() {

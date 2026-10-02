@@ -1,8 +1,8 @@
-//! axum response wrapper for CSV exports — sets the right
-//! `Content-Type` + an optional `Content-Disposition` so browsers
-//! prompt a "Save as…" download.
+//! A CSV download response. It sets `Content-Type` and, when you
+//! give a filename, a `Content-Disposition` that makes the browser
+//! offer a "Save as" dialog.
 //!
-//! Use it as the return type of any handler that produces a CSV body:
+//! Return it from any handler that produces CSV:
 //!
 //! ```ignore
 //! use rustango::csv::csv_from_json_rows;
@@ -22,19 +22,18 @@ use axum::response::{IntoResponse, Response};
 
 use crate::csv::CsvWriter;
 
-/// CSV download response. Wraps a [`CsvWriter`] (or raw string) plus
-/// optional download filename.
+/// A CSV body plus an optional download filename.
 pub struct CsvResponse {
     body: String,
     filename: Option<String>,
-    /// Whether to render `Content-Disposition: attachment` (force
-    /// download) or `inline` (let the browser try to display).
-    /// Default `true` (attachment).
+    /// `true` sends `Content-Disposition: attachment`, `false` sends
+    /// `inline`. Defaults to `true`.
     attachment: bool,
 }
 
 impl CsvResponse {
-    /// New response from a [`CsvWriter`].
+    /// Build from a [`CsvWriter`]. Prefer this: the writer quotes
+    /// fields and defuses spreadsheet formulas for you.
     #[must_use]
     pub fn new(writer: CsvWriter) -> Self {
         Self {
@@ -44,8 +43,10 @@ impl CsvResponse {
         }
     }
 
-    /// New response from a raw CSV string. Caller is responsible for
-    /// formatting (RFC 4180 quoting, line terminators).
+    /// Build from a raw CSV string. Nothing is checked, so you must
+    /// do the RFC 4180 quoting yourself, and you must defuse cells
+    /// that start with `=`, `+`, `-` or `@`: a spreadsheet runs
+    /// those as formulas. [`crate::csv::neutralize_formula`] does it.
     #[must_use]
     pub fn from_string(body: impl Into<String>) -> Self {
         Self {
@@ -55,15 +56,14 @@ impl CsvResponse {
         }
     }
 
-    /// Set the download filename. The browser will use it for the
-    /// "Save as…" dialog.
+    /// Set the filename the browser suggests when saving.
     #[must_use]
     pub fn filename(mut self, name: impl Into<String>) -> Self {
         self.filename = Some(name.into());
         self
     }
 
-    /// Display inline (no download prompt). Default is attachment.
+    /// Show the CSV in the browser instead of downloading it.
     #[must_use]
     pub fn inline(mut self) -> Self {
         self.attachment = false;
@@ -92,10 +92,9 @@ impl IntoResponse for CsvResponse {
     }
 }
 
-/// Escape `"` and `\` for inclusion inside the quoted filename of
-/// `Content-Disposition`. Conservative — no Unicode encoding here;
-/// for non-ASCII filenames you should use the RFC 5987 `filename*=`
-/// extension (out of scope for the v1 helper).
+/// Escape `"` and `\` so the name is safe inside the quoted
+/// `Content-Disposition` filename. Non-ASCII names would need the
+/// RFC 5987 `filename*=` form, which this helper does not emit.
 fn escape_filename(name: &str) -> String {
     name.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -200,8 +199,7 @@ mod tests {
             .into_response();
         let bytes = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
-        // Header row, then both data rows; "Bob, Jr." gets quoted because
-        // it contains a comma.
+        // "Bob, Jr." is quoted because it holds a comma.
         assert!(s.starts_with("id,name\r\n"));
         assert!(s.contains("1,Alice"));
         assert!(s.contains("2,\"Bob, Jr.\""));

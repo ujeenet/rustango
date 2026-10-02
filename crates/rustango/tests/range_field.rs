@@ -1,5 +1,5 @@
-//! Unit coverage for `Range<T>` PostgreSQL range columns — Django
-//! `RangeField` family (#343). No database required: asserts the derived
+//! Unit coverage for `Range<T>` PostgreSQL range columns
+//! (#343). No database required: asserts the derived
 //! schema's `FieldType::Range` mapping, the per-dialect column-type
 //! emission (`int4range` / `int8range` / `numrange` / `daterange` /
 //! `tstzrange` on PG; degraded `TEXT` on MySQL / SQLite), and the
@@ -106,16 +106,14 @@ fn insert_casts_range_literal_to_its_pg_type() {
     // when $1 is bound as text but the column is `int4range` (no
     // assignment cast). The writer must emit `$N::int4range`.
     use rustango::core::InsertQuery;
-    let q = InsertQuery {
-        model: Event::SCHEMA,
-        columns: vec!["seats", "valid_on"],
-        values: vec![
+    let q = InsertQuery::new(
+        Event::SCHEMA,
+        vec!["seats", "valid_on"],
+        vec![
             SqlValue::RangeLiteral("[1,10)".into()),
             SqlValue::RangeLiteral("[2025-01-01,2025-02-01)".into()),
         ],
-        returning: vec![],
-        on_conflict: None,
-    };
+    );
     let sql = Postgres.compile_insert(&q).unwrap().sql;
     assert!(
         sql.contains("$1::int4range"),

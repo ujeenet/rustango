@@ -1,8 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::first_where(col, val, pool)` shortcut — Eloquent
-//! `Model::firstWhere($col, $val)` / Django
-//! `Model.objects.filter(col=val).first()` parity.
+//! `Model::first_where(col, val, pool)` shortcut — the first row
+//! matching a single column equality, or `None`.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

@@ -1,4 +1,4 @@
-//! `#[rustango(db_comment = "...")]` field attribute (Django parity #450).
+//! `#[rustango(db_comment = "...")]` field attribute (#450).
 //!
 //! Covers:
 //! - macro threads the value through to `FieldSchema::db_comment`

@@ -1,5 +1,5 @@
 //! Tri-dialect SQL-emission tests for `QuerySet` set algebra
-//! (issue #25 / #329). Django's `.union(other_qs, all=)` /
+//! (issue #25 / #329). `.union(other_qs)` / `.union_all(other_qs)` /
 //! `.intersection(other_qs)` / `.difference(other_qs)` lower to SQL
 //! `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT`. Postgres + SQLite
 //! support all four; MySQL needs 8.0.31+ for INTERSECT/EXCEPT, but
@@ -172,7 +172,7 @@ fn branch_order_by_wraps_in_derived_table() {
 #[test]
 fn head_order_by_before_union_wraps_with_b0_alias() {
     // #1034 — ORDER BY / LIMIT set BEFORE the first `.union()` scope to
-    // the FIRST queryset (Django 4.0+ component-slicing). The head is
+    // the FIRST queryset (component slicing). The head is
     // wrapped in its own aliased derived table; the clauses live inside
     // the parens, NOT after the final branch.
     let q = Post::objects()
@@ -216,7 +216,7 @@ fn head_order_by_before_union_wraps_with_b0_alias() {
 fn clauses_after_union_scope_to_combined_result() {
     // #1034 — the SAME clauses set AFTER `.union()` route to the
     // combined-result slots and emit after the last branch (the head
-    // is NOT wrapped). This is the Django-documented outer form.
+    // is NOT wrapped). This is the outer form.
     let q = Post::objects()
         .where_(Post::status.eq("draft"))
         .union(Post::objects().where_(Post::status.eq("review")))

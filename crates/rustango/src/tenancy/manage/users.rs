@@ -19,7 +19,7 @@ use crate::sql::{Auto, FetcherPool};
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::quote_ident;
-use crate::tenancy::manage::args::{next_value, reject_leading_flag};
+use crate::tenancy::manage::args::{next_value, parse, reject_leading_flag, Spec};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
 
@@ -107,10 +107,11 @@ where
     let mut op = crate::tenancy::Operator {
         id: Auto::default(),
         username: username.clone(),
-        password_hash: crate::tenancy::password::hash(&plain)?,
+        password_hash: crate::tenancy::password::hash_async(&plain).await?,
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await?;
     let id = op.id.get().copied().unwrap_or_default();
@@ -135,36 +136,23 @@ pub(super) async fn create_user_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    // Flags may sit anywhere: `create-user acme --superuser` once made a
+    // user named `--superuser` (#1910).
+    let parsed = parse(
         args,
-        "create-user",
-        "slug",
-        "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
+        &Spec {
+            verb: "create-user",
+            usage: "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
+            switches: &["--generate", "--superuser"],
+            valued: &["--password"],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug_arg = iter.next().cloned();
-    let username_arg = iter.next().cloned();
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    let mut is_superuser = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--superuser" => is_superuser = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "create-user <slug> <username> [--password <p> | --generate] [--superuser]"
-                        .into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "create-user: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let slug_arg = parsed.positional(0).cloned();
+    let username_arg = parsed.positional(1).cloned();
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
+    let mut is_superuser = parsed.has("--superuser");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "create-user: --generate and --password are mutually exclusive".into(),
@@ -214,7 +202,7 @@ where
         TenancyError::Validation(format!("create-user: no tenant with slug `{slug}`"))
     })?;
 
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
 
     // v0.38 — open a tenant-scoped Pool enum (handles schema-mode on
     // PG, database-mode on any backend). Then drive the read/write
@@ -228,10 +216,11 @@ where
     // promoted to superuser even if `--superuser` wasn't passed.
     let mut auto_promoted = false;
     if !is_superuser {
+        // `?`, not a default: a failed read is not "no users" (#1910).
         let existing: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
+            .limit(1)
             .fetch(&scoped)
-            .await
-            .unwrap_or_default();
+            .await?;
         if existing.is_empty() {
             is_superuser = true;
             auto_promoted = true;
@@ -249,6 +238,7 @@ where
         created_at: chrono::Utc::now(),
         data: serde_json::Value::Object(serde_json::Map::new()),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     user.save_pool(&scoped).await?;
     let row_id: i64 = user.id.get().copied().unwrap_or_default();
@@ -274,7 +264,7 @@ where
 
 // ---------- create-superuser (v0.27.6, #77 partial) ----------
 
-/// Django-shape `create-superuser <slug> <username> [--password <s>]`.
+/// `create-superuser <slug> <username> [--password <s>]`.
 /// Convenience entrypoint that always sets `is_superuser = true` —
 /// equivalent to `create-user <slug> <username> --superuser` but
 /// with a clearer name and prompts when args are missing.
@@ -287,7 +277,8 @@ pub(super) async fn create_superuser_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    // Forward to `create_user_cmd` with `--superuser` injected.
+    // Forward to `create_user_cmd` with `--superuser` injected; the
+    // parser there takes flags anywhere, so no args still prompts.
     let mut forwarded: Vec<String> = args.to_vec();
     if !forwarded.iter().any(|s| s == "--superuser") {
         forwarded.push("--superuser".into());
@@ -443,7 +434,7 @@ where
         };
         (p, false)
     };
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     // v0.38 — tri-dialect UPDATE. Bind chrono::Utc::now() instead of
     // SQL `NOW()` so the same code works on PG/MySQL (NOW()) and
@@ -547,7 +538,7 @@ where
         };
         (p, false)
     };
-    let hash = crate::tenancy::password::hash(&plain)?;
+    let hash = crate::tenancy::password::hash_async(&plain).await?;
     // Route the operator-password rotate through the ORM so the SQL
     // gets per-dialect placeholders + identifier quoting + `NOW()` is
     // a value we set on the Rust side (chrono::Utc::now()) instead of
@@ -664,12 +655,12 @@ where
             "change-password: no user `{username}` in tenant `{slug}`"
         )));
     };
-    if !crate::tenancy::password::verify(&cur_plain, &user.password_hash)? {
+    if !crate::tenancy::password::verify_async(&cur_plain, &user.password_hash).await? {
         return Err(TenancyError::Validation(
             "change-password: current password did not match".into(),
         ));
     }
-    user.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    user.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
     user.password_changed_at = Some(chrono::Utc::now());
     user.save_pool(&pool).await?;
     writeln!(
@@ -767,12 +758,12 @@ where
             "change-operator-password: no operator named `{username}`"
         ))
     })?;
-    if !crate::tenancy::password::verify(&cur_plain, &op.password_hash)? {
+    if !crate::tenancy::password::verify_async(&cur_plain, &op.password_hash).await? {
         return Err(TenancyError::Validation(
             "change-operator-password: current password did not match".into(),
         ));
     }
-    op.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    op.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
     op.password_changed_at = Some(chrono::Utc::now());
     op.save_pool(&registry).await?;
     writeln!(w, "password changed for operator `{username}`")?;

@@ -1,7 +1,8 @@
-//! Method dispatch. Slice 1 (#1014) implements the two methods needed to
-//! complete a handshake: `initialize` and `ping`. Everything else returns
-//! a JSON-RPC `method not found`. Tools / prompts / resources dispatch
-//! lands in later slices, keyed off the same `match`.
+//! Method dispatch: one `match` over the JSON-RPC method name.
+//!
+//! `initialize` and `ping` need no agent. Every other method does,
+//! and is refused without one. An unknown name returns
+//! `method not found`.
 
 use serde_json::{json, Value};
 
@@ -9,7 +10,7 @@ use super::pagination::paginate;
 use super::router::McpState;
 use super::tools::{list_tools, McpContext};
 
-/// Read the opaque `cursor` param for a `*/list` call, if present.
+/// Read the `cursor` param of a `*/list` call, if it has one.
 fn cursor_of(params: &Option<Value>) -> Option<&str> {
     params
         .as_ref()
@@ -20,11 +21,11 @@ use super::types::{
     codes, Implementation, InitializeResult, JsonRpcError, ServerCapabilities, PROTOCOL_VERSION,
 };
 
-/// Dispatch one JSON-RPC method to its result (or a JSON-RPC error).
+/// Run one JSON-RPC method and return its result, or an error.
 ///
-/// `ctx` is the authenticated agent context — `Some` on the agent-guarded
-/// tenant router, `None` on the unauthed Slice-1 routers. `initialize` /
-/// `ping` don't need it; the `tools/*` methods require it (fail-closed).
+/// `ctx` is the authenticated agent. It is `Some` only on a router
+/// that authenticates. `initialize` and `ping` work without it;
+/// everything else fails closed.
 pub(crate) async fn dispatch(
     state: &McpState,
     method: &str,
@@ -81,8 +82,8 @@ pub(crate) async fn dispatch(
             let ctx = ctx.ok_or_else(auth_required)?;
             super::resources::read_resource(&ctx, params.unwrap_or_else(|| json!({}))).await
         }
-        // We expose no URI templates, but the spec method must exist (return an
-        // empty list) rather than 404 with `method not found` (#1099).
+        // No URI templates are exposed, but the method has to exist
+        // and return an empty list rather than `method not found`.
         "resources/templates/list" => {
             ctx.ok_or_else(auth_required)?;
             Ok(json!({ "resourceTemplates": [] }))
@@ -99,8 +100,8 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// The `tools/*` methods are only reachable with a verified agent — the
-/// unauthed routers have no principal to authorize against.
+/// The error for a method that needs an agent when there is none. A
+/// router that does not authenticate has nobody to authorize.
 fn auth_required() -> JsonRpcError {
     JsonRpcError::new(
         codes::INVALID_REQUEST,
@@ -108,22 +109,20 @@ fn auth_required() -> JsonRpcError {
     )
 }
 
-/// The `initialize` handshake — advertise our protocol version,
-/// capabilities (none in Slice 1), and identity. We do not hard-fail on a
-/// client/server protocol-version mismatch: we return ours and let the
-/// client decide, per the MCP lifecycle spec.
+/// The `initialize` handshake: report our protocol version, our
+/// capabilities and our identity.
+///
+/// A version mismatch is not an error here. We return ours and let
+/// the client decide, as the MCP lifecycle spec says.
 fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
     let result = InitializeResult {
         protocol_version: PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
-            // Slices 3 + 5 light up tools / prompts / resources.
-            // `listChanged` is wired by follow-up #1087; false until then.
-            // Follow-up #1087: the server emits `*/list_changed` over SSE
-            // for in-process changes, so `listChanged` is advertised true.
+            // `listChanged` is true because the server does emit
+            // `*/list_changed` over SSE for in-process changes.
             tools: Some(json!({ "listChanged": true })),
             prompts: Some(json!({ "listChanged": true })),
             resources: Some(json!({ "listChanged": true, "subscribe": false })),
-            // Follow-up #1091: logging + completion utilities.
             logging: Some(json!({})),
             completions: Some(json!({})),
         },

@@ -19,6 +19,7 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::{
     create_skill_pool, create_user_key_pool, map_skill_to_permission_pool, revoke_user_key_pool,
+    rotate_agent_secret_pool,
 };
 
 async fn world() -> Pool {
@@ -85,6 +86,7 @@ async fn raw_credential_resolves_live_rbac_scope() {
     // The raw show-once token authenticates directly.
     let agent = verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .expect("raw credential verifies");
     assert_eq!(agent.user_id, Some(uid));
     assert_eq!(agent.tenant, "acme");
@@ -99,6 +101,7 @@ async fn raw_credential_resolves_live_rbac_scope() {
         .expect("deny perm");
     let narrowed = verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .expect("still authenticates");
     assert!(narrowed.skills.is_empty(), "denied perm drops the skill");
     assert!(narrowed.tools.is_empty());
@@ -120,6 +123,7 @@ async fn revoked_key_is_refused_immediately() {
     // Warm the verification cache with a successful call…
     assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .is_some());
     // …then revoke: the liveness check runs per request, so even a cached
     // verification is refused straight away.
@@ -129,8 +133,65 @@ async fn revoked_key_is_refused_immediately() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "revoked key must be refused despite the warm cache"
+    );
+}
+
+/// Rotation, which nothing covered.
+///
+/// This is the case #1539 was filed for and the only one the
+/// verification cache could actually get wrong: deletion and
+/// deactivation are caught by the liveness check on every request, so
+/// `revoked_key_is_refused_immediately` above passes with or without
+/// any cache handling — it deletes the agent. Rotation leaves the row
+/// active with a new hash, so a warm entry is the only thing that can
+/// keep the *old* secret working.
+#[tokio::test]
+async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
+    let pool = world().await;
+    skill_world(&pool).await;
+    let uid = make_user(&pool, "carol").await;
+    set_user_perm_pool(uid, "thing.edit", true, &pool)
+        .await
+        .expect("grant");
+    let issued = create_user_key_pool(&pool, uid, "carol's key", &[])
+        .await
+        .expect("key");
+    let name = issued.agent.name.clone();
+
+    // Warm the cache, so a subsequent call would skip Argon2 and take
+    // whatever the entry says.
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .expect("check runs")
+            .is_some(),
+        "precondition: the freshly issued token authenticates",
+    );
+
+    let rotated = rotate_agent_secret_pool(&pool, &name)
+        .await
+        .expect("rotate");
+
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .expect("check runs")
+            .is_none(),
+        "the OLD secret must stop working the moment the row records a \
+         rotation — the first attempt at this cleared a process-local \
+         cache from the `manage` CLI, which never reaches the serving \
+         process, so the old secret kept working for the whole TTL",
+    );
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &rotated.token)
+            .await
+            .expect("check runs")
+            .is_some(),
+        "control: the NEW secret must authenticate, or the assertion \
+         above would pass on a rotation that simply broke the key",
     );
 }
 
@@ -143,6 +204,7 @@ async fn deactivated_owner_is_refused() {
         .expect("key");
     assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
         .await
+        .expect("check runs")
         .is_some());
 
     let Pool::Sqlite(sq) = &pool else {
@@ -156,6 +218,7 @@ async fn deactivated_owner_is_refused() {
     assert!(
         verify_raw_agent_credential(&pool, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "a deactivated owner's keys must be refused"
     );
@@ -172,21 +235,25 @@ async fn garbage_and_wrong_secrets_are_refused() {
     // No dot → shape gate refuses without touching the DB.
     assert!(verify_raw_agent_credential(&pool, "acme", "not-a-key")
         .await
+        .expect("check runs")
         .is_none());
     // Empty halves.
     assert!(verify_raw_agent_credential(&pool, "acme", ".")
         .await
+        .expect("check runs")
         .is_none());
     // Right prefix, wrong secret.
     let prefix = issued.token.split('.').next().unwrap();
     let forged = format!("{prefix}.deadbeefdeadbeefdeadbeefdeadbeef");
     assert!(verify_raw_agent_credential(&pool, "acme", &forged)
         .await
+        .expect("check runs")
         .is_none());
     // A JWT-shaped bearer (three dot-separated base64 parts) must not
     // authenticate as a raw credential either.
     assert!(verify_raw_agent_credential(&pool, "acme", "eyJx.eyJy.sig")
         .await
+        .expect("check runs")
         .is_none());
 }
 
@@ -218,6 +285,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&acme, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_some(),
         "owning tenant must authenticate"
     );
@@ -227,18 +295,40 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&globex, "globex", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
         "credential must not authenticate against another tenant"
     );
 
-    // Cross-tenant is refused even when the foreign slug is presented
-    // against the owning pool's token first — i.e. the cache key, not just
-    // the pool, carries the tenant.
+    // The dangerous shape: the OWNING slug (so the warm cache entry is
+    // found) against a FOREIGN pool. On a hit the agent id comes from
+    // the entry, and everything else is then read by that id from
+    // whichever pool was passed — so the foreign tenant must have a
+    // row at the same id for this to test anything. Ids are per-tenant
+    // sequences, so giving globex one key makes them collide at 1.
+    //
+    // Without that row this assertion passed for the wrong reason:
+    // `agent_auth_state_pool` returned `None` and the refusal proved
+    // nothing about re-binding (#1604 review, tenancy-001).
+    let g_uid = make_user(&globex, "mallory").await;
+    let g_issued = create_user_key_pool(&globex, g_uid, "mallory's key", &[])
+        .await
+        .expect("globex key");
+    assert_eq!(
+        issued.agent.id.get().copied(),
+        g_issued.agent.id.get().copied(),
+        "precondition: both tenants' first agent must share an id, or \
+         the redemption below is not being exercised",
+    );
+
     assert!(
         verify_raw_agent_credential(&globex, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_none(),
-        "foreign pool must refuse even with the owning slug"
+        "a warm entry must not be redeemable against another tenant's \
+         storage: the cached id resolves to a different agent there, \
+         whose owner and grants would otherwise be handed to the caller"
     );
 
     // The owning tenant still works afterwards — isolation must not have
@@ -246,6 +336,7 @@ async fn credential_does_not_cross_tenants() {
     assert!(
         verify_raw_agent_credential(&acme, "acme", &issued.token)
             .await
+            .expect("check runs")
             .is_some(),
         "owning tenant still authenticates after cross-tenant attempts"
     );

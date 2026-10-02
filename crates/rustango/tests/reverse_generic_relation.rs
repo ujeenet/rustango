@@ -59,34 +59,33 @@ async fn fresh_pool() -> Pool {
     contenttypes::ensure_seeded(&pool)
         .await
         .expect("ensure_seeded");
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query(
-            "CREATE TABLE rgr_post (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE rgr_article (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE rgr_tag (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                content_type_id INTEGER NOT NULL, \
-                object_pk INTEGER NOT NULL, \
-                name TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE rgr_post (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE rgr_article (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE rgr_tag (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            content_type_id INTEGER NOT NULL, \
+            object_pk INTEGER NOT NULL, \
+            name TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
     pool
 }
 
@@ -261,7 +260,7 @@ async fn prefetch_reverse_generic_groups_children_by_parent_pk() {
     let pool = fresh_pool().await;
     let (post1_pk, _) = seed_post_with_tag(&pool, "first", "rust").await;
     add_tag_for_post(&pool, post1_pk, "web").await;
-    let (post2_pk, _) = seed_post_with_tag(&pool, "second", "django").await;
+    let (post2_pk, _) = seed_post_with_tag(&pool, "second", "async").await;
 
     let grouped = contenttypes::prefetch_reverse_generic_for::<Post>(
         &pool,
@@ -284,7 +283,7 @@ async fn prefetch_reverse_generic_groups_children_by_parent_pk() {
         .iter()
         .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_owned))
         .collect();
-    assert!(post2_tags.contains("django"));
+    assert!(post2_tags.contains("async"));
 }
 
 #[tokio::test]

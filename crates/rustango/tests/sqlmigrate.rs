@@ -1,4 +1,4 @@
-//! Django-parity #345 — `manage sqlmigrate <name>` prints the SQL a
+//! Issue #345 — `manage sqlmigrate <name>` prints the SQL a
 //! given migration would emit, without touching the database.
 //!
 //! `sqlmigrate_one` is pure file I/O + render, so the test

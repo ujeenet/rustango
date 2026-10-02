@@ -26,6 +26,9 @@ crates/rustango/examples/*/target/
 # AI / coding-agent tooling — per-developer local config, never shared.
 # These files accumulate absolute paths, per-machine command allowlists,
 # and session state; they are not part of the project.
+#
+# Nothing under `.claude/` is tracked, skills and the review bus included:
+# they are personal tooling that each developer keeps locally.
 .claude/
 CLAUDE.md
 AGENTS.md

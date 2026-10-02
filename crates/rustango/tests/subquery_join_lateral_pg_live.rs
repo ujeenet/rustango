@@ -42,7 +42,12 @@ pub struct Order {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    Some(sqlx::PgPool::connect(&url).await.ok()?.into())
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"))
+            .into(),
+    )
 }
 
 async fn fresh(pool: &Pool) {

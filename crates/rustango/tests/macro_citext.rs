@@ -1,11 +1,11 @@
-//! Django-parity #344 — `#[rustango(citext)]` field attribute that
+//! Issue #344 — `#[rustango(citext)]` field attribute that
 //! routes the migration DDL through `dialect.ci_text_type` instead
 //! of the plain `column_type` mapping.
 //!
 //! Verifies:
 //! 1. The flag threads from macro → `FieldSchema::case_insensitive`.
 //! 2. PG emits `CITEXT`, SQLite emits `TEXT COLLATE NOCASE`, MySQL
-//!    emits `TEXT COLLATE utf8mb4_general_ci`.
+//!    emits `LONGTEXT COLLATE utf8mb4_general_ci`.
 //! 3. PG's `ci_text_extension_sql()` returns the right prelude.
 //! 4. Other field types (`i64`, `DateTime`) ignore the flag — the
 //!    macro accepts it but the DDL falls through to the normal type.

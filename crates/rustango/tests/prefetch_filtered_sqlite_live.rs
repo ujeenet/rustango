@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! `fetch_with_prefetch_filtered` — closes #298 / T2.1.
 //!
-//! Live SQLite test for Django's `Prefetch(queryset=...)` shape:
+//! Live SQLite test for the filtered-prefetch shape:
 //! the caller supplies a child `QuerySet` carrying the filters /
 //! ordering they want, and the prefetch helper injects the FK-IN
 //! predicate so each parent picks up only its matching children.

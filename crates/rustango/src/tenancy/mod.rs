@@ -1,7 +1,7 @@
 //! Multi-tenancy for rustango.
 //!
-//! v0.5 makes rustango "organizations-aware" without inheriting Django's
-//! `DATABASES`-dict-in-`settings.py` footgun. Tenants are first-class
+//! v0.5 makes rustango "organizations-aware" without listing every
+//! database in a settings file. Tenants are first-class
 //! rows in a `rustango_orgs` table that lives in the **registry**
 //! database — the only database the app boots knowing about. Every
 //! other database (or Postgres schema) is discovered through that
@@ -141,14 +141,14 @@ pub mod tenant_console;
 
 #[cfg(feature = "mcp")]
 pub use agents::{
-    add_skill_resource_pool, agent_token_still_valid_pool, authenticate_agent_by_prefix_pool,
-    authenticate_agent_pool, create_agent_pool, create_skill_pool, create_user_key_pool,
-    delete_user_keys_pool, grant_skill_pool, list_agents_pool, list_skills_pool,
-    list_user_keys_pool, map_skill_to_permission_pool, resolve_agent_grants_pool,
-    resolve_user_agent_grants_pool, resources_for_skills_pool, revoke_skill_pool,
-    revoke_user_key_pool, rotate_agent_secret_pool, skills_by_codenames_pool,
-    unmap_skill_from_permission_pool, Agent, AgentError, AgentGrant, AgentSecret, AgentSkill,
-    AgentSkillPermission, AgentSkillResource, AgentSkillTool,
+    add_skill_resource_pool, agent_auth_state_pool, agent_owner_is_active_pool,
+    agent_token_still_valid_pool, authenticate_agent_by_prefix_pool, authenticate_agent_pool,
+    create_agent_pool, create_skill_pool, create_user_key_pool, delete_user_keys_pool,
+    grant_skill_pool, list_agents_pool, list_skills_pool, list_user_keys_pool,
+    map_skill_to_permission_pool, resolve_agent_grants_pool, resolve_user_agent_grants_pool,
+    resources_for_skills_pool, revoke_skill_pool, revoke_user_key_pool, rotate_agent_secret_pool,
+    skills_by_codenames_pool, unmap_skill_from_permission_pool, Agent, AgentError, AgentGrant,
+    AgentSecret, AgentSkill, AgentSkillPermission, AgentSkillResource, AgentSkillTool,
 };
 #[cfg(feature = "postgres")]
 pub use auth::{authenticate_operator, authenticate_user};
@@ -205,9 +205,10 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
+pub(crate) use resolver::host_is_apex;
 pub use resolver::{
-    invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, OrgResolver,
-    PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,
+    invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, ListenerPort,
+    OrgResolver, PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
 // The resolver's process-global test hooks are deliberately NOT public
 // API of `tenancy` — they live in `crate::testkit`, so the name says
@@ -215,6 +216,8 @@ pub use resolver::{
 // could use to defeat the fingerprint or the breaker in production.
 // Gated to match `testkit`'s own gate, so a production build neither
 // compiles them in nor warns about an unused re-export.
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) use resolver::isolated as isolated_resolver;
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) use resolver::{
     expire_generation, reset_generation, reset_org_cache, reset_registry_breaker,

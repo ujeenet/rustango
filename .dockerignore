@@ -1,0 +1,38 @@
+# Build context for `docker/soak/Dockerfile`, whose context is the repo
+# root because the examples depend on `crates/rustango` by path.
+#
+# Without this file the context is ~24 GB — `target/` alone is 8.6 GB and
+# `target-examples/` another 2.6 GB — all of it uploaded to the daemon on
+# every build, and `.env` baked into the image alongside it.
+
+# Build output. The single biggest thing here.
+target/
+target-examples/
+**/target/
+
+# Secrets. `.env.example` is the committed template and is safe to ship.
+.env
+.env.*
+!.env.example
+
+# Local databases — a SQLite file copied into an image is a data leak
+# and a stale-state bug at the same time.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+var/
+
+# Nothing in the image reads these.
+.git/
+.github/
+docs/
+**/node_modules/
+**/e2e/playwright-report/
+**/e2e/test-results/
+*.log
+
+# Editor / OS noise.
+.DS_Store
+.idea/
+.vscode/

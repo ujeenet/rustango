@@ -24,9 +24,9 @@ pub struct Article {
     author_id: i64,
 }
 
-/// Canonical "custom manager" shape — Django's
-/// `ArticleQuerySet.published()` / `.by_author(user)` as a Rust
-/// extension trait on `QuerySet<Article>`.
+/// Canonical "custom manager" shape — named, reusable filters
+/// (`.published()` / `.by_author(id)`) as an extension trait on
+/// `QuerySet<Article>`.
 trait ArticleQuerySetExt: Sized {
     fn published(self) -> Self;
     fn by_author(self, author_id: i64) -> Self;
@@ -65,8 +65,8 @@ fn extension_trait_composes_with_where_after_custom_method() {
 #[test]
 fn multiple_extension_traits_can_coexist() {
     // Define a second trait and verify both can be brought into
-    // scope simultaneously without conflict — Django supports
-    // multiple Managers per model (`objects` + `published_manager`).
+    // scope simultaneously without conflict — a model may carry
+    // several independent manager traits.
     trait ArchivedQuerySetExt: Sized {
         fn archived(self) -> Self;
     }
@@ -81,8 +81,8 @@ fn multiple_extension_traits_can_coexist() {
     let _chain: QuerySet<Article> = Article::objects().published().archived();
 }
 
-/// "Manager-style" accessor — Django's `Article.published_manager =
-/// PublishedManager()` adapted to a free function on `impl Article`.
+/// "Manager-style" accessor — an associated function on
+/// `impl Article` that hands back a pre-filtered QuerySet.
 /// This is the alternative shape when you want a named accessor
 /// that always pre-applies a filter (vs an extension trait that
 /// chains on demand).

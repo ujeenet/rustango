@@ -174,19 +174,125 @@ supports two upload flows:
   call.
 - **Direct-to-storage:** `manager.begin_upload(...)` returns a **presigned PUT**
   URL the browser uploads to directly (your server never proxies the bytes),
-  then you confirm the row.
+  then you confirm the row. The PUT must send every header in
+  `ticket.headers` (`Content-Type`, `If-None-Match: *`), so the bucket's CORS
+  rule must allow both. The URL can create the object once and never replace it.
+  Grant `s3:ListBucket` too: without it S3 answers a missing object with 403,
+  and finalize returns 502 instead of marking the row `Failed`.
 
 ```rust
 use rustango::media::{Media, MediaManager};
 
 let manager = MediaManager::new_pool(pool.clone(), registry);
 // Hand the browser a short-lived download link:
-let url = manager.presigned_get(&media, Duration::from_secs(3600)).await?;
+// Returns Option<String> — None on backends that cannot sign (e.g. local disk).
+let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {
+    return Err(/* no signed URL for this backend */);
+};
 ```
 
 It also handles soft-delete and orphan purging. The full flow is dogfooded in
 `media_sqlite_live.rs`; the manager's presigned/direct-upload methods are
 PostgreSQL-oriented.
+
+### Serving media on a public page
+
+A public page does **not** go through `media::router`. That router is the
+internal management API — uploads, deletes, tagging, browsing — and it
+answers `401` to anyone not signed in, on every route, by design.
+
+Render the URL from your own handler instead:
+
+```rust
+// your own public route
+let url = manager.public_url(media_id).await?;   // Option<String>, no signature
+```
+
+`public_url` is a database lookup plus a string; it mints nothing and awaits
+no signer, which is why it suits a page. Two delivery models, and choosing
+between them is the actual decision:
+
+| | public bucket / CDN | private bucket + presigned |
+|---|---|---|
+| address | `manager.public_url(id)` — stable | `manager.presigned_get(&m, ttl)` — expires |
+| cacheable | yes, by browsers and CDNs | no; the router sends `no-store` |
+| who may fetch | anyone with the URL | anyone with the URL, until it expires |
+| use for | public pages, `<img src>` | the management router, internal tools |
+
+`public_url` tells you where the object *would* be served from; it does not
+make the object readable. Point it at a private bucket and you get a correct
+URL and a 403 — that case wants a presigned URL, which is deliberately not
+cacheable and not shareable.
+
+For files on local disk rather than a bucket, the static handler already does
+this and needs no media row at all:
+
+```rust
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+```
+
+**If you were about to write an `AllowAll` authorizer to make a public page
+work, stop.** That opens all 16 routes — including `DELETE` and the presigned
+`PUT` — to everyone, which is the hole 0.57.7 closed.
+
+### The management router needs an authorization policy
+
+`media::router` mounts 16 JSON routes over the manager, all of them operator
+actions on the library. **Every one is gated, and there is no permissive
+default.** Build it with `media_router_with` and supply a policy:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — the old constructor — is deprecated and now
+answers `403` on every route. That is a deliberate behaviour change in
+0.57.7: before it, those routes took no authentication, authorization or
+tenant extractor at all, so `GET /media/{id}` returned the row **and a
+presigned S3 download URL** to anyone who could guess an integer, and
+`POST /uploads/begin` minted a presigned `PUT` for a caller-chosen key
+prefix.
+
+`MediaPerms` (needs the `tenancy` feature) checks the `{table}.{action}`
+permission codenames the admin already uses — `rustango_media.view` to read,
+`rustango_media_collections.add` to create a folder, and so on. Mount it
+**inside** `require_auth`, which is what injects the identity it reads;
+without that every request is a `401`. Superusers skip the codename check —
+but **not** `allow_disks`, which binds them too: `is_superuser` elevates
+inside one tenant, and the object store is shared across all of them.
+
+Three things it does not do:
+
+- **Row-level decisions.** A grant of `rustango_media.view` reads *any* media
+  row by id. `MediaManager` holds one pool, so a multi-tenant deployment
+  scopes rows itself — implement `MediaAuthorizer` for that. `MediaTarget`
+  names the row (`Media(id)`, `Collection(id)`, `CollectionSubtree(id)`, …)
+  precisely so a per-row policy can be written. `?recursive` on a collection's
+  contents arrives as `CollectionContents { id, recursive: true }` — same
+  target, flagged — so a policy can be stricter about the wide read without
+  losing the collection it names.
+- **Scope the object store.** `disk` is caller-supplied on
+  `POST /uploads/begin` and the `StorageRegistry` is process-wide, so
+  pool-per-tenant isolates the database and not the bucket: a bare
+  `rustango_media.add` grant writes into any disk the process knows about.
+  Say which ones with `MediaPerms::new(pool).allow_disks(["user-uploads"])`.
+  Prefixes within a disk still need `MediaAuthorizer`, which is handed
+  `key_prefix`.
+- **Guess what a new route means.** Both `MediaAction` and `MediaTarget` are
+  `#[non_exhaustive]`, so end a hand-written policy on `_ => false` and a
+  route added in a later release arrives denied rather than allowed.
+
+Worth knowing when you write your own: `DELETE /collections/{id}` deletes the
+whole **subtree** and re-parents the media under every level of it, so it
+arrives as `Delete(CollectionSubtree(id))` rather than
+`Delete(Collection(id))` — and under `MediaPerms` it needs
+`rustango_media.change` as well as `rustango_media_collections.delete`,
+because it writes to the media table.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md) has
+the migration notes.
 
 ### How the media tables are created
 
@@ -204,7 +310,14 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > the system-migration ledger *without* re-running its `CREATE TABLE`, and your
 > existing rows are left untouched. **No manual step is required** — the upgrade
 > that would otherwise fail with `relation already exists` / `table already exists`
-> now just works. (Introduced in 0.51.1; see the CHANGELOG.)
+> now just works.
+>
+> **Upgrade to 0.51.2 or later, not 0.51.1.** 0.51.0 moved the media tables onto
+> system migrations and 0.51.1 claimed this reconcile — cross-version testing
+> against real 0.46–0.50 databases showed neither worked, and **both are yanked**.
+> The reconcile guard demanded a migration be purely `CreateTable`, while a
+> generated initial migration is tables *and* indexes, so it bailed on every real
+> one. 0.51.2 is the release where this actually fires (#1167).
 
 ---
 
@@ -213,7 +326,7 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitive) · `.randomize_filename(bool)`. Used by
 `save_uploads(multipart, &cfg, &storage)`.
 

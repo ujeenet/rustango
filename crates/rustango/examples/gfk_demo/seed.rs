@@ -76,7 +76,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     // Tags + Comments attached via the typed setter. The macro emits
     // `set_target_for::<T>` from the `generic_fk(name = "target")` arg.
     for (post_pk, names) in [
-        (p1_pk, ["rust", "django-parity", "demo"].as_slice()),
+        (p1_pk, ["rust", "generic-fk", "demo"].as_slice()),
         (p2_pk, ["polymorphic", "tags"].as_slice()),
     ] {
         for name in names {

@@ -1,4 +1,4 @@
-//! `cargo rustango new <name>` — Django-style project scaffolder.
+//! `cargo rustango new <name>` — project scaffolder.
 //!
 //! Cargo invokes external subcommands by spawning a binary called
 //! `cargo-rustango` and passing `rustango` as the first argv. We
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("cargo-rustango — Django-style project scaffolder for rustango");
+    println!("cargo-rustango — project scaffolder for the rustango web framework");
     println!();
     println!("USAGE:");
     println!("  cargo rustango new <name> [--template api|fullstack|tenant]");
@@ -217,6 +217,12 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("passkey", "WebAuthn / passkey authentication"),
     ("cache-redis", "Redis cache backend"),
     ("cache-page", "whole-page response caching"),
+    ("jobs", "background job queue (in-process worker pool)"),
+    (
+        "jobs-postgres",
+        "database-backed job queue, surviving restarts",
+    ),
+    ("scheduler", "fixed-interval background tasks"),
     ("email-smtp", "SMTP transport for the email framework"),
     ("mcp", "Model Context Protocol server for AI agents"),
     ("testkit", "test-only schema builders and model factories"),
@@ -575,8 +581,77 @@ fn validate_name(name: &str) -> Result<(), String> {
             "`{name}` is not a valid Cargo crate name — use [A-Za-z_][A-Za-z0-9_-]*"
         ));
     }
+    // The templates write `use <crate>::urls` and `mod <name>`: a keyword
+    // does not parse and `std` shadows the real one (#1913).
+    let ident = name.replace('-', "_");
+    if RESERVED_IDENTS.contains(&ident.as_str()) {
+        return Err(format!(
+            "`{name}` cannot be a project name — `{ident}` is a Rust keyword or a \
+             built-in crate name, so the generated code would not compile"
+        ));
+    }
     Ok(())
 }
+
+/// Keywords (2015–2024, strict and reserved) plus built-in crate names.
+/// Same list as `rustango::migrate::manage`; this crate links no rustango.
+const RESERVED_IDENTS: &[&str] = &[
+    "abstract",
+    "alloc",
+    "as",
+    "async",
+    "await",
+    "become",
+    "box",
+    "break",
+    "const",
+    "continue",
+    "core",
+    "crate",
+    "do",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "final",
+    "fn",
+    "for",
+    "gen",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "macro",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "override",
+    "priv",
+    "proc_macro",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "static",
+    "std",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "unsafe",
+    "unsized",
+    "use",
+    "virtual",
+    "where",
+    "while",
+    "yield",
+];
 
 fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     let name = &args.name;
@@ -602,7 +677,12 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
         "docker-compose.yml",
         &templates::docker_compose(name, backend),
     )?;
-    write(root, "Dockerfile", templates::dockerfile())?;
+    // Two images, because they answer different questions: `Dockerfile`
+    // is the one you deploy (multi-stage, release, non-root),
+    // `Dockerfile.dev` is the cargo-watch one docker-compose.yml builds.
+    write(root, "Dockerfile", &templates::dockerfile_prod(name))?;
+    write(root, "Dockerfile.dev", templates::dockerfile_dev())?;
+    write(root, ".dockerignore", templates::DOCKERIGNORE)?;
     write(
         root,
         "README.md",
@@ -636,22 +716,21 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
 
     fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
 
-    write(root, "src/main.rs", templates::main_rs(template))?;
+    // The library target is where the app lives; the binary uses it.
+    // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
+    // own crate and can reach the app only through this.
+    write(root, "src/lib.rs", &templates::lib_rs(name))?;
+    write(root, "src/main.rs", &templates::main_rs(template, name))?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
 
-    // Tenant projects get an empty `system/migrations/` folder — the
-    // framework's own tables (`rustango_orgs`, `rustango_users`, roles/
-    // permissions, …) are NOT shipped as hardcoded bootstrap JSON.
-    // Instead the first `cargo run -- makemigrations` generates them
-    // into `system/migrations/` from the compiled models (reflecting the
-    // enabled feature flags), and `cargo run -- migrate` applies them —
-    // the normal Django flow. `.gitkeep` keeps the dir under version
-    // control until the migrations land.
-    if matches!(template, Template::Tenant) {
-        write(root, "system/migrations/.gitkeep", "")?;
-    }
+    // Every project gets an empty `system/migrations/` folder — the
+    // framework's own tables are NOT shipped as hardcoded bootstrap JSON.
+    // `makemigrations` generates them from the compiled models and they
+    // are committed like any app migration; the image copies the folder,
+    // so `.gitkeep` keeps it present until they land (#1988).
+    write(root, "system/migrations/.gitkeep", "")?;
 
     Ok(())
 }
@@ -685,6 +764,25 @@ mod tests {
             full.starts_with(&v),
             "expected `{full}` to start with `{v}`"
         );
+    }
+
+    /// #1702 — the templates that ship `config/*.toml` load them, or the
+    /// `[security]` headers (and every other setting) never apply.
+    #[test]
+    fn templates_with_config_files_load_them() {
+        for template in [Template::Fullstack, Template::Tenant] {
+            let main = templates::main_rs(template, "demo");
+            assert!(
+                main.contains(".with_settings_from_env()"),
+                "{template:?} main.rs does not load its settings"
+            );
+        }
+        // Once loaded: dev serves plain HTTP, so its cookies must not be
+        // `Secure`; the release image must not fall back to the dev tier.
+        let dev = templates::config_dev_settings_toml("demo", Backend::Postgres);
+        assert!(dev.contains("secure_cookies    = false"), "{dev}");
+        let image = templates::dockerfile_prod("demo");
+        assert!(image.contains("ENV RUSTANGO_ENV=prod"), "{image}");
     }
 
     /// Regression guard for #79: every scaffold template must pin
@@ -736,6 +834,65 @@ mod tests {
         }
     }
 
+    /// Every scaffolded example (one with a `config/`) holds what
+    /// `cargo rustango new` emits today for one backend; regenerate,
+    /// don't hand-edit (#1801). `cookbook_blog` is hand-written, and
+    /// `prod_settings.toml` is tuned per app.
+    #[test]
+    fn example_configs_match_the_templates() {
+        let examples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rustango/examples");
+        let mut checked = 0;
+        let mut drifted = Vec::new();
+        for entry in std::fs::read_dir(&examples).expect("read examples/") {
+            let root = entry.expect("examples/ entry").path();
+            let name = root.file_name().unwrap().to_str().unwrap().to_owned();
+            if name == "cookbook_blog" || !root.join("config").is_dir() {
+                continue;
+            }
+            checked += 1;
+            let rendered = |backend| {
+                [
+                    (".env.example", templates::env_example(&name, backend)),
+                    (
+                        "config/default.toml",
+                        templates::config_default_toml(&name, backend),
+                    ),
+                    (
+                        "config/dev_settings.toml",
+                        templates::config_dev_settings_toml(&name, backend),
+                    ),
+                    (
+                        "config/staging_settings.toml",
+                        templates::config_staging_settings_toml(&name, backend),
+                    ),
+                ]
+            };
+            let mismatches = |backend| -> Vec<&str> {
+                rendered(backend)
+                    .into_iter()
+                    .filter(|(file, want)| {
+                        std::fs::read_to_string(root.join(file)).ok().as_ref() != Some(want)
+                    })
+                    .map(|(file, _)| file)
+                    .collect()
+            };
+            let closest = [Backend::Postgres, Backend::Sqlite, Backend::Mysql]
+                .into_iter()
+                .map(mismatches)
+                .min_by_key(Vec::len)
+                .unwrap();
+            if !closest.is_empty() {
+                drifted.push(format!("{name}: {closest:?}"));
+            }
+        }
+        assert!(checked >= 3, "found only {checked} scaffolded examples");
+        assert!(
+            drifted.is_empty(),
+            "drifted from the scaffolder: {drifted:?}"
+        );
+    }
+
     /// Regression guard against the original #79 footgun — no
     /// scaffold template may emit a yanked version literal.
     #[test]
@@ -757,25 +914,131 @@ mod tests {
 
     // ---- #86 — Dockerfile + cargo-watch rust service in scaffolder ----
 
-    /// `Dockerfile` template emits a working rust toolchain image
-    /// with `cargo-watch` preinstalled — the foundation of the
-    /// hot-reload dev loop the docker-compose.yml expects.
+    /// `Dockerfile.dev` emits a working rust toolchain image with
+    /// `cargo-watch` preinstalled — the foundation of the hot-reload
+    /// dev loop the docker-compose.yml expects.
     #[test]
-    fn dockerfile_emits_rust_toolchain_with_cargo_watch() {
-        let body = templates::dockerfile();
+    fn dockerfile_dev_emits_rust_toolchain_with_cargo_watch() {
+        let body = templates::dockerfile_dev();
         assert!(
             body.contains("FROM rust:"),
-            "Dockerfile must base on a rust image, got `{body}`"
+            "Dockerfile.dev must base on a rust image, got `{body}`"
         );
         assert!(
             body.contains("cargo install cargo-watch"),
-            "Dockerfile must preinstall cargo-watch (powers the docker-compose.yml \
+            "Dockerfile.dev must preinstall cargo-watch (powers the docker-compose.yml \
              hot-reload command), got `{body}`"
         );
         assert!(
             body.contains("WORKDIR /app"),
-            "Dockerfile must set WORKDIR /app to match docker-compose.yml's bind \
+            "Dockerfile.dev must set WORKDIR /app to match docker-compose.yml's bind \
              mount target, got `{body}`"
+        );
+    }
+
+    /// #1272 — fullstack generates the admin helper and mounts it, names
+    /// no driver pool, and puts it behind a login (#1627).
+    #[test]
+    fn fullstack_mounts_a_gated_driver_neutral_admin() {
+        let urls = templates::urls_rs(Template::Fullstack);
+        let main = templates::main_rs(Template::Fullstack, "demo");
+        assert!(urls.contains("pub fn admin_router(pool: Pool)"), "{urls}");
+        assert!(urls.contains(".with_session_auth("), "{urls}");
+        assert!(
+            main.contains(".nest_with(\"/admin\", urls::admin_router)"),
+            "{main}"
+        );
+        // #1216: no verb may need DATABASE_URL before `Cli::run`.
+        assert!(!main.contains("DATABASE_URL"), "{main}");
+        for body in [&urls, &main] {
+            for driver in ["PgPool", "SqlitePool", "MySqlPool"] {
+                assert!(!body.contains(driver), "names {driver}: {body}");
+            }
+        }
+    }
+
+    /// #1988 — the image must carry `system/migrations/`, and every path
+    /// it copies must exist in a fresh project, or `docker build` fails.
+    #[test]
+    fn image_ships_system_migrations_on_every_template() {
+        for template in ["api", "fullstack", "tenant"] {
+            let root = std::env::temp_dir().join(format!(
+                "cargo_rustango_image_{template}_{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let args = parse(&["demo", "--template", template]).expect("args");
+            write_project(&root, &args).expect("scaffold");
+            let image = fs::read_to_string(root.join("Dockerfile")).expect("Dockerfile");
+            let sources: Vec<&str> = image
+                .lines()
+                .filter_map(|l| l.strip_prefix("COPY "))
+                .filter(|l| !l.starts_with("--from") && !l.starts_with(". "))
+                .filter_map(|l| l.split_whitespace().next())
+                .collect();
+            for src in &sources {
+                assert!(root.join(src).exists(), "{template}: COPY {src} is missing");
+            }
+            assert!(
+                sources.contains(&"system"),
+                "{template}: the image drops system/migrations: {sources:?}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// The deployable image is the one a generated project was missing:
+    /// for a long time the only Dockerfile installed a toolchain and
+    /// waited for a bind mount, so a project could be developed in
+    /// Docker but not shipped in it.
+    #[test]
+    fn dockerfile_builds_a_release_binary_and_drops_root() {
+        let body = templates::dockerfile_prod("myapp");
+        assert!(
+            body.contains("AS builder") && body.matches("FROM ").count() >= 2,
+            "the deploy image must be multi-stage, or the toolchain ships with it: {body}"
+        );
+        assert!(
+            body.contains("--release"),
+            "a deploy image built at the debug profile is not a deploy image: {body}"
+        );
+        assert!(
+            body.contains("--locked"),
+            "a deploy image is exactly where an unnoticed dependency bump should fail \
+             the build rather than ship: {body}"
+        );
+        assert!(
+            body.contains("USER 10001"),
+            "the runtime stage must drop root: {body}"
+        );
+        assert!(
+            body.contains(r#"CMD ["myapp"]"#),
+            "CMD must name the generated binary, got: {body}"
+        );
+        // Both stages must agree on libc — a bookworm-built binary will
+        // not start on bullseye, and the failure is at run time.
+        assert!(
+            body.contains("rust:1-bookworm") && body.contains("debian:bookworm-slim"),
+            "builder and runtime must share a Debian release: {body}"
+        );
+    }
+
+    /// `.dockerignore` decides what reaches the daemon at all. Without
+    /// it `target/` (gigabytes) and `.env` (secrets) are uploaded on
+    /// every build and land in the image.
+    #[test]
+    fn dockerignore_excludes_target_and_secrets() {
+        let body = templates::DOCKERIGNORE;
+        for needle in ["target/", ".env", "*.db", ".git/"] {
+            assert!(
+                body.contains(needle),
+                "`.dockerignore` must exclude `{needle}`, got: {body}"
+            );
+        }
+        assert!(
+            body.contains("!.env.example"),
+            "`.env.example` is the committed template and must survive the `.env` \
+             exclusion, got: {body}"
         );
     }
 
@@ -795,9 +1058,12 @@ mod tests {
             body.contains("cargo watch -x run"),
             "rust service must run cargo-watch, got: {body}"
         );
+        // Must be the DEV image specifically: the plain `Dockerfile` is
+        // now the deployable one, which copies the source in and would
+        // defeat the bind mount this service depends on.
         assert!(
-            body.contains("build: ."),
-            "rust service must build from the project Dockerfile, got: {body}"
+            body.contains("dockerfile: Dockerfile.dev"),
+            "rust service must build from Dockerfile.dev, got: {body}"
         );
         // Cargo cache volumes — without these, every `up` triggers
         // a full from-scratch rebuild (the worst dev UX possible).
@@ -822,7 +1088,7 @@ mod tests {
     #[test]
     fn every_main_template_mounts_with_welcome() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let body = templates::main_rs(template);
+            let body = templates::main_rs(template, "my_app");
             assert!(
                 body.contains(".with_welcome()"),
                 "template {template:?} src/main.rs should chain `.with_welcome()` \
@@ -946,8 +1212,20 @@ mod tests {
             );
         }
         // Not reserved — these load fine, so they stay accepted.
-        for n in ["myblog", "test", "std", "core", "crate_thing"] {
+        for n in ["myblog", "test", "crate_thing", "my-type"] {
             validate_name(n).unwrap_or_else(|e| panic!("{n} should be allowed: {e}"));
+        }
+    }
+
+    /// `use type::urls` does not parse and a crate named `std` breaks the
+    /// prelude, so the generated project would not build (#1913).
+    #[test]
+    fn keywords_and_builtin_crate_names_are_refused() {
+        for n in [
+            "type", "match", "self", "super", "crate", "std", "core", "async",
+        ] {
+            let err = validate_name(n).expect_err(n);
+            assert!(err.contains("keyword"), "{n}: {err}");
         }
     }
 
@@ -998,6 +1276,8 @@ mod tests {
         let my = templates::docker_compose(name, Backend::Mysql);
         assert!(my.contains("image: mysql:8"), "{my}");
         assert!(my.contains("MYSQL_DATABASE: app_dev"), "{my}");
+        // #1742: the stock `_ai_ci` default ignores case.
+        assert!(my.contains("--collation-server=utf8mb4_0900_as_cs"), "{my}");
         assert!(my.contains("depends_on:"), "{my}");
     }
 

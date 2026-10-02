@@ -5,7 +5,7 @@ transaktionale E-Mails. **Rustango** gibt dir ein `Mailer`-Trait mit austauschba
 Backends (Konsole für die Entwicklung, SMTP für die Produktion, ein In-Memory-Recorder für Tests),
 einen flüssigen `Email`-Builder mit Schutz vor Header-Injection und
 Template-Rendering. Schreibe `mailer.send(&email)` einmal; wechsle vom Drucken
-in dein Terminal zu echtem SMTP mit einer einzeiligen Änderung — wie Djangos E-Mail-Framework.
+in dein Terminal zu echtem SMTP mit einer einzeiligen Änderung — der Aufrufcode bleibt unberührt.
 
 [![E-Mail in Rustango: Ein Email-Builder (to/subject/body/html) wird gegen Header-Injection validiert und dann durch das Mailer-Trait versendet — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in Tests](../img/email.png)](../img/email.png)
 
@@ -69,7 +69,9 @@ halte ein **`BoxedMailer`** (`Arc<dyn Mailer>`):
 | `NullMailer` | `email` | E-Mail vollständig deaktivieren |
 
 Baue ihn aus der Konfiguration, damit er sich je Umgebung unterscheidet (`ConsoleMailer`
-lokal, `SmtpMailer` in prod) über `email::from_settings(&settings.email)`.
+lokal, `SmtpMailer` in prod) über `email::from_settings(&settings.mail)?`. Mit
+`backend = "smtp"` schlägt es fehl, wenn der Mailer nicht gebaut werden kann (kein `smtp_host`,
+ungültige `from_address`, `smtp_tls` außer `none` / `starttls` / `implicit`).
 
 ---
 
@@ -109,7 +111,7 @@ Header eingeschmuggelter Zeilenumbruch ist die Art, wie Angreifer ein versteckte
 // Missing recipients or an empty subject → MailError::InvalidMessage
 Email::new().subject("hi").validate()?;          // Err: no recipients
 
-// A CRLF in any header field → MailError::BadHeader (Django's BadHeaderError)
+// A CRLF in any header field → MailError::BadHeader
 Email::new()
     .to("a@example.com")
     .subject("Hello\r\nBcc: victim@example.com")  // injection attempt
@@ -183,7 +185,7 @@ Das `email_jobs`-Feature verdrahtet dies für dich.
 `send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
 
 **`MailError`:** `InvalidMessage` (unvollständig) · `BadHeader` (CRLF-Injection) ·
-`Transport` (Backend-/Zustellungsfehler).
+`Transport` (Backend-/Zustellungsfehler, als einziger von `EmailJob` wiederholt) · `Config` (fehlerhafter `[mail]`-Abschnitt).
 
 ---
 

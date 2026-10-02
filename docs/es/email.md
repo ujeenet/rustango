@@ -5,7 +5,7 @@ aplicaciones envían correo transaccional. **Rustango** te ofrece un trait `Mail
 backends intercambiables (consola para desarrollo, SMTP para producción, un grabador en memoria
 para pruebas), un builder `Email` fluido con protección contra inyección de cabeceras, y el
 renderizado de plantillas. Escribe `mailer.send(&email)` una vez; cambia de imprimir
-en tu terminal a SMTP real con un cambio de una línea — como el framework de correo de Django.
+en tu terminal a SMTP real con un cambio de una línea — sin tocar el código que lo llama.
 
 [![Correo en Rustango: un builder Email (to/subject/body/html) se valida contra la inyección de cabeceras, luego se envía a través del trait Mailer — ConsoleMailer en dev, SmtpMailer en prod, InMemoryMailer en pruebas](../img/email.png)](../img/email.png)
 
@@ -70,7 +70,9 @@ sostén un **`BoxedMailer`** (`Arc<dyn Mailer>`):
 | `NullMailer` | `email` | deshabilitar el correo por completo |
 
 Constrúyelo a partir de la configuración para que difiera por entorno (`ConsoleMailer`
-en local, `SmtpMailer` en prod) mediante `email::from_settings(&settings.email)`.
+en local, `SmtpMailer` en prod) mediante `email::from_settings(&settings.mail)?`. Con
+`backend = "smtp"` falla si el mailer no se puede construir (sin `smtp_host`, `from_address`
+inválida, `smtp_tls` distinto de `none` / `starttls` / `implicit`).
 
 ---
 
@@ -110,7 +112,7 @@ introducido a escondidas en una cabecera es la forma en que los atacantes añade
 // Missing recipients or an empty subject → MailError::InvalidMessage
 Email::new().subject("hi").validate()?;          // Err: no recipients
 
-// A CRLF in any header field → MailError::BadHeader (Django's BadHeaderError)
+// A CRLF in any header field → MailError::BadHeader
 Email::new()
     .to("a@example.com")
     .subject("Hello\r\nBcc: victim@example.com")  // injection attempt
@@ -184,7 +186,7 @@ La característica `email_jobs` cablea esto por ti.
 `send_many(mailer, &emails)` · `from_settings(&EmailSettings)`.
 
 **`MailError`:** `InvalidMessage` (incompleto) · `BadHeader` (inyección CRLF) ·
-`Transport` (fallo de backend/entrega).
+`Transport` (fallo de backend/entrega, el único que `EmailJob` reintenta) · `Config` (sección `[mail]` incorrecta).
 
 ---
 

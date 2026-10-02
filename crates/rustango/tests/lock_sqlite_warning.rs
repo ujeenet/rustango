@@ -1,4 +1,4 @@
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "runtime"))]
 //! `.select_for_update()` / `.skip_locked()` / `.nowait()` on SQLite —
 //! issue #290 / T2.9. Pins that the writer emits a `tracing::warn!`
 //! when a queryset with a `LockMode` compiles against SQLite, and
@@ -9,10 +9,9 @@
 //! `tracing-subscriber` isn't reachable (it's a transitive dep via
 //! the `runtime` feature, present in all-features CI).
 
-use std::sync::{Arc, Mutex};
-
 use rustango::query::QuerySet;
 use rustango::sql::{Dialect, Sqlite};
+use rustango::testkit::CaptureWriter;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -25,38 +24,22 @@ pub struct Job {
     status: String,
 }
 
-/// Captures `tracing` events into a shared buffer for assertion.
-#[derive(Clone, Default)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 fn compile_with_capture<F: FnOnce()>(f: F) -> String {
     let buf: CaptureWriter = CaptureWriter::default();
     let buf_clone = buf.clone();
+    // `with_ansi(false)`: enabling the `ansi` feature (#1480) made
+    // `fmt` colour by default, and escape codes land *between* the
+    // characters a substring assertion looks for — `tenant=acme`
+    // becomes `\x1b[3mtenant\x1b[0m\x1b[2m=\x1b[0macme`. A test that
+    // reads rendered output must ask for plain text.
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || buf_clone.clone())
         .with_max_level(tracing::Level::WARN)
         .with_target(true)
         .finish();
     tracing::subscriber::with_default(subscriber, f);
-    let bytes = buf.0.lock().unwrap().clone();
-    String::from_utf8(bytes).unwrap_or_default()
+    buf.contents()
 }
 
 #[test]

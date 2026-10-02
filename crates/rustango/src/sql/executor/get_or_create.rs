@@ -1,4 +1,4 @@
-//! Django-shape `get_or_create` / `update_or_create` helpers.
+//! `get_or_create` / `update_or_create` helpers.
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 2. Both
 //! helpers go through `FetcherPool::fetch` then either return
@@ -12,14 +12,14 @@ use super::{
 use crate::core::Model;
 use crate::sql::Pool;
 
-/// v0.45 — Django-style `get_or_create`. Runs the queryset; if it
+/// v0.45 — `get_or_create`. Runs the queryset; if it
 /// matches exactly one row return `(row, false)`; if it matches none
 /// invoke `create_fn` to materialize a new instance + insert it and
 /// return `(created, true)`. Matching multiple rows is a
 /// programming error and returns
 /// [`ExecError::MultipleRowsReturned`].
 ///
-/// Like Django's helper, this is **not atomic** without an enclosing
+/// This is **not atomic** without an enclosing
 /// transaction — between the SELECT and the INSERT another writer
 /// could insert a colliding row. For race-free behaviour pair it
 /// with `Pool::begin()` or with a UNIQUE constraint that surfaces
@@ -82,7 +82,7 @@ where
     }
 }
 
-/// v0.45 — Django-style `update_or_create`. Runs the queryset; if
+/// v0.45 — `update_or_create`. Runs the queryset; if
 /// it matches exactly one row, invoke `update_fn` to mutate it +
 /// save the changes and return `(updated, false)`; if it matches
 /// none, invoke `create_fn` and return `(created, true)`. Matching

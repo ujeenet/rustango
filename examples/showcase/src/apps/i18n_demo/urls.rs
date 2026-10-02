@@ -31,8 +31,8 @@ pub fn api() -> Router {
 }
 
 /// Build `/<lang>/i18n/greeting` with the locale pinned to `lang` via
-/// `LocaleMiddleware::new(&[lang]).default(lang)`. Mirrors Django's
-/// `i18n_patterns` semantics: the URL determines the locale.
+/// `LocaleMiddleware::new(&[lang]).default(lang)`: the URL prefix
+/// decides the locale.
 fn locale_prefix_router(lang: &'static str) -> Router {
     let inner = Router::new()
         .route("/i18n/greeting", get(greeting))

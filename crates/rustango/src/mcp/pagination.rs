@@ -1,30 +1,29 @@
-//! Cursor pagination for the MCP `*/list` methods (epic #1013,
-//! follow-up #1089).
+//! Cursor pagination for the MCP `*/list` methods.
 //!
-//! MCP list results carry an opaque `nextCursor`; the client passes it
-//! back as the `cursor` param to fetch the next page. Page size is the
-//! server's `[mcp].max_tools_listed` knob (`None`/0 ⇒ pagination off, a
-//! single page with no `nextCursor`). The cursor encodes an offset over
-//! the agent's *stable-ordered* list.
+//! A list result carries a `nextCursor`, which the client sends back
+//! as the `cursor` param to get the next page. Page size comes from
+//! `[mcp].max_tools_listed`; `None` or 0 means one page and no
+//! cursor. The cursor holds an offset into the agent's list, whose
+//! order is stable.
 //!
-//! The cursor is **HMAC-signed and bound to the requesting agent** (#1099):
-//! the payload `o{offset}:a{agent_id}` is signed with a process-stable key
-//! derived from the framework session secret, then base64url-wrapped for
-//! opacity. A tampered, forged, or another agent's cursor is rejected
-//! (`invalid_params`).
+//! **The cursor is signed and tied to one agent.** The payload
+//! `o{offset}:a{agent_id}` is signed with a key derived from the
+//! session secret, then base64url-wrapped so it looks opaque. A
+//! cursor that was altered, forged, or minted for another agent is
+//! rejected with `invalid_params`.
 
 use serde_json::Value;
 
 use super::types::JsonRpcError;
 use crate::signing::Signer;
 
-/// Apply pagination to a `{ "<key>": [...] }` list result. Returns the
-/// (possibly sliced) value with a `nextCursor` when more items remain. The
-/// cursor is signed + bound to `agent_id`.
+/// Paginate a `{ "<key>": [...] }` result. Returns one page, with a
+/// `nextCursor` when items remain. The cursor is signed and tied to
+/// `agent_id`.
 ///
 /// # Errors
-/// `invalid_params` if `cursor` is present but malformed, tampered, or minted
-/// for a different agent.
+/// `invalid_params` when `cursor` is present but malformed, altered,
+/// or minted for another agent.
 pub fn paginate(
     mut full: Value,
     key: &str,
@@ -32,7 +31,7 @@ pub fn paginate(
     page_size: Option<usize>,
     agent_id: i64,
 ) -> Result<Value, JsonRpcError> {
-    // Pagination disabled (no/zero page size): single page, no cursor.
+    // No page size means one page and no cursor.
     let Some(page_size) = page_size.filter(|n| *n > 0) else {
         return Ok(full);
     };
@@ -55,10 +54,11 @@ pub fn paginate(
     Ok(full)
 }
 
-/// Process-stable signer for pagination cursors. Keyed off the framework
-/// session secret (`RUSTANGO_SESSION_SECRET`, or a per-process random fallback)
-/// so cursors stay valid for the process lifetime and verify across instances
-/// that share the secret. Salt isolates this from other token purposes.
+/// The signer for pagination cursors. Its key comes from
+/// `RUSTANGO_SESSION_SECRET`, or a random one per process when that
+/// is unset. So a cursor lasts as long as the process, and verifies
+/// on any instance that shares the secret. A salt keeps this key
+/// separate from the ones other tokens use.
 fn cursor_signer() -> &'static Signer {
     use std::sync::OnceLock;
     static SIGNER: OnceLock<Signer> = OnceLock::new();
@@ -75,7 +75,7 @@ fn decode_cursor(c: &str, agent_id: i64) -> Result<usize, JsonRpcError> {
     let signed = crate::url_codec::urlsafe_base64_decode(c)
         .and_then(|b| String::from_utf8(b).ok())
         .ok_or_else(bad)?;
-    // Verify the HMAC tag (constant-time) before trusting any bytes.
+    // Check the tag, in constant time, before trusting any byte.
     let value = cursor_signer().unsign(&signed).map_err(|_| bad())?;
     // value == "o{offset}:a{agent_id}"
     let (off_part, agent_part) = value.split_once(':').ok_or_else(bad)?;
@@ -87,7 +87,7 @@ fn decode_cursor(c: &str, agent_id: i64) -> Result<usize, JsonRpcError> {
         .strip_prefix('a')
         .and_then(|n| n.parse::<i64>().ok())
         .ok_or_else(bad)?;
-    // Agent-bound: a cursor minted for another agent can't be replayed.
+    // A cursor minted for another agent cannot be replayed here.
     if bound != agent_id {
         return Err(bad());
     }
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(p2["tools"].as_array().unwrap().len(), 2);
         assert_eq!(p2["tools"][0]["name"], 2); // continues after page 1
 
-        // Last page has no nextCursor.
+        // The last page carries no cursor.
         let cur2 = p2["nextCursor"].as_str().unwrap();
         let p3 = paginate(list(5), "tools", Some(cur2), Some(2), AGENT).unwrap();
         assert_eq!(p3["tools"].as_array().unwrap().len(), 1);
@@ -137,8 +137,7 @@ mod tests {
 
     #[test]
     fn unsigned_or_tampered_cursor_is_rejected() {
-        // A plausible-looking but unsigned cursor (the pre-#1099 format) fails
-        // the HMAC check.
+        // A cursor that looks right but is unsigned fails the check.
         let forged = crate::url_codec::urlsafe_base64_encode(b"o2:a7");
         let err = paginate(list(5), "tools", Some(&forged), Some(2), AGENT).unwrap_err();
         assert_eq!(err.code, super::super::types::codes::INVALID_PARAMS);
@@ -146,7 +145,7 @@ mod tests {
 
     #[test]
     fn cursor_is_bound_to_the_minting_agent() {
-        // A valid cursor for AGENT must NOT decode for a different agent.
+        // A cursor valid for one agent must not decode for another.
         let p1 = paginate(list(5), "tools", None, Some(2), AGENT).unwrap();
         let cur = p1["nextCursor"].as_str().unwrap();
         let err = paginate(list(5), "tools", Some(cur), Some(2), AGENT + 1).unwrap_err();

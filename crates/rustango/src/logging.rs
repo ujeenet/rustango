@@ -1,11 +1,10 @@
-//! Tracing-subscriber setup helpers — the boilerplate every rustango app
-//! writes by hand becomes one call.
+//! Tracing-subscriber setup in one call.
 //!
 //! ## Quick start
 //!
 //! ```ignore
 //! fn main() {
-//!     rustango::logging::setup();        // env-filter, pretty, "info,sqlx=warn"
+//!     rustango::logging::setup();        // env-filter, full, "info,sqlx=warn"
 //!     // ... rest of your main
 //! }
 //! ```
@@ -19,8 +18,7 @@
 //!     .install();
 //! ```
 //!
-//! All functions are idempotent — `try_init` underneath, so calling twice
-//! (e.g. from a test + from main) won't panic.
+//! All functions use `try_init`, so calling them twice never panics.
 
 #[cfg(feature = "runtime")]
 use tracing_subscriber::layer::SubscriberExt;
@@ -29,23 +27,23 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[cfg(feature = "runtime")]
 use tracing_subscriber::EnvFilter;
 
-/// Default env-filter when `RUST_LOG` is unset:
-/// info for app code + warn for sqlx (sqlx is verbose at info).
+/// Default env-filter when `RUST_LOG` is unset. `sqlx` is very noisy at
+/// info, so it is pinned to warn.
 pub const DEFAULT_FILTER: &str = "info,sqlx=warn";
 
-/// Install the canonical dev logger: pretty format, env-filter from
-/// `RUST_LOG` (falling back to `"info,sqlx=warn"`).
+/// Install the dev logger: `full` format, filter from `RUST_LOG` or
+/// `"info,sqlx=warn"`.
 ///
-/// Idempotent — safe to call from `main`, tests, anywhere. Stdout-only;
-/// for file output use [`Setup::with_file`].
+/// Safe to call more than once. Stdout only; for a file use
+/// [`Setup::with_file`].
 #[cfg(feature = "runtime")]
 pub fn setup() {
     let _ = Setup::new().install();
 }
 
-/// File-rotation cadence for [`Setup::with_file`]. Mirrors
-/// `tracing_appender::rolling::Rotation` — re-exported here so
-/// callers don't need a direct dep on `tracing-appender`.
+/// How often [`Setup::with_file`] rolls the log file. Mirrors
+/// `tracing_appender::rolling::Rotation`, so callers do not need a
+/// direct dependency on `tracing-appender`.
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy)]
 pub enum Rotation {
@@ -72,8 +70,7 @@ impl Rotation {
     }
 }
 
-/// One configured file output for [`Setup`]. Internal — users
-/// construct this implicitly via [`Setup::with_file`].
+/// One configured file output, built by [`Setup::with_file`].
 #[cfg(feature = "runtime")]
 struct FileSink {
     dir: std::path::PathBuf,
@@ -81,35 +78,147 @@ struct FileSink {
     rotation: Rotation,
 }
 
+/// How the terminal output is shaped.
+///
+/// `#[non_exhaustive]` so a new variant does not break a downstream
+/// `match`.
+#[cfg(feature = "runtime")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Format {
+    /// Single-line, the default. `tracing_subscriber`'s `Full`.
+    #[default]
+    Full,
+    /// Multi-line, one field per line. Verbose; good for a dev terminal.
+    Pretty,
+    /// Terser single line: drops the target, shortens the level.
+    Compact,
+    /// One JSON object per event, for log aggregators.
+    Json,
+}
+
+/// When to emit ANSI colour.
+///
+/// # Not honoured under `#[rustango::main]`
+///
+/// That macro installs a subscriber before your `main` body runs, so a
+/// later `Setup::install()` does nothing and this setting is ignored.
+/// The macro always uses the [`Color::Auto`] rule. To pick `Always` or
+/// `Never`, install the subscriber yourself from a plain `main`.
+///
+/// `#[non_exhaustive]` — see [`Format`].
+#[cfg(feature = "runtime")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Color {
+    /// Colour only when stdout is a terminal. The default.
+    #[default]
+    Auto,
+    /// Always colour, even when piped. For a pager that understands it.
+    Always,
+    /// Never colour.
+    Never,
+}
+
+#[cfg(feature = "runtime")]
+impl Color {
+    /// Should the stdout layer emit escape codes?
+    ///
+    /// `Auto` checks [`NO_COLOR`](https://no-color.org) first, then asks
+    /// whether stdout is a terminal. Any non-empty `NO_COLOR` value
+    /// means "no colour"; an empty one does not.
+    ///
+    /// The `NO_COLOR` check is explicit because every layer below calls
+    /// `.with_ansi(..)`, which overrides the `tracing-subscriber`
+    /// default that would otherwise handle it.
+    #[must_use]
+    pub fn should_colour(self) -> bool {
+        use std::io::IsTerminal as _;
+        match self {
+            Color::Always => true,
+            Color::Never => false,
+            Color::Auto => {
+                let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+                !no_color && std::io::stdout().is_terminal()
+            }
+        }
+    }
+}
+
+/// A `fmt` layer with its formatter type erased.
+///
+/// `Vec<Box<dyn Layer<S>>>` is itself a `Layer<S>`, so sinks can be
+/// collected before the registry is built. Chaining `.with()` instead
+/// would change the subscriber's type at every step.
+#[cfg(feature = "runtime")]
+type Erased = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+
+/// The one place a [`Format`] becomes a formatter. Separate from
+/// `install` so tests can render through it directly.
+///
+/// The caller resolves `ansi`, and passes false for a file sink: escape
+/// codes in a log file break every later grep.
+#[cfg(feature = "runtime")]
+fn fmt_layer<W>(
+    format: Format,
+    ansi: bool,
+    targets: bool,
+    thread_ids: bool,
+    line_numbers: bool,
+    writer: Option<W>,
+) -> Erased
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Clone + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+    macro_rules! sink {
+        ($l:expr) => {
+            match writer.clone() {
+                Some(w) => $l.with_writer(w).boxed(),
+                None => $l.boxed(),
+            }
+        };
+    }
+    let base = tracing_subscriber::fmt::layer()
+        .with_target(targets)
+        .with_thread_ids(thread_ids)
+        .with_line_number(line_numbers);
+    match format {
+        Format::Json => sink!(base.json()),
+        Format::Pretty => sink!(base.pretty().with_ansi(ansi)),
+        Format::Compact => sink!(base.compact().with_ansi(ansi)),
+        Format::Full => sink!(base.with_ansi(ansi)),
+    }
+}
+
 /// Builder for the tracing-subscriber config.
 ///
-/// All knobs are optional with sensible defaults. Build up the config and
-/// call [`install`](Self::install) when done.
+/// Every option has a sensible default. Set what you need, then call
+/// [`install`](Self::install).
 #[cfg(feature = "runtime")]
 pub struct Setup {
-    json: bool,
+    format: Format,
+    color: Color,
     default_filter: String,
     with_targets: bool,
     with_thread_ids: bool,
     with_line_numbers: bool,
-    /// Tee logs to a rolling file in addition to stdout. `None` =
-    /// stdout-only (the default, matches Setup::new).
+    /// Also write logs to a rolling file. `None` means stdout only.
     file_sink: Option<FileSink>,
-    /// `true` keeps the stdout layer alongside the file output. Set
-    /// to `false` via [`Setup::file_only`] when you want logs to land
-    /// in the file ONLY (e.g. headless workers, daemonized
-    /// processes).
+    /// Keep the stdout layer next to the file output. [`Setup::file_only`]
+    /// clears it.
     keep_stdout: bool,
 }
 
 #[cfg(feature = "runtime")]
 impl Setup {
-    /// New builder with defaults: pretty format, `"info,sqlx=warn"` filter,
-    /// no thread IDs, no line numbers, targets shown.
+    /// New builder with defaults: `full` format, `"info,sqlx=warn"`
+    /// filter, no thread IDs, no line numbers, targets shown.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            json: false,
+            format: Format::Full,
+            color: Color::Auto,
             default_filter: DEFAULT_FILTER.to_owned(),
             with_targets: true,
             with_thread_ids: false,
@@ -119,11 +228,25 @@ impl Setup {
         }
     }
 
-    /// Output JSON instead of pretty colored format. Recommended for
-    /// production (Loki / CloudWatch / Datadog all parse JSON).
+    /// Output JSON instead of the terminal format. Best for production,
+    /// where log aggregators parse JSON.
     #[must_use]
     pub fn json(mut self) -> Self {
-        self.json = true;
+        self.format = Format::Json;
+        self
+    }
+
+    /// Pick the output format explicitly.
+    #[must_use]
+    pub fn with_format(mut self, format: Format) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// When to colour terminal output. Defaults to [`Color::Auto`].
+    #[must_use]
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = color;
         self
     }
 
@@ -135,7 +258,8 @@ impl Setup {
         self
     }
 
-    /// Hide event targets (the module path) in pretty output.
+    /// Hide event targets (the module path) from the output. Applies to
+    /// every format.
     #[must_use]
     pub fn without_targets(mut self) -> Self {
         self.with_targets = false;
@@ -157,15 +281,13 @@ impl Setup {
         self
     }
 
-    /// Tee logs to a rolling file in `dir`/`filename_prefix.YYYY-MM-DD`
-    /// in addition to stdout. By default rotates daily; pass a
-    /// different [`Rotation`] to override. The directory is created on
-    /// first write if it doesn't exist.
+    /// Also write logs to a rolling file at
+    /// `dir`/`filename_prefix.YYYY-MM-DD`. The directory is created on
+    /// first write.
     ///
-    /// File output uses `tracing-appender`'s non-blocking writer so a
-    /// stalled disk doesn't pause request handling — events queue
-    /// in-memory and drop only under sustained extreme pressure.
-    /// Closes future-backlog item #1 ("advanced logging config").
+    /// Writes go through `tracing-appender`'s non-blocking writer, so a
+    /// slow disk does not stall request handling. Events queue in
+    /// memory and drop only under heavy sustained pressure.
     ///
     /// ```ignore
     /// use rustango::logging::{Setup, Rotation};
@@ -189,9 +311,8 @@ impl Setup {
         self
     }
 
-    /// When [`Self::with_file`] is configured, drop the stdout layer
-    /// so logs land in the rolling file ONLY. No-op when no file
-    /// sink is configured.
+    /// Drop the stdout layer so logs go only to the rolling file.
+    /// Does nothing unless [`Self::with_file`] was called.
     #[must_use]
     pub fn file_only(mut self) -> Self {
         self.keep_stdout = false;
@@ -199,10 +320,9 @@ impl Setup {
     }
 
     /// Build a `Setup` from a [`crate::config::LoggingSettings`]
-    /// section, mapping every TOML field to the matching builder
-    /// method. Unknown enum-shaped values (`format`, `file_rotation`)
-    /// fall back to the default + a `tracing::warn!` so a typo in
-    /// the TOML doesn't fail boot. Roadmap #8, v0.30.11.
+    /// section. Every TOML field maps to a builder method. An
+    /// unknown `format` or `file_rotation` value logs a warning and
+    /// falls back to the default, so a typo does not fail boot.
     ///
     /// ```ignore
     /// let settings = rustango::config::Settings::load_from_env()?;
@@ -217,18 +337,33 @@ impl Setup {
         if let Some(filter) = s.level.as_deref() {
             setup = setup.with_default_env_filter(filter);
         }
-        match s.format.as_deref() {
-            Some("json") => setup = setup.json(),
-            Some("pretty") | None => {} // default
-            Some("compact") => {}       // currently same as pretty; reserved
+        setup = match s.format.as_deref() {
+            Some("json") => setup.with_format(Format::Json),
+            Some("pretty") => setup.with_format(Format::Pretty),
+            Some("compact") => setup.with_format(Format::Compact),
+            Some("full") | None => setup.with_format(Format::Full),
             Some(other) => {
                 tracing::warn!(
                     target: "rustango::logging",
                     format = other,
-                    "unknown logging format; falling back to pretty"
+                    "unknown logging format; falling back to full"
                 );
+                setup.with_format(Format::Full)
             }
-        }
+        };
+        setup = match s.color.as_deref() {
+            Some("always") => setup.with_color(Color::Always),
+            Some("never") => setup.with_color(Color::Never),
+            Some("auto") | None => setup.with_color(Color::Auto),
+            Some(other) => {
+                tracing::warn!(
+                    target: "rustango::logging",
+                    color = other,
+                    "unknown logging color mode; falling back to auto"
+                );
+                setup.with_color(Color::Auto)
+            }
+        };
         if matches!(s.with_thread_ids, Some(true)) {
             setup = setup.with_thread_ids();
         }
@@ -262,43 +397,40 @@ impl Setup {
         setup
     }
 
-    /// Apply the config. Uses `try_init` under the hood — duplicate calls
-    /// are silently ignored. When [`Self::with_file`] is configured,
-    /// returns the `tracing_appender::WorkerGuard` that flushes
-    /// pending writes on drop — keep it alive for the lifetime of the
-    /// process (typically by stashing in a `static` or `OnceLock`).
-    /// `None` is returned when no file sink is configured.
+    /// Apply the config. Uses `try_init`, so a duplicate call is
+    /// ignored.
+    ///
+    /// With [`Self::with_file`], returns a `WorkerGuard` that flushes
+    /// pending writes when dropped. Keep it alive for the whole
+    /// process. Returns `None` when there is no file sink.
     #[must_use = "the returned WorkerGuard must outlive the process so file writes flush"]
     pub fn install(self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
         let env_filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(&self.default_filter));
 
+        // Colour is a stdout-only decision, resolved once so every
+        // branch agrees and `Auto` asks about the terminal once.
+        let ansi = self.format != Format::Json && self.color.should_colour();
+
         let Some(file_sink) = self.file_sink else {
-            // No file sink — keep the prior fmt::init path so the
-            // single-output story is unchanged for existing callers.
-            if self.json {
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .json()
-                    .with_target(self.with_targets)
-                    .with_thread_ids(self.with_thread_ids)
-                    .with_line_number(self.with_line_numbers)
-                    .try_init();
-            } else {
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .with_target(self.with_targets)
-                    .with_thread_ids(self.with_thread_ids)
-                    .with_line_number(self.with_line_numbers)
-                    .try_init();
-            }
+            // Stdout only: the simple `fmt::init` path.
+            let b = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_target(self.with_targets)
+                .with_thread_ids(self.with_thread_ids)
+                .with_line_number(self.with_line_numbers);
+            let outcome = match self.format {
+                Format::Json => b.json().try_init(),
+                Format::Pretty => b.pretty().with_ansi(ansi).try_init(),
+                Format::Compact => b.compact().with_ansi(ansi).try_init(),
+                Format::Full => b.with_ansi(ansi).try_init(),
+            };
+            warn_if_already_installed(&outcome);
             return None;
         };
 
-        // File sink + optional stdout: compose two `fmt::Layer`s
-        // through `tracing_subscriber::registry()`. Each layer gets
-        // its own writer (stdout vs the rolling file), but they
-        // share the env filter.
+        // File sink plus optional stdout: two `fmt::Layer`s on one
+        // registry. Each gets its own writer; they share the filter.
         let appender = tracing_appender::rolling::RollingFileAppender::new(
             file_sink.rotation.to_appender(),
             file_sink.dir,
@@ -306,51 +438,61 @@ impl Setup {
         );
         let (file_writer, guard) = tracing_appender::non_blocking(appender);
 
-        // Build the layers and `try_init` the registry. Two arms:
-        // one for json, one for pretty — couldn't share a generic
-        // because `Layer` types differ when format toggles.
-        if self.json {
-            let file_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_target(self.with_targets)
-                .with_thread_ids(self.with_thread_ids)
-                .with_line_number(self.with_line_numbers)
-                .with_writer(file_writer);
-            let registry = tracing_subscriber::registry()
-                .with(env_filter)
-                .with(file_layer);
-            if self.keep_stdout {
-                let stdout_layer = tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_target(self.with_targets)
-                    .with_thread_ids(self.with_thread_ids)
-                    .with_line_number(self.with_line_numbers);
-                let _ = registry.with(stdout_layer).try_init();
-            } else {
-                let _ = registry.try_init();
-            }
-        } else {
-            let file_layer = tracing_subscriber::fmt::layer()
-                .with_target(self.with_targets)
-                .with_thread_ids(self.with_thread_ids)
-                .with_line_number(self.with_line_numbers)
-                .with_writer(file_writer)
-                .with_ansi(false);
-            let registry = tracing_subscriber::registry()
-                .with(env_filter)
-                .with(file_layer);
-            if self.keep_stdout {
-                let stdout_layer = tracing_subscriber::fmt::layer()
-                    .with_target(self.with_targets)
-                    .with_thread_ids(self.with_thread_ids)
-                    .with_line_number(self.with_line_numbers);
-                let _ = registry.with(stdout_layer).try_init();
-            } else {
-                let _ = registry.try_init();
-            }
+        // Each format is a different `Layer` type, so the layers are
+        // boxed and collected: `Vec<Box<dyn Layer<S>>>` is itself a
+        // `Layer<S>`. The file layer always gets `ansi = false`;
+        // escape codes in a log file break every later grep.
+        let build = |writer: Option<tracing_appender::non_blocking::NonBlocking>| -> Erased {
+            let to_file = writer.is_some();
+            fmt_layer(
+                self.format,
+                ansi && !to_file,
+                self.with_targets,
+                self.with_thread_ids,
+                self.with_line_numbers,
+                writer,
+            )
+        };
+
+        let mut layers: Vec<Erased> = vec![build(Some(file_writer))];
+        if self.keep_stdout {
+            layers.push(build(None));
+        }
+        let outcome = tracing_subscriber::registry()
+            .with(layers)
+            .with(env_filter)
+            .try_init();
+        if warn_if_already_installed(&outcome) {
+            // Returning the guard would keep a writer alive for a file
+            // nothing is routed to, which looks like a working sink.
+            return None;
         }
         Some(guard)
     }
+}
+
+/// Warn when a subscriber was already installed, and return `true`
+/// in that case.
+///
+/// An `Err` from `try_init` means every setting just assembled was
+/// dropped and the first subscriber stays. The usual cause is
+/// `#[rustango::main]`, so the message names its opt-out. Staying
+/// quiet here is how `format = "json"` silently stays plain text.
+#[cfg(feature = "runtime")]
+fn warn_if_already_installed<E: std::fmt::Display>(outcome: &Result<(), E>) -> bool {
+    let Err(e) = outcome else {
+        return false;
+    };
+    // The installed subscriber may filter this out, so also print to
+    // stderr. The point is that it is not silent.
+    let msg = format!(
+        "[logging] settings ignored: a tracing subscriber is already installed ({e}). \
+         If this is `#[rustango::main]`, use `#[rustango::main(logging = false)]` \
+         so your own setup installs first."
+    );
+    tracing::warn!(target: "rustango::logging", "{msg}");
+    eprintln!("warning: {msg}");
+    true
 }
 
 #[cfg(feature = "runtime")]
@@ -370,8 +512,8 @@ pub fn should_use_json_for_env() -> bool {
     )
 }
 
-/// One-call setup that picks the right format based on `RUSTANGO_ENV`:
-/// JSON in prod, pretty in dev. Stdout-only; for file output use
+/// One-call setup that picks the format from `RUSTANGO_ENV`: JSON in
+/// prod, `full` in dev. Stdout only; for a file use
 /// [`Setup::with_file`].
 #[cfg(feature = "runtime")]
 pub fn setup_for_env() {
@@ -385,16 +527,17 @@ pub fn setup_for_env() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| Mutex::new(()))
+    /// The suite-wide env lock, shared with `error` and
+    /// `template_debug`. Lib tests share one process, so a private
+    /// mutex here would not serialize against those modules.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::error::test_env::lock()
     }
 
     #[test]
     fn should_use_json_for_prod_env() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "prod");
         assert!(should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "production");
@@ -403,8 +546,8 @@ mod tests {
     }
 
     #[test]
-    fn should_use_pretty_for_other_envs() {
-        let _g = env_lock().lock().unwrap();
+    fn should_not_use_json_for_other_envs() {
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "local");
         assert!(!should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "staging");
@@ -413,8 +556,8 @@ mod tests {
     }
 
     #[test]
-    fn should_use_pretty_when_unset() {
-        let _g = env_lock().lock().unwrap();
+    fn should_not_use_json_when_unset() {
+        let _g = env_lock();
         std::env::remove_var("RUSTANGO_ENV");
         assert!(!should_use_json_for_env());
     }
@@ -423,7 +566,72 @@ mod tests {
     #[test]
     fn builder_sets_json_flag() {
         let s = Setup::new().json();
-        assert!(s.json);
+        assert_eq!(s.format, Format::Json);
+    }
+
+    /// Every documented format value maps to its own `Format`. That the
+    /// output really differs is checked by the `rendered` module below.
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn every_format_value_maps_to_a_distinct_formatter() {
+        let of = |v: Option<&str>| {
+            Setup::from_settings(&crate::config::LoggingSettings {
+                format: v.map(str::to_owned),
+                ..Default::default()
+            })
+            .format
+        };
+        assert_eq!(of(Some("json")), Format::Json);
+        assert_eq!(of(Some("pretty")), Format::Pretty);
+        assert_eq!(of(Some("compact")), Format::Compact);
+        assert_eq!(of(Some("full")), Format::Full);
+        assert_eq!(of(None), Format::Full, "absent means full");
+        assert_eq!(of(Some("nonsense")), Format::Full, "unknown falls back");
+
+        // No `assert_ne!` loop over the variants: on distinct fieldless
+        // variants that is a tautology. The mapping that matters is
+        // format -> formatter, which the `rendered` module checks by
+        // capturing real output.
+    }
+
+    /// Colour: `never` off, `always` on, `auto` decided by the terminal.
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn color_setting_maps_and_no_color_suppresses() {
+        let of = |v: Option<&str>| {
+            Setup::from_settings(&crate::config::LoggingSettings {
+                color: v.map(str::to_owned),
+                ..Default::default()
+            })
+            .color
+        };
+        assert_eq!(of(Some("always")), Color::Always);
+        assert_eq!(of(Some("never")), Color::Never);
+        assert_eq!(of(Some("auto")), Color::Auto);
+        assert_eq!(of(None), Color::Auto);
+        assert_eq!(of(Some("nonsense")), Color::Auto);
+
+        assert!(Color::Always.should_colour());
+        assert!(!Color::Never.should_colour());
+
+        // `Auto` is not asserted against a fixed value: it asks whether
+        // fd 1 is a terminal, which differs between a local run and CI.
+        // Only the `NO_COLOR` contract is deterministic.
+        let _guard = env_lock();
+        let previous = std::env::var_os("NO_COLOR");
+        std::env::set_var("NO_COLOR", "1");
+        assert!(
+            !Color::Auto.should_colour(),
+            "NO_COLOR=1 must suppress colour regardless of tty state"
+        );
+        std::env::set_var("NO_COLOR", "");
+        // An empty NO_COLOR does not mean "no colour", so Auto falls
+        // through to the tty question. Not asserted, see above.
+        let _ = Color::Auto.should_colour();
+        match previous {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
     }
 
     #[cfg(feature = "runtime")]
@@ -467,17 +675,16 @@ mod tests {
         assert!(!s.keep_stdout);
     }
 
-    // ---- from_settings (roadmap #8, v0.30.11) ----
+    // ---- from_settings ----
 
-    /// Empty `LoggingSettings` (every field `None`) builds a Setup
-    /// matching `Setup::new()` — the safer default that doesn't
-    /// surprise existing projects when they add an empty
-    /// `[logging]` section.
+    /// Empty `LoggingSettings` builds the same Setup as `Setup::new()`,
+    /// so adding an empty `[logging]` section changes nothing.
     #[cfg(all(feature = "runtime", feature = "config"))]
     #[test]
     fn from_settings_empty_matches_new_defaults() {
         let s = Setup::from_settings(&crate::config::LoggingSettings::default());
-        assert!(!s.json);
+        assert_eq!(s.format, Format::Full);
+        assert_eq!(s.color, Color::Auto);
         assert_eq!(s.default_filter, DEFAULT_FILTER);
         assert!(!s.with_thread_ids);
         assert!(!s.with_line_numbers);
@@ -496,6 +703,7 @@ mod tests {
         let cfg = crate::config::LoggingSettings {
             level: Some("debug,sqlx=info".into()),
             format: Some("json".into()),
+            color: None,
             with_thread_ids: Some(true),
             with_line_numbers: Some(true),
             without_targets: Some(true),
@@ -503,19 +711,18 @@ mod tests {
             file_prefix: None,
             file_rotation: None,
             file_only: None,
+            access_log: None,
         };
         let s = Setup::from_settings(&cfg);
-        assert!(s.json);
+        assert_eq!(s.format, Format::Json);
         assert_eq!(s.default_filter, "debug,sqlx=info");
         assert!(s.with_thread_ids);
         assert!(s.with_line_numbers);
         assert!(!s.with_targets);
     }
 
-    /// `file_dir` set + every rotation variant maps to the right
-    /// `Rotation`. Unknown values fall back to `Daily` (with a
-    /// `tracing::warn!` we don't easily intercept here, but the
-    /// effective behavior is right).
+    /// Every rotation value maps to the right `Rotation`; unknown ones
+    /// fall back to `Daily`.
     #[cfg(all(feature = "runtime", feature = "config"))]
     #[test]
     fn from_settings_file_sink_resolves_rotation() {
@@ -546,14 +753,12 @@ mod tests {
         }
     }
 
-    /// `file_only = true` only drops stdout when `file_dir` is also
-    /// set — `file_only` without a sink is a no-op (the boolean is
-    /// ignored, no panic).
+    /// `file_only = true` drops stdout only when `file_dir` is also
+    /// set. Without a sink it does nothing.
     #[cfg(all(feature = "runtime", feature = "config"))]
     #[test]
     fn from_settings_file_only_requires_file_dir() {
-        // file_only=true but no file_dir → no sink, stdout kept
-        // (file_only is a no-op without a sink to opt out of).
+        // file_only=true but no file_dir → no sink, stdout kept.
         let mut cfg = crate::config::LoggingSettings::default();
         cfg.file_only = Some(true);
         let s = Setup::from_settings(&cfg);
@@ -567,5 +772,152 @@ mod tests {
         let s = Setup::from_settings(&cfg);
         assert!(s.file_sink.is_some());
         assert!(!s.keep_stdout);
+    }
+}
+
+/// Rendered-output tests for the format mapping.
+///
+/// The enum-level tests cannot see two variants reaching the same
+/// formatter. These render a real event through [`fmt_layer`], the
+/// function `install` uses, and compare the bytes.
+#[cfg(all(test, feature = "runtime"))]
+mod rendered {
+    use super::*;
+
+    /// Emit one event through `fmt_layer` and return what was written.
+    fn render(format: Format, ansi: bool) -> String {
+        let buf = crate::testkit::CaptureWriter::default();
+        let layer = fmt_layer(format, ansi, true, false, false, Some(buf.clone()));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            // Inside a span and with a target: `Compact` differs from
+            // `Full` only in how it renders those, so a bare event
+            // cannot tell them apart.
+            let span = tracing::info_span!("req", route = "/x");
+            let _g = span.enter();
+            tracing::info!(target: "demo::target", answer = 42, "hello");
+        });
+        buf.contents()
+    }
+
+    /// Strip the RFC3339 timestamp, which differs on every render.
+    /// Without this, `assert_ne!` between two renders just compares
+    /// two clocks and passes whatever the formatters did.
+    fn shape(s: &str) -> String {
+        // Strip the timestamp wherever it appears, not only as a whole
+        // whitespace-separated token: JSON renders as one blob with no
+        // spaces, so a token filter would miss its clock reading.
+        let mut out = String::with_capacity(s.len());
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            // `2026-09-16T19:03:15.520524Z` — date, `T`, time, `Z`.
+            let looks_like_ts = b[i] == b'2'
+                && i + 20 <= b.len()
+                && b[i + 1].is_ascii_digit()
+                && b[i + 4] == b'-'
+                && b[i + 7] == b'-'
+                && b[i + 10] == b'T';
+            if looks_like_ts {
+                let mut j = i + 10;
+                while j < b.len() && b[j] != b'Z' {
+                    j += 1;
+                }
+                if j < b.len() {
+                    out.push_str("<ts>");
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out.push(b[i] as char);
+            i += 1;
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// `shape()` must really remove the clock.
+    ///
+    /// The control for `format_variants_render_differently`: two
+    /// renders of the *same* format differ only by timestamp, so they
+    /// must compare equal after `shape()`. Otherwise that test's
+    /// `assert_ne!` pairs pass because of the clock.
+    #[test]
+    fn shape_removes_the_timestamp_for_every_format() {
+        for f in [Format::Full, Format::Pretty, Format::Compact, Format::Json] {
+            let a = render(f, false);
+            let b = render(f, false);
+            assert_ne!(a, b, "{f:?}: two renders should differ by timestamp");
+            assert_eq!(
+                shape(&a),
+                shape(&b),
+                "{f:?}: shape() left a clock reading in, so every comparison \
+                 using it can pass for the wrong reason:\n{a}\n{b}"
+            );
+        }
+    }
+
+    /// No two formats render the same shape. Point `Format::Compact`
+    /// at the `Full` layer and only this test fails.
+    #[test]
+    fn format_variants_render_differently() {
+        let all = [
+            (Format::Full, render(Format::Full, false)),
+            (Format::Pretty, render(Format::Pretty, false)),
+            (Format::Compact, render(Format::Compact, false)),
+            (Format::Json, render(Format::Json, false)),
+        ];
+        for (f, out) in &all {
+            assert!(!out.is_empty(), "{f:?} rendered nothing");
+            assert!(out.contains("hello"), "{f:?} lost the message: {out:?}");
+        }
+        for (i, (fa, a)) in all.iter().enumerate() {
+            for (fb, b) in &all[i + 1..] {
+                assert_ne!(
+                    shape(a),
+                    shape(b),
+                    "{fa:?} and {fb:?} render identically once the timestamp is \
+                     removed:\n{a}"
+                );
+            }
+        }
+    }
+
+    /// The shapes are what their names claim.
+    #[test]
+    fn each_format_has_its_documented_shape() {
+        let json = render(Format::Json, false);
+        assert!(
+            json.trim_start().starts_with('{') && json.contains("\"answer\":42"),
+            "json should be one object per event: {json}"
+        );
+        // Pretty puts fields on their own lines; Full and Compact do not.
+        assert!(
+            render(Format::Pretty, false).lines().count()
+                > render(Format::Full, false).lines().count(),
+            "pretty should be multi-line where full is not"
+        );
+    }
+
+    /// Colour is observed, not just configured. Without this, the
+    /// `ansi` feature could be left off and every test still pass.
+    #[test]
+    fn ansi_produces_escape_codes_and_its_absence_does_not() {
+        const ESC: char = '\u{1b}';
+        for f in [Format::Full, Format::Pretty, Format::Compact] {
+            assert!(
+                render(f, true).contains(ESC),
+                "{f:?} with ansi=true emitted no escape codes — the `ansi` feature \
+                 is not compiled in"
+            );
+            assert!(
+                !render(f, false).contains(ESC),
+                "{f:?} with ansi=false still emitted escape codes"
+            );
+        }
+        assert!(
+            !render(Format::Json, true).contains(ESC),
+            "JSON must never be coloured — escape codes inside a JSON string break \
+             every consumer"
+        );
     }
 }

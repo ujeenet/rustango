@@ -56,6 +56,8 @@ async fn ready_503_when_a_check_fails() {
         .skip_db_probe()
         .check("ok", || async { Ok(()) })
         .check("payments", || async { Err("gateway timeout".into()) })
+        // The error text is private by default since #1840.
+        .show_errors()
         .into_router();
     let r = TestClient::new(app).get("/ready").send().await;
     assert_eq!(r.status, 503);

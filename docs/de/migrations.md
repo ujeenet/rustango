@@ -1,6 +1,6 @@
 # Migrationen & die Migrations-Engine
 
-**Rustango** liefert eine Migrations-Engine im Django-Stil: Sie bearbeiten Ihre Modelle,
+**Rustango** liefert eine modellgetriebene Migrations-Engine: Sie bearbeiten Ihre Modelle,
 führen `makemigrations` aus, um eine versionierte JSON-Datei zu generieren, die die
 Schemaänderung beschreibt, und `migrate`, um sie anzuwenden. Seit **0.48** migriert das Framework
 sogar **seine eigenen** `rustango_*`-Tabellen über dieselbe Engine —
@@ -77,7 +77,7 @@ automatisch und hängt ganz davon ab, was bereits vorhanden ist:
 |---|---|
 | frisch — keine Historie, keine Tabellen | führt den Squash tatsächlich aus |
 | jede ersetzte Migration ist im Ledger | verzeichnet ihn, setzt Tombstones auf die Vorgänger, **kein DDL** |
-| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet ihn, **kein DDL** (Djangos kettenübergreifendes `--fake-initial`) |
+| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet ihn, **kein DDL** — das Ledger wird nachträglich an die vorhandenen Tabellen angeglichen |
 | nur *einige* ersetzte Zeilen / Tabellen vorhanden | **verweigert** — benennt, was fehlt, weist Sie an, von Hand aufzulösen |
 
 Der **partielle** Fall ist absichtlich ein harter Fehler: keine automatische Wahl ist

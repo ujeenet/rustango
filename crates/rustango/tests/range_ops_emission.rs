@@ -154,7 +154,7 @@ fn sqlite_rejects_range_op_with_clean_error() {
     ));
 }
 
-// ---------- Django parser routes ----------
+// ---------- string-lookup parser routes ----------
 
 #[test]
 fn parser_routes_range_overlap_from_string() {

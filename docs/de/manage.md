@@ -1,6 +1,6 @@
 # `manage`-CLI-Referenz
 
-Dies ist **Rustango**s Kommandozeilenwerkzeug, wie Djangos `manage.py`, Laravels
+Dies ist **Rustango**s Kommandozeilenwerkzeug, vergleichbar mit Laravels
 `artisan` oder Rails' `rails`-Befehl. In einem via `cargo rustango new`
 generierten Projekt führt ein einziges Binary jeden Befehl aus („Verb"):
 
@@ -10,7 +10,7 @@ cargo run -- migrate               # any other verb
 cargo run -- --help                # full subcommand list
 ```
 
-[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](../img/manage.png)](../img/manage.png)
+[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands](../img/manage.png)](../img/manage.png)
 
 > **Quelle:** `rustango::manage` (`Cli`, der Verb-Dispatcher) — hinter dem
 > `manage`-Feature (standardmäßig aktiviert).
@@ -61,6 +61,7 @@ Nutzungshilfe aus.
 - [Tenancy-Befehle](#tenancy-befehle)
 - [Eigene Unterbefehle](#eigene-unterbefehle)
 - [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
+- [Alle Verben](#alle-verben)
 
 ---
 
@@ -68,8 +69,8 @@ Nutzungshilfe aus.
 
 ### `makemigrations [name]`
 
-Generiert eine Migrationsdatei aus Änderungen an Ihren Modellen — wie Djangos
-`makemigrations`. Es vergleicht Ihre registrierten Modelle mit dem letzten
+Generiert eine Migrationsdatei aus Änderungen an Ihren Modellen.
+Es vergleicht Ihre registrierten Modelle mit dem letzten
 gespeicherten Schema-Snapshot in `migrations/` und schreibt eine neue
 JSON-Datei mit allen Änderungen.
 
@@ -128,7 +129,7 @@ bereits vorhandenen Constraint.
 ### `makemigrations --empty <name>`
 
 Erstellt eine leere Migration (keine `forward`-Operationen), die Sie von Hand
-ausfüllen — wie Djangos `makemigrations --empty`. Verwenden Sie sie, wenn Sie
+ausfüllen. Verwenden Sie sie, wenn Sie
 Datenoperationen oder Umbenennungsoperationen schreiben müssen, die der
 Auto-Detektor nicht generieren kann. Bearbeiten Sie das resultierende JSON
 selbst.
@@ -143,8 +144,8 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat —
-dieselbe Idee wie Djangos `makemigrations --merge` (Issue #346). Das passiert,
+Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat
+(Issue #346). Das passiert,
 wenn zwei Personen jeweils `makemigrations` auf ihrem eigenen Feature-Branch
 ausführen, sodass beide neuen Dateien auf denselben Elternknoten zeigen.
 Nachdem beide Branches gemergt sind, hat die Historie zwei „Blätter"
@@ -166,15 +167,14 @@ cargo run -- makemigrations --merge
 - **Bereits eine einzelne Kette** → gibt `no merge needed` aus und beendet sich
   sauber. Sicher auf einer gesunden Historie auszuführen.
 - **Wirklich getrennte Historien** (keine Branch-Kollision) → bricht mit einem
-  Fehler ab, statt einen Elternknoten zu erfinden. Dieselbe Absicherung, die
-  Django verwendet.
+  Fehler ab, statt einen Elternknoten zu erfinden.
 - **Nicht kombinierbar** mit `--empty`, `--app`, `--scope` oder einem
   positionalen Namen.
 
 ### `migrate`
 
-Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — wie
-Djangos `migrate` oder Laravels `php artisan migrate`. Dies ist der Befehl, den
+Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — das
+Gegenstück zu Laravels `php artisan migrate`. Dies ist der Befehl, den
 Sie nach `makemigrations` ausführen, um Ihr Schema tatsächlich zu ändern.
 
 ```bash
@@ -195,8 +195,8 @@ Sie [`migrate-registry`](#migrate-registry) /
 
 ### `migrate <target>`
 
-Migriert zu einem bestimmten Punkt in der Historie, vorwärts oder rückwärts —
-wie Djangos `migrate <app> <name>`. Nennen Sie eine Migration, um zu ihr zu
+Migriert zu einem bestimmten Punkt in der Historie, vorwärts oder rückwärts.
+Nennen Sie eine Migration, um zu ihr zu
 wechseln; das spezielle Ziel `zero` macht alles rückgängig.
 
 ```bash
@@ -233,7 +233,7 @@ Zieldatenbank bereits enthält. Er entscheidet automatisch:
 |---|---|
 | frisch — keine Historie, keine Tabellen | der Squash läuft echt |
 | jede ersetzte Migration steht im Ledger | verzeichnet, Vorgänger als erledigt markiert, **kein DDL** |
-| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet, **kein DDL** (Djangos `--fake-initial`) |
+| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet, **kein DDL** — das Ledger wird nachträglich an die vorhandenen Tabellen angeglichen |
 | nur *einige* ersetzte Zeilen / Tabellen vorhanden | **verweigert**, benennt, was fehlt |
 
 Der partielle Fall ist bewusst ein harter Fehler: keine automatische Wahl ist
@@ -288,8 +288,8 @@ cargo run -- downgrade 3                # three steps
 
 ### `showmigrations` / `status`
 
-Listet jede Migration und ob sie angewendet wurde — wie Djangos
-`showmigrations`. `[X]` bedeutet angewendet, `[ ]` bedeutet noch ausstehend.
+Listet jede Migration und ob sie angewendet wurde. `[X]` bedeutet angewendet,
+`[ ]` bedeutet noch ausstehend.
 
 ```bash
 cargo run -- showmigrations
@@ -313,7 +313,7 @@ Ausgabe:
 Fügt einer Migration einen Roh-SQL-Datenschritt hinzu, ohne das JSON von Hand
 zu bearbeiten. Greifen Sie dazu, wenn Sie vorhandene Zeilen transformieren
 müssen — eine Spalte nachfüllen, Daten bereinigen — als Teil einer Migration.
-Es ist das Äquivalent zu Djangos `RunSQL`-Datenmigration, für Sie von der
+Das Ergebnis ist eine Datenmigration, die rohes SQL ausführt — für Sie von der
 Kommandozeile aus generiert.
 
 ```bash
@@ -350,8 +350,8 @@ markiert — jeder Versuch, ihn zurückzurollen, scheitert sofort.
 
 ### `cargo rustango new <name>` *(separates Binary)*
 
-Erstellt ein brandneues **Rustango**-Projekt — wie `django-admin startproject`
-oder `laravel new`. Dies ist ein separates Werkzeug, installieren Sie es also
+Erstellt ein brandneues **Rustango**-Projekt — wie `laravel new` oder
+`rails new`. Dies ist ein separates Werkzeug, installieren Sie es also
 zuerst mit `cargo install cargo-rustango`. Wählen Sie aus drei Vorlagen:
 
 ```bash
@@ -369,11 +369,25 @@ Schreibt:
   .gitignore
   rust-toolchain.toml
   docker-compose.yml
+  Dockerfile                                (deploy image — multi-stage, release, non-root)
+  Dockerfile.dev                            (cargo-watch image docker-compose.yml builds)
+  .dockerignore
   README.md
+  config/default.toml                       (shared knobs)
+  config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
   system/migrations/                        (tenant template — framework tables, generated)
-  src/{main,models,views,urls}.rs
+  src/{lib,main,models,views,urls}.rs
 ```
+
+Die `config/`-Ebene ist die Settings-Quelle: `default.toml` enthält, was alle
+Umgebungen teilen, und je eine `<env>_settings.toml` überschreibt sie, zur
+Laufzeit ausgewählt über **`RUSTANGO_ENV`** (Standard `dev`) — ein frisches
+`cargo run` läuft also ohne jede TOML-Änderung. Zusammen tragen sie das
+`[database]`-Pool-Tuning, `[admin]`, `[mcp]` und die `secure_cookies`-Policy —
+und sie sind es, was das Settings-Audit von
+[`check --deploy`](#check---deploy) liest. Die Inhalte pro Ebene stehen unter
+[Scaffolding](scaffolding.md).
 
 Die Tenant-Vorlage liefert einen **leeren** `system/migrations/`-Ordner. Die
 eigenen Tabellen des Frameworks (`rustango_orgs`, `rustango_users`,
@@ -384,8 +398,8 @@ Bootstrap-JSON. Siehe [`migrate`](#migrate) /
 
 ### `startapp <name> [flags]`
 
-Erstellt eine neue App (ein Feature-Modul) unter `src/<name>/` — genau wie
-Djangos `startapp`. Verwenden Sie es, um Modelle, Views und URLs für einen Teil
+Erstellt eine neue App (ein Feature-Modul) unter `src/<name>/`.
+Verwenden Sie es, um Modelle, Views und URLs für einen Teil
 Ihres Projekts gruppiert zu halten.
 
 ```bash
@@ -423,17 +437,24 @@ schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 - Überschreibt keine bestehende Datei.
 - Erinnert Sie daran, `pub mod X;` zu Ihrer `lib.rs` hinzuzufügen.
 
-### `make:viewset <Name> [--model <Model>]`
+### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Generiert eine `#[derive(ViewSet)]`-Struktur — einen REST-Endpunkt für ein
-Modell, wie ein Django-REST-Framework-ViewSet. Die Feldlisten kommen für Sie
-vorgestubbt zum Ausfüllen.
+Generiert eine vollständige CRUD-REST-Ressource für ein Modell.
+
+**Zwei Vorlagen, für Sie ausgewählt.** Das `#[derive(ViewSet)]` mit einem Pool
+fängt einen einzigen Pool beim Einbinden ein, was für ein Tenancy-Projekt falsch
+ist — der Generator wählt daher zwischen zwei Formen. Auflösungsreihenfolge:
+`--no-tenant` gewinnt, dann `--tenant`, dann die **Auto-Erkennung** — `tenancy`
+in der Feature-Liste der `rustango`-Abhängigkeit in `Cargo.toml` — und sonst die
+Pool-Vorlage. Wenn die Auto-Erkennung den Tenant-Modus wählt, sagt sie das auf
+stdout und nennt `--no-tenant` als Override.
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post --no-tenant   # Pool-Form erzwingen
 ```
 
-Generierte `src/post_view_set.rs`:
+Pool-Vorlage — generierte `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
@@ -443,10 +464,25 @@ pub struct PostViewSet;
 
 Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
+Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
+`pub fn router() -> Router<()>`, gebaut aus
+`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, mit der ganzen
+Builder-Kette (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
+vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
+jeden Tenant.
+
+Einbinden mit: `.merge(crate::viewsets::post::router())` — **nicht** mit der
+`PostViewSet::router(path, pool)`-Zeile oben.
+
+`--crate <path>` benennt die Framework-Crate in den generierten `use`-Zeilen um,
+für Projekte, die `rustango` unter einem anderen Namen importieren.
+
 ### `make:serializer <Name> [--model <Model>]`
 
 Generiert eine `#[derive(Serializer)]`-Struktur — steuert, wie ein Modell nach
-und von JSON konvertiert wird (wie ein DRF-Serializer).
+und von JSON konvertiert wird.
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -455,7 +491,7 @@ cargo run -- make:serializer PostSerializer --model Post
 ### `make:form <Name>`
 
 Generiert eine `#[derive(Form)]`-Struktur zum Validieren und Verarbeiten von
-Formular-Eingaben — wie ein Django-`Form`.
+Formular-Eingaben.
 
 ```bash
 cargo run -- make:form ContactForm
@@ -463,12 +499,42 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Generiert ein Hintergrund-Job-Gerüst (Arbeit, die außerhalb des Requests läuft,
-wie eine Celery-Task oder ein Laravel-Job), mit einem auskommentierten Beispiel,
-wie man es einplant.
+Generiert einen `jobs::Job` — eine Payload-Struktur plus die Trait-Implementierung
+mit `NAME`, `MAX_ATTEMPTS` und `async fn run(&self)`. Das ist Arbeit, die Sie aus
+einem Handler in die Queue stellen und ein Worker später ausführt.
+
+`run` erhält **nur die Payload**: keinen Pool, keinen Tenant, keinen
+Request-Kontext. Tragen Sie alles Nötige in den Feldern.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:scheduled <Name>`
+
+Generiert eine Aufgabe mit festem Intervall für `scheduler::Scheduler` — die Form,
+die `make:job` emittierte, bevor dieser einen echten Job erzeugte.
+
+```bash
+cargo run -- make:scheduled NightlySweep
+```
+
+### `make:worker <Name>`
+
+Generiert ein eigenständiges Worker-Binary für `src/bin/` — ein Prozess, der die
+Job-Queue abarbeitet und kein HTTP bedient. Betreiben Sie ihn neben dem
+Web-Prozess oder als eigenen Container.
+
+Die Form ist kurz und lässt sich so falsch schreiben, dass es erst in Produktion
+auffällt: Ein Worker, der auf `tokio::signal::ctrl_c()` wartet, behandelt SIGINT,
+aber **nicht** SIGTERM — und genau das senden `docker stop`, Kubernetes und
+systemd. Das Abarbeiten läuft dann nie, der Container wird nach seiner Schonfrist
+getötet, und laufende Jobs gehen verloren, ohne dass etwas protokolliert wird.
+Der generierte Worker wartet auf `shutdown::shutdown_signal()`, das beide
+Signale annimmt.
+
+```bash
+cargo run -- make:worker JobsWorker
 ```
 
 ### `make:notification <Name>`
@@ -531,6 +597,10 @@ cargo run -- db:dump > backups/before-migrate.sql    # stdout → file
 cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
+Die Statuszeile `running: pg_dump …` geht auf **stderr** und bleibt damit
+aus der Umleitung und aus einer Pipe heraus. Bis [#1404](https://github.com/ujeenet/rustango/issues/1404)
+ging sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
+
 ### `db:restore <path> [--clean]`
 
 Lädt eine Dump-Datei zurück in Ihre Datenbank — das Gegenstück zu `db:dump`. Es
@@ -556,7 +626,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.58.0
+rustango 0.59.18
 ```
 
 ### `about`
@@ -568,7 +638,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.58.0
+  version:        0.59.18
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -578,21 +648,24 @@ rustango
 
 ### `check [--deploy]`
 
-Führt Gesundheitsprüfungen an Ihrem Projekt durch — wie Djangos `check`. Fügen
-Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu, genau wie
-Djangos `check --deploy` funktioniert.
+Führt Gesundheitsprüfungen an Ihrem Projekt durch. Fügen
+Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 
 **Immer aktive Prüfungen:**
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
-- Migrationsanzahl vs. Modellanzahl
+- Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
 - `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Byte (der HMAC-Schlüssel für
   Cookies + JWTs; `SECRET_KEY` wird vom Framework nie gelesen)
 - `DATABASE_URL` gesetzt
-- `RUSTANGO_APEX_DOMAIN` gesetzt (Tenancy-Projekte)
+- `RUSTANGO_APEX_DOMAIN` gesetzt — die Warnung erscheint bei **jedem** Projekt, wenn unset oder `localhost`, und sagt das auch; Single-Tenant-Projekte können sie ignorieren
+- `DATABASE_URL` zeigt auf `localhost` / `127.0.0.1` (Warnung — in Produktion meist ein Managed-Hostname)
+- `RUSTANGO_BIND` beginnt mit `127.0.0.1` (Warnung — nur Loopback nimmt keinen externen Traffic an)
+- Ein Settings-Tier-Audit über dein TOML, das Dev-Defaults in einer Prod-Stufe meldet (braucht das Feature `config`)
+- `Meta.required_db_vendor` / `required_db_features` jedes registrierten Models, geprüft gegen den tatsächlich verbundenen Dialekt
 
 ```bash
 $ cargo run -- check --deploy
@@ -684,7 +757,7 @@ cargo run -- wizard
 handgebauten Bootstrap-Migrationen mehr. Seine eigenen Tabellen
 (`rustango_orgs`, `rustango_operators`, `rustango_users`, Rollen/Berechtigungen,
 …) werden aus den kompilierten Modellen in `system/migrations/` generiert — der
-normale Django-Fluss (Modelle → `makemigrations` → `migrate`) — und von
+normale Ablauf (Modelle → `makemigrations` → `migrate`) — und von
 [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry) angewendet, die
 sie bei Bedarf generieren, falls die Dateien fehlen.
 
@@ -726,7 +799,7 @@ für sich allein brauchen.
 
 ### `runserver` / `run-server`
 
-Startet den Multi-Tenant-Webserver — Djangos `runserver`. In einem
+Startet den Multi-Tenant-Webserver. In einem
 Tenancy-Projekt ist dies dasselbe wie ein nacktes `cargo run`; die benannte Form
 existiert, damit eigene Binaries, die ihre eigenen Argumente parsen, es trotzdem
 auslösen können.
@@ -736,11 +809,20 @@ cargo run                        # implicit
 cargo run -- runserver           # explicit
 ```
 
+Bei SIGTERM nimmt er keine Verbindungen mehr an und gibt offenen Verbindungen
+`[server] shutdown_timeout_secs` (Standard 20) Zeit, dann schließt er den Rest.
+SSE und Long-Poll enden nie von selbst. Provisionierungs- und Migrationsläufe,
+die ein gestoppter Prozess über eine Stunde auf `running` ließ, werden beim
+nächsten Start als fehlgeschlagen markiert; ein Webhook-Retry mit derselben
+`event_id` läuft erneut.
+
 ### `create-tenant <slug> [options]`
 
 Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
 darauf an. Der `<slug>` ist sein kurzer Bezeichner. Sicher erneut ausführbar —
-ein erneuter Aufruf auf einem bestehenden Tenant dupliziert nichts.
+ein erneuter Aufruf auf einem
+bestehenden Slug wird vorab mit ``tenant slug `<slug>` already exists``
+abgelehnt (tenancy/provision.rs:599), bevor sonst etwas passiert.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
@@ -754,6 +836,10 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--database-url <url>` | Tenant-spezifische DB-URL (erforderlich für den database-Modus) |
 | `--host-pattern <pattern>` | Überschreibt das vom `SubdomainResolver` verwendete Host-Muster |
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
+| `--backend postgres \| mysql \| sqlite` | Treiber für einen Database-Mode-Tenant (Default: `postgres`). Wird gegen `--mode` validiert |
+| `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
+| `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
 
 ### `edit-tenant <slug> [options]`
 
@@ -785,9 +871,12 @@ Werte werden so validiert, wie `create-tenant` sie validiert: ein Host-Muster
 mit Port oder ein Pfad-Präfix, das der Resolver nie erzeugen könnte, wird
 abgelehnt statt gespeichert, um dann stillschweigend nie zu matchen.
 
-Ein Rotieren von `--database-url` verwirft den zwischengespeicherten Pool des
-Tenants, sodass die nächste Anfrage mit der neuen Zugangsinformation
-verbindet; andere Änderungen lassen warme Verbindungen unangetastet.
+Ein Rotieren von `--database-url` ändert die gespeicherte URL. Jeder Server
+wechselt binnen 30 s, wenn sein Tenant-Cache aufgefrischt wird; andere
+Änderungen lassen warme Verbindungen unangetastet. Ein Secret, das hinter
+**derselben** Referenz rotiert wird (Vault, Env-Var), ändert nichts
+Gespeichertes: Server neu starten oder den Pool des Tenants auf jedem
+Server invalidieren.
 
 ### `test-tenant-connection <url> [flags]`
 
@@ -805,7 +894,9 @@ cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
 
 Deaktiviert einen Tenant, indem `active = false` gesetzt wird. Dies ist die
 weiche, umkehrbare Option — die Daten des Tenants bleiben auf der Platte, und
-ein erneutes Ausführen von `create-tenant` bringt ihn zurück. Wenn Sie nicht
+reaktiviere ihn mit `edit-tenant <slug> --activate`.
+Ein erneutes `create-tenant` funktioniert **nicht**: die `Org`-Zeile existiert
+weiterhin, der Slug gilt also als Duplikat. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug zur Bestätigung übergeben.
 
@@ -820,12 +911,19 @@ seine Zeile aus `rustango_orgs`, ohne Rückgängig-Machen. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug übergeben. Bei Tenants im database-Modus bleibt die
 zugrunde liegende Datenbank an Ort und Stelle, es sei denn, Sie übergeben
-zusätzlich `--purge-database`.
+zusätzlich `--purge-database`. Ohne dieses Flag **verweigert** der Befehl bei
+Database-Mode-Tenants komplett — er entfernt nicht die `Org`-Zeile und lässt die
+Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
 cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode: also DROP DATABASE
 ```
+
+Bei mehreren Servern erst deaktivieren (`drop-tenant`) und 30 s warten. Ein
+Server, dessen Tenant-Cache noch einen Schema-Mode-Tenant hält, behält
+`search_path = <schema>, public`; nach dem Löschen des Schemas fallen seine
+Abfragen bis zur Cache-Auffrischung auf `public` durch.
 
 ### `list-tenants`
 
@@ -920,8 +1018,8 @@ damit ein erneut laufendes Provisioning-Skript nicht rot wird.
 
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
-Erstellt einen Benutzer innerhalb eines Tenants — ungefähr Djangos
-`createsuperuser`, aber auf einen einzelnen Tenant beschränkt.
+Erstellt einen Benutzer innerhalb eines Tenants — mit `--superuser` auch einen
+Administrator, aber immer auf einen einzelnen Tenant beschränkt.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -934,8 +1032,8 @@ Operator-Konsole.
 
 ### `create-role <tenant> <name>`
 
-Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen, wie eine
-Django-Gruppe) innerhalb eines Tenants.
+Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen) innerhalb eines
+Tenants.
 
 ```bash
 cargo run -- create-role acme editor
@@ -970,7 +1068,7 @@ cargo run -- revoke-role acme alice editor
 Gewährt eine einzelne Berechtigung. Standardmäßig ist das zweite Argument ein
 **Benutzername**, sodass die Berechtigung direkt an diesen Benutzer geht; fügen
 Sie `--role` hinzu, um sie stattdessen einer Rolle zu gewähren.
-Berechtigungs-Codenames verwenden Djangos Format `<app>.<action>_<model>`
+Berechtigungs-Codenames verwenden das Format `<app>.<action>_<model>`
 (`blog.add_post`, `blog.change_post`, …). Das Feature
 `auto_create_permissions` erstellt die vier standardmäßigen CRUD-Codenames
 automatisch für jedes Modell, das mit `#[rustango(permissions)]` markiert ist.
@@ -1068,8 +1166,7 @@ Die Operator-Konsole hat dafür ebenfalls einen Button, auf der Tenant-Liste.
 
 ## Eigenes Benutzermodell (zusätzliche Spalten auf `rustango_users`)
 
-Dies ist **Rustango**s Version von Djangos „custom user model" — wie Sie Ihre
-eigenen Felder zur Benutzertabelle hinzufügen. Der eingebaute Tenant-`User` hat
+So fügen Sie der Benutzertabelle Ihre eigenen Felder hinzu. Der eingebaute Tenant-`User` hat
 sieben feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
 `active`, `created_at`, plus eine `data`-JSONB-Spalte (ein flexibler JSON-Blob)
 für beliebige zusätzliche Metadaten pro Benutzer. **Für die meisten Apps ist
@@ -1188,8 +1285,8 @@ Server-`Builder` direkt baut, ohne über `Cli` zu gehen.
 
 ## Eigene Unterbefehle
 
-Sie können Ihre eigenen Befehle hinzufügen — **Rustango**s Interpretation von
-Djangos eigenen Management-Befehlen. Der Trick besteht darin, die Argumente
+Sie können Ihre eigenen Befehle hinzufügen und sie neben den eingebauten Verben
+ausführen. Der Trick besteht darin, die Argumente
 selbst zu inspizieren und Ihren Befehl zu behandeln, bevor Sie den Rest an
 `Cli::run` weitergeben. Zwei Wege, es zu tun:
 
@@ -1202,7 +1299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("import-csv")) {
         let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
         return my_csv_importer::run(&pool, &args[1..]).await;
     }
     rustango::manage::Cli::new().api(urls::api()).run().await
@@ -1223,7 +1320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
 
     match args.first().map(String::as_str) {
         Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
@@ -1377,7 +1474,7 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | Feld | Standard | Zweck |
 |---|---|---|
 | `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, scheitert der nächste nicht-gecachte Tenant (keine stille Verdrängung). |
-| `database_pool_max_connections` | 4 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
+| `database_pool_max_connections` | 16 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
 | `database_pool_min_connections` | 0 | Hält jederzeit N Verbindungen warm. `≥1` senkt die Latenz des ersten Requests, indem der TCP/TLS/Auth-Roundtrip beim Boot bezahlt wird. |
 | `database_pool_acquire_timeout` | 30s | Wie lange `pool.acquire()` wartet, bevor es mit `PoolTimedOut` scheitert. |
 | `database_pool_idle_timeout` | 10 min | Schließt untätige Verbindungen nach dieser Dauer. Wehrt Kappungen durch Load-Balancer / `idle_in_transaction_session_timeout` ab. |
@@ -1404,14 +1501,19 @@ als `skipped_cap` im [`PrewarmReport`]). Per-Tenant-Build-Fehler loggen ein
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` ist ein `tracing::info_span!`, der den
-Cold-Path-Pool-Build umschließt. Abonnieren Sie ihn, um die Per-Tenant-Build-
-Latenz zu sehen:
+`tenant_pool_init` ist ein `tracing::info_span!`, der den
+Cold-Path-Pool-Build umschließt; die Events darin tragen das Target
+`rustango::tenancy::pools`. Abonnieren Sie es, um die
+Per-Tenant-Build-Latenz zu sehen:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Einschalten mit `RUST_LOG=rustango::tenancy::pools=info`. Ein Filter auf
+`crate::tenancy::pools` passt auf nichts — ein Target ist ein String und
+kein Pfad, siehe [Logging](logging.md#targets-das-subsystem-benennen).
 
 ### Einrichtungs-Falle — macOS `.local`-TLDs
 
@@ -1441,3 +1543,115 @@ Sie auf mDNS.
 - [ViewSets](viewsets.md)
 - [Serializer](serializers.md)
 - [Sicherheitsleitfaden](security.md)
+
+## Alle Verben
+
+Die Abschnitte oben erklären die gängigen Verben im Detail. Diese Tabelle ist
+die **vollständige** Liste, aus den beiden Dispatchern
+(`migrate/manage.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
+ein Verb, das im Leitfaden fehlt, ist hier trotzdem auffindbar. Für die Flags
+`<verb> --help` ausführen; der Hilfetext ist maßgeblich, diese Seite nicht.
+
+Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
+`Cli::tenancy()` erreicht.
+
+### Migrationen und Schema
+
+| Verb | Was es tut |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
+| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
+| `downgrade [N]` | Rollt die letzten N Migrationen zurück |
+| `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
+| `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
+| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Hängt eine handgeschriebene Datenoperation an |
+| `inspectdb [--schema <s>] [--table <t>]` | Liest ein bestehendes Schema und erzeugt `#[derive(Model)]`-Quellcode |
+
+### Daten
+
+| Verb | Was es tut |
+|---|---|
+| `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
+| `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein. Ein fehlgeschlagener oder teilweiser Ladevorgang wird nicht zurückgerollt |
+| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Postgres nutzt `TRUNCATE … RESTART IDENTITY CASCADE` und leert dabei auch referenzierende Tabellen außerhalb des Filters; MySQL / SQLite löschen die Zeilen und behalten die ID-Zähler |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |
+| `db:dump` / `db:restore` / `db:info` | Natives Dump / Restore / Inspect |
+| `dbshell` | Führt den nativen Client aus (`psql` / `mysql` / `sqlite3`). Braucht nur `DATABASE_URL`, keinen funktionierenden Pool — es wird vor dem Pool-Aufbau behandelt und funktioniert daher auch, wenn sqlx nicht verbinden kann |
+
+### Scaffolder und Generatoren
+
+| Verb | Was es tut |
+|---|---|
+| `startapp <name>` | Legt ein App-Modul an |
+| `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Queue-Job, eine Intervall-Aufgabe, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
+| `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
+
+### Cache, Sessions und Mail
+
+| Verb | Was es tut |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Legt die Cache-Tabelle an (und die Session-Tabelle, wenn Sessions in die DB gehen) |
+| `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück |
+| `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
+
+### Introspektion
+
+| Verb | Was es tut |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Jedes registrierte Model, sortiert für deterministische Ausgabe |
+| `showurls [--format plain\|json]` | Jede benannte Route, sortiert |
+| `check [--deploy]` | Health-Checks; `--deploy` ergänzt die Produktions-Audits |
+| `create-admin` | Legt eine `AdminUser`-Zeile für Projekte mit `admin::Builder::with_session_auth` an. **Nicht** tenancy-gated — nimmt einen einfachen `&Pool` und schreibt `rustango_admin_users`, die Tabelle wird bei Bedarf angelegt. Der einzige Weg zu einem ersten Admin-Login in einem Nicht-Tenancy-Projekt |
+| `about` / `version` / `--version` | Build- und Versionsinformationen |
+| `docs` | Öffnet die Dokumentation |
+
+### Benutzer und Zugriff **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-superuser` / `set-superuser` | Legt einen Superuser an oder befördert einen bestehenden Benutzer |
+| `create-user` / `create-operator` | Legt einen Tenant-Benutzer oder einen Operator an |
+| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer |
+| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren |
+| `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
+| `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
+| `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
+| `create-api-key` | Stellt einen API-Key aus |
+
+### Tenants **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Anlegen, bearbeiten, auflisten |
+| `drop-tenant` / `purge-tenant` | Deaktivieren (umkehrbar) / zerstören (nicht) |
+| `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
+| `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
+| `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
+| `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
+| `run-server` / `runserver` | Startet den Multi-Tenant-Server |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
+
+### Audit **T**
+
+| Verb | Was es tut |
+|---|---|
+| `audit-log` | Liest den Audit-Trail |
+| `audit-cleanup` | Kürzt ihn |
+
+### MCP **T**
+
+Vollständig im [MCP-Leitfaden](mcp.md) dokumentiert.
+
+| Verb | Was es tut |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Bindet einen Skill an eine Berechtigung |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | MCP-Zugangsdaten pro Benutzer |
+| `list-runs` / `show-run` | Lauf-Historie |
+
+---

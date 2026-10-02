@@ -1,5 +1,5 @@
-//! Django-parity #436 — DRF `validate(self, data)` cross-field hook
-//! via `#[serializer(validate = "fn_name")]` at the container level.
+//! Issue #436 — a cross-field validation hook declared with
+//! `#[serializer(validate = "fn_name")]` at the container level.
 //!
 //! Verifies the macro:
 //! - Emits a `validate()` method even when no per-field validators are declared

@@ -1,10 +1,10 @@
 //! Tri-dialect emission tests for PG aggregate functions (issue #33):
 //! `array_agg`, `string_agg`, `jsonb_agg`. `array_agg` / `jsonb_agg`
 //! stay PG-only (non-PG emits `SqlError::AggregateNotSupportedInDialect`);
-//! `string_agg` is database-agnostic as of Django 6.0 (#1024) — it
+//! `string_agg` is database-agnostic (#1024) — it
 //! lowers to GROUP_CONCAT (MySQL) / group_concat (SQLite).
 
-use rustango::core::{AggregateExpr, AggregateQuery, SqlValue, WhereExpr};
+use rustango::core::{AggregateExpr, AggregateQuery, SqlValue};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
 use rustango::Model;
 
@@ -21,18 +21,10 @@ pub struct Post {
 }
 
 fn aggregate_query(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
-    AggregateQuery {
-        model: <Post as rustango::core::Model>::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: Vec::new(),
-        aggregates: vec![(alias.into(), expr)],
-        aliases: vec![],
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-    }
+    AggregateQuery::new(
+        <Post as rustango::core::Model>::SCHEMA,
+        vec![(alias.into(), expr)],
+    )
 }
 
 // ---------- array_agg ----------
@@ -115,7 +107,7 @@ fn string_agg_distinct_emits_distinct() {
 
 #[test]
 fn string_agg_lowers_on_mysql_and_sqlite() {
-    // #1024 — Django 6.0 made StringAgg database-agnostic. MySQL maps to
+    // #1024 — `string_agg` runs on every backend. MySQL maps to
     // GROUP_CONCAT (delimiter inlined into SEPARATOR), SQLite to
     // group_concat (delimiter bound as a parameter).
     let q = aggregate_query(AggregateExpr::string_agg("tag", ", "), "tags");
@@ -138,7 +130,7 @@ fn string_agg_lowers_on_mysql_and_sqlite() {
 
 #[test]
 fn any_value_emits_per_dialect() {
-    // Django 6.0 AnyValue: PG `any_value()`, MySQL `ANY_VALUE()`, SQLite
+    // `any_value`: PG `any_value()`, MySQL `ANY_VALUE()`, SQLite
     // has neither so it falls back to `min()` (deterministic).
     let q = aggregate_query(AggregateExpr::AnyValue("tag"), "any_tag");
     assert!(
@@ -266,18 +258,11 @@ fn jsonb_agg_rejected_on_non_pg() {
 
 #[test]
 fn array_agg_composes_with_group_by() {
-    let q = AggregateQuery {
-        model: <Post as rustango::core::Model>::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: vec!["author"],
-        aggregates: vec![("tags".into(), AggregateExpr::array_agg("tag"))],
-        aliases: vec![],
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-    };
+    let mut q = AggregateQuery::new(
+        <Post as rustango::core::Model>::SCHEMA,
+        vec![("tags".into(), AggregateExpr::array_agg("tag"))],
+    );
+    q.group_by = vec!["author"];
     let stmt = Postgres.compile_aggregate(&q).unwrap();
     // SELECT "author", array_agg("tag") AS "tags" FROM "pga_post" GROUP BY "author"
     assert!(stmt.sql.contains(r#"SELECT "author""#));

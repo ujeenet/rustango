@@ -1,11 +1,9 @@
-//! Django-shape template context processors — issue #384.
+//! Template context processors.
 //!
-//! Context processors are callables that receive an
-//! `axum::http::request::Parts` (Django's `request`) and produce a
-//! `{key → value}` map that's merged into every Tera template's
-//! context. They let cross-cutting concerns (request user, active
-//! locale, feature flags, build version, …) appear in every
-//! template without each handler having to thread them in manually.
+//! A processor takes the request's `Parts` and returns a map of keys
+//! to merge into a template context. Use one for values every page
+//! needs, such as the current user, the locale or the build version,
+//! so no handler has to pass them in.
 //!
 //! ## Usage
 //!
@@ -31,25 +29,20 @@
 //! tera.render("page.html", &ctx)?
 //! ```
 //!
-//! ## Why a per-call helper instead of an automatic middleware?
+//! `tera.render` takes a finished `Context`, so there is no place to
+//! splice processors in behind your back. The framework's class-based
+//! views call
+//! [`apply_to_context`](crate::template_context_processors::apply_to_context)
+//! for you; a hand-written handler
+//! calls it itself, or skips the merge.
 //!
-//! Tera's `tera.render(name, ctx)` takes a fully-built `Context`;
-//! there's no extension point between Tera and the bytes-out
-//! pipeline where we could splice processors in invisibly. So the
-//! helper sits at the caller's side, and the framework's
-//! CBV/template-views call it on the user's behalf where it makes
-//! sense. Handlers rolling their own `tera.render` either call
-//! `apply_to_context` explicitly or skip the merge — both are
-//! deliberate.
+//! ## Key collisions
 //!
-//! ## Override semantics
-//!
-//! When a handler-supplied key collides with a processor-supplied
-//! key, **the handler wins** — `apply_to_context` only inserts
-//! keys that aren't already present. Same shape as Django's
-//! processor + render-context merge order. Lets a per-handler
-//! override neutralize a sitewide default without unregistering
-//! the processor.
+//! The handler wins.
+//! [`apply_to_context`](crate::template_context_processors::apply_to_context)
+//! only adds keys that are not
+//! there yet, so one page can override a sitewide default without
+//! unregistering the processor.
 
 use std::collections::HashMap;
 
@@ -57,36 +50,29 @@ use axum::http::request::Parts;
 use serde_json::Value;
 use tera::Context;
 
-/// Signature of a template context processor. Pure `fn` pointer
-/// (not `Arc<dyn Fn>`) so the registration can live in
-/// `inventory::submit!`'s `static` storage — see the same shape on
-/// [`crate::admin::custom_views::CustomViewHandler`].
+/// Signature of a context processor. A plain `fn` pointer, because
+/// `inventory::submit!` stores the registration in a `static`.
 pub type ContextProcessorFn = fn(&Parts) -> HashMap<String, Value>;
 
-/// One registration. Inventory-collected via
+/// One registration. Build it with
 /// [`crate::register_template_context_processor!`].
 pub struct ContextProcessor {
-    /// The callable. Receives the request's
-    /// `axum::http::request::Parts` (headers + uri + method + …,
-    /// minus the body) and returns the keys to merge.
+    /// The callable. It gets the request head (method, uri, headers,
+    /// but no body) and returns the keys to merge.
     pub processor: ContextProcessorFn,
 }
 
 inventory::collect!(ContextProcessor);
 
-/// Walk every registered context processor + merge their keys into
-/// `ctx`. Handler-supplied keys win on collision.
+/// Merge every registered processor's keys into `ctx`. Keys the
+/// handler already set are left alone.
 ///
-/// Cheap to call on every request — `inventory::iter` is `O(N)`
-/// over a typically-small N.
+/// Cheap enough to call on every request.
 pub fn apply_to_context(ctx: &mut Context, parts: &Parts) {
     for entry in inventory::iter::<ContextProcessor> {
         let kv = (entry.processor)(parts);
         for (k, v) in kv {
-            // Django-shape: handler-supplied keys WIN. Skip when
-            // the caller already inserted the key — same merge
-            // order as Django's render-context vs. processor
-            // merge.
+            // The handler's own keys win.
             if ctx.contains_key(&k) {
                 continue;
             }
@@ -95,9 +81,8 @@ pub fn apply_to_context(ctx: &mut Context, parts: &Parts) {
     }
 }
 
-/// Same as [`apply_to_context`] but takes a fresh
-/// [`tera::Context`] and returns it built — for handlers that
-/// don't have any caller-side context to merge into.
+/// [`apply_to_context`] on a fresh [`tera::Context`], for handlers
+/// with nothing of their own to merge in.
 #[must_use]
 pub fn context_from_processors(parts: &Parts) -> Context {
     let mut ctx = Context::new();
@@ -105,9 +90,7 @@ pub fn context_from_processors(parts: &Parts) -> Context {
     ctx
 }
 
-/// Register a template context processor. Pair with
-/// [`apply_to_context`] at the handler site (or rely on the
-/// framework's CBV wrappers, which call it automatically).
+/// Register a context processor. [`apply_to_context`] runs it.
 ///
 /// ```ignore
 /// rustango::register_template_context_processor!(|parts| {
@@ -121,14 +104,10 @@ macro_rules! register_template_context_processor {
         $crate::inventory::submit! {
             $crate::template_context_processors::ContextProcessor {
                 processor: {
-                    // Coerce the user's expression to the typed
-                    // fn-pointer up front so type inference flows
-                    // into a closure body (e.g. `parts.uri.path()`
-                    // would otherwise fail with an unknown-type
-                    // error). Inventory::submit! requires a const-
-                    // constructible value, hence the explicit
-                    // signature on the inner fn rather than an
-                    // `Arc<dyn Fn>`.
+                    // Naming the fn-pointer type here lets inference
+                    // reach into a closure body, so `parts.uri.path()`
+                    // compiles. `inventory::submit!` also needs a
+                    // const value, which rules out `Arc<dyn Fn>`.
                     const _PROCESSOR: $crate::template_context_processors::ContextProcessorFn =
                         $processor;
                     _PROCESSOR
@@ -156,8 +135,7 @@ mod tests {
         let mut ctx = Context::new();
         ctx.insert("a", &"original");
         apply_to_context(&mut ctx, &parts);
-        // Nothing else gets injected — the only key is the one
-        // we pre-inserted.
+        // Only the key we inserted is present.
         assert_eq!(
             ctx.into_json().as_object().unwrap().len(),
             1,
@@ -167,22 +145,15 @@ mod tests {
 
     #[test]
     fn handler_keys_win_over_processor_keys() {
-        // Drive `apply_to_context` directly with a one-shot
-        // processor lookalike — we can't run `inventory::submit!`
-        // inside a function body, and registrations leak across
-        // every test binary, so this tests the merge semantics
-        // independently by walking a synthetic input.
+        // `inventory::submit!` cannot go in a function body, and a
+        // real registration would leak into other tests, so run the
+        // same merge loop over a local processor instead.
         let parts = parts_for_path("/test");
 
-        // Caller pre-inserted `winner` — processor's value must not
-        // overwrite it.
+        // The caller set `winner` first, so it must survive.
         let mut ctx = Context::new();
         ctx.insert("winner", &"caller");
 
-        // Simulate one processor run inline. The real
-        // `apply_to_context` does the same loop over inventory;
-        // testing the loop body keeps this assertion deterministic
-        // across binaries.
         let processor: ContextProcessorFn = |_parts| {
             [
                 ("winner".to_owned(), json!("processor")),

@@ -53,9 +53,7 @@ async fn empty_default_applies_and_defaults_to_empty_string() {
             .expect("CREATE TABLE with an empty-string default must apply (#1161)");
     }
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     // Insert without supplying `name` → the `DEFAULT ''` fills it.
     sqlx::query("INSERT INTO empty_default_demo DEFAULT VALUES")
         .execute(sq)

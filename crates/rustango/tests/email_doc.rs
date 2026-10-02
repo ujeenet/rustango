@@ -68,7 +68,7 @@ fn validate_rejects_incomplete_messages() {
 #[test]
 fn crlf_header_injection_is_rejected() {
     // A newline in the subject would let an attacker inject extra headers
-    // (e.g. a hidden Bcc). Validation refuses it (Django's BadHeaderError).
+    // (e.g. a hidden Bcc). Validation refuses it.
     let sneaky = Email::new()
         .to("a@example.com")
         .subject("Hello\r\nBcc: victim@example.com")

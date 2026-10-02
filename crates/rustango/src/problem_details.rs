@@ -1,12 +1,9 @@
-//! RFC 7807 "Problem Details for HTTP APIs" — standardized error
-//! responses with the canonical `application/problem+json` content
-//! type.
+//! RFC 7807 "Problem Details for HTTP APIs": error responses sent as
+//! `application/problem+json`.
 //!
-//! Sister module to [`crate::api_errors`]: ApiError ships rustango's
-//! flat `{error, message, status, details}` shape that frontends
-//! already parse. ProblemDetails ships the RFC 7807 shape that public
-//! REST APIs (Stripe, GitHub, Twitter all loose variants of it) and
-//! API gateways expect.
+//! [`crate::api_errors`] does the same job with rustango's own flat
+//! `{error, message, status, details}` body. Use this module instead
+//! when a public API or a gateway expects the RFC 7807 shape.
 //!
 //! ## Quick start
 //!
@@ -34,8 +31,8 @@
 //!
 //! ## Extension fields
 //!
-//! RFC 7807 explicitly allows arbitrary extra fields alongside the
-//! standard ones. Add them with [`ProblemDetails::with_extension`]:
+//! RFC 7807 allows extra fields next to the standard ones. Add them
+//! with [`ProblemDetails::with_extension`]:
 //!
 //! ```ignore
 //! ProblemDetails::validation("title cannot be empty")
@@ -45,13 +42,14 @@
 //!
 //! ## Interop with `ApiError`
 //!
-//! `ProblemDetails: From<ApiError>` is implemented when both modules
-//! are on, so handlers that currently return `Result<T, ApiError>` can
-//! emit RFC 7807 by mapping at the boundary:
+//! With the `admin` feature on, `From<ApiError>` is available, so a
+//! handler that returns `Result<T, ApiError>` can switch at the edge:
 //!
 //! ```ignore
 //! handler().await.map_err(ProblemDetails::from)
 //! ```
+//!
+//! [`ProblemDetails::with_extension`]: crate::problem_details::ProblemDetails::with_extension
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -59,32 +57,29 @@ use indexmap::IndexMap;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-/// One RFC 7807 problem document. Implements `axum::response::IntoResponse`
-/// so handlers can return `Result<T, ProblemDetails>` directly.
+/// One RFC 7807 problem document. It implements `IntoResponse`, so a
+/// handler can return `Result<T, ProblemDetails>`.
 #[derive(Debug, Clone)]
 pub struct ProblemDetails {
-    /// URI reference identifying the problem type. Defaults to
-    /// `"about:blank"` per the spec — pointing at human-readable docs
-    /// is a best practice for public APIs.
+    /// URI naming the kind of problem. Defaults to `"about:blank"`. A
+    /// public API should point it at its error docs.
     pub type_: String,
-    /// Short human-readable summary. SHOULD NOT change between
-    /// occurrences of the same problem (per spec). Defaults to the
-    /// HTTP status canonical reason phrase.
+    /// Short summary of the problem kind. It should stay the same for
+    /// every occurrence. Defaults to the status reason phrase.
     pub title: String,
-    /// HTTP status code. Same value as the response's status line.
+    /// HTTP status code, matching the response status line.
     pub status: u16,
-    /// Human-readable explanation specific to this occurrence.
+    /// What went wrong this time, in plain words.
     pub detail: Option<String>,
-    /// URI reference identifying THIS specific occurrence (typically a
-    /// per-request UUID or a log-search URL).
+    /// URI for this one occurrence, such as a request id or log link.
     pub instance: Option<String>,
-    /// Extension members — arbitrary additional fields. Stable order
-    /// (IndexMap) so successive serializations match.
+    /// Extra fields. Order is stable, so output does not shift.
     pub extensions: IndexMap<String, Value>,
 }
 
 impl ProblemDetails {
-    /// Build a problem with `status` + the default title + `detail`.
+    /// Build a problem from a status and a detail, with the default
+    /// title.
     #[must_use]
     pub fn new(status: StatusCode, detail: impl Into<String>) -> Self {
         Self {
@@ -114,7 +109,7 @@ impl ProblemDetails {
     pub fn conflict(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, detail)
     }
-    /// 422 — semantically "the body is well-formed but failed validation".
+    /// 422: the body parsed, but the values failed validation.
     pub fn validation(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
@@ -127,43 +122,39 @@ impl ProblemDetails {
 
     // -------- builder
 
-    /// Override the `type` URI. For public APIs, point at human-readable
-    /// docs (e.g. `"https://docs.example.com/errors/validation"`).
+    /// Set the `type` URI, for example a link to your error docs.
     #[must_use]
     pub fn with_type(mut self, type_: impl Into<String>) -> Self {
         self.type_ = type_.into();
         self
     }
 
-    /// Override the `title`. Default is the status canonical reason —
-    /// only set this if you have a more specific summary.
+    /// Set the `title`. Only needed when you have a better summary than
+    /// the status reason phrase.
     #[must_use]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
         self
     }
 
-    /// Override `detail`. Pass `None` to drop it (per spec, detail is
-    /// optional).
+    /// Set `detail`. Pass `None` to leave it out.
     #[must_use]
     pub fn with_detail(mut self, detail: Option<String>) -> Self {
         self.detail = detail;
         self
     }
 
-    /// Set the `instance` URI — the canonical identifier for THIS
-    /// occurrence. Common pattern: `"/errors/{request_id}"`.
+    /// Set the `instance` URI for this occurrence, often
+    /// `"/errors/{request_id}"`.
     #[must_use]
     pub fn with_instance(mut self, instance: impl Into<String>) -> Self {
         self.instance = Some(instance.into());
         self
     }
 
-    /// Add an extension field. RFC 7807 explicitly permits arbitrary
-    /// extra fields next to the standard ones. Reserved names
-    /// (`type`, `title`, `status`, `detail`, `instance`) are silently
-    /// ignored — the spec says they shouldn't be overridden via
-    /// extension.
+    /// Add an extra field. The reserved names `type`, `title`,
+    /// `status`, `detail` and `instance` are ignored, because the spec
+    /// does not allow overriding them this way.
     #[must_use]
     pub fn with_extension(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
         let name = name.into();
@@ -173,8 +164,7 @@ impl ProblemDetails {
         self
     }
 
-    /// Render to a JSON [`Value`]. Useful for tests and for embedding
-    /// in custom response builders.
+    /// Render to a JSON [`Value`], for tests or a custom response.
     #[must_use]
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
@@ -237,15 +227,14 @@ impl std::fmt::Display for ProblemDetails {
 
 impl std::error::Error for ProblemDetails {}
 
-// -------- bridge to ApiError so existing handlers can opt in by mapping
+// -------- bridge from ApiError
 
 #[cfg(feature = "admin")]
 impl From<crate::api_errors::ApiError> for ProblemDetails {
     fn from(e: crate::api_errors::ApiError) -> Self {
         let mut p = ProblemDetails::new(e.status, e.message);
-        // The ApiError carries a `code` slug like "validation_failed"
-        // — promote it to the title so the RFC 7807 doc keeps the slug
-        // in plain sight (default title is the status canonical reason).
+        // Keep the ApiError slug ("validation_failed") visible by using it
+        // as the title instead of the status reason phrase.
         if e.code != p.title.to_lowercase().replace(' ', "_") {
             p = p.with_title(e.code);
         }
@@ -362,7 +351,7 @@ mod tests {
 
     #[test]
     fn implements_std_error() {
-        // Compile-time check — ProblemDetails: std::error::Error.
+        // Compile-time check that the trait is implemented.
         fn assert_error<E: std::error::Error>() {}
         assert_error::<ProblemDetails>();
     }
@@ -374,7 +363,7 @@ mod tests {
         let e = ApiError::validation("title cannot be empty").with_field("title");
         let p: ProblemDetails = e.into();
         assert_eq!(p.status, 422);
-        // The ApiError's `error` slug ("validation_failed") becomes the title.
+        // The slug becomes the title.
         assert_eq!(p.title, "validation_failed");
         assert_eq!(p.detail.as_deref(), Some("title cannot be empty"));
         assert_eq!(p.extensions["details"]["field"], "title");

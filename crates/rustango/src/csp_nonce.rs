@@ -1,11 +1,10 @@
 //! Per-request CSP nonce middleware.
 //!
-//! A strict Content-Security-Policy blocks inline `<script>` tags by
-//! default. The standards-blessed escape hatch is per-request nonces:
-//! the server generates a random token, drops it into the CSP header
-//! (`script-src 'nonce-XYZ'`), and renders the same token onto every
-//! inline script tag (`<script nonce="XYZ">`). The browser only runs
-//! tags whose nonce matches.
+//! A strict Content-Security-Policy blocks inline `<script>` tags.
+//! The standard way around that is a nonce per request: the server
+//! makes a random token, puts it in the CSP header as
+//! `script-src 'nonce-XYZ'`, and writes the same token on each
+//! inline tag. The browser runs only the tags whose nonce matches.
 //!
 //! ## Wire-up
 //!
@@ -37,12 +36,12 @@
 //!
 //! ## How substitution works
 //!
-//! After the handler runs, the middleware looks at the response's
-//! `content-security-policy` (or `content-security-policy-report-only`)
-//! header. If it contains the literal string [`CSP_NONCE_PLACEHOLDER`]
-//! (`'nonce-__RUSTANGO_NONCE__'`), the middleware replaces every
-//! occurrence with the per-request nonce. Otherwise the header is left
-//! untouched — non-HTML responses get their CSP exactly as configured.
+//! After the handler runs, the middleware reads the response's
+//! `content-security-policy` header, or the report-only one. Every
+//! copy of [`CSP_NONCE_PLACEHOLDER`] becomes this request's nonce.
+//! If the placeholder is absent, the header is left as it is.
+//!
+//! [`CSP_NONCE_PLACEHOLDER`]: crate::csp_nonce::CSP_NONCE_PLACEHOLDER
 
 use std::sync::Arc;
 
@@ -56,17 +55,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use rand::{rngs::OsRng, RngCore};
 
-/// Placeholder string that should appear in your CSP wherever you want
-/// the per-request nonce to be substituted. Use it inside the source
-/// list of `script-src` / `style-src` (etc.):
+/// Put this in your CSP wherever the per-request nonce should go,
+/// inside the source list of `script-src`, `style-src` and so on:
 ///
 /// ```ignore
 /// CspBuilder::strict_starter()
 ///     .script_src(&["'self'", CSP_NONCE_PLACEHOLDER])
 /// ```
 ///
-/// The full string emitted into the CSP is `'nonce-XYZ'`, so the
-/// placeholder includes the surrounding quotes and the `nonce-` prefix.
+/// The CSP ends up with `'nonce-XYZ'`, so the placeholder already
+/// includes the quotes and the `nonce-` prefix.
 pub const CSP_NONCE_PLACEHOLDER: &str = "'nonce-__RUSTANGO_NONCE__'";
 
 const PLACEHOLDER_TOKEN: &str = "__RUSTANGO_NONCE__";
@@ -93,8 +91,7 @@ impl Nonce {
 /// CSP nonce middleware configuration.
 #[derive(Clone, Debug)]
 pub struct CspNonceLayer {
-    /// Length (in bytes) of the random material before base64 encoding.
-    /// 16 bytes (128 bits) is the OWASP recommendation. Default: 16.
+    /// Random bytes per nonce, before base64. OWASP recommends 16.
     pub bytes: usize,
 }
 
@@ -145,9 +142,8 @@ impl<S: Clone + Send + Sync + 'static> CspNonceRouterExt for Router<S> {
 
 fn generate_nonce(byte_len: usize) -> String {
     let mut buf = vec![0u8; byte_len];
-    // v0.30.12 — use OsRng directly. Predictable nonces would
-    // defeat the strict-CSP `script-src 'nonce-...'` model;
-    // OsRng matches the rest of the framework's crypto sites.
+    // Use OsRng. A guessable nonce lets an attacker write an inline
+    // script that the strict CSP would then run.
     OsRng.fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(&buf)
 }

@@ -1,6 +1,6 @@
 //! Cookbook Chapter 18 — Internationalization (i18n).
 //!
-//! `rustango::i18n::Translator` is Django's `gettext` family in Rust: per-
+//! `rustango::i18n::Translator` is a `gettext`-style translation API: per-
 //! locale message catalogs with base-language fallback, `{name}`
 //! placeholders, and CLDR-correct pluralization. Plus `Accept-Language`
 //! negotiation and RTL detection. All **in-process, no DB** — the DB

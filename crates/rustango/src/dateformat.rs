@@ -1,11 +1,9 @@
-//! Django-shape date format-character expander.
+//! Template-style date format codes.
 //!
-//! Mirrors `django.utils.dateformat` — converts a Django template
-//! `{{ obj|date:"Y-m-d H:i" }}` format string into the rendered
-//! output for a given `DateTime<Utc>` (or `NaiveDate` / `NaiveTime`).
-//!
-//! Django uses a single-character format-code language distinct
-//! from strftime. The most common codes:
+//! Render a `DateTime<Utc>`, `NaiveDate` or `NaiveTime` with the
+//! format string you would write in a template as
+//! `{{ obj|date:"Y-m-d H:i" }}`. The codes are single characters and
+//! are not the same as strftime's. The common ones:
 //!
 //! | Code | Meaning                       | Example       |
 //! |------|-------------------------------|---------------|
@@ -19,7 +17,8 @@
 //! | `j`  | 1-2-digit day                 | `4`           |
 //! | `D`  | Short weekday name            | `Thu`         |
 //! | `l`  | Full weekday name             | `Thursday`    |
-//! | `N`  | Day of year (1-366)           | `155`         |
+//! | `N`  | AP-style month abbreviation   | `Sept.`       |
+//! | `z`  | Day of year (1-366)           | `155`         |
 //! | `w`  | Day of week, Sunday=0         | `4`           |
 //! | `H`  | 2-digit 24-hour               | `13`          |
 //! | `G`  | 1-2-digit 24-hour             | `13`          |
@@ -32,14 +31,13 @@
 //! | `U`  | Unix epoch seconds            | `1717504800`  |
 //! | `\X` | Literal character (escape)    | `X`           |
 //!
-//! Other Django codes (`b`, `e`, `I`, `O`, `T`, `Z`, `c`, `r`,
-//! `u`, `o`, `t`, `S`, `f`, `P`, `W`) are recognized — see the
-//! format-char dispatch in [`format_datetime`] for the exhaustive
-//! list. `P` emits Django's "p.m." / "noon" / "midnight" form;
-//! `f` collapses zero-minute times to "1" instead of "1:00"; `W`
-//! is the ISO-8601 week number; `t` is days-in-month; `o` is the
-//! ISO-8601 week-numbering year (differs from `Y` near year
-//! boundaries).
+//! The codes `b`, `e`, `I`, `L`, `O`, `T`, `Z`, `c`, `r`, `u`, `o`,
+//! `t`, `S`, `f`, `P` and `W` also work; [`format_datetime`] has the
+//! full list. A few need a word: `P` gives the "1:30 p.m." /
+//! "noon" / "midnight" form, `f` writes "1" rather than "1:00" on the
+//! hour, `W` is the ISO-8601 week number, `t` is the number of days
+//! in the month, and `o` is the ISO-8601 week-numbering year, which
+//! can differ from `Y` around New Year.
 //!
 //! ```ignore
 //! use chrono::{DateTime, Utc, TimeZone};
@@ -49,24 +47,24 @@
 //! assert_eq!(format_datetime(&dt, "Y-m-d H:i:s"), "2026-06-04 13:05:09");
 //! assert_eq!(format_datetime(&dt, r"\Y\e\a\r: Y"), "Year: 2026");
 //! ```
+//!
+//! [`format_datetime`]: crate::dateformat::format_datetime
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
 
-/// Format a `DateTime<Utc>` per Django's `dateformat` shape.
-/// `format_string` uses Django's single-char codes (see module-level
-/// doc table). Backslash escapes the next character — useful for
-/// rendering literal letters that would otherwise be interpreted
-/// (e.g. `r"\Y\e\a\r: Y"` → `"Year: 2026"`).
+/// Format a `DateTime<Utc>` with the single-character codes;
+/// the module doc has the table.
 ///
-/// Unknown / unsupported chars in the format string pass through
-/// unchanged (Django shape — `"random"` renders as `"random"`).
+/// A backslash makes the next character literal, so
+/// `r"\Y\e\a\r: Y"` gives `"Year: 2026"`. Any character
+/// that is not a code passes through unchanged.
 #[must_use]
 pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
     let mut out = String::with_capacity(format_string.len() * 2);
     let mut chars = format_string.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            // Literal escape — next char passes through verbatim.
+            // Escape: the next char is a literal.
             if let Some(literal) = chars.next() {
                 out.push(literal);
             }
@@ -106,41 +104,31 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
             'r' => out.push_str(&dt.to_rfc2822()),
             'S' => out.push_str(day_suffix(dt.day())),
             'L' => out.push(if is_leap(dt.year()) { '1' } else { '0' }),
-            // Timezone codes — DateTime<Utc> always renders these
-            // as UTC equivalents.
+            // The input is always UTC, so the zone codes are fixed.
             'O' => out.push_str("+0000"),
             'T' => out.push_str("UTC"),
             'Z' => out.push_str("0"),
             'e' => out.push_str("UTC"),
-            'I' => out.push('0'), // DST flag — always 0 for UTC
-            // Microseconds — 6 digits of fractional seconds.
+            'I' => out.push('0'), // DST flag, always 0 for UTC
+            // Microseconds, 6 digits.
             'u' => out.push_str(&format!("{:06}", dt.nanosecond() / 1000)),
-            // Django's `P` — "p.m." / "a.m." form with "noon" and
-            // "midnight" specials; minutes shown only when non-zero.
             'P' => out.push_str(&fmt_pretty_meridiem(dt.hour(), dt.minute())),
-            // Django's `f` — 12-hour hour, plus `:MM` only when MM
-            // is non-zero. "1" / "1:30" / "12" (midnight or noon).
             'f' => out.push_str(&fmt_12h_minutes(dt.hour(), dt.minute())),
-            // Django's `W` — ISO-8601 week number (1..=53).
+            // ISO-8601 week number, 1..=53.
             'W' => out.push_str(&format!("{}", dt.iso_week().week())),
-            // Django's `t` — days in the current month (28..=31).
+            // Days in this month, 28..=31.
             't' => out.push_str(&format!("{}", days_in_month(dt.year(), dt.month()))),
-            // Django's `o` — ISO-8601 week-numbering year (may
-            // differ from Y near Jan 1 / Dec 31 boundaries).
+            // ISO-8601 week-numbering year, which can differ from Y.
             'o' => out.push_str(&format!("{:04}", dt.iso_week().year())),
-            // Other Django codes we don't implement specially —
-            // pass through as a literal (Django shape: unknown
-            // chars are kept verbatim).
+            // Not a code: keep it.
             other => out.push(other),
         }
     }
     out
 }
 
-/// Django-parity `dateformat.format(date, format_string)` for a
-/// `NaiveDate` (no time component). Time-related format chars
-/// (`H`, `i`, `s`, `a`, etc.) render as zeros to match what
-/// Django does when given a `date` instead of `datetime`.
+/// [`format_datetime`] for a `NaiveDate`. A date with no time is
+/// read as midnight, so `H:i:s` gives `00:00:00`.
 ///
 /// ```ignore
 /// use chrono::NaiveDate;
@@ -156,10 +144,8 @@ pub fn format_date(date: &NaiveDate, format_string: &str) -> String {
     format_datetime(&dt, format_string)
 }
 
-/// Django-parity `dateformat.time_format(time, format_string)` for
-/// a `NaiveTime`. Date-related format chars (`Y`, `m`, `d`, `D`,
-/// `l`, `N`, etc.) render against the Unix epoch date (1970-01-01)
-/// when a time-only input is passed.
+/// [`format_datetime`] for a `NaiveTime`. There is no date, so date
+/// codes such as `Y`, `m` and `d` render against 1970-01-01.
 ///
 /// ```ignore
 /// use chrono::NaiveTime;
@@ -185,26 +171,22 @@ mod tera_filters {
     use std::collections::HashMap;
     use tera::{to_value, Tera, Value};
 
-    /// Register Django-shape date / time formatting filters on a Tera
-    /// instance. The filters parse string inputs as ISO 8601
-    /// datetime / date / time first, then apply the format string with
-    /// Django single-char format codes (`Y` / `m` / `d` / `H` / `i` /
-    /// `s` / `D` / `j` / `N` / `P` / etc., see [`format_datetime`]).
+    /// Add date and time filters to a Tera instance.
+    /// Each one parses its ISO 8601 string input, then formats it
+    /// with the codes in [`format_datetime`]. A value that
+    /// does not parse is passed through unchanged.
     ///
-    /// Registered names:
-    /// * `dateformat` — datetime → Django-formatted string
-    /// * `timeformat` — time-only → Django-formatted string
+    /// Two filters are added: `dateformat` for a date or datetime,
+    /// and `timeformat` for a time.
     ///
-    /// Filter usage in templates:
     /// ```jinja
     /// {{ post.created_at | dateformat("Y-m-d H:i") }}
     /// {{ event.starts_at | dateformat("D, F j Y") }}
     /// {{ schedule.time | timeformat("g:i A") }}
     /// ```
     ///
-    /// Naming sidesteps Tera's built-in `date` filter (which uses
-    /// chrono's strftime format) — that one stays available for users
-    /// already using its `%Y`/`%m`/`%d` syntax.
+    /// The names avoid Tera's own `date` filter, which stays free for
+    /// anyone using its strftime syntax.
     pub fn register_filters(tera: &mut Tera) {
         tera.register_filter("dateformat", dateformat);
         tera.register_filter("timeformat", timeformat);
@@ -411,9 +393,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
-/// Django's `P` — "p.m." / "a.m." with "noon" / "midnight" specials.
-/// Examples: `(0, 0)` → `"midnight"`; `(12, 0)` → `"noon"`;
-/// `(13, 0)` → `"1 p.m."`; `(13, 30)` → `"1:30 p.m."`.
+/// The `P` code: `"midnight"`, `"noon"`, `"1 p.m."`, `"1:30 p.m."`.
 fn fmt_pretty_meridiem(hour: u32, minute: u32) -> String {
     if hour == 0 && minute == 0 {
         return "midnight".to_owned();
@@ -430,9 +410,8 @@ fn fmt_pretty_meridiem(hour: u32, minute: u32) -> String {
     }
 }
 
-/// Django's `f` — 12-hour hour, plus `:MM` only when MM is
-/// non-zero. Examples: `(13, 0)` → `"1"`; `(13, 30)` → `"1:30"`;
-/// `(0, 0)` → `"12"`.
+/// The `f` code: the 12-hour hour, with `:MM` only when the minutes
+/// are not zero. `"1"`, `"1:30"`, `"12"`.
 fn fmt_12h_minutes(hour: u32, minute: u32) -> String {
     let h12 = ((hour + 11) % 12) + 1;
     if minute == 0 {
@@ -533,7 +512,7 @@ mod tests {
     #[test]
     fn format_day_of_year_z() {
         let t = dt(2026, 6, 4, 0, 0, 0);
-        // June 4 of a non-leap year is day 155 — Django format code is `z`.
+        // June 4 of a non-leap year is day 155.
         assert_eq!(format_datetime(&t, "z"), "155");
     }
 
@@ -547,15 +526,12 @@ mod tests {
     }
 
     #[test]
-    // Named for the Django format code under test. Those codes are
-    // case-sensitive — `N` (AP-style month) is a different specifier
-    // from `n` (month number) — so lowercasing the suffix would make
-    // the pair indistinguishable.
+    // The suffix is the format code under test. Codes are
+    // case-sensitive (`N` and `n` differ), so it stays uppercase.
     #[allow(non_snake_case)]
     fn format_ap_month_abbr_N() {
-        // Django format code `N` — AP-style month abbreviation: short
-        // months get trailing period, long-form months (March, April,
-        // May, June, July) render in full without period.
+        // AP style: short month names take a period, and March
+        // through July are written out in full without one.
         assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "N"), "Jan.");
         assert_eq!(format_datetime(&dt(2026, 2, 1, 0, 0, 0), "N"), "Feb.");
         assert_eq!(format_datetime(&dt(2026, 3, 1, 0, 0, 0), "N"), "March");
@@ -565,10 +541,8 @@ mod tests {
     }
 
     #[test]
-    // Named for the Django format code under test. Those codes are
-    // case-sensitive — `N` (AP-style month) is a different specifier
-    // from `n` (month number) — so lowercasing the suffix would make
-    // the pair indistinguishable.
+    // The suffix is the format code under test. Codes are
+    // case-sensitive (`N` and `n` differ), so it stays uppercase.
     #[allow(non_snake_case)]
     fn format_unix_timestamp_U() {
         let t = dt(2026, 1, 1, 0, 0, 0);
@@ -588,15 +562,13 @@ mod tests {
     fn format_rfc_2822_r() {
         let t = dt(2026, 6, 4, 13, 5, 9);
         let out = format_datetime(&t, "r");
-        // chrono RFC 2822 format includes weekday + GMT zone shape.
+        // chrono's RFC 2822 output starts with the weekday.
         assert!(out.contains("Thu, 4 Jun 2026 13:05:09"));
     }
 
     #[test]
-    // Named for the Django format code under test. Those codes are
-    // case-sensitive — `N` (AP-style month) is a different specifier
-    // from `n` (month number) — so lowercasing the suffix would make
-    // the pair indistinguishable.
+    // The suffix is the format code under test. Codes are
+    // case-sensitive (`N` and `n` differ), so it stays uppercase.
     #[allow(non_snake_case)]
     fn format_day_suffix_S() {
         // 1 → st, 2 → nd, 3 → rd, 4 → th, 11 → th, 21 → st.
@@ -609,10 +581,8 @@ mod tests {
     }
 
     #[test]
-    // Named for the Django format code under test. Those codes are
-    // case-sensitive — `N` (AP-style month) is a different specifier
-    // from `n` (month number) — so lowercasing the suffix would make
-    // the pair indistinguishable.
+    // The suffix is the format code under test. Codes are
+    // case-sensitive (`N` and `n` differ), so it stays uppercase.
     #[allow(non_snake_case)]
     fn format_leap_year_L() {
         assert_eq!(format_datetime(&dt(2024, 1, 1, 0, 0, 0), "L"), "1"); // leap
@@ -641,7 +611,7 @@ mod tests {
     #[test]
     fn format_unknown_chars_pass_through() {
         let t = dt(2026, 6, 4, 0, 0, 0);
-        // Hyphens, slashes, colons are not codes — passed verbatim.
+        // Hyphens, slashes and brackets are not codes.
         assert_eq!(format_datetime(&t, "Y/m/d"), "2026/06/04");
         assert_eq!(format_datetime(&t, "[Y]"), "[2026]");
     }
@@ -678,7 +648,7 @@ mod tests {
 
     #[test]
     fn date_time_codes_render_as_zeros() {
-        // No time component → Django shape: render as midnight.
+        // No time, so it renders midnight.
         let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
         assert_eq!(format_date(&d, "H:i:s"), "00:00:00");
         assert_eq!(format_date(&d, "a"), "am");
@@ -702,12 +672,12 @@ mod tests {
 
     #[test]
     fn time_date_codes_render_against_epoch() {
-        // Time-only input → Django shape: date chars use 1970-01-01.
+        // No date, so date codes use 1970-01-01.
         let t = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
         assert_eq!(time_format(&t, "Y-m-d"), "1970-01-01");
     }
 
-    // -------- Django P / f / W / t / o (new codes) --------
+    // -------- P / f / W / t / o --------
 
     #[test]
     fn p_midnight_and_noon() {

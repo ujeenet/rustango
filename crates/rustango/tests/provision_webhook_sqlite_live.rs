@@ -327,7 +327,7 @@ async fn a_retried_delivery_returns_the_first_run() {
 /// **The real case.** Two deliveries of one event arriving at once —
 /// the check-then-insert window. The unique constraint on
 /// `idempotency_key`, not the handler, is what has to win.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_simultaneous_deliveries_create_one_tenant() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
@@ -335,25 +335,34 @@ async fn two_simultaneous_deliveries_create_one_tenant() {
     let body = body_for(&slug, "evt-race", chrono::Utc::now().timestamp());
     let sig = signed(&body);
 
-    let (a, c) = tokio::join!(
-        b.app.clone().oneshot(post(body.clone(), Some(&sig))),
-        b.app.clone().oneshot(post(body.clone(), Some(&sig))),
-    );
-    let (a, c) = (a.unwrap(), c.unwrap());
+    let handles: Vec<_> = (0..8)
+        .map(|_| tokio::spawn(b.app.clone().oneshot(post(body.clone(), Some(&sig)))))
+        .collect();
+    let mut resps = Vec::new();
+    for h in handles {
+        resps.push(h.await.unwrap().unwrap());
+    }
 
-    // One may be accepted and one rejected, or one accepted and one
-    // de-duplicated — both are correct. What is never correct is two
-    // tenants.
-    let statuses = [a.status(), c.status()];
+    // One accepted, the rest de-duplicated; the loser of the unique-key
+    // race is a duplicate too, never a 500 (#1933).
+    let statuses: Vec<_> = resps.iter().map(|r| r.status()).collect();
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::ACCEPTED)
+            .count(),
+        1,
+        "{statuses:?}"
+    );
     assert!(
         statuses
             .iter()
-            .any(|s| *s == StatusCode::ACCEPTED || *s == StatusCode::OK),
-        "at least one delivery should have been handled: {statuses:?}"
+            .all(|s| *s == StatusCode::ACCEPTED || *s == StatusCode::OK),
+        "a racing delivery failed: {statuses:?}"
     );
 
     // Let whichever run started finish.
-    for resp in [a, c] {
+    for resp in resps {
         if let Some(id) = json_of(resp).await["run_id"].as_i64() {
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(10), await_run(&b, id)).await;
@@ -374,6 +383,59 @@ async fn two_simultaneous_deliveries_create_one_tenant() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1, "one event, one run: {runs:?}");
+}
+
+/// The race, forced: a trigger opens a twin run under the same key
+/// between this delivery's idempotency check and its insert (#1933).
+#[tokio::test]
+async fn a_delivery_that_loses_the_key_race_gets_the_twin_run() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let registry = b.pools.registry_pool();
+    let slug = unique("twin");
+    // A failed run makes the handler release its key, then insert.
+    let old = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        None,
+        Some("evt-twin"),
+    )
+    .await
+    .unwrap();
+    let old_id = old.id.get().copied().unwrap();
+    store::finish_run(&registry, old_id, store::RunState::Failed, Some("pod died"))
+        .await
+        .unwrap();
+    let trigger = r#"CREATE TRIGGER twin AFTER UPDATE OF idempotency_key ON rustango_provisioning_runs
+        WHEN OLD.idempotency_key = 'evt-twin' AND NEW.idempotency_key IS NULL
+        BEGIN
+            INSERT INTO rustango_provisioning_runs
+                (kind, slug, state, storage_mode, backend_kind, idempotency_key, started_at)
+            VALUES (OLD.kind, OLD.slug, 'running', OLD.storage_mode, OLD.backend_kind,
+                'evt-twin', OLD.started_at);
+        END"#;
+    rustango::sql::raw_execute_pool(&registry, trigger, Vec::new())
+        .await
+        .expect("trigger");
+
+    let body = body_for(&slug, "evt-twin", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the race loser must be a duplicate"
+    );
+    let json = json_of(resp).await;
+    let twin = store::run_by_idempotency_key(&registry, "evt-twin")
+        .await
+        .unwrap()
+        .expect("twin run");
+    assert_eq!(json["duplicate"], serde_json::json!(true));
+    assert_eq!(json["run_id"].as_i64(), twin.id.get().copied());
 }
 
 /// The security decision, end to end: a caller-supplied `database_url`
@@ -403,7 +465,7 @@ async fn a_caller_supplied_url_is_refused_under_the_default_policy() {
     );
     let json = json_of(resp).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .is_some_and(|e| e.contains("derives")),
         "the refusal should say why: {json}"
@@ -481,4 +543,218 @@ async fn the_run_is_visible_exactly_like_a_console_run() {
         .unwrap();
     assert_eq!(run.requested_by.as_deref(), Some("webhook"));
     let _ = &b.tmp;
+}
+
+/// Backdate a run so it looks like its pod died two hours ago.
+async fn age_run(b: &Booted, run_id: i64) {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    store::ProvisioningRun::objects()
+        .where_(store::ProvisioningRun::id.eq(run_id))
+        .update()
+        .set(
+            "started_at",
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .execute_pool(&b.pools.registry_pool())
+        .await
+        .unwrap();
+}
+
+/// A run left `running` by a dead pod no longer answers every retry with
+/// `duplicate: running` forever; the retry runs again (#1883).
+#[tokio::test]
+async fn a_retry_after_an_interrupted_run_provisions_again() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("stuck");
+    let registry = b.pools.registry_pool();
+    let stuck = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        Some("webhook"),
+        Some("evt-stuck"),
+    )
+    .await
+    .unwrap();
+    let stuck_id = stuck.id.get().copied().unwrap();
+    age_run(&b, stuck_id).await;
+
+    let body = body_for(&slug, "evt-stuck", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = json_of(resp).await;
+    assert_eq!(json["duplicate"], serde_json::json!(false));
+    let run_id = json["run_id"].as_i64().unwrap();
+    assert_ne!(run_id, stuck_id);
+    assert_eq!(
+        store::RunState::parse(&await_run(&b, run_id).await.state),
+        store::RunState::Succeeded
+    );
+    let old = store::run_by_id(&registry, stuck_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(store::RunState::parse(&old.state), store::RunState::Failed);
+}
+
+/// A run still making progress is not taken over by a retry.
+#[tokio::test]
+async fn a_retry_during_a_live_run_is_still_a_duplicate() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("live");
+    let registry = b.pools.registry_pool();
+    let live = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        Some("webhook"),
+        Some("evt-live"),
+    )
+    .await
+    .unwrap();
+    let body = body_for(&slug, "evt-live", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = json_of(resp).await;
+    assert_eq!(json["duplicate"], serde_json::json!(true));
+    assert_eq!(json["run_id"].as_i64(), live.id.get().copied());
+}
+
+/// Insert the inactive Org a run left behind, then fail that run.
+async fn half_made(
+    b: &Booted,
+    holder: &tempfile::TempDir,
+    slug: &str,
+    key: &str,
+    own: bool,
+) -> i64 {
+    let registry = b.pools.registry_pool();
+    let run = store::open_run(&registry, slug, "database", "sqlite", None, None, Some(key))
+        .await
+        .unwrap();
+    let run_id = run.id.get().copied().unwrap();
+    let mut org = Org {
+        slug: slug.to_owned(),
+        display_name: slug.to_owned(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite://{}/t_{slug}.db?mode=rwc",
+            holder.path().display()
+        )),
+        active: false,
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&registry).await.unwrap();
+    if own {
+        store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
+            .await
+            .unwrap();
+    }
+    store::finish_run(&registry, run_id, store::RunState::Failed, Some("pod died"))
+        .await
+        .unwrap();
+    org.id.get().copied().unwrap()
+}
+
+/// A retry picks up the tenant its failed run left inactive, instead of
+/// failing on "slug already exists" (#1883).
+#[tokio::test]
+async fn a_retry_resumes_the_tenant_a_failed_run_left_behind() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("resume");
+    let _ = half_made(&b, &holder, &slug, "evt-resume", true).await;
+
+    let body = body_for(&slug, "evt-resume", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    let run = await_run(&b, run_id).await;
+    assert_eq!(
+        store::RunState::parse(&run.state),
+        store::RunState::Succeeded,
+        "{:?}",
+        run.error
+    );
+    let orgs: Vec<Org> = Org::objects()
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap();
+    assert_eq!(orgs.len(), 1);
+    assert!(orgs[0].active, "the resumed tenant was not activated");
+}
+
+/// An inactive Org no failed run made is not taken over.
+#[tokio::test]
+async fn a_retry_does_not_resume_a_tenant_it_did_not_make() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("foreign");
+    let _ = half_made(&b, &holder, &slug, "evt-foreign", false).await;
+
+    let body = body_for(&slug, "evt-foreign", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    let run = await_run(&b, run_id).await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects()
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap();
+    assert!(!orgs[0].active);
+}
+
+/// Purge forgets which run made the Org, so a new tenant that reuses the
+/// id (SQLite does) is not taken for the old half-made one.
+#[tokio::test]
+async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("reused");
+    let old_id = half_made(&b, &holder, &slug, "evt-reused-1", true).await;
+    rustango::tenancy::decommission::decommission(
+        b.pools.as_ref(),
+        &slug,
+        rustango::tenancy::decommission::Action::Purge {
+            purge_database: true,
+        },
+    )
+    .await
+    .expect("purge");
+
+    let registry = b.pools.registry_pool();
+    // Reused on purpose: a table without AUTOINCREMENT would do it itself.
+    let mut org = Org {
+        id: rustango::sql::Auto::Set(old_id),
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite://{}/t_{slug}.db?mode=rwc",
+            holder.path().display()
+        )),
+        active: false,
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&registry).await.unwrap();
+
+    let body = body_for(&slug, "evt-reused-2", chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    let run = await_run(&b, run_id).await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a purged tenant's run resumed a new one");
 }

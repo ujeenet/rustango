@@ -56,7 +56,11 @@ fn lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn reset(pool: &sqlx::PgPool) {
@@ -679,5 +683,101 @@ fn audit_source_token_is_stable() {
     assert_eq!(
         AuditSource::Custom("webhook:stripe".into()).as_token(),
         "webhook:stripe"
+    );
+}
+
+/// Rolled-back transactions in `db` once none of its backends remain:
+/// a backend flushes its stats on exit, before it leaves `pg_stat_activity`.
+async fn settled_rollbacks(admin: &sqlx::PgPool, db: &str) -> i64 {
+    let mut live: i64 = -1;
+    for _ in 0..100 {
+        live = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = $1")
+            .bind(db)
+            .fetch_one(admin)
+            .await
+            .expect("activity");
+        if live == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Unflushed stats would read low and pass the test for nothing.
+    assert_eq!(live, 0, "{db} still has backends after 5 s");
+    sqlx::query("SELECT pg_stat_clear_snapshot()")
+        .execute(admin)
+        .await
+        .expect("clear snapshot");
+    sqlx::query_scalar("SELECT xact_rollback FROM pg_stat_database WHERE datname = $1")
+        .bind(db)
+        .fetch_one(admin)
+        .await
+        .expect("rollbacks")
+}
+
+/// One round of every ensure path, on a pool closed afterwards.
+async fn ensure_round(url: &str, round: u32) {
+    let pool = rustango::sql::Pool::connect(url).await.expect("connect");
+    audit::ensure_table_pool(&pool).await.expect("audit ensure");
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    rustango::admin::totp_store::ensure_table(&pool)
+        .await
+        .expect("totp ensure");
+    #[cfg(feature = "admin")]
+    {
+        let args = [
+            "create-admin",
+            &format!("u{round}"),
+            "--password",
+            "pw-1642-x",
+        ];
+        let dir = std::env::temp_dir().join(format!("rustango_1642_{}", std::process::id()));
+        let mut out = Vec::new();
+        rustango::migrate::manage::run_with_writer(
+            &pool,
+            &dir,
+            args.iter().map(|s| (*s).to_owned()),
+            &mut out,
+        )
+        .await
+        .expect("create-admin");
+    }
+    let _ = round;
+    pool.close().await;
+}
+
+/// #1642 — a repeat ensure sends nothing the server rejects; each
+/// rejection is an ERROR in the PG log. Counted in a database of its own.
+#[tokio::test]
+async fn repeat_ensures_send_nothing_the_server_rejects() {
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let _g = lock().lock().await;
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let db = format!("rustango_1642_{}", std::process::id());
+    let (scheme, rest) = url.split_once("://").unwrap();
+    let (authority, _) = rest.rsplit_once('/').unwrap();
+    let db_url = format!("{scheme}://{authority}/{db}");
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    ensure_round(&db_url, 1).await;
+    let before = settled_rollbacks(&admin, &db).await;
+    ensure_round(&db_url, 2).await;
+    let after = settled_rollbacks(&admin, &db).await;
+
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await;
+    assert_eq!(
+        after - before,
+        0,
+        "the second ensure had statements rejected — one PG log ERROR each"
     );
 }

@@ -27,16 +27,32 @@ Die Konsole ist ein Router, den du einhängst; wie viel sie kann, hängt davon a
 
 ```rust
 use rustango::tenancy::operator_console::{router, router_with_pools, router_with_provisioning, SessionSecret};
+use rustango::tenancy::provision::Provisioner;
+
+// `pools` ist hier ein `Arc<TenantPools<_>>`.
 
 // Nur lesend: Tenants, Operatoren und das Audit-Log durchsehen.
 let app = router(registry.clone(), SessionSecret::from_env_or_random());
 
 // …plus Tenants bearbeiten, Operatoren verwalten, Hostnamen binden, Pools vorwärmen.
-let app = router_with_pools(registry.clone(), pools.clone(), secret);
+let app = router_with_pools(registry.clone(), pools.clone().into_invalidator(), secret);
 
 // …plus neue Tenants provisionieren und Migrationen ausführen.
-let app = router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret);
+let provisioner = Provisioner::new(pools.clone(), registry_url.clone(), "migrations").erased();
+let app = router_with_provisioning(
+    registry.clone(),
+    pools.clone().into_invalidator(),
+    provisioner,
+    secret,
+);
 ```
+
+Zwei Konvertierungen leisten dort Arbeit, und keine davon ist optional.
+`pools` geht als `Arc<dyn TenantPoolInvalidator>` hinein, braucht also
+`.into_invalidator()` — die Konsole invalidiert Pools nur, und der enge
+Trait ist es, was sie von allem anderen fernhält. `Provisioner::new`
+schließt über die Pools, die Registry-URL und das Migrationsverzeichnis,
+und `.erased()` steckt das Ganze hinter `Arc<dyn TenantProvisioner>`.
 
 In einem generierten `tenant`-Projekt ist das bereits verdrahtet — `Cli::new().tenancy().with_tenant_provisioning("migrations")` hängt die volle Variante ein. Siehe [Scaffolding](scaffolding.md).
 
@@ -133,5 +149,23 @@ Welche Routen existieren, hängt davon ab, welchen Konstruktor du eingehängt ha
 | Provisioning-Läufe ansehen | | | ✓ |
 
 Nicht eingehängte Routen liefern 404 statt 403 — eine Nur-Lese-Konsole bewirbt nicht, was sie nicht kann.
+
+### Drei weitere Konstruktoren, für Verdrahtung statt für Fähigkeiten
+
+Die drei oben sind die Fähigkeitsstufen. Die übrigen nehmen dieselben
+Stufen und ergänzen Verdrahtung, sind also keine vierte und fünfte
+Sprosse:
+
+| Konstruktor | Stufe | Was er zusätzlich nimmt |
+|---|---|---|
+| `router_with_brand_storage` | nur lesend, oder bearbeitend mit `Some(pools)` | ein `BoxedStorage` für Branding-Uploads, wenn das voreingestellte `LocalStorage` nicht der gewünschte Ort ist |
+| `router_with_impersonation` | bearbeitend | Brand-Storage, das Tenant-Session-Secret und eine Handoff-URL, damit ein Operator einen Tenant betreten kann |
+| `router_full` | was immer du übergibst | all das als `Option` — `None` hängt die jeweiligen Routen schlicht nicht ein |
+
+`Server::Builder::serve` hängt Impersonation für dich ein; ein eigener
+Mount-Punkt entscheidet sich dafür, indem er `router_with_impersonation`
+statt `router_with_pools` verwendet. Greif zu `router_full`, wenn du eine
+Kombination brauchst, die die Kurzformen nicht benennen — es existiert,
+damit eine neue Paarung keinen neuen positionalen Konstruktor braucht.
 
 **Jeder Operator kann alles.** Es gibt keine Rechte-Gates pro Operator: ein Operator erreicht jeden Tenant und jede Aktion, die die Konsole anbietet. Die Zugriffsgrenze ist die Operatorenliste selbst — genau deshalb greift eine Deaktivierung bei der nächsten Anfrage.

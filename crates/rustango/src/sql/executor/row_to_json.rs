@@ -39,6 +39,17 @@ use crate::sql::Pool;
 // stay byte-identical.
 use crate::hex::hex_encode;
 
+/// True when the cell is SQL NULL or missing. sqlx-sqlite decodes NULL
+/// as `0` / `false` / `""` instead of erroring (#1766), so check first.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub(super) fn cell_is_null<R: sqlx::Row, I: sqlx::ColumnIndex<R>>(row: &R, index: I) -> bool {
+    use sqlx::ValueRef as _;
+    match row.try_get_raw(index) {
+        Ok(v) => v.is_null(),
+        Err(_) => true,
+    }
+}
+
 /// Generic body for the PG + MySQL `row_to_json` variants — they
 /// emit byte-identical match-on-`FieldType` decode tables. Issue
 /// #562: extract into a generic-over-`sqlx::Row` function so the
@@ -50,10 +61,12 @@ use crate::hex::hex_encode;
 /// `Decode<'r, R::Database> + Type<R::Database>` bounds for each
 /// FieldType we decode. sqlx already provides these for `PgRow` and
 /// `MySqlRow`; the bounds compile away to nothing at the call sites.
+/// `uuid_cell` is the exception: MySQL keeps a UUID as `CHAR(36)` text.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn row_to_json_generic<'r, R>(
     row: &'r R,
     fields: &[&'static crate::core::FieldSchema],
+    uuid_cell: fn(&'r R, &str) -> Option<uuid::Uuid>,
 ) -> serde_json::Value
 where
     R: sqlx::Row,
@@ -68,7 +81,6 @@ where
     chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     chrono::NaiveTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    uuid::Uuid: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     serde_json::Value: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     rust_decimal::Decimal: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     Vec<u8>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
@@ -77,6 +89,10 @@ where
     use serde_json::{json, Value};
     let mut map = serde_json::Map::new();
     for field in fields {
+        if cell_is_null(row, field.column) {
+            map.insert(field.name.to_owned(), Value::Null);
+            continue;
+        }
         let value = match field.ty {
             FieldType::I16 => row
                 .try_get::<i16, _>(field.column)
@@ -114,8 +130,7 @@ where
                 .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
                 .map(|dt| json!(dt.to_rfc3339()))
                 .unwrap_or(Value::Null),
-            FieldType::Uuid => row
-                .try_get::<uuid::Uuid, _>(field.column)
+            FieldType::Uuid => uuid_cell(row, field.column)
                 .map(|u| json!(u.to_string()))
                 .unwrap_or(Value::Null),
             FieldType::Json => row
@@ -160,21 +175,25 @@ pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields)
+    row_to_json_generic(row, fields, |row, col| {
+        sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok()
+    })
 }
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
 /// `field.ty` against `&MySqlRow`. Type mappings mirror the
 /// `sqlx::Type<MySql>` impls emitted by `#[derive(Model)]` —
 /// `chrono::DateTime<Utc>` ↔ `DATETIME(6)`, `serde_json::Value` ↔
-/// `JSON`, `uuid::Uuid` ↔ `CHAR(36)` (sqlx-mysql's default).
+/// `JSON`, `uuid::Uuid` ↔ `CHAR(36)` hyphenated text.
 #[cfg(feature = "mysql")]
 #[must_use]
 pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields)
+    row_to_json_generic(row, fields, |row, col| {
+        crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok()
+    })
 }
 
 /// SQLite counterpart of [`row_to_json`]. SQLite's storage is more
@@ -194,6 +213,10 @@ pub fn row_to_json_sqlite(
     use sqlx::Row as _;
     let mut map = serde_json::Map::new();
     for field in fields {
+        if cell_is_null(row, field.column) {
+            map.insert(field.name.to_owned(), Value::Null);
+            continue;
+        }
         let value = match field.ty {
             FieldType::I16 => row
                 .try_get::<i16, _>(field.column)
@@ -242,9 +265,11 @@ pub fn row_to_json_sqlite(
                         .map(|s| json!(s))
                         .unwrap_or(Value::Null)
                 }),
+            // sqlx binds a Uuid as a 16-byte BLOB; older rows may be TEXT.
             FieldType::Uuid => row
-                .try_get::<String, _>(field.column)
-                .map(|u| json!(u))
+                .try_get::<uuid::Uuid, _>(field.column)
+                .map(|u| json!(u.to_string()))
+                .or_else(|_| row.try_get::<String, _>(field.column).map(|u| json!(u)))
                 .unwrap_or(Value::Null),
             FieldType::Json => {
                 // SQLite stores JSON as TEXT; try parsing back to
@@ -261,9 +286,12 @@ pub fn row_to_json_sqlite(
                 // `.to_string()` so the stored representation lines up.
                 row.try_get::<String, _>(field.column)
                     .map(|s| json!(s))
+                    // NUMERIC affinity stores `1` as INTEGER, `1.5` as REAL.
                     .or_else(|_| {
-                        // Small integers / floats may land in their
-                        // native affinity — fall back gracefully.
+                        row.try_get::<i64, _>(field.column)
+                            .map(|n| json!(n.to_string()))
+                    })
+                    .or_else(|_| {
                         row.try_get::<f64, _>(field.column)
                             .map(|n| json!(n.to_string()))
                     })
@@ -503,6 +531,57 @@ pub async fn select_one_row_as_json(
                 q = bind_query_sqlite(q, v);
             }
             Ok(q.fetch_optional(sq).await?.as_ref().map(|r| {
+                let mut json = row_to_json_sqlite(r, fields);
+                augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                json
+            }))
+        }
+    }
+}
+
+/// [`select_one_row_as_json`] inside an open transaction.
+#[cfg(feature = "admin")]
+pub(crate) async fn select_one_row_as_json_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Option<serde_json::Value>, ExecError> {
+    crate::test_assertions::query_counter::bump();
+    let stmt = tx.dialect().compile_select(query)?;
+    match tx {
+        #[cfg(feature = "postgres")]
+        crate::sql::PoolTx::Postgres(t) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
+                let mut json = row_to_json(r, fields);
+                augment_joined_columns_pg(&mut json, r, &query.joins);
+                json
+            }))
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::PoolTx::Mysql(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
+                let mut json = row_to_json_my(r, fields);
+                augment_joined_columns_my(&mut json, r, &query.joins);
+                json
+            }))
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::PoolTx::Sqlite(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
                 let mut json = row_to_json_sqlite(r, fields);
                 augment_joined_columns_sqlite(&mut json, r, &query.joins);
                 json

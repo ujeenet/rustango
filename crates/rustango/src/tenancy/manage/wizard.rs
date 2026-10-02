@@ -109,7 +109,7 @@ where
 
     // Step 3 — apply registry migrations (creates rustango_orgs etc.)
     if prompt_yes_no(reader, writer, "Apply registry migrations now?", true)? {
-        super::migrations::migrate_registry_cmd(pools, dir, writer).await?;
+        super::migrations::migrate_registry_cmd(pools, dir, &[], writer).await?;
     }
 
     // Step 4 — operator (logs into the operator console)

@@ -1,15 +1,12 @@
-//! Pluggable authentication-backend chain — Django's
-//! `AUTHENTICATION_BACKENDS = [...]` setting.
+//! A chain of authentication backends, tried in order.
 //!
 //! ## The chain
 //!
-//! [`AuthBackendChain`] walks an ordered list of [`AuthBackend`]s,
-//! returning the first non-`None` `authenticate(...)` result. Misses
-//! cascade — `None` means "this backend has nothing to say about
-//! these credentials"; the chain moves on. An `Err` short-circuits
-//! the walk (and is returned to the caller as-is) so a transient
-//! DB outage in backend N doesn't get masked by a fallthrough to
-//! backend N+1.
+//! [`AuthBackendChain`] walks an ordered list of [`AuthBackend`]s and
+//! returns the first `Some` result. `None` means "this backend knows
+//! nothing about these credentials", so the chain moves on. An `Err`
+//! stops the walk and goes back to the caller, so a DB outage in one
+//! backend is never hidden by a fallthrough to the next.
 //!
 //! ```ignore
 //! use std::sync::Arc;
@@ -25,24 +22,21 @@
 //! let principal = chain.authenticate(&creds).await?;
 //! ```
 //!
-//! ## What this module owns vs. what it doesn't
+//! ## Scope
 //!
-//! Concrete backends in rustango (the tenant `User` table, the
-//! operator console, OAuth/OIDC) keep their existing surfaces —
-//! this module is a portable *registry* on top. The first wave of
-//! adopters wraps an existing `authenticate_user_pool(...)` call in
-//! an `AuthBackend` impl and registers it.
+//! This module is only the registry. The concrete backends, such as
+//! the tenant `User` table, the operator console and OAuth, keep
+//! their own APIs; you wrap one in an `AuthBackend` impl and
+//! register it.
 //!
-//! ## What [`Principal`] is
+//! [`Principal`] is the small shared shape the chain returns,
+//! because each backend has its own native record. It carries an
+//! id, a username, two flags and an attribute bag. Map it to your
+//! own user type when you need the full record.
 //!
-//! Backends authenticate users from very different stores (tenant
-//! DB, header, LDAP, OAuth provider, …) returning very different
-//! native records. [`Principal`] is the lowest-common-denominator
-//! shape the chain hands back — `id` + `username` + boolean flags
-//! + `attributes` bag. Callers map it to their own `User` type at
-//! the call site if they need full record access.
-//!
-//! Issue #54.
+//! [`Principal`]: crate::auth_backends::Principal
+//! [`AuthBackend`]: crate::auth_backends::AuthBackend
+//! [`AuthBackendChain`]: crate::auth_backends::AuthBackendChain
 
 use std::collections::HashMap;
 use std::fmt;
@@ -52,30 +46,28 @@ use serde::{Deserialize, Serialize};
 
 // ------------------------------------------------------------------ Credentials
 
-/// One bundle of inputs handed to every backend in the chain. Most
-/// backends use only one field — `RemoteUserBackend` reads
-/// `remote_user`, a password backend reads `username` + `password`,
-/// an OAuth callback path stashes its token in `extras`.
+/// The inputs handed to every backend in the chain. Most backends
+/// read one field: a password backend reads `username` and
+/// `password`, [`RemoteUserBackend`] reads `remote_user`, an OAuth
+/// callback puts its token in `extras`.
 #[derive(Debug, Default, Clone)]
 pub struct Credentials {
-    /// Conventional login handle. Set by every form-based auth flow.
+    /// Login handle, set by any form-based flow.
     pub username: Option<String>,
-    /// Plain-text password to be hash-compared by the backend.
-    /// Never stored, never logged.
+    /// The plain-text password, for the backend to compare against
+    /// a hash. **Never store it and never log it.**
     pub password: Option<String>,
-    /// Trusted upstream user identifier (e.g. an SSO proxy's
-    /// `X-Remote-User` header). Backends that consume it MUST
-    /// document that they trust the framework to have validated
-    /// the upstream — see [`RemoteUserBackend`].
+    /// A user id from a trusted upstream, such as an SSO proxy's
+    /// `X-Remote-User` header. It is only as trustworthy as the
+    /// thing that filled it in; see [`RemoteUserBackend`].
     pub remote_user: Option<String>,
-    /// Open-ended bag for backend-specific inputs (`token`,
-    /// `provider`, MFA codes, etc). String-valued only — backends
-    /// that need typed inputs deserialize from these strings.
+    /// Anything else a backend needs, such as a token, a provider
+    /// name or an MFA code. Strings only; parse them yourself.
     pub extras: HashMap<String, String>,
 }
 
 impl Credentials {
-    /// Build a password-form credential bundle.
+    /// Credentials from a login form.
     #[must_use]
     pub fn password(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
@@ -85,8 +77,8 @@ impl Credentials {
         }
     }
 
-    /// Build a remote-user credential bundle (typically populated by
-    /// a `RemoteUserMiddleware` from a trusted upstream header).
+    /// Credentials from a trusted upstream header. Only build these
+    /// where you know the header came from your proxy.
     #[must_use]
     pub fn remote(remote_user: impl Into<String>) -> Self {
         Self {
@@ -95,7 +87,7 @@ impl Credentials {
         }
     }
 
-    /// Add an extra key-value pair (returns `self` for builder use).
+    /// Add one entry to `extras`.
     #[must_use]
     pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extras.insert(key.into(), value.into());
@@ -105,28 +97,25 @@ impl Credentials {
 
 // ------------------------------------------------------------------ Principal
 
-/// Common return shape for every backend. Callers project this into
-/// their own user type as needed.
+/// What every backend returns. Map it to your own user type when
+/// you need more.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
-    /// Backend-defined opaque identifier. Typically the user's
-    /// numeric ID stringified, or a UUID, or the username itself
-    /// when the backend has no other ID.
+    /// Opaque id chosen by the backend: often the numeric user id as
+    /// a string, a UUID, or the username when there is nothing else.
     pub id: String,
     /// Login handle.
     pub username: String,
-    /// `true` if the user is currently active (not soft-disabled).
+    /// `true` when the account is not disabled.
     pub is_active: bool,
-    /// `true` if the user is a superuser (admin) on the backend.
+    /// `true` when the account is an admin on that backend.
     pub is_superuser: bool,
-    /// Backend-defined identifier of the backend that authenticated
-    /// this principal. Useful when the chain has multiple backends
-    /// and a downstream handler wants to skip MFA for federated
-    /// users, etc.
+    /// [`AuthBackend::name`] of the backend that authenticated this
+    /// principal. A handler can branch on it, for example to skip
+    /// MFA for a federated login.
     pub backend: String,
-    /// Free-form attribute bag for backend-supplied claims that
-    /// don't fit the canonical fields (groups, OAuth claims, custom
-    /// flags).
+    /// Extra claims that do not fit the fields above, such as
+    /// groups or OAuth claims.
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
@@ -134,18 +123,15 @@ pub struct Principal {
 
 #[derive(Debug)]
 pub enum AuthError {
-    /// Backend ran but the credentials don't match. The chain
-    /// translates `Ok(None)` and this variant differently: `Ok(None)`
-    /// keeps walking the chain, `Err(InvalidCredentials)` aborts.
-    /// Most backends prefer `Ok(None)` so a username-not-in-this-store
-    /// falls through to the next backend cleanly.
+    /// The backend ran and the credentials did not match. This
+    /// stops the chain. Prefer `Ok(None)`, which lets an unknown
+    /// username fall through to the next backend.
     InvalidCredentials,
-    /// Backend infrastructure failure — DB outage, LDAP timeout, etc.
-    /// Aborts the chain so the caller sees the underlying problem
-    /// rather than a misleading "no backend recognized you".
+    /// The backend itself failed: a DB outage, an LDAP timeout. It
+    /// stops the chain so the caller sees the real problem instead
+    /// of "no backend recognised you".
     Backend(String),
-    /// Catch-all for backend-defined errors not covered above. The
-    /// chain still aborts; the message bubbles up.
+    /// Any other backend error. It also stops the chain.
     Other(String),
 }
 
@@ -163,27 +149,26 @@ impl std::error::Error for AuthError {}
 
 // ------------------------------------------------------------------ AuthBackend
 
-/// Trait every backend implements. `authenticate` returns:
+/// One authentication source. `authenticate` returns:
 ///
-/// - `Ok(Some(principal))` — backend accepted these credentials,
-///   chain stops, principal returned to caller.
-/// - `Ok(None)` — backend has nothing to say (e.g. username
-///   doesn't exist in this store). Chain moves to the next backend.
-/// - `Err(_)` — backend failure, chain aborts.
+/// - `Ok(Some(principal))`: accepted, and the chain stops.
+/// - `Ok(None)`: nothing to say, so the chain tries the next one.
+/// - `Err(_)`: the backend failed, and the chain stops.
 ///
-/// The async trait uses [`async_trait::async_trait`] for object
-/// safety. `Box<dyn AuthBackend>` is the chain element shape.
+/// Return `Ok(None)` for a wrong password too, not an error, so the
+/// response cannot tell a caller which store holds the account.
 #[async_trait::async_trait]
 pub trait AuthBackend: Send + Sync {
-    /// Backend-defined identifier, recorded in [`Principal::backend`].
+    /// Short name for this backend, copied into
+    /// [`Principal::backend`].
     fn name(&self) -> &'static str;
 
-    /// Try to authenticate the credentials.
+    /// Try to authenticate these credentials.
     async fn authenticate(&self, creds: &Credentials) -> Result<Option<Principal>, AuthError>;
 
-    /// Look up a principal by ID (the value [`Principal::id`] held).
-    /// Defaults to `Ok(None)`; backends that support session-reload
-    /// (e.g. via a session cookie's stashed `user_id`) override.
+    /// Look a principal up by its [`Principal::id`], for reloading a
+    /// user from a session. Override it if your backend can; the
+    /// default returns `Ok(None)`.
     async fn get_user(&self, _id: &str) -> Result<Option<Principal>, AuthError> {
         Ok(None)
     }
@@ -198,36 +183,35 @@ pub struct AuthBackendChain {
 }
 
 impl AuthBackendChain {
-    /// Empty chain — every call returns `Ok(None)` until backends are
-    /// registered.
+    /// An empty chain. Every call returns `Ok(None)` until you add
+    /// a backend, so nobody can log in.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Register a backend at the end of the chain. Order matters —
-    /// the first backend that returns `Ok(Some(_))` wins.
+    /// Add a backend to the end of the chain. Order matters: the
+    /// first backend that accepts wins.
     #[must_use]
     pub fn with(mut self, backend: Arc<dyn AuthBackend>) -> Self {
         self.backends.push(backend);
         self
     }
 
-    /// Number of registered backends.
+    /// How many backends are registered.
     #[must_use]
     pub fn len(&self) -> usize {
         self.backends.len()
     }
 
-    /// `true` when no backends are registered.
+    /// `true` when nothing is registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
     }
 
-    /// Walk the chain. Returns the first `Ok(Some(_))`; bails on any
-    /// `Err`; returns `Ok(None)` if every backend returned
-    /// `Ok(None)`.
+    /// Walk the chain and return the first backend that accepts.
+    /// `Ok(None)` means no backend did; an `Err` stops the walk.
     pub async fn authenticate(&self, creds: &Credentials) -> Result<Option<Principal>, AuthError> {
         for backend in &self.backends {
             match backend.authenticate(creds).await? {
@@ -238,9 +222,8 @@ impl AuthBackendChain {
         Ok(None)
     }
 
-    /// Walk the chain looking up a previously authenticated principal
-    /// by ID (typically from a session cookie). First non-`None`
-    /// result wins; `Err` aborts.
+    /// Walk the chain to reload a principal by id, usually one held
+    /// in a session. The first hit wins; an `Err` stops the walk.
     pub async fn get_user(&self, id: &str) -> Result<Option<Principal>, AuthError> {
         for backend in &self.backends {
             match backend.get_user(id).await? {
@@ -254,20 +237,18 @@ impl AuthBackendChain {
 
 // ------------------------------------------------------------------ RemoteUserBackend
 
-/// Trust an upstream proxy's user-identity header (Cloudflare Access,
-/// Tailscale, mod_auth_kerb, etc). The proxy is responsible for
-/// authentication — this backend takes the username on faith and
-/// returns a `Principal`.
+/// Trust the user-identity header of an upstream proxy, such as
+/// Cloudflare Access or Tailscale. The proxy does the
+/// authentication; this backend takes the name on faith.
 ///
-/// **Security**: only register this backend when the deployment
-/// guarantees that the `remote_user` field can only be populated by
-/// the trusted upstream (typically via a middleware that strips the
-/// header from un-proxied requests, or a separate listener that
-/// only the proxy can reach).
+/// **Security: this backend performs no check of its own.** Anyone
+/// who can set `remote_user` becomes that user. Register it only
+/// when the deployment guarantees the header comes from your proxy:
+/// strip the header from every un-proxied request in middleware, or
+/// listen on an address only the proxy can reach.
 pub struct RemoteUserBackend {
-    /// Optional callback that decides whether to admit a remote user
-    /// (e.g. to gate by group membership). Default: admit any
-    /// non-empty `remote_user`.
+    /// Decides which remote users to admit, for example by group.
+    /// The default admits any non-empty name.
     pub admit: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
 
@@ -284,8 +265,8 @@ impl Default for RemoteUserBackend {
 }
 
 impl RemoteUserBackend {
-    /// Admit every non-empty `remote_user`. Sensible default for an
-    /// SSO proxy that already enforces group membership upstream.
+    /// Admit any non-empty name. Use it when the SSO proxy already
+    /// enforces who may reach the app.
     #[must_use]
     pub fn trust_username() -> Self {
         Self {
@@ -293,8 +274,8 @@ impl RemoteUserBackend {
         }
     }
 
-    /// Admit only usernames the predicate accepts. Use this to layer
-    /// a local allow-list on top of the upstream's auth.
+    /// Admit only the names the predicate accepts, which adds a
+    /// local allow-list on top of the upstream's check.
     #[must_use]
     pub fn with_predicate<F>(predicate: F) -> Self
     where
@@ -336,8 +317,7 @@ impl AuthBackend for RemoteUserBackend {
 mod tests {
     use super::*;
 
-    /// Helper backend that returns the same Principal for every
-    /// password-form input matching `(username, password)`.
+    /// Accepts one fixed `(username, password)` pair.
     struct FixedPasswordBackend {
         username: &'static str,
         password: &'static str,
@@ -381,8 +361,7 @@ mod tests {
         }
     }
 
-    /// Backend that always errors. Used to pin the abort-on-error
-    /// chain semantics.
+    /// Always errors, to pin the stop-on-error rule.
     struct ExplodingBackend;
     #[async_trait::async_trait]
     impl AuthBackend for ExplodingBackend {
@@ -461,8 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_backend_wins_when_both_match() {
-        // Both backends accept the same creds; the FIRST one in the
-        // chain returns its principal — order matters.
+        // Both accept the same credentials, so order decides.
         let chain = AuthBackendChain::new()
             .with(Arc::new(FixedPasswordBackend {
                 username: "alice",
@@ -472,7 +450,7 @@ mod tests {
             .with(Arc::new(FixedPasswordBackend {
                 username: "alice",
                 password: "s3cret",
-                is_superuser: true, // would have been superuser via 2nd
+                is_superuser: true, // must not reach the result
             }));
         let p = chain
             .authenticate(&Credentials::password("alice", "s3cret"))
@@ -510,8 +488,7 @@ mod tests {
         }));
         let p = chain.get_user("1").await.unwrap().unwrap();
         assert_eq!(p.username, "alice");
-        // Default impl returns None — so an ID the backend doesn't
-        // recognize falls through cleanly.
+        // An unknown id falls through to `None`.
         let r = chain.get_user("999").await.unwrap();
         assert!(r.is_none());
     }
@@ -534,10 +511,10 @@ mod tests {
     #[tokio::test]
     async fn remote_user_backend_ignores_empty_header() {
         let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-        // Empty remote_user — admit predicate returns false → None.
+        // Empty name: the admit predicate says no.
         let r = chain.authenticate(&Credentials::remote("")).await.unwrap();
         assert!(r.is_none());
-        // No remote_user at all (password-form creds) — still None.
+        // No remote_user at all: also none.
         let r = chain
             .authenticate(&Credentials::password("alice", "x"))
             .await
@@ -556,7 +533,7 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-        // Bob is upstream-authenticated but our allow-list rejects.
+        // Bob passed upstream, but our allow-list rejects him.
         assert!(chain
             .authenticate(&Credentials::remote("bob"))
             .await
@@ -566,9 +543,8 @@ mod tests {
 
     #[tokio::test]
     async fn remote_user_falls_through_to_password_backend() {
-        // Common deployment: SSO header for proxied requests, password
-        // form for local admin access. Order them remote-first so SSO
-        // wins when present.
+        // A common setup: SSO header for proxied requests, password
+        // form for local admin. Remote first, so SSO wins.
         let chain = AuthBackendChain::new()
             .with(Arc::new(RemoteUserBackend::trust_username()))
             .with(Arc::new(FixedPasswordBackend {
@@ -577,8 +553,7 @@ mod tests {
                 is_superuser: false,
             }));
 
-        // Direct request with password — falls through remote backend
-        // (no header) into the password one.
+        // No header, so this falls through to the password backend.
         let p = chain
             .authenticate(&Credentials::password("alice", "s3cret"))
             .await
@@ -586,8 +561,7 @@ mod tests {
             .unwrap();
         assert_eq!(p.backend, "fixed_password");
 
-        // Proxied request with header — remote backend wins, password
-        // backend never consulted.
+        // With the header, the remote backend wins.
         let p = chain
             .authenticate(&Credentials::remote("alice"))
             .await

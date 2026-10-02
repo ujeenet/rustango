@@ -64,8 +64,8 @@ pub struct JwtClaims {
     /// Token type — `"access"` or `"refresh"`.
     pub typ: String,
     /// Custom claims set via [`JwtLifecycle::issue_pair_with`] or
-    /// [`JwtLifecycle::issue_token_with`]. Empty for tokens issued via
-    /// the no-custom variants.
+    /// [`JwtLifecycle::issue_access_with`]. Empty for tokens issued
+    /// via the no-custom variants.
     pub custom: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -88,10 +88,55 @@ impl JwtClaims {
     pub fn custom_value(&self, key: &str) -> Option<&serde_json::Value> {
         self.custom.get(key)
     }
+
+    /// The user id, if this token may act as a user in `scope` (#1848).
+    ///
+    /// # Errors
+    /// The reason it may not; see [`UserTokenScope`].
+    pub fn user_id_in(&self, scope: UserTokenScope<'_>) -> Result<i64, &'static str> {
+        scope.admits(&self.custom).map(|()| self.sub)
+    }
 }
 
-/// Reserved claim names — caller-supplied custom payloads cannot use these.
-/// Returned by [`reserved_claims`] for inspection.
+/// Claim that marks a non-user principal, e.g. an MCP agent (`"agent"`).
+pub const CLAIM_KIND: &str = "kind";
+/// Claim pinning a token to one tenant slug.
+pub const CLAIM_TENANT: &str = "tenant";
+
+/// Where a user access token is presented. The one check that decides
+/// whether its `sub` names a user there (#1848).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UserTokenScope<'a> {
+    /// A resolved tenant: the `tenant` claim must equal this slug.
+    Tenant(&'a str),
+    /// No tenant resolved: only a token with no `tenant` claim.
+    Unscoped,
+}
+
+impl UserTokenScope<'_> {
+    /// Refuses a `kind` token (its `sub` is not a user id) and a tenant
+    /// binding that does not match this scope.
+    pub(crate) fn admits(
+        self,
+        claims: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), &'static str> {
+        if claims.contains_key(CLAIM_KIND) {
+            return Err("token is not a user token");
+        }
+        let bound = claims.get(CLAIM_TENANT);
+        match (self, bound) {
+            (Self::Tenant(slug), Some(v)) if v.as_str() == Some(slug) => Ok(()),
+            (Self::Tenant(_), Some(_)) => Err("token issued for different tenant"),
+            (Self::Tenant(_), None) => Err("token missing tenant binding"),
+            (Self::Unscoped, None) => Ok(()),
+            (Self::Unscoped, Some(_)) => Err("tenant token presented without a tenant"),
+        }
+    }
+}
+
+/// Reserved claim names — caller-supplied custom payloads cannot use
+/// these.
 pub const RESERVED_CLAIM_NAMES: &[&str] = &["sub", "exp", "jti", "typ"];
 
 /// Returned by [`JwtLifecycle::issue_pair_with`] when the custom payload
@@ -123,8 +168,30 @@ pub struct JwtLifecycle {
 
 impl JwtLifecycle {
     /// Build a new lifecycle with default TTLs (15 min access / 7 day refresh).
+    ///
+    /// # Panics
+    /// If `secret` is shorter than 32 bytes. HMAC accepts any key length,
+    /// but a short key is guessable and would let anyone mint tokens —
+    /// fail closed rather than sign with one.
+    ///
+    /// This is the floor `JwtBackend::new` and `auth_routes::build_jwt`
+    /// already enforce. It was missing here, on the one path that
+    /// *issues* tokens rather than verifying them: a caller could sign
+    /// with a two-byte key and every verifier downstream would accept
+    /// the result, because the tokens are perfectly valid — just
+    /// forgeable by anyone. Audit A-06.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        // The message deliberately does NOT carry `secret.len()`.
+        // CodeQL's `rust/cleartext-logging` flags the length as a value
+        // derived from a secret reaching a log sink, and it is right to:
+        // a panic message lands in logs and crash reports, and the exact
+        // length of a key is information about that key. `jwt.rs`'s
+        // equivalent check already words it this way.
+        assert!(
+            secret.len() >= 32,
+            "JwtLifecycle signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
+        );
         Self {
             secret,
             access_ttl_secs: DEFAULT_ACCESS_TTL_SECS,
@@ -151,6 +218,12 @@ impl JwtLifecycle {
     pub fn with_jti_store(mut self, store: Arc<dyn JtiStore>) -> Self {
         self.jti_store = store;
         self
+    }
+
+    /// `true` when revocations live in this process only.
+    #[must_use]
+    pub fn jti_store_is_process_local(&self) -> bool {
+        self.jti_store.is_process_local()
     }
 
     /// Override the access token TTL (in seconds).
@@ -253,12 +326,12 @@ impl JwtLifecycle {
     /// [`Self::refresh_with`] instead and supply fresh claims.
     ///
     /// Returns `None` if the refresh token is invalid, expired, or already
-    /// blacklisted.
+    /// blacklisted. A refresh token is single use: of two refreshes of
+    /// one token, even concurrent ones, the second returns `None`.
     pub async fn refresh(&self, refresh_token: &str) -> Option<JwtTokenPair> {
-        let claims = self.verify_refresh(refresh_token).await?;
-        // Rotate: blacklist the old refresh, issue a new pair carrying the
+        // Rotate: redeem the old refresh, issue a new pair carrying the
         // same custom payload (preserves `scope` / `roles` / `tenant`).
-        self.blacklist_jti(&claims.jti, claims.exp).await;
+        let claims = self.redeem_refresh(refresh_token).await?;
         // Safe to unwrap — the custom claims came from a token we ourselves
         // issued, so they can't contain reserved names (issue_pair_with
         // already rejected those at original issuance).
@@ -269,7 +342,8 @@ impl JwtLifecycle {
     /// custom payload — useful when permissions may have changed since
     /// the refresh token was issued (e.g. role revoked, scope downgraded).
     ///
-    /// The old refresh JTI is still blacklisted to prevent replay.
+    /// The old refresh token is single use here too: a second refresh
+    /// of it returns `Ok(None)`.
     ///
     /// # Errors
     /// [`JwtIssueError::ReservedClaim`] if `new_custom` overlaps reserved names.
@@ -279,10 +353,9 @@ impl JwtLifecycle {
         refresh_token: &str,
         new_custom: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<JwtTokenPair>, JwtIssueError> {
-        let Some(claims) = self.verify_refresh(refresh_token).await else {
+        let Some(claims) = self.redeem_refresh(refresh_token).await else {
             return Ok(None);
         };
-        self.blacklist_jti(&claims.jti, claims.exp).await;
         self.issue_pair_with(claims.sub, new_custom).map(Some)
     }
 
@@ -329,20 +402,30 @@ impl JwtLifecycle {
         payload.insert("jti".into(), serde_json::Value::String(jti));
         payload.insert("typ".into(), serde_json::Value::String(typ.into()));
 
+        // Three segments, with the JOSE header, signed over
+        // `header.payload` — i.e. an actual JWT (#1397).
+        //
+        // This used to emit `base64(payload).base64(sig)`: two segments,
+        // no header, no `alg`, signed over the payload alone. Nothing
+        // outside rustango could read it — not jwt.io, not any language's
+        // standard library, not an API gateway asked to validate a JWT,
+        // and not `rustango::jwt::decode`, which rejected the framework's
+        // own tokens as malformed. Meanwhile every doc, the type names
+        // and the route all said JWT.
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "HS256", "typ": "JWT"}))
+                .unwrap_or_default(),
+        );
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap_or_default());
-        let sig = self.sign(payload_b64.as_bytes());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = self.sign(signing_input.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        format!("{payload_b64}.{sig_b64}")
+        format!("{signing_input}.{sig_b64}")
     }
 
     async fn verify_token(&self, token: &str) -> Option<JwtClaims> {
-        let claims = self.decode_unchecked(token)?;
-        // Expiry — checked before the store, so an expired token never costs
-        // a round trip to a durable backend.
-        if chrono::Utc::now().timestamp() >= claims.exp {
-            return None;
-        }
+        let claims = self.decode_unexpired(token)?;
         // Blacklist
         if self.is_blacklisted(&claims.jti).await {
             return None;
@@ -350,11 +433,108 @@ impl JwtLifecycle {
         Some(claims)
     }
 
+    /// Single-use redemption of a refresh token: `mark_used` is the one
+    /// atomic check, so of two concurrent redemptions only one wins.
+    async fn redeem_refresh(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.decode_unexpired(token)?;
+        if claims.typ != REFRESH_TYP {
+            return None;
+        }
+        self.jti_store
+            .mark_used(&claims.jti, claims.exp)
+            .await
+            .then_some(claims)
+    }
+
+    /// A refresh token's claims by signature, expiry and `typ`, ignoring
+    /// revocation, so a replayed token can be told from a forged one (#1854).
+    pub(crate) fn decode_refresh(&self, token: &str) -> Option<JwtClaims> {
+        self.decode_unexpired(token)
+            .filter(|c| c.typ == REFRESH_TYP)
+    }
+
+    /// Mark a refresh-token family dead until `exp` (#1854). Only as
+    /// strong as the JTI store: a process-local one forgets on restart.
+    pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {
+        let key = family_key(fam);
+        // `false` is "already there"; a store that also can't read it back failed.
+        if !self.jti_store.mark_used(&key, exp).await && !self.jti_store.is_used(&key).await {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JTI store did not record a refresh-family revocation; the replayed chain stays live"
+            );
+        }
+    }
+
+    /// Record a refresh attempt on a token not yet redeemed, in a
+    /// `grace`-second time bucket (#1854).
+    pub(crate) async fn note_refresh_attempt(&self, jti: &str, grace: i64) {
+        if grace <= 0 || self.jti_store.is_used(jti).await {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let key = grace_key(jti, now / grace);
+        let _ = self.jti_store.mark_used(&key, now + 2 * grace).await;
+    }
+
+    /// `true` when a refresh of `jti` began while it was still unredeemed,
+    /// within the last `grace` to `2 × grace` seconds: a retry, not a theft.
+    pub(crate) async fn recently_attempted(&self, jti: &str, grace: i64) -> bool {
+        if grace <= 0 {
+            return false;
+        }
+        let bucket = chrono::Utc::now().timestamp() / grace;
+        self.jti_store.is_used(&grace_key(jti, bucket)).await
+            || self.jti_store.is_used(&grace_key(jti, bucket - 1)).await
+    }
+
+    pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
+        self.jti_store.is_used(&family_key(fam)).await
+    }
+
+    /// Signature and expiry, no store lookup. Expiry comes first, so an
+    /// expired token never costs a round trip to a durable backend.
+    fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.decode_unchecked(token)?;
+        (chrono::Utc::now().timestamp() < claims.exp).then_some(claims)
+    }
+
     /// Decode + verify signature only — does NOT check expiry or blacklist.
     /// Used for `revoke` so we can blacklist even an already-expired token's JTI.
     fn decode_unchecked(&self, token: &str) -> Option<JwtClaims> {
-        let (payload_b64, sig_b64) = token.split_once('.')?;
-        let expected = self.sign(payload_b64.as_bytes());
+        // Accepts both shapes (#1397). Three segments is what we issue
+        // now; two is the pre-#1397 format, still verified so that
+        // upgrading the framework does not log out everyone holding a
+        // token that has not expired yet.
+        //
+        // This is a compatibility path with an end date, not a permanent
+        // one — remove it in 0.58, by which time every token minted in
+        // the old shape has aged out. It weakens nothing in the
+        // meantime: both shapes are verified with the same HMAC key, and
+        // an attacker who cannot forge one cannot forge the other.
+        let parts: Vec<&str> = token.split('.').collect();
+        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
+            [header, payload, sig] => {
+                // Pin the algorithm from the header rather than trusting
+                // it. Belt-and-braces — we verify HS256 over the whole
+                // `header.payload` with our own key regardless, so a
+                // swapped `alg` cannot validate — but refusing it here
+                // means `alg: none` is rejected as such instead of as a
+                // signature mismatch.
+                let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(header)
+                    .ok()?;
+                let header_json: serde_json::Value = serde_json::from_slice(&header_bytes).ok()?;
+                if header_json.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
+                    return None;
+                }
+                (format!("{header}.{payload}"), *payload, *sig)
+            }
+            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
+            _ => return None,
+        };
+
+        let expected = self.sign(signing_input.as_bytes());
         let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig_b64)
             .ok()?;
@@ -396,10 +576,9 @@ impl JwtLifecycle {
     }
 
     async fn blacklist_jti(&self, jti: &str, expires_at: i64) {
-        // v0.48 — delegate to the pluggable JtiStore. We ignore the
-        // returned `bool` (newly-inserted vs already-present) because
-        // re-revoking an already-revoked token is idempotent here:
-        // either way the JTI is in the store on return. Pruning is
+        // v0.48 — delegate to the pluggable JtiStore. Revocation only, so
+        // the returned `bool` is ignored: re-revoking is idempotent.
+        // Refresh rotation must not use this; see `redeem_refresh`. Pruning is
         // the store's responsibility (`InMemoryJtiStore` does it
         // opportunistically inside `mark_used`).
         //
@@ -421,7 +600,17 @@ impl JwtLifecycle {
     }
 }
 
-fn random_jti() -> String {
+/// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.
+fn family_key(fam: &str) -> String {
+    format!("fam:{fam}")
+}
+
+/// Bucketed, so the window holds even where `is_used` ignores expiry.
+fn grace_key(jti: &str, bucket: i64) -> String {
+    format!("grace:{jti}:{bucket}")
+}
+
+pub(crate) fn random_jti() -> String {
     // v0.42 — OsRng (OS CSPRNG) for JWT identifier material. A
     // predictable JTI lets an attacker pre-mint blacklist entries
     // and bypass token revocation.
@@ -447,8 +636,15 @@ fn check_reserved(
 mod tests {
     use super::*;
 
+    /// 32 bytes, because that is the floor `new` enforces.
+    ///
+    /// This helper signed with an 11-byte `b"test-secret"` — a key the
+    /// framework's own verifier-side constructors have refused since
+    /// audit N5. The module's tests were the reason nobody noticed the
+    /// issuing path had no floor: they exercised it exclusively with a
+    /// key it should never have accepted.
     fn jwt() -> JwtLifecycle {
-        JwtLifecycle::new(b"test-secret".to_vec())
+        JwtLifecycle::new(b"test-secret-at-least-32-bytes-ok!".to_vec())
     }
 
     #[tokio::test]
@@ -512,6 +708,53 @@ mod tests {
         assert!(j.verify_refresh(&pair.refresh).await.is_none());
     }
 
+    /// A store whose calls yield, like a database. The in-memory store
+    /// never yields, which hides the check-then-mark race.
+    struct YieldingStore(std::sync::Mutex<std::collections::HashSet<String>>);
+    impl JtiStore for YieldingStore {
+        fn is_used<'a>(&'a self, jti: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.0.lock().unwrap().contains(jti)
+            })
+        }
+        fn mark_used<'a>(&'a self, jti: &'a str, _: i64) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.0.lock().unwrap().insert(jti.to_owned())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_token_yield_one_pair() {
+        let j = jwt().with_jti_store(Arc::new(YieldingStore(Default::default())));
+        let pair = j.issue_pair(7);
+        let (a, b) = tokio::join!(j.refresh(&pair.refresh), j.refresh(&pair.refresh));
+        assert!(a.is_some() ^ b.is_some(), "a refresh token redeemed twice");
+        let pair = j.issue_pair(7);
+        let (a, b) = tokio::join!(
+            j.refresh_with(&pair.refresh, serde_json::Map::new()),
+            j.refresh_with(&pair.refresh, serde_json::Map::new()),
+        );
+        assert!(
+            a.unwrap().is_some() ^ b.unwrap().is_some(),
+            "refresh_with redeemed twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_token_cannot_be_redeemed() {
+        let j = jwt();
+        let pair = j.issue_pair(7);
+        assert!(j.revoke(&pair.refresh).await);
+        assert!(j.refresh(&pair.refresh).await.is_none());
+        assert!(
+            j.refresh(&pair.access).await.is_none(),
+            "an access token is not a refresh token"
+        );
+    }
+
     #[tokio::test]
     async fn revoke_invalidates_access_token() {
         let j = jwt();
@@ -542,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_secret_fails_verification() {
         let j1 = jwt();
-        let j2 = JwtLifecycle::new(b"different-secret".to_vec());
+        let j2 = JwtLifecycle::new(b"a-different-secret-32-bytes-long!".to_vec());
         let pair = j1.issue_pair(5);
         assert!(j2.verify_access(&pair.access).await.is_none());
     }
@@ -559,7 +802,7 @@ mod tests {
 
     #[test]
     fn custom_ttls() {
-        let j = JwtLifecycle::new(b"k".to_vec())
+        let j = JwtLifecycle::new(b"custom-ttl-secret-32-bytes-long!!".to_vec())
             .with_access_ttl(60)
             .with_refresh_ttl(3600);
         assert_eq!(j.access_ttl_secs, 60);
@@ -758,5 +1001,27 @@ mod tests {
         assert_eq!(j.blacklist_size().await, 1);
         j.revoke(&pair.refresh).await;
         assert_eq!(j.blacklist_size().await, 2);
+    }
+
+    /// A short signing key is refused, not quietly accepted.
+    ///
+    /// `JwtBackend::new` and `auth_routes::build_jwt` both enforced this
+    /// floor; the constructor that actually *signs* did not. A two-byte
+    /// key produced perfectly valid tokens that anyone could forge, and
+    /// every verifier downstream accepted them — there was nothing to
+    /// notice. Audit A-06.
+    #[test]
+    #[should_panic(expected = "need >= 32")]
+    fn a_short_signing_key_is_refused() {
+        let _ = JwtLifecycle::new(b"too-short".to_vec());
+    }
+
+    /// And exactly 32 bytes is accepted, so the boundary is `>=` rather
+    /// than `>`. A test that only checked the panic would pass with the
+    /// comparison inverted.
+    #[test]
+    fn a_thirty_two_byte_key_is_accepted() {
+        let life = JwtLifecycle::new(vec![7u8; 32]);
+        assert_eq!(life.access_ttl_secs, DEFAULT_ACCESS_TTL_SECS);
     }
 }

@@ -1,13 +1,11 @@
-//! `manage create-admin` CLI verb — bootstrap an `AdminUser` row for
-//! projects using `admin::Builder::with_session_auth` (#253 slice B).
+//! The `create-admin` CLI verb: create an `AdminUser` row for a
+//! project that uses `admin::Builder::with_session_auth`.
 //!
-//! Modelled on `tenancy::manage::users::create_user_cmd` but:
-//! - takes a plain `&Pool` (no tenancy resolver needed),
-//! - writes to `rustango_admin_users` (auto-created if absent),
-//! - uses `crate::passwords::hash` for the password.
+//! It takes a plain `&Pool`, with no tenancy resolver, writes to
+//! `rustango_admin_users` (creating the table if needed), and hashes
+//! the password with `crate::passwords::hash_async`.
 //!
-//! Usage (from any project pairing the bare admin with session
-//! auth):
+//! Usage:
 //!
 //! ```text
 //! cargo run -- create-admin alice                          # prompts for password
@@ -25,8 +23,11 @@ use crate::sql::{Auto, Pool};
 
 use super::user::AdminUser;
 
-/// Dispatch entry-point — wired into `migrate::manage::run` under
-/// the `"create-admin"` arm. `args` is the slice AFTER the verb name.
+/// Entry point, called from `migrate::manage::run` for the
+/// `"create-admin"` verb. `args` holds the tokens after the verb.
+///
+/// # Errors
+/// Bad arguments, a duplicate username, or a failed hash or insert.
 pub async fn create_admin_cmd<W: Write + Send>(
     pool: &Pool,
     args: &[String],
@@ -89,10 +90,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
             })?,
     };
     let (plain, generated) = if generate {
-        // Reuse the tenancy password generator when the `tenancy`
-        // feature is on; the bare admin compiles without `tenancy`,
-        // so fall back to a tiny local generator using `rand`. Both
-        // paths produce a 20-char URL-safe-base64-trimmed password.
+        // A 20-char password from the local generator. The bare admin
+        // compiles without `tenancy`, so it cannot use that one.
         let plain = generate_password(20);
         (plain, true)
     } else {
@@ -110,19 +109,14 @@ pub async fn create_admin_cmd<W: Write + Send>(
     };
 
     // ---- ensure the table exists ---------------------------------
-    // First run on a fresh sqlite project shouldn't require manually
-    // calling `bootstrap` — the migrate verb that just ran already
-    // applied any project migrations, so this is the right place to
-    // make sure `rustango_admin_users` is present.
-    use crate::migrate::ddl;
-    let dialect = pool.dialect();
-    let sql = ddl::create_table_sql_with_dialect(dialect, AdminUser::SCHEMA);
-    // Driver-specific "IF NOT EXISTS" support varies; we just attempt
-    // and absorb "already exists" failures since they're benign here.
-    let _ = crate::sql::raw_execute_pool(pool, &sql, vec![]).await;
+    // A first run on a fresh project should not need a manual
+    // `bootstrap` call, so make sure `rustango_admin_users` is there.
+    // The shared ensure path: no ERROR in the PG log when the table is
+    // there, and a real failure is reported instead of swallowed (#1642).
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminUser::SCHEMA]);
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
 
     // ---- reject duplicate username -------------------------------
-    // #562 — by_pk constructor for single-column lookup.
     use crate::core::{SelectQuery, SqlValue};
     let select = SelectQuery::by_pk(
         AdminUser::SCHEMA,
@@ -141,7 +135,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
     }
 
     // ---- hash + insert -------------------------------------------
-    let hash = crate::passwords::hash(&plain)
+    let hash = crate::passwords::hash_async(&plain)
+        .await
         .map_err(|e| MigrateError::Validation(format!("password hash failed: {e}")))?;
     let mut user = AdminUser {
         id: Auto::Unset,
@@ -152,6 +147,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
         is_superuser,
         active: true,
         created_at: chrono::Utc::now(),
+        sessions_revoked_at: None,
     };
     user.save_pool(pool)
         .await
@@ -170,8 +166,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
     Ok(())
 }
 
-/// Tiny local password generator — 20 chars from URL-safe base64.
-/// Independent of tenancy so the bare admin compiles without it.
+/// Small password generator: `n` chars of URL-safe base64. Local, so
+/// the bare admin compiles without `tenancy`.
 fn generate_password(n: usize) -> String {
     use base64::Engine;
     use rand::RngCore;

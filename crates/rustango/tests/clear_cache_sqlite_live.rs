@@ -1,6 +1,6 @@
 #![cfg(all(feature = "sqlite", feature = "cache"))]
-//! Live SQLite tests for `DatabaseCache::purge_expired` — Django
-//! `manage clearsessions` parity. The framework's CLI wrapper
+//! Live SQLite tests for `DatabaseCache::purge_expired` — drop the
+//! rows whose TTL has passed. The framework's CLI wrapper
 //! (`manage clear-cache`) is a thin pass-through over this method;
 //! we test the method directly to avoid the CLI plumbing.
 

@@ -117,8 +117,7 @@ pub struct ChainSecretsResolver {
 }
 
 impl ChainSecretsResolver {
-    /// Construct an empty chain. Use [`Self::push`] / [`Self::default_to`]
-    /// to populate.
+    /// Construct an empty chain. Use [`Self::push`] to populate.
     #[must_use]
     pub fn new(default: impl SecretsResolver) -> Self {
         Self {

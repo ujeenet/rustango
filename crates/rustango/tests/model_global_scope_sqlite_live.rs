@@ -32,11 +32,7 @@ use rustango::Model;
 /// Returns `is_active = true` so every queryset for `Post` is
 /// implicitly `Post::objects().filter(is_active = true)`.
 fn active_only() -> WhereExpr {
-    WhereExpr::Predicate(Filter {
-        column: "is_active",
-        op: Op::Eq,
-        value: SqlValue::Bool(true),
-    })
+    WhereExpr::Predicate(Filter::new("is_active", Op::Eq, SqlValue::Bool(true)))
 }
 
 #[derive(Model, Debug, Clone)]
@@ -101,6 +97,30 @@ fn schema_carries_one_global_scope() {
         }
         _ => panic!("expected Predicate, got {expr:?}"),
     }
+}
+
+/// `apply = Self::…` resolves inside the derive's generated consts.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "gs_self_post", global_scope(name = "active", apply = Self::active))]
+#[allow(dead_code)]
+pub struct SelfScopedPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub is_active: bool,
+}
+
+impl SelfScopedPost {
+    fn active() -> WhereExpr {
+        active_only()
+    }
+}
+
+#[test]
+fn apply_may_name_an_associated_fn_through_self() {
+    use rustango::core::Model as _;
+    let scopes = SelfScopedPost::SCHEMA.global_scopes;
+    assert_eq!(scopes.len(), 1);
+    assert!(matches!((scopes[0].apply)(), WhereExpr::Predicate(_)));
 }
 
 #[tokio::test]

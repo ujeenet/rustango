@@ -1,10 +1,8 @@
-//! Opinionated HTTP client — `reqwest` wrapper with sane timeouts,
-//! exponential-backoff retries on idempotent verbs / transient
-//! failures, and a default `User-Agent`.
+//! HTTP client: a `reqwest` wrapper with sane timeouts, backoff retries
+//! and a default `User-Agent`.
 //!
-//! `reqwest::Client` directly is fine for one-off calls — reach for
-//! [`HttpClient`] when you want consistent retry + timeout behavior
-//! across many call sites without duplicating builders.
+//! Use `reqwest::Client` for one-off calls. Use [`HttpClient`] when many
+//! call sites need the same retry and timeout behavior.
 //!
 //! ## Quick start
 //!
@@ -29,18 +27,16 @@
 //!
 //! ## What gets retried
 //!
-//! With `RetryPolicy::default()`:
+//! GET, HEAD and OPTIONS retry by default. Other verbs retry only when
+//! you opt in with [`RequestBuilder::send_with_retry`], and only if the
+//! call is safe to repeat.
 //!
-//! - GET / HEAD / OPTIONS — retried by default
-//! - POST / PUT / PATCH / DELETE — only when you opt in via
-//!   [`RequestBuilder::send_with_retry`] (the call must be idempotent)
+//! A retry happens on a transport error (connect, DNS, TLS, timeout) or
+//! on HTTP 408, 429 or 5xx. A `Retry-After` header sets the wait instead
+//! of the backoff, capped at `max_backoff`.
 //!
-//! And only when one of these is true:
-//!
-//! - Transport error (connect refused, DNS failure, TLS handshake, timeout)
-//! - HTTP 408 / 429 / 5xx response
-//! - The response carries `Retry-After`, in which case we honor it as
-//!   the wait before the next attempt (capped at `max_backoff`).
+//! [`HttpClient`]: crate::http_client::HttpClient
+//! [`RequestBuilder::send_with_retry`]: crate::http_client::RequestBuilder::send_with_retry
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,9 +100,7 @@ impl RetryPolicy {
     }
 }
 
-/// HTTP client with built-in retry behavior.
-///
-/// Cheap to clone — the internal `reqwest::Client` is `Arc`-wrapped.
+/// HTTP client with built-in retry behavior. Cheap to clone.
 #[derive(Clone)]
 pub struct HttpClient {
     inner: reqwest::Client,
@@ -120,8 +114,7 @@ impl HttpClient {
     }
 
     /// Wrap an existing `reqwest::Client` with the default retry policy.
-    /// Useful when you've already built a client with custom TLS / proxy
-    /// settings.
+    /// Use this when the client already has custom TLS or proxy settings.
     #[must_use]
     pub fn from_reqwest(client: reqwest::Client) -> Self {
         Self {
@@ -154,8 +147,8 @@ impl HttpClient {
     pub fn head(&self, url: impl IntoUrl) -> RequestBuilder {
         self.request(Method::HEAD, url)
     }
-    /// Build a `QUERY` request (RFC 10008) — a safe, idempotent read with
-    /// a body. Classified idempotent, so it's retried by default like GET.
+    /// Build a `QUERY` request (RFC 10008): a safe read that carries a
+    /// body. Retried by default, like GET.
     pub fn query(&self, url: impl IntoUrl) -> RequestBuilder {
         self.request(
             Method::from_bytes(b"QUERY").expect("QUERY is a valid method token"),
@@ -176,7 +169,7 @@ impl HttpClient {
     }
 }
 
-/// `Url`-or-string convenience trait so callers can pass either form.
+/// Lets callers pass either a `Url` or a string.
 pub trait IntoUrl {
     fn into_url(self) -> Result<Url, HttpError>;
 }
@@ -258,8 +251,8 @@ impl HttpClientBuilder {
     /// timeout, `rustango-http/<crate version>` User-Agent.
     ///
     /// # Errors
-    /// Underlying reqwest builder error (only happens with bizarre
-    /// TLS / runtime config — unlikely with the workspace defaults).
+    /// Returns the reqwest builder error when the TLS or runtime config
+    /// is unusable.
     pub fn build(self) -> Result<HttpClient, HttpError> {
         let timeout = self.timeout.unwrap_or(Duration::from_secs(30));
         let connect = self.connect_timeout.unwrap_or(Duration::from_secs(10));
@@ -300,9 +293,9 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
-    /// Override the default per-method retry policy. `true` forces
-    /// retries on any verb (use only when you've confirmed the call is
-    /// idempotent); `false` disables retries even on GET.
+    /// Override the per-method default. `true` retries any verb, so use
+    /// it only when repeating the call is safe. `false` turns retries
+    /// off, even for GET.
     #[must_use]
     pub fn send_with_retry(mut self, on: bool) -> Self {
         self.retry_override = Some(on);
@@ -325,7 +318,7 @@ impl RequestBuilder {
         self.header("authorization", format!("Bearer {}", token.as_ref()))
     }
 
-    /// Set the body to a JSON-serialized value.
+    /// Set the body to a JSON value.
     ///
     /// # Errors
     /// Returns `HttpError::Header` when serialization fails.
@@ -344,10 +337,10 @@ impl RequestBuilder {
         self
     }
 
-    /// Send the request, applying the configured retry policy.
+    /// Send the request under the configured retry policy.
     ///
     /// # Errors
-    /// Final `HttpError::Reqwest` when retries are exhausted.
+    /// The last `HttpError::Reqwest` once retries run out.
     pub async fn send(self) -> Result<Response, HttpError> {
         let url = self.url?;
         let policy = self.policy.clone();
@@ -394,9 +387,8 @@ impl RequestBuilder {
 }
 
 fn is_method_idempotent(m: &Method) -> bool {
-    // QUERY (RFC 10008) is safe + idempotent, so it's retry-safe like GET.
-    // Matched by name to stay independent of the `admin`-gated `http_query`
-    // module.
+    // QUERY (RFC 10008) is safe to repeat, like GET. Matched by name so this
+    // does not depend on the `admin`-gated `http_query` module.
     matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS) || m.as_str() == "QUERY"
 }
 
@@ -413,8 +405,7 @@ fn retry_after(resp: &Response, policy: &RetryPolicy) -> Option<Duration> {
         return None;
     }
     let raw = resp.headers().get(RETRY_AFTER)?.to_str().ok()?;
-    // RFC 7231: either delta-seconds or HTTP-date. We support seconds only;
-    // HTTP-date is rare for Retry-After in modern APIs.
+    // RFC 7231 allows seconds or an HTTP-date. Only seconds are supported.
     let secs: u64 = raw.trim().parse().ok()?;
     Some(Duration::from_secs(secs).min(policy.max_backoff))
 }
@@ -499,8 +490,8 @@ mod tests {
 
     #[tokio::test]
     async fn query_method_and_body_go_over_the_wire() {
-        // `any` accepts the extension method; the handler echoes method +
-        // body so we can prove the connector sent QUERY with its body.
+        // `any` accepts the extension method; the handler echoes method and
+        // body, proving QUERY went out with its body.
         let app = Router::new().route(
             "/",
             axum::routing::any(|m: Method, body: String| async move { format!("{m}:{body}") }),

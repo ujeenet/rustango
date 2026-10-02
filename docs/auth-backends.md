@@ -3,9 +3,10 @@
 An **auth backend** answers one question: *given an incoming request, who is the
 user?* **Rustango** lets you stack several — HTTP Basic, API key, JWT — into a
 chain that the auth middleware tries in order, so one app can accept humans and
-machines on the same routes. This is Django's `AUTHENTICATION_BACKENDS` idea,
-wired to axum. Pair it with `require_auth` / `require_perm` to gate routes and
-the `CurrentUser` extractor to read the result.
+machines on the same routes. You pick which backends to register and in what
+order, and the chain is wired to axum. Pair it with `require_auth` /
+`require_perm` to gate routes and the `CurrentUser` extractor to read the
+result.
 
 [![Auth backends in Rustango: a request flows through a chain of backends (ModelBackend, ApiKeyBackend, JwtBackend); the first to recognise the credential wins and injects CurrentUser, then require_perm checks a codename](img/auth-backends.png)](img/auth-backends.png)
 
@@ -16,7 +17,9 @@ the `CurrentUser` extractor to read the result.
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) and
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — behind the `tenancy`
 > feature. A portable, DB-agnostic registry also lives at
-> `rustango::auth_backends` (always compiled).
+> `rustango::auth_backends`, which needs the internal `_async_trait`
+> feature — pulled in by `cache`, `email`, `jobs` and `oauth2`, so most
+> builds have it, but a minimal one does not.
 >
 > **Runnable version:** every snippet is copied from
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -78,6 +81,32 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+On a tenant route the token's `tenant` claim must match the resolved tenant, and
+MCP agent tokens (`kind` claim) are refused. Mint with `JwtAuth` login or
+`JwtBackend::issue_for_tenant`; plain `issue` tokens work only where no tenant is resolved.
+
+`JwtBackend` accepts the access tokens `JwtLifecycle` issues, and refuses its
+refresh tokens — the two are wire-identical apart from `typ`, so a refresh
+token presented as a bearer would otherwise be an access credential with days
+of life instead of minutes.
+
+**Revocation is opt-in and off by default.** A bare `JwtBackend` never consults
+a blacklist, so a token revoked by `/api/auth/logout` keeps authenticating
+through this backend until it expires on its own. Share one store between the
+lifecycle and the backend to make logout take effect:
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // Redis in prod
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+It must be the *same* store. Wiring two instances looks configured and enforces
+nothing: logout writes to one and verification reads the other. See
+[revocation and the JTI store](auth-jwt-api.md#revocation-and-the-jti-store).
+
 Write a custom backend by implementing the trait (one async method that inspects
 the request `Parts` and returns `Option<AuthUser>`):
 
@@ -113,8 +142,28 @@ use rustango::tenancy::RouterAuthExt;
 
 let app = Router::new()
     .route("/profile", get(profile))
-    .require_auth(backends, pool);     // 401 if no backend matches
+    .require_auth(backends);           // 401 if no backend matches
 ```
+
+> **These took a `Pool` before 0.57.11.** They do not any more, and the
+> change is a security fix, not tidying. The pool
+> was captured when the router was built and reused for every request,
+> so a credential issued by one tenant authenticated on another
+> tenant's host — the backends looked the user up in whichever database
+> the router happened to be constructed with, and `is_superuser`
+> travelled onward in a request extension without a re-query.
+>
+> The pool now comes from the tenant resolved for **each request**.
+> Migration is dropping the argument:
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Mount the tenancy layer outside these. Without a tenant context in
+> request extensions they fail closed with a `500` rather than guess a
+> database.
 
 Verified behaviour:
 
@@ -159,12 +208,12 @@ outer one, so the user is resolved *before* the permission is checked:
 ```rust
 let admin = Router::new()
     .route("/admin", get(admin_only))
-    .require_perm("post.add", pool.clone());   // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/profile", get(profile))
     .merge(admin)
-    .require_auth(backends, pool);             // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 ```rust
@@ -186,7 +235,7 @@ permission tables are created by `ensure_tables_pool`).
 Separately, `rustango::auth_backends` (note: crate root, **not** `tenancy`) is a
 small **framework-agnostic** registry — a `Credentials` → `Principal` chain with
 its own `AuthBackend` trait. It has no HTTP/axum glue; use it when you want
-Django-style backend pluggability inside your own auth code:
+pluggable auth backends inside your own auth code:
 
 ```rust
 use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};

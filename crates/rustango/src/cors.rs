@@ -37,9 +37,9 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::header::{
-    HeaderName, HeaderValue, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
+    HeaderValue, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
     ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, ORIGIN,
 };
 use axum::http::{Method, Request, Response, StatusCode};
 use axum::middleware::Next;
@@ -48,8 +48,7 @@ use axum::Router;
 /// Origin matching policy.
 #[derive(Clone, Debug)]
 pub enum AllowOrigin {
-    /// Echo back any incoming `Origin` (sets `Access-Control-Allow-Origin: *`
-    /// when no specific origin is sent — request-aware reflection).
+    /// Accept any origin. Sends `Access-Control-Allow-Origin: *`.
     Any,
     /// Allow only origins in this list (case-insensitive exact match).
     List(Arc<Vec<String>>),
@@ -73,8 +72,8 @@ impl Default for CorsLayer {
 }
 
 impl CorsLayer {
-    /// Empty CORS layer — no origins allowed by default. Configure with
-    /// `allow_origins` / `allow_any_origin`.
+    /// Empty layer: no origin is allowed. Add some with
+    /// `allow_origins` or `allow_any_origin`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -87,8 +86,8 @@ impl CorsLayer {
         }
     }
 
-    /// Wide-open development config: any origin, common methods, common
-    /// headers. **Do not use in production.**
+    /// Development config: any origin, plus the common methods and
+    /// headers. **Do not use it in production.**
     #[must_use]
     pub fn permissive() -> Self {
         Self {
@@ -101,9 +100,8 @@ impl CorsLayer {
                 "DELETE".into(),
                 "HEAD".into(),
                 "OPTIONS".into(),
-                // RFC 10008 — QUERY always triggers a preflight (never
-                // CORS-safelisted), so it must be advertised here to work
-                // cross-origin.
+                // QUERY is never CORS-safelisted, so it always needs a
+                // preflight and must be listed here.
                 "QUERY".into(),
             ],
             allow_headers: vec!["*".into()],
@@ -125,14 +123,11 @@ impl CorsLayer {
         self
     }
 
-    /// Allow any origin (echoes the incoming Origin back).
+    /// Allow any origin.
     ///
-    /// v0.30.12 (security audit) — emits a `tracing::warn!` if
-    /// credentials are already enabled. Browsers reject `*` with
-    /// credentials, and while the framework works around this by
-    /// echoing the Origin per-request, preflights without an
-    /// Origin header fail. Build with an explicit allowlist
-    /// (`.allow_origins([...])`) for credentialed CORS.
+    /// This warns if credentials are already on. Browsers reject `*`
+    /// together with credentials. For credentialed CORS, list the
+    /// origins with `.allow_origins([...])` instead.
     #[must_use]
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_origin = AllowOrigin::Any;
@@ -146,20 +141,16 @@ impl CorsLayer {
         self
     }
 
-    /// Build the layer from a loaded
-    /// [`crate::config::SecuritySettings`] section (#87 wiring,
-    /// v0.29). Three branches:
+    /// Build the layer from a [`crate::config::SecuritySettings`]
+    /// section:
     ///
-    /// - `cors_allowed_origins` empty → returns `None`. CORS is
-    ///   opt-in; an empty list means "don't mount the layer at
-    ///   all" (different from "allow zero origins").
-    /// - List contains `"*"` → returns
-    ///   `Some(Self::permissive())`. Wildcard is the canonical way
-    ///   to write "any origin" in TOML; it maps to the existing
-    ///   permissive preset.
-    /// - Specific origins → returns `Some` with allowlist + the
-    ///   common methods/headers most APIs need. Callers that want
-    ///   tighter control build their own layer.
+    /// - `cors_allowed_origins` empty gives `None`. CORS is opt-in,
+    ///   so an empty list means "do not mount the layer", which is
+    ///   not the same as "allow no origin".
+    /// - A list holding `"*"` gives [`Self::permissive`].
+    /// - Named origins give an allowlist plus the methods and
+    ///   headers most APIs need. For tighter control, build the
+    ///   layer yourself.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -220,19 +211,13 @@ impl CorsLayer {
         self
     }
 
-    /// Set `Access-Control-Allow-Credentials: true`. Note: when `true`
-    /// you cannot use `allow_any_origin()` — browsers reject `*` with
-    /// credentials, and the framework works around this by echoing
-    /// the request's `Origin` back instead of `*` (only on requests
-    /// that carry an `Origin` header). Preflight requests that omit
-    /// `Origin` will still get `*` in the response, which the
-    /// browser rejects with credentials.
+    /// Set `Access-Control-Allow-Credentials: true`.
     ///
-    /// v0.30.12 (security audit) — this method emits a
-    /// `tracing::warn!` at construction time when `yes = true`
-    /// and the layer is configured with `allow_any_origin()`, so
-    /// the misconfig surfaces in logs instead of silently failing
-    /// preflights for some clients.
+    /// **Do not combine this with `allow_any_origin()`.** Browsers
+    /// reject `*` together with credentials, so those requests fail.
+    /// List your origins instead. This method warns at build time if
+    /// the layer already allows any origin, so the mistake shows up
+    /// in the logs and not only as a broken preflight.
     #[must_use]
     pub fn allow_credentials(mut self, yes: bool) -> Self {
         self.allow_credentials = yes;
@@ -259,6 +244,14 @@ impl CorsLayer {
     /// Returns `None` when the origin should be rejected.
     fn resolve_origin(&self, request_origin: Option<&str>) -> Option<String> {
         match (&self.allow_origin, request_origin) {
+            // Never echo a concrete origin while credentials are on.
+            //
+            // A browser refuses `Access-Control-Allow-Origin: *` with
+            // credentials, but it accepts an echoed concrete origin.
+            // So echoing here would turn "any origin" into "every
+            // origin, with cookies", readable by any site the victim
+            // visits. Answer `*` and let the browser block it.
+            (AllowOrigin::Any, _) if self.allow_credentials => Some("*".to_owned()),
             (AllowOrigin::Any, Some(o)) => Some(o.to_owned()),
             (AllowOrigin::Any, None) => Some("*".to_owned()),
             (AllowOrigin::List(list), Some(o)) => {
@@ -336,16 +329,18 @@ fn attach_cors_headers(
     request_headers: Option<&str>,
     response: &mut Response<Body>,
 ) {
+    // The answer depends on Origin unless it is always `*`, refusals
+    // included, so a shared cache must key on it (#1867).
+    let always_wildcard = matches!(cfg.allow_origin, AllowOrigin::Any) && cfg.allow_credentials;
+    if !always_wildcard {
+        crate::vary::add_vary(response.headers_mut(), "Origin");
+    }
     let Some(allow_origin) = cfg.resolve_origin(request_origin) else {
         return;
     };
     let headers = response.headers_mut();
     if let Ok(v) = HeaderValue::from_str(&allow_origin) {
         headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, v);
-    }
-    // Vary: Origin so caches don't serve a wrong-origin response
-    if matches!(cfg.allow_origin, AllowOrigin::List(_)) {
-        headers.append(VARY, HeaderValue::from_static("origin"));
     }
 
     if !cfg.allow_methods.is_empty() {
@@ -355,6 +350,11 @@ fn attach_cors_headers(
     }
 
     let allow_headers = if cfg.allow_headers.is_empty() {
+        // An echoed answer depends on the request, so a cache must key on it.
+        if request_headers.is_some() {
+            crate::vary::add_vary(headers, "Access-Control-Request-Headers");
+            crate::vary::add_vary(headers, "Access-Control-Request-Method");
+        }
         request_headers.map(str::to_owned)
     } else {
         Some(cfg.allow_headers.join(", "))
@@ -371,7 +371,9 @@ fn attach_cors_headers(
         }
     }
 
-    if cfg.allow_credentials {
+    // Never send credentials next to a wildcard: no browser honours
+    // that pair. The build-time warning tells the operator instead.
+    if cfg.allow_credentials && allow_origin != "*" {
         headers.insert(
             ACCESS_CONTROL_ALLOW_CREDENTIALS,
             HeaderValue::from_static("true"),
@@ -383,7 +385,6 @@ fn attach_cors_headers(
             headers.insert(ACCESS_CONTROL_MAX_AGE, v);
         }
     }
-    let _ = (HeaderName::from_static("vary"),); // silence unused import in some configs
 }
 
 #[cfg(test)]
@@ -403,6 +404,115 @@ mod tests {
     fn resolve_any_without_origin_returns_wildcard() {
         let l = CorsLayer::new().allow_any_origin();
         assert_eq!(l.resolve_origin(None).as_deref(), Some("*"));
+    }
+
+    /// The credentialed wildcard hole. Echoing the request origin is
+    /// safe without credentials, and lets any site read any response
+    /// with them, because browsers reject `*` plus credentials but
+    /// accept an echoed concrete origin. Both halves are pinned here.
+    #[test]
+    fn any_origin_never_echoes_while_credentials_are_on() {
+        let evil = "https://evil.example";
+
+        let safe = CorsLayer::new().allow_any_origin();
+        assert_eq!(
+            safe.resolve_origin(Some(evil)).as_deref(),
+            Some(evil),
+            "without credentials, echoing is fine and stays"
+        );
+
+        let holed = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        assert_eq!(
+            holed.resolve_origin(Some(evil)).as_deref(),
+            Some("*"),
+            "with credentials the origin must NOT be echoed — a reflected \
+             concrete origin is what browsers accept, and is the hole"
+        );
+    }
+
+    /// The other half: `*` and `Access-Control-Allow-Credentials: true` must
+    /// never ship together, whatever the origin resolved to.
+    #[test]
+    fn wildcard_response_carries_no_credentials_header() {
+        let cfg = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(&cfg, Some("https://evil.example"), None, &mut res);
+
+        let h = res.headers();
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap()),
+            Some("*")
+        );
+        assert!(
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none(),
+            "a wildcard response must not claim credentials: got {:?}",
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+        );
+    }
+
+    /// A refused origin and an echoed Any-mode origin both vary by
+    /// `Origin`; only the always-`*` policy does not (#1867).
+    #[test]
+    fn vary_origin_is_sent_unless_the_answer_is_always_star() {
+        let vary = |cfg: &CorsLayer, origin: Option<&str>| {
+            let mut res = Response::new(Body::empty());
+            attach_cors_headers(cfg, origin, None, &mut res);
+            res.headers()
+                .get(axum::http::header::VARY)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        let list = CorsLayer::new().allow_origins(vec!["https://app.example.com"]);
+        assert_eq!(
+            vary(&list, Some("https://evil.example")).as_deref(),
+            Some("Origin")
+        );
+        assert_eq!(vary(&list, None).as_deref(), Some("Origin"));
+        let any = CorsLayer::new().allow_any_origin();
+        assert_eq!(
+            vary(&any, Some("https://x.example")).as_deref(),
+            Some("Origin")
+        );
+        assert_eq!(vary(&any, None).as_deref(), Some("Origin"));
+        let star = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        assert_eq!(vary(&star, Some("https://x.example")), None);
+
+        // A preflight that echoes the requested headers varies on them too.
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(
+            &list,
+            Some("https://app.example.com"),
+            Some("X-Custom"),
+            &mut res,
+        );
+        assert_eq!(res.headers()[ACCESS_CONTROL_ALLOW_HEADERS], "X-Custom");
+        assert_eq!(
+            res.headers()[axum::http::header::VARY],
+            "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
+        );
+    }
+
+    /// An allowlist is the supported way to do credentialed CORS, so
+    /// it must keep working.
+    #[test]
+    fn allowlisted_origin_still_gets_credentials() {
+        let cfg = CorsLayer::new()
+            .allow_origins(vec!["https://app.example.com"])
+            .allow_credentials(true);
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(&cfg, Some("https://app.example.com"), None, &mut res);
+
+        let h = res.headers();
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap()),
+            Some("https://app.example.com")
+        );
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
     }
 
     #[test]
@@ -443,8 +553,8 @@ mod tests {
 
     #[test]
     fn permissive_advertises_query_method() {
-        // RFC 10008 QUERY always triggers a preflight, so it must be in
-        // Access-Control-Allow-Methods to work cross-origin.
+        // QUERY always needs a preflight, so it must appear in
+        // Access-Control-Allow-Methods.
         let l = CorsLayer::permissive();
         assert!(
             l.allow_methods.iter().any(|m| m == "QUERY"),
@@ -453,11 +563,11 @@ mod tests {
         );
     }
 
-    // ---- #87 wiring: from_settings ----
+    // ---- from_settings ----
 
-    /// Empty `cors_allowed_origins` returns `None` so callers don't
-    /// mount the layer at all — different from "allow zero origins"
-    /// (which would 403 every preflight).
+    /// An empty `cors_allowed_origins` gives `None`, so the layer is
+    /// not mounted. That differs from "allow no origin", which would
+    /// reject every preflight.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_empty_returns_none() {
@@ -475,9 +585,8 @@ mod tests {
         assert!(layer.resolve_origin(Some("https://random.test")).is_some());
     }
 
-    /// Specific origins build an allowlist; non-matching origins
-    /// reject. Methods + headers + max-age get sensible defaults so
-    /// the resulting layer is immediately usable.
+    /// Named origins build an allowlist and anything else is
+    /// rejected. Methods, headers and max-age get useful defaults.
     #[cfg(feature = "config")]
     #[test]
     fn from_settings_specific_origins_build_allowlist() {

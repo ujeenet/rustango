@@ -1,8 +1,7 @@
-//! `CASE WHEN … THEN … ELSE … END` conditional expressions (issue #4).
+//! `CASE WHEN … THEN … ELSE … END` conditional expressions.
 //!
-//! The fourth slice of the ORM Expression DSL epic. Builds on the
-//! [`crate::core::Expr`] tree from #1 and the function dispatcher
-//! from #2/#3.
+//! Produces a [`crate::core::Expr`] for `set_expr` and other
+//! expression slots.
 //!
 //! ```ignore
 //! use rustango::core::{case::case, F, funcs::lower};
@@ -39,46 +38,33 @@
 //!     .execute(&pool).await?;
 //! ```
 //!
-//! ## Conditions accept any [`WhereExpr`]
+//! Notes:
 //!
-//! The `WHEN` predicate uses the same shape as a `where_()` clause —
-//! `Column::eq()`, `Column::gt()`, `.and()`, `.or()`, `Not(...)` all
-//! work. Each branch's condition is a full tree, so arbitrarily
-//! complex predicates are expressible.
-//!
-//! ## `ELSE` is optional
-//!
-//! Omitting `.default(...)` produces `CASE WHEN … END` (no `ELSE`).
-//! On every dialect, a `CASE` that matches no branch with no `ELSE`
-//! returns `NULL`. Add `.default(...)` to make the fallback explicit.
-//!
-//! ## Tri-dialect: identical SQL
-//!
-//! `CASE WHEN … THEN … ELSE … END` is SQL-92 standard syntax and
-//! works identically on PG, MySQL, and SQLite. The writer emits the
-//! same string for every backend.
+//! - A `WHEN` condition is any [`WhereExpr`], the same shape as a
+//!   `where_()` clause: `Column::eq()`, `.and()`, `.or()`, `Not(...)`.
+//! - `.default(...)` is optional. Without it, a `CASE` that matches no
+//!   branch returns `NULL`.
+//! - The syntax is standard SQL, so PG, MySQL and SQLite all get the
+//!   same string.
 //!
 //! [`WhereExpr`]: crate::core::WhereExpr
 
 use super::expr::{CaseBranch, Expr};
 use super::query::WhereExpr;
 
-/// Builder for an [`Expr::Case`]. Constructed via [`case()`]; finalize
-/// by passing into anything that takes `impl Into<Expr>` (e.g.
-/// `set_expr`, `annotate`, `Column::eq_expr`). The builder always
-/// produces a well-formed `Case` even when no branches are added —
-/// the writer rejects empty-branches case expressions at emit time
-/// so users see an error before the database does.
+/// Builder for an [`Expr::Case`]. Start with [`case()`] and pass the
+/// result to any `impl Into<Expr>` slot, such as `set_expr`. It builds
+/// even with no branches, but the writer then returns
+/// `SqlError::EmptyCaseBranches` before the database sees the query.
 #[must_use]
 pub struct CaseBuilder {
     branches: Vec<CaseBranch>,
     default: Option<Box<Expr>>,
 }
 
-/// Start a `CASE WHEN …` expression. Chain `.when(cond, then)` for
-/// each branch in order, then optionally `.default(value)` to set
-/// the `ELSE` clause. Finalize implicitly when passed to anything
-/// expecting `impl Into<Expr>`.
+/// Start a `CASE WHEN …` expression. Add branches with
+/// `.when(cond, then)` in order, then `.default(value)` for the
+/// optional `ELSE` clause.
 #[must_use]
 pub fn case() -> CaseBuilder {
     CaseBuilder {
@@ -87,9 +73,8 @@ pub fn case() -> CaseBuilder {
     }
 }
 
-/// Sugar for `Expr::Literal(v.into())`. Mirrors Django's `Value()`
-/// — useful at call sites where a bare literal could be mistaken for
-/// a column reference and you want to be explicit:
+/// Short for `Expr::Literal(v.into())`. Use it where a bare literal
+/// could otherwise read as a column name:
 ///
 /// ```ignore
 /// case()
@@ -97,18 +82,18 @@ pub fn case() -> CaseBuilder {
 ///     .default(value("Published"))
 /// ```
 ///
-/// The bare-literal form (`case().when(..., "Draft")`) also works
-/// via `From<&str> for Expr`; `value()` is for emphasis.
+/// A bare literal works too (`case().when(..., "Draft")`); `value()`
+/// only makes the intent clear.
 #[must_use]
 pub fn value(v: impl Into<super::SqlValue>) -> Expr {
     Expr::Literal(v.into())
 }
 
 impl CaseBuilder {
-    /// Append a `WHEN <condition> THEN <then>` branch. `condition` is
-    /// anything convertible to [`WhereExpr`] — most commonly a
-    /// `TypedFilter` from `Column::eq()` / `.and()` / `.or()`. `then`
-    /// is any [`Expr`] (literal, `F()`, function call, nested `Case`).
+    /// Add a `WHEN <condition> THEN <then>` branch. `condition` is any
+    /// [`WhereExpr`], usually from `Column::eq()`, `.and()` or
+    /// `.or()`. `then` is any [`Expr`]: a literal, `F()`, a function
+    /// call or a nested `Case`.
     #[must_use]
     pub fn when(mut self, condition: impl Into<WhereExpr>, then: impl Into<Expr>) -> Self {
         self.branches.push(CaseBranch {
@@ -118,16 +103,16 @@ impl CaseBuilder {
         self
     }
 
-    /// Set the optional `ELSE` branch. Last call wins if invoked
-    /// repeatedly — only one `ELSE` is legal in SQL.
+    /// Set the optional `ELSE` branch. SQL allows only one, so the
+    /// last call wins.
     #[must_use]
     pub fn default(mut self, value: impl Into<Expr>) -> Self {
         self.default = Some(Box::new(value.into()));
         self
     }
 
-    /// Finalize. Same as `Into<Expr>::into(builder)` — provided as a
-    /// method when type inference would otherwise need help.
+    /// Finalize. Same as `Into<Expr>`, but a method helps when type
+    /// inference needs it.
     #[must_use]
     pub fn build(self) -> Expr {
         Expr::Case {
@@ -217,8 +202,8 @@ mod tests {
 
     #[test]
     fn case_implements_into_expr() {
-        // Compile-only check that `case().build()` is interchangeable
-        // with explicit `.into()` in any `impl Into<Expr>` slot.
+        // Compile-only check that `.into()` works in an
+        // `impl Into<Expr>` slot.
         let _: Expr = case().when(predicate("x", 1), 1_i64).into();
     }
 

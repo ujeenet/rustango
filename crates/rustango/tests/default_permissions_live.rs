@@ -1,5 +1,5 @@
-//! Django parity — `Meta.default_permissions = ('view', 'change')`
-//! lets a model opt out of the default `add` / `delete` CRUD
+//! `Meta.default_permissions` lets a model opt out of some of the
+//! default `add` / `change` / `delete` / `view` CRUD
 //! codenames. rustango spells the attribute as
 //! `#[rustango(default_permissions = "view,change")]` and
 //! `auto_create_permissions_pool` filters the four-action seed loop
@@ -67,9 +67,7 @@ async fn seeder_emits_only_declared_subset() {
     rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
 
     // dp_readonly: view only — 1 codename.
     let read_only_rows: Vec<(String,)> = sqlx::query_as(
@@ -129,9 +127,7 @@ async fn re_seed_stays_idempotent_with_filtered_set() {
     auto_create_permissions_pool(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let (count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM rustango_permissions WHERE table_name = 'dp_readonly'",
     )

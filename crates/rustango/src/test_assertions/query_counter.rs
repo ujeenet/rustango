@@ -1,6 +1,6 @@
-//! Django-shape `assertNumQueries` — count SQL queries executed inside
-//! a scoped async block, then assert the count matches an expectation.
-//! Django-parity #431.
+//! Count the SQL queries executed inside a scoped async block, then
+//! assert the count matches an expectation. Use it to pin down N+1
+//! regressions in a test.
 //!
 //! ## Quick start
 //!
@@ -46,25 +46,57 @@
 //!
 //! ## What gets counted
 //!
-//! Every `_pool` entry point in [`crate::sql`] that hits a real query:
+//! Every `_pool` and `_tx` entry point in [`crate::sql`] that hits a
+//! real query:
 //!
-//! - `raw_execute_pool` — fall-through raw SQL
+//! - `raw_execute_pool` / `raw_query_pool` — fall-through raw SQL
 //! - `select_rows_as_json` / `select_one_row_as_json` — JSON-bridge reads
-//! - `select_rows_pool_with_related` / `select_one_row_pool` — typed reads
+//! - `select_rows_pool` / `select_rows_pool_with_related` /
+//!   `select_one_row_pool` — typed reads
+//! - `count_rows_pool`, `fetch_aggregate_pool`, `fetch_paginated_pool`
 //! - `insert_pool` / `update_pool` / `delete_pool` — single-row writes
+//! - the `_tx` counterparts of all of the above
 //!
 //! Each call increments by 1 regardless of how many rows the query
-//! returns — mirroring Django's `assertNumQueries` (one SQL statement
-//! = one count, even if it returns thousands of rows).
+//! returns: one SQL statement is one count, even when it returns
+//! thousands of rows.
+//!
+//! ## What does **not** get counted
+//!
+//! The PostgreSQL-only `_on` family — `annotate_count_children_on`,
+//! `fetch_aggregate_on`, `fetch_with_prefetch`, `QuerySet::fetch_on`
+//! — takes a bare sqlx executor rather than a [`crate::sql::Pool`] and
+//! runs its query without passing through any instrumented entry
+//! point. A block that only uses those counts zero.
+//!
+//! Stated here because the failure mode is a **pass**: `assert_num_queries`
+//! sees no query and agrees with any expectation of 0. Until #1561, read
+//! a 0 from a block that touched `_on` code as "not measured", not as
+//! "no queries".
 
 use std::cell::Cell;
 use std::future::Future;
+
+/// One scope's counts: `current` resets on [`QueryCounter::take`],
+/// `total` does not, so an enclosing scope still sees every query.
+#[derive(Default)]
+struct Counts {
+    current: Cell<usize>,
+    total: Cell<usize>,
+}
+
+impl Counts {
+    fn add(&self, n: usize) {
+        self.current.set(self.current.get() + n);
+        self.total.set(self.total.get() + n);
+    }
+}
 
 tokio::task_local! {
     /// Per-task SQL query counter. `None`-equivalent (the `try_with`
     /// returns `Err`) outside an active scope, which is the production
     /// path — every `_pool` call's `bump()` is a no-op.
-    static COUNTER: Cell<usize>;
+    static COUNTER: Counts;
 }
 
 /// Bump the per-task query counter by 1. No-op when called outside an
@@ -73,7 +105,7 @@ tokio::task_local! {
 ///
 /// Called by every `_pool` entry point in [`crate::sql::executor`].
 pub(crate) fn bump() {
-    let _ = COUNTER.try_with(|c| c.set(c.get() + 1));
+    let _ = COUNTER.try_with(|c| c.add(1));
 }
 
 /// Scoped query counter. See module docs for the chained API
@@ -89,7 +121,15 @@ impl QueryCounter {
     /// For the simple "assert N total at the end" case use the
     /// top-level [`assert_num_queries`] helper.
     pub async fn scope<F: Future>(fut: F) -> F::Output {
-        COUNTER.scope(Cell::new(0), fut).await
+        let (out, total) = COUNTER
+            .scope(Counts::default(), async {
+                let out = fut.await;
+                (out, COUNTER.with(|c| c.total.get()))
+            })
+            .await;
+        // A nested scope's queries also count for the one around it (#1960).
+        let _ = COUNTER.try_with(|c| c.add(total));
+        out
     }
 
     /// Read the current count inside an active scope. Panics if
@@ -98,7 +138,7 @@ impl QueryCounter {
     #[must_use]
     pub fn current() -> usize {
         COUNTER
-            .try_with(Cell::get)
+            .try_with(|c| c.current.get())
             .expect("QueryCounter::current() called outside an active scope")
     }
 
@@ -107,21 +147,16 @@ impl QueryCounter {
     /// segment independently.
     pub fn take() -> usize {
         COUNTER
-            .try_with(|c| {
-                let n = c.get();
-                c.set(0);
-                n
-            })
+            .try_with(|c| c.current.replace(0))
             .expect("QueryCounter::take() called outside an active scope")
     }
 }
 
 /// Run `fut` and assert that exactly `expected` SQL queries executed
-/// during it. Panics on mismatch with a Django-shape message.
+/// during it. Panics on mismatch, printing both counts.
 ///
-/// Returns the future's output so callers can chain assertions on the
-/// produced value the same way Django's `assertNumQueries` returns a
-/// context manager that captures the wrapped code's return value.
+/// Returns the future's output, so the caller can go on to assert on
+/// the produced value.
 ///
 /// # Panics
 /// When the observed count differs from `expected`.
@@ -131,7 +166,7 @@ pub async fn assert_num_queries<F: Future>(expected: usize, fut: F) -> F::Output
         let actual = QueryCounter::current();
         assert_eq!(
             actual, expected,
-            "assertNumQueries failed: expected {expected} queries, observed {actual}"
+            "assert_num_queries failed: expected {expected} queries, observed {actual}"
         );
         result
     })
@@ -171,7 +206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "assertNumQueries failed: expected 2 queries, observed 3")]
+    #[should_panic(expected = "assert_num_queries failed: expected 2 queries, observed 3")]
     async fn assert_num_queries_panics_with_count_in_message() {
         assert_num_queries(2, async {
             bump();
@@ -214,6 +249,29 @@ mod tests {
             bump();
             assert_eq!(QueryCounter::take(), 1);
             assert_eq!(QueryCounter::current(), 0);
+        })
+        .await;
+    }
+
+    /// The outer scope counts the inner one's queries, even ones it took (#1960).
+    #[tokio::test]
+    async fn nested_scope_counts_toward_the_outer_one() {
+        assert_num_queries(3, async {
+            bump();
+            assert_num_queries(2, async {
+                bump();
+                bump();
+            })
+            .await;
+        })
+        .await;
+        QueryCounter::scope(async {
+            QueryCounter::scope(async {
+                bump();
+                assert_eq!(QueryCounter::take(), 1);
+            })
+            .await;
+            assert_eq!(QueryCounter::current(), 1);
         })
         .await;
     }

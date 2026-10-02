@@ -36,9 +36,11 @@ async fn fresh_pool() -> Pool {
         .expect("connect sqlite::memory:");
     let pool: Pool = sqlite.into();
 
-    // Build only our test model's DDL, not every registered framework
-    // model — `apply_all_pool` would walk the full inventory and trip
-    // on framework models that emit Postgres-shaped DDL.
+    // Build only our test model's DDL. `apply_all_pool` would work —
+    // it creates all nineteen managed framework tables on SQLite
+    // cleanly, which it did not when this was written — but this test
+    // is about one model's round trip, and creating the framework's
+    // schema alongside it would widen what a failure here could mean.
     let dialect = pool.dialect();
     assert_eq!(dialect.name(), "sqlite");
     let create = ddl::create_table_sql_with_dialect(dialect, LiveUser::SCHEMA);

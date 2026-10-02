@@ -181,12 +181,107 @@ use rustango::media::{Media, MediaManager};
 
 let manager = MediaManager::new_pool(pool.clone(), registry);
 // Hand the browser a short-lived download link:
-let url = manager.presigned_get(&media, Duration::from_secs(3600)).await?;
+// Devuelve Option<String> — None en backends que no pueden firmar (p. ej. disco local).
+let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {
+    return Err(/* sin URL firmada para este backend */);
+};
 ```
 
 También gestiona el borrado lógico y la purga de huérfanos. El flujo completo se somete a prueba
 en `media_sqlite_live.rs`; los métodos prefirmados/de subida directa del manager están
 orientados a PostgreSQL.
+
+### Servir medios en una página pública
+
+Una página pública **no** pasa por `media::router`. Ese router es la API de
+gestión interna — subidas, borrados, etiquetas, navegación — y responde `401`
+a quien no haya iniciado sesión, en todas sus rutas, por diseño.
+
+Resuelve la URL desde tu propio handler:
+
+```rust
+// tu propia ruta pública
+let url = manager.public_url(media_id).await?;   // Option<String>, sin firma
+```
+
+`public_url` es una consulta a la base de datos más una cadena; no firma nada
+ni espera a un firmante, y por eso encaja en una página. Dos modelos de
+entrega, y elegir entre ellos es la decisión real:
+
+| | bucket público / CDN | bucket privado + presignado |
+|---|---|---|
+| dirección | `manager.public_url(id)` — estable | `manager.presigned_get(&m, ttl)` — caduca |
+| cacheable | sí, por navegadores y CDN | no; el router envía `no-store` |
+| quién puede descargar | cualquiera con la URL | cualquiera con la URL, hasta que caduque |
+| para qué | páginas públicas, `<img src>` | el router de gestión, herramientas internas |
+
+`public_url` te dice **dónde** se serviría el objeto; no lo hace legible.
+Apúntalo a un bucket privado y obtendrás una URL correcta y un 403 — ese caso
+quiere una URL presignada, que deliberadamente no es cacheable ni compartible.
+
+Para archivos en disco local en lugar de un bucket, el handler de estáticos ya
+hace esto y no necesita ninguna fila de medios:
+
+```rust
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+```
+
+**Si estabas a punto de escribir un authorizer `AllowAll` para que funcione
+una página pública, para.** Eso abre las 16 rutas — incluidas `DELETE` y el
+`PUT` presignado — a todo el mundo, que es justo el agujero que cerró 0.57.7.
+
+### El router de gestión necesita una política de autorización
+
+`media::router` monta 16 rutas JSON sobre el manager, todas ellas acciones de
+gestión sobre la biblioteca. **Todas están protegidas y no hay un valor por
+defecto permisivo.** Constrúyelo con `media_router_with` y pasa una política:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — el constructor antiguo — está obsoleto y ahora
+responde `403` en cada ruta. Es un cambio de comportamiento deliberado en
+0.57.7: antes, esas rutas no tomaban ningún extractor de autenticación,
+autorización ni tenant, así que `GET /media/{id}` devolvía la fila **y una
+URL de descarga prefirmada de S3** a cualquiera capaz de adivinar un entero,
+y `POST /uploads/begin` emitía un `PUT` prefirmado para un prefijo de clave
+elegido por quien llamaba.
+
+`MediaPerms` (necesita la feature `tenancy`) comprueba los codenames de
+permiso `{tabla}.{acción}` que el admin ya usa — `rustango_media.view` para
+leer, `rustango_media_collections.add` para crear una carpeta, etc. Móntalo
+**dentro** de `require_auth`, que es lo que inyecta la identidad que lee; sin
+eso toda petición es un `401`. Los superusuarios se saltan la comprobación.
+
+Tres cosas que no hace:
+
+- **Decisiones a nivel de fila.** Un `rustango_media.view` lee *cualquier*
+  fila de medios por id. `MediaManager` tiene un único pool, así que un
+  despliegue multi-tenant acota las filas por su cuenta — para eso
+  implementas `MediaAuthorizer`. `MediaTarget` nombra la fila (`Media(id)`,
+  `Collection(id)`, `CollectionSubtree(id)`, …) precisamente para ello.
+- **Acotar el almacén de objetos.** `disk` lo suministra quien llama en
+  `POST /uploads/begin` y el `StorageRegistry` es de todo el proceso, así que
+  un pool por inquilino aísla la base de datos y no el bucket: un
+  `rustango_media.add` a secas escribe en cualquier disco que el proceso
+  conozca. Indica cuáles con
+  `MediaPerms::new(pool).allow_disks(["user-uploads"])`. Los prefijos dentro de
+  un disco siguen necesitando `MediaAuthorizer`, que recibe `key_prefix`.
+- **Adivinar qué significa una ruta nueva.** `MediaAction` y `MediaTarget`
+  son `#[non_exhaustive]`: termina una política propia en `_ => false` y una
+  ruta añadida más adelante llegará denegada en lugar de permitida.
+
+Conviene saberlo al escribir la tuya: `DELETE /collections/{id}` borra el
+**subárbol** completo y reasigna los medios de cada nivel, así que llega como
+`Delete(CollectionSubtree(id))` y no como `Delete(Collection(id))` — y bajo
+`MediaPerms` necesita `rustango_media.change` además de
+`rustango_media_collections.delete`, porque escribe en la tabla de medios.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md)
+tiene las notas de migración.
 
 ### Cómo se crean las tablas de medios
 
@@ -214,7 +309,7 @@ framework, cada vez que ejecutas `migrate` / aprovisionas un inquilino. No hay u
 **Trait `Storage`:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible a mayúsculas/minúsculas) · `.randomize_filename(bool)`. Usado por
 `save_uploads(multipart, &cfg, &storage)`.
 

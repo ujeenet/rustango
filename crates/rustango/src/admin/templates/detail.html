@@ -38,6 +38,7 @@
             <form method="post"
                   action="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/delete"
                   onsubmit="return confirm('Delete this row?')">
+                {{ csrf_input | safe }}
                 <button type="submit" class="btn btn-danger">Delete</button>
             </form>
         </div>
@@ -99,7 +100,7 @@
         <section class="audit-trail">
             <h2>
                 Audit trail
-                {% if audit_entries | length > 0 %}
+                {% if audit_entries | length > 0 and can_view_audit %}
                     <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}{{ audit_url }}?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
                 {% endif %}
             </h2>

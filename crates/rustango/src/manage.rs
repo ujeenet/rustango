@@ -24,6 +24,8 @@
 //!
 //! The dispatcher owns the `cargo run` vs `cargo run -- migrate` split
 //! so users have one binary instead of two.
+//!
+//! [`Cli::tenancy`]: crate::manage::Cli::tenancy
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -37,12 +39,49 @@ type SeedFut<'a> =
     Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send>;
 
+/// Work to run after the server stops accepting connections and its
+/// in-flight requests have finished. See [`Cli::on_shutdown`].
+type ShutdownFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
+
+/// A router built from the serving pool. See [`Cli::nest_with`].
+type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
+
+/// `runserver`'s auto-migrate: the same chains as `manage migrate` (#2056).
+async fn auto_migrate(
+    pool: &crate::sql::Pool,
+    dir: &std::path::Path,
+) -> Result<(), crate::migrate::MigrateError> {
+    crate::migrate::manage::migrate_with_framework(
+        pool,
+        dir,
+        &mut std::io::stderr(),
+        crate::migrate::Signals::Skip,
+        |held| crate::migrate::migrate_pool_locked(held, pool, dir, None),
+    )
+    .await
+}
+
+/// Run the [`Cli::on_shutdown`] hook, if one was registered.
+async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
+    if let Some(hook) = hook {
+        tracing::info!(target: "rustango::shutdown", "running shutdown hook");
+        hook().await;
+    }
+}
+
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
 pub struct Cli {
     api: Router,
     seed: Option<SeedFn>,
+    /// Ran after graceful shutdown drains the server, before `run`
+    /// returns. Set via [`Cli::on_shutdown`] — the only place a job
+    /// queue's `shutdown()` can actually execute (#1409).
+    on_shutdown: Option<ShutdownFn>,
+    /// Routers built from the serving pool, by mount path.
+    nested: Vec<(String, NestFn)>,
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
@@ -52,11 +91,14 @@ pub struct Cli {
     /// `None` keeps the v0.27 defaults.
     #[cfg(feature = "tenancy")]
     routes: Option<crate::tenancy::RouteConfig>,
+    /// See [`Cli::tenant_header`].
+    #[cfg(feature = "tenancy")]
+    tenant_header: Option<crate::tenancy::HeaderResolver>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
     /// to swap in a custom [`crate::tenancy::TenantUserModel`].
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
     /// Cloned [`Settings`] handle stored by [`Cli::with_settings`].
     /// Consumed at `runserver` time to apply layers (security_headers,
@@ -65,6 +107,9 @@ pub struct Cli {
     /// the whole stack.
     #[cfg(feature = "config")]
     settings_for_layers: Option<crate::config::Settings>,
+    /// A config that exists but does not load; `run` refuses to start (#1927).
+    #[cfg(feature = "config")]
+    settings_error: Option<crate::config::ConfigError>,
     /// When `true`, mounts `/health` + `/ready` endpoints on the
     /// API router at runserver time. Set via [`Cli::with_health`].
     /// Default `false` because operators sometimes want their own
@@ -74,18 +119,21 @@ pub struct Cli {
     /// create tenants (#1322). `None` = the create routes are not
     /// mounted. See `Cli::with_tenant_provisioning`.
     provisioning_dir: Option<std::path::PathBuf>,
-    /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
-    /// Mounted at `runserver` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
+    /// Per-tenant pool sizing. `None` = `TenantPoolsConfig::default()`.
+    /// Set via [`Cli::with_tenant_pools`] (#1456).
+    #[cfg(feature = "tenancy")]
+    tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
+    /// Mounts registered via [`Cli::with_static`] and [`Cli::with_uploads`],
+    /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
     /// `static_files::static_router` keep doing it.
     #[cfg(feature = "admin")]
-    static_dirs: Vec<(String, PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
     /// means no CSRF layer mounted — the right default for pure JSON
     /// APIs that authenticate via JWT and reject form-encoded bodies
-    /// at the deserializer layer. Form-driven apps (anything using
-    /// `template_views` Create/Update/DeleteView) opt in.
+    /// at the deserializer layer. Form-driven apps opt in; the
+    /// `template_views` routers carry their own layer.
     #[cfg(feature = "csrf")]
     csrf: Option<crate::forms::csrf::CsrfConfig>,
     /// When `true`, mounts [`crate::welcome::welcome_router`] at `/`
@@ -113,17 +161,25 @@ impl Cli {
         Self {
             api: Router::new(),
             seed: None,
+            on_shutdown: None,
+            nested: Vec::new(),
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
+            tenant_header: None,
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
+            #[cfg(feature = "config")]
+            settings_error: None,
             health_endpoints: false,
             provisioning_dir: None,
+            #[cfg(feature = "tenancy")]
+            tenant_pools: None,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -156,12 +212,39 @@ impl Cli {
         self
     }
 
+    /// Opt in to resolving the tenant from a header (`X-Org`) when no
+    /// host matched; off by default (#1856).
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_header(mut self, resolver: crate::tenancy::HeaderResolver) -> Self {
+        self.tenant_header = Some(resolver);
+        self
+    }
+
     /// Mount the user's stateless API router. Pool is injected via
     /// `axum::Extension<PgPool>` at serve time so handlers can pull
     /// it without managing state themselves.
     #[must_use]
     pub fn api(mut self, router: Router) -> Self {
         self.api = router;
+        self
+    }
+
+    /// Nest, at `path`, a router built from the pool `runserver` opens.
+    /// Other verbs never build it, so they run without a database (#1216).
+    ///
+    /// ```ignore
+    /// Cli::new().api(urls::api()).nest_with("/admin", urls::admin_router)
+    /// ```
+    ///
+    /// Single-database serving only: `runserver` refuses it with
+    /// [`Cli::tenancy`], whose pool is the registry's.
+    #[must_use]
+    pub fn nest_with<F>(mut self, path: impl Into<String>, router: F) -> Self
+    where
+        F: FnOnce(crate::sql::Pool) -> Router + Send + 'static,
+    {
+        self.nested.push((path.into(), Box::new(router)));
         self
     }
 
@@ -176,6 +259,36 @@ impl Cli {
         Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
     {
         self.seed = Some(Box::new(move |pool| Box::pin(hook(pool))));
+        self
+    }
+
+    /// Run a hook after the server has drained, before [`Cli::run`]
+    /// returns — draining a job queue, flushing a metrics exporter,
+    /// closing a pool.
+    ///
+    /// This is where `queue.shutdown()` belongs (#1409). Putting it
+    /// *after* `run()` — as `docs/jobs.md` used to — could never work:
+    /// nothing handled SIGTERM, so the process was killed outright and
+    /// no line after `run()` ever executed.
+    ///
+    /// ```ignore
+    /// let queue = Arc::new(InMemoryJobQueue::with_workers(4));
+    /// let q = Arc::clone(&queue);
+    /// Cli::new().api(routes)
+    ///     .on_shutdown(move || async move { q.shutdown().await })
+    ///     .run().await
+    /// ```
+    ///
+    /// Runs on SIGINT and SIGTERM alike. It does not run on a crash or
+    /// `SIGKILL`, so it is for a clean stop, not a durability guarantee
+    /// — work that must survive a hard kill needs a persistent queue.
+    #[must_use]
+    pub fn on_shutdown<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_shutdown = Some(Box::new(move || Box::pin(hook())));
         self
     }
 
@@ -213,6 +326,46 @@ impl Cli {
         self
     }
 
+    /// Size the per-tenant connection pools (#1456).
+    ///
+    /// Until this existed, `TenantPoolsConfig` was public and
+    /// documented but unreachable from here: every path built
+    /// `TenantPools::new(pool)`, which takes
+    /// [`crate::tenancy::TenantPoolsConfig::default`], and
+    /// `tenancy/pools.rs` reads no environment variables. The
+    /// `RUSTANGO_DB_*` knobs are honoured by `sql::Pool` only, so they
+    /// did not reach tenant pools either.
+    ///
+    /// It matters because connections multiply by tenant *and* by
+    /// process. Twenty database-mode tenants at the default 16
+    /// connections, across a web and a worker process, is 640 — against
+    /// a stock `PostgreSQL` limit of 100. With no way to lower it, the
+    /// only lever was the database server's own `max_connections`,
+    /// which is the wrong place to size an application's pools and is
+    /// frequently not the operator's to change.
+    ///
+    /// ```no_run
+    /// use rustango::tenancy::TenantPoolsConfig;
+    ///
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .with_tenant_pools(TenantPoolsConfig {
+    ///         database_pool_max_connections: 4,
+    ///         max_cached_database_pools: 200,
+    ///         ..Default::default()
+    ///     });
+    /// ```
+    ///
+    /// Past `max_cached_database_pools` the most idle tenant is
+    /// evicted and reconnects on its next request. Set it above your
+    /// tenant count to avoid the churn.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
+        self.tenant_pools = Some(config);
+        self
+    }
+
     /// Let operators create tenants from the console (#1322) —
     /// `/orgs/new`, the connection probe, and the provisioning run
     /// view + live stream.
@@ -247,14 +400,13 @@ impl Cli {
 
     /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
     /// serving files under `root_dir`. Repeat the call to mount more
-    /// than one directory (e.g. `/static` from `./assets`,
-    /// `/uploads` from `./var/uploads`).
+    /// than one directory. Mount user uploads with [`Self::with_uploads`].
     ///
     /// ```ignore
     /// rustango::manage::Cli::new()
     ///     .api(urls::api())
     ///     .with_static("/static", "./assets")
-    ///     .with_static("/uploads", "./var/uploads")
+    ///     .with_uploads("/uploads", "./var/uploads")
     ///     .run().await
     /// ```
     ///
@@ -268,17 +420,29 @@ impl Cli {
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.static_dirs.push((prefix, files));
+        self
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on this origin
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn with_uploads(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
     /// Auto-mount the [`crate::forms::csrf::CsrfLayer`] on the API
     /// router at `runserver` time using
-    /// [`crate::forms::csrf::CsrfConfig::default`]. Required for any
-    /// project using the HTML CBVs (`template_views`'s
-    /// `CreateView`/`UpdateView`/`DeleteView`) — those views call
-    /// `csrf::ensure_token` to mint the cookie + form value, and the
-    /// layer enforces it on POST/PUT/PATCH/DELETE.
+    /// [`crate::forms::csrf::CsrfConfig::default`]. It enforces the
+    /// token on POST/PUT/PATCH/DELETE for hand-written form handlers;
+    /// the `template_views` routers already check it themselves.
     ///
     /// Default off — pure JSON APIs that authenticate via JWT
     /// (`Authorization: Bearer ...`) don't need CSRF and shouldn't
@@ -440,7 +604,12 @@ impl Cli {
         // is explicitly `false` (e.g. dev_settings.toml for local HTTP).
         // Process-wide so the operator + tenant consoles honor it without
         // per-Builder wiring; first call wins, like the other boot globals.
+        // Same gate as `crate::session`: without it there is no cookie to mark.
+        #[cfg(any(feature = "admin", feature = "tenancy", feature = "csrf"))]
         let _ = crate::session::set_secure_cookies(s.security.secure_cookies.unwrap_or(true));
+
+        // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
+        apply_login_settings(&s.auth);
 
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
@@ -460,21 +629,37 @@ impl Cli {
     /// rustango::manage::Cli::new().with_settings(&cfg)
     /// ```
     ///
-    /// Returns the original [`Cli`] unchanged when the layered
-    /// loader fails (e.g. `config/default.toml` missing) so projects
-    /// that haven't adopted the layered loader still build cleanly.
-    /// Errors are surfaced via `tracing::warn` so they're visible
-    /// without breaking startup.
+    /// With no `config/default.toml` the [`Cli`] runs on its defaults.
+    /// Any other load error (bad TOML, a value of the wrong type, a bad
+    /// `RUSTANGO__*` override) makes [`Cli::run`] fail instead (#1927).
     #[cfg(feature = "config")]
     #[must_use]
     pub fn with_settings_from_env(self) -> Self {
-        match crate::config::Settings::load_from_env() {
+        self.with_loaded_settings(crate::config::Settings::load_from_env())
+    }
+
+    #[cfg(feature = "config")]
+    fn with_loaded_settings(
+        mut self,
+        loaded: Result<crate::config::Settings, crate::config::ConfigError>,
+    ) -> Self {
+        match loaded {
             Ok(cfg) => self.with_settings(&cfg),
+            Err(e) if e.is_missing_config() => {
+                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: no config file; running on Cli defaults");
+                self
+            }
             Err(e) => {
-                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: failed to load Settings; falling back to Cli defaults");
+                self.settings_error = Some(e);
                 self
             }
         }
+    }
+
+    /// The config error `run` refuses to start on, if any.
+    #[cfg(feature = "config")]
+    fn boot_settings_error(&self) -> Option<&crate::config::ConfigError> {
+        self.settings_error.as_ref()
     }
 
     /// Override the migrations directory. Defaults to `./migrations`.
@@ -512,7 +697,7 @@ impl Cli {
     ///     .user_model::<myapp::AppUser>()
     ///     .run().await
     /// ```
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
@@ -524,6 +709,10 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(feature = "config")]
+        if let Some(e) = self.boot_settings_error() {
+            return Err(format!("refusing to start on a broken config: {e}").into());
+        }
         // v0.30.11 — install logging here (the outermost dispatch
         // point) so the WorkerGuard outlives BOTH the runserver
         // future AND the management-verb dispatch path. Installing
@@ -556,7 +745,51 @@ impl Cli {
         }
     }
 
-    async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    /// The one place a tenancy verb gets its `TenantPools`, on every backend:
+    /// the SQLite / MySQL arms each built their own and dropped
+    /// `with_tenant_pools` and `user_model` (#1456, #1914).
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb<DB: crate::sql::sqlx::Database>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        self.run_tenancy_verb_to(registry, url, args, &mut std::io::stdout())
+            .await
+    }
+
+    #[cfg(feature = "tenancy")]
+    async fn run_tenancy_verb_to<DB: crate::sql::sqlx::Database, W: std::io::Write + Send>(
+        &self,
+        registry: crate::sql::sqlx::Pool<DB>,
+        url: &str,
+        args: Vec<String>,
+        out: &mut W,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    {
+        let mut pools = crate::tenancy::TenantPools::new(registry);
+        if let Some(cfg) = self.tenant_pools.clone() {
+            pools = pools.config(cfg);
+        }
+        crate::tenancy::manage::run_with_writer_and_init(
+            &pools,
+            url,
+            &self.migrations_dir,
+            args,
+            out,
+            self.init_tenancy_fn,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn dispatch(mut self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         // `dbshell` needs DATABASE_URL but NOT a sqlx pool — it execs
         // the native client (psql / mysql / sqlite3). Handle it before
         // the pool dance so it works even when sqlx can't connect
@@ -650,16 +883,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             #[cfg(feature = "mysql")]
             if scheme == "mysql" {
@@ -668,16 +892,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    self.init_tenancy_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(pool, &url, args).await;
             }
             if !matches!(scheme.as_str(), "postgres" | "postgresql") {
                 return Err(format!(
@@ -695,16 +910,7 @@ impl Cli {
             } else {
                 crate::sql::Pool::connect_postgres(&url).await?
             };
-            let pools = crate::tenancy::TenantPools::new(pool);
-            crate::tenancy::manage::run_with_init(
-                &pools,
-                &url,
-                &self.migrations_dir,
-                args,
-                self.init_tenancy_fn,
-            )
-            .await?;
-            return Ok(());
+            return self.run_tenancy_verb(pool, &url, args).await;
         }
         #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
         if self.tenancy {
@@ -720,17 +926,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_sqlite(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
@@ -739,17 +935,7 @@ impl Cli {
                 } else {
                     crate::sql::Pool::connect_mysql(&url).await?
                 };
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
+                return self.run_tenancy_verb(p, &url, args).await;
             }
             #[cfg(not(any(feature = "sqlite", feature = "mysql")))]
             {
@@ -788,14 +974,223 @@ impl Cli {
                 .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
+        if args.first().map(String::as_str) == Some("check") {
+            self.build_nested(&pool);
+        }
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
         Ok(())
     }
 
-    async fn runserver(self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Build, and drop, every [`Cli::nest_with`] router, so `check --deploy`
+    /// audits the admins `runserver` would mount (#1627).
+    fn build_nested(&mut self, pool: &crate::sql::Pool) {
+        for (_, build) in std::mem::take(&mut self.nested) {
+            drop(build(pool.clone()));
+        }
+    }
+
+    /// Everything between "the pool is open" and "bind the socket":
+    /// welcome page, health endpoints, static dirs, CSRF, the settings
+    /// layers, and the pool extension.
+    ///
+    /// One function, because `runserver` has **three** serving paths —
+    /// a non-Postgres build, a Postgres build on a `postgres://` URL,
+    /// and a multi-backend build on a non-PG URL (#560) — and each used
+    /// to assemble its own router from the same list of steps.
+    ///
+    /// That duplication *was* #1457. One copy never read
+    /// `health_endpoints`, so `/health` 404'd; the fix corrected two of
+    /// the three, and the third — the one the soak fleet's own
+    /// `--features postgres,mysql,sqlite` image takes on a `sqlite://`
+    /// URL — went on answering 404. Three copies of a list of steps is
+    /// a list of steps that will drift again, so there is one now.
+    ///
+    /// Generic over the pool type because the Postgres path extends a
+    /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
+    /// enum) while the other two extend `crate::sql::Pool`.
+    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    fn drain_timeout(&self) -> std::time::Duration {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            return s.server.drain_timeout();
+        }
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT
+    }
+
+    fn assemble_app<P>(&mut self, pool: P) -> Router
+    where
+        P: Clone + Send + Sync + 'static,
+        P: Into<crate::sql::Pool>,
+    {
+        let mut api = std::mem::take(&mut self.api);
+        for (path, build) in std::mem::take(&mut self.nested) {
+            api = api.nest(&path, build(pool.clone().into()));
+        }
+        // `_http_layers`, not `admin`: the manage-only `api` template calls
+        // `.with_welcome()` / `.with_health()` too (#2013).
+        #[cfg(feature = "_http_layers")]
+        let api = if self.welcome_page {
+            try_mount_welcome(api)
+        } else {
+            api
+        };
+        #[cfg(feature = "_http_layers")]
+        let api = if self.health_endpoints {
+            api.merge(crate::health::health_router(pool.clone()))
+        } else {
+            api
+        };
+        #[cfg(feature = "admin")]
+        let api = mount_static_dirs(api, &self.static_dirs);
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf.take() {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
+        // Inside CORS and the security headers, so a panic's 500 carries them (#1541).
+        let api = crate::panic_guard::catch_panics(api);
+        #[cfg(feature = "config")]
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let api = wrap_outer(apply_settings_layers_or_warn(api, settings));
+        let api = self.mount_observability(api);
+        api.layer(axum::Extension(pool))
+    }
+
+    /// Everything the tenancy builder must put on its outermost router:
+    /// observability and the `[security]` outer layers, which layers on
+    /// the api router never reach (#1480, #1699, #1700). Both tenancy
+    /// serving paths go through here.
+    #[cfg(feature = "tenancy")]
+    fn tenancy_builder<DB: sqlx::Database>(
+        &self,
+        builder: crate::server::Builder<DB>,
+        outer: Option<OuterLayers>,
+    ) -> crate::server::Builder<DB> {
+        let mut builder = builder
+            .observability(self.access_log_layer())
+            .span_redact(self.span_redact_params());
+        if let Some(h) = &self.tenant_header {
+            builder = builder.header_resolver(h.clone());
+        }
+        match outer {
+            Some(o) => o.apply_to(builder),
+            None => builder,
+        }
+    }
+
+    /// The configured access-log layer, or `None` when
+    /// `[logging] access_log = false`.
+    ///
+    /// Split out of [`Self::mount_observability`] because the
+    /// multi-tenant path cannot mount here: it hands its router to
+    /// `server::Builder`, which merges the tenant admin in afterwards
+    /// and dispatches the operator console on a sibling branch. Layers
+    /// applied to the api router never reach either (axum: "routes
+    /// added after `layer` is called will not have the middleware
+    /// added"). The builder takes this layer and applies it to the
+    /// outermost router instead, where every branch inherits it.
+    fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
+        self.access_log_enabled()
+            .then(|| self.configured_access_log())
+    }
+
+    /// The access-log layer as configured, built whether or not it
+    /// will be mounted.
+    ///
+    /// Separate from [`Self::access_log_layer`] because the span needs
+    /// the same redact list even when the log is off, and building it
+    /// a second way is how the two drifted apart (#1610).
+    fn configured_access_log(&self) -> crate::access_log::AccessLogLayer {
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+        log_layer
+    }
+
+    /// Query params the request span must redact.
+    ///
+    /// Taken from the configured access log rather than recomputed, so
+    /// `[audit] redact_query_params` reaches the span even with
+    /// `[logging] access_log = false` (#1610).
+    fn span_redact_params(&self) -> Vec<String> {
+        self.configured_access_log().redact_query_params
+    }
+
+    /// The per-request span and the access log.
+    ///
+    /// Called from the `assemble_app` serving paths. The two
+    /// `runserver_tenancy` variants do **not** call this: they hand
+    /// their router to `server::Builder`, which merges the tenant admin
+    /// in afterwards and dispatches the operator console on a sibling
+    /// branch, so a layer applied here would reach neither. Those paths
+    /// pass [`Self::access_log_layer`] to `Builder::observability`,
+    /// which applies it to the outermost router instead.
+    ///
+    /// That five-paths-not-one distinction was missed on the first cut,
+    /// and it mattered most exactly where it was missed. This replaced
+    /// the access log's old home inside `apply_settings_layers`, so a
+    /// multi-tenant app that called `.with_settings_from_env()` went
+    /// from having a request log to having none — a regression in the
+    /// one project shape #1480 was opened about.
+    /// `every_serving_path_is_observable` pins it now.
+    ///
+    /// Mounting here rather than in the settings layers is still the
+    /// point: that path only runs when the app calls
+    /// `.with_settings_from_env()`, which the api template does not call,
+    /// so the tenant field would be unreachable there (#1480).
+    ///
+    /// `TracingLayer` had a worse version of the same problem: it built
+    /// a correct span carrying tenant, method, path and status, and
+    /// nothing in the framework ever mounted it. A `tracing::info!` in a
+    /// handler therefore had no enclosing span, so no tenant and no
+    /// correlation — which is exactly the "logs arrive as loose traces"
+    /// symptom.
+    ///
+    /// All three layers need `_http_layers`, which `manage` implies, so
+    /// the `api` template's build gets them too (#1514).
+    fn mount_observability(&self, api: Router) -> Router {
+        // Delegates: the mount itself lives in one place, shared with
+        // `server::Builder`. The two used to carry near-verbatim copies
+        // of the same three ordering rules and had already drifted into
+        // opposite relative order.
+        crate::access_log::mount_observability(
+            api,
+            self.access_log_layer(),
+            self.span_redact_params(),
+        )
+    }
+
+    /// `[logging] access_log = false` turns the request log off.
+    ///
+    /// Default on: a server that logs no requests is a server you cannot
+    /// debug, and the previous default — off unless you found the right
+    /// builder call — was not a decision anyone made on purpose.
+    ///
+    fn access_log_enabled(&self) -> bool {
+        #[cfg(feature = "config")]
+        {
+            if let Some(s) = self.settings_for_layers.as_ref() {
+                return s.logging.access_log.unwrap_or(true);
+            }
+        }
+        true
+    }
+
+    async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Logging install lives in `run()` (the outermost dispatch
         // point) so the WorkerGuard outlives every runserver +
         // management-verb path uniformly.
+        if self.tenancy && !self.nested.is_empty() {
+            return Err(
+                "Cli::nest_with needs a single-database app; with .tenancy() \
+                        the serving pool is the registry's"
+                    .into(),
+            );
+        }
         #[cfg(feature = "tenancy")]
         if self.tenancy {
             return self.runserver_tenancy().await;
@@ -814,8 +1209,8 @@ impl Cli {
                 "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
             })?;
             let pool = crate::sql::Pool::connect(&url).await?;
-            let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            auto_migrate(&pool, &self.migrations_dir).await?;
+            if let Some(seed) = self.seed.take() {
                 // The seed hook's error is now `Send + Sync` (so a seed can
                 // hold an error across an `.await` without the future losing
                 // `Send`); coerce to this fn's `Box<dyn Error>` at the boundary.
@@ -823,30 +1218,22 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let drain = self.drain_timeout();
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
         #[cfg(feature = "postgres")]
@@ -870,82 +1257,66 @@ impl Cli {
                 // necessary setup here rather than restructure the
                 // `#[cfg]` blocks at the top of the fn.
                 let pool = crate::sql::Pool::connect(&url).await?;
-                let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-                if let Some(seed) = self.seed {
+                auto_migrate(&pool, &self.migrations_dir).await?;
+                if let Some(seed) = self.seed.take() {
                     seed(&pool)
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
-                let api = self.api;
-                #[cfg(feature = "admin")]
-                let api = if self.welcome_page {
-                    try_mount_welcome(api)
-                } else {
-                    api
-                };
-                #[cfg(feature = "admin")]
-                let api = mount_static_dirs(api, &self.static_dirs);
-                #[cfg(feature = "csrf")]
-                let api = match self.csrf {
-                    Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                    None => api,
-                };
-                #[cfg(feature = "config")]
-                let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-                let app = api.layer(axum::Extension(pool));
+                let drain = self.drain_timeout();
+                let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                crate::shutdown::serve_until_drained(
+                    |stop| {
+                        axum::serve(
+                            listener,
+                            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(stop)
+                    },
+                    drain,
                 )
                 .await?;
+                run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
-            let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            // The PG runner fires the migrate signals; keep it for the project chain.
+            let dir = &self.migrations_dir;
+            crate::migrate::manage::migrate_with_framework(
+                &crate::sql::Pool::from(pool.clone()),
+                dir,
+                &mut std::io::stderr(),
+                crate::migrate::Signals::Fire,
+                |held| crate::migrate::migrate_locked(held, &pool, dir, None),
+            )
+            .await?;
+            if let Some(seed) = self.seed.take() {
                 seed(&crate::sql::Pool::from(pool.clone()))
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
-            // to be too (#1208) — it was unconditional, which broke every
-            // admin-less build.
-            #[cfg(feature = "admin")]
-            let api = if self.health_endpoints {
-                api.merge(crate::health::health_router(pool.clone()))
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let drain = self.drain_timeout();
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
             // v0.30.16 — `into_make_service_with_connect_info` is what
             // populates `ConnectInfo<SocketAddr>` in request extensions.
             // Without it, `access_log` (and any other middleware that
             // reads the peer address) sees "-".
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            crate::shutdown::serve_until_drained(
+                |stop| {
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(stop)
+                },
+                drain,
             )
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             Ok(())
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
     }
@@ -957,9 +1328,17 @@ impl Cli {
     // `axum::serve`. The non-PG runserver_tenancy fallback below
     // mirrors that for symmetry.
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
-        let api = self.api;
-        #[cfg(feature = "admin")]
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Taken before `self` is picked apart below, so the hook still
+        // runs on this path too (#1409) — the tenancy server drains via
+        // its own `shutdown_signal`, and dropping the hook here would
+        // have left `on_shutdown` working on one path and silently not
+        // on the other.
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -970,22 +1349,40 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
-        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-        let mut builder = crate::server::Builder::from_env().await?.api(api);
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let (api, outer) = apply_settings_layers_or_warn(api, settings);
+        #[cfg(not(feature = "config"))]
+        let outer = None;
+        // Not `mount_observability` here: this router is about to be
+        // merged with the tenant admin and dispatched beside the
+        // operator console, and layers applied now would reach neither.
+        // The builder applies them to the outermost router instead.
+        let mut builder = crate::server::Builder::from_env()
+            .await?
+            .api(api)
+            .drain_timeout(self.drain_timeout());
+        builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
         }
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
-        if let Some(seed) = self.seed {
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
+        }
+        if let Some(seed) = self.seed.take() {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
             builder = builder
@@ -994,19 +1391,24 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 
     #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // v0.38 slice 24 — `server::Builder<DB>` is generic. On non-PG
         // single-backend builds, `DefaultTenantDb` resolves to whichever
         // sqlx backend the feature flags picked (sqlite first, mysql
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
-        let api = self.api;
-        #[cfg(feature = "admin")]
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
+        #[cfg(feature = "_http_layers")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -1017,8 +1419,16 @@ impl Cli {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
             None => api,
         };
+        // Inside CORS; the builder catches the admin and console routes (#1541).
+        let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
-        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let settings = self.settings_for_layers.as_ref();
+        #[cfg(feature = "config")]
+        let (api, outer) = apply_settings_layers_or_warn(api, settings);
+        #[cfg(not(feature = "config"))]
+        let outer = None;
+        // Not `mount_observability` — see the dispatch path above. The
+        // builder applies these to the outermost router.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1037,19 +1447,24 @@ impl Cli {
             apex,
         )
         .api(api);
+        builder = self.tenancy_builder(builder, outer);
         if self.health_endpoints {
             builder = builder.with_health();
         }
         if let Some(dir) = self.provisioning_dir.clone() {
             builder = builder.with_tenant_provisioning(dir);
         }
-        for (prefix, root) in self.static_dirs {
-            builder = builder.with_static(prefix, root);
+        for (prefix, files) in self.static_dirs {
+            builder = builder.with_static_files(prefix, files);
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
-        if let Some(seed) = self.seed {
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
+        }
+        if let Some(seed) = self.seed.take() {
             // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
             // projects get their `Cli::seed` hook fired on boot too.
             builder = builder
@@ -1058,7 +1473,9 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 }
 
@@ -1083,7 +1500,7 @@ impl Default for Cli {
 /// surfaces as a `tracing::warn!` instead of a process abort.
 /// `Router` implements `UnwindSafe` so the catch is sound; the
 /// fallback returns the original router unchanged.
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 fn try_mount_welcome(api: Router) -> Router {
     let api_for_probe = api.clone();
     // v0.37 (#5) — axum's `Router::merge` panics with "Overlapping
@@ -1114,13 +1531,10 @@ fn try_mount_welcome(api: Router) -> Router {
 }
 
 #[cfg(feature = "admin")]
-fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
+fn mount_static_dirs(api: Router, dirs: &[(String, crate::static_files::StaticFiles)]) -> Router {
     let mut r = api;
-    for (prefix, root) in dirs {
-        r = r.nest(
-            prefix,
-            crate::static_files::static_router(crate::static_files::StaticFiles::new(root.clone())),
-        );
+    for (prefix, files) in dirs {
+        r = r.nest(prefix, crate::static_files::static_router(files.clone()));
     }
     r
 }
@@ -1155,12 +1569,15 @@ fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
 fn apply_settings_layers_or_warn(
     api: Router,
     settings: Option<&crate::config::Settings>,
-) -> Router {
+) -> (Router, Option<OuterLayers>) {
     match settings {
-        Some(s) => apply_settings_layers(api, s),
+        Some(s) => {
+            let (api, outer) = apply_settings_layers(api, s);
+            (api, Some(outer))
+        }
         None => {
             warn_if_settings_inert();
-            api
+            (api, None)
         }
     }
 }
@@ -1168,7 +1585,7 @@ fn apply_settings_layers_or_warn(
 /// The layer-driving settings that `s` configures, by dotted name.
 ///
 /// Only settings that would actually install a layer count — a configured
-/// `secret_key` is not evidence that anyone expected CORS. Pure, so the
+/// `database.url` is not evidence that anyone expected CORS. Pure, so the
 /// warning's precision is unit-testable.
 #[cfg(feature = "config")]
 fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
@@ -1199,8 +1616,13 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
 /// configured (the common case for projects that never used `Settings`).
 #[cfg(feature = "config")]
 fn warn_if_settings_inert() {
-    let Ok(s) = crate::config::Settings::load_from_env() else {
-        return;
+    let s = match crate::config::Settings::load_from_env() {
+        Ok(s) => s,
+        Err(e) if e.is_missing_config() => return,
+        Err(e) => {
+            tracing::warn!(target: "rustango::manage", error = %e, "the config does not load; none of it is applied");
+            return;
+        }
     };
     let inert = inert_layer_settings(&s);
     if inert.is_empty() {
@@ -1212,18 +1634,16 @@ fn warn_if_settings_inert() {
         "these settings are configured but NOT being applied — no settings layer is \
          installed. Add `.with_settings_from_env()` to the `Cli` builder chain to \
          activate them (CORS, body limit, request timeout, security headers). \
-         Note that enabling them also turns on a strict CSP, which can break a \
-         server-rendered app that was fine without it."
+         A `[security] csp` you set also takes effect then, and can break \
+         pages that use inline script."
     );
 }
 
 #[cfg(feature = "config")]
-fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
-    use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
+fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> (Router, OuterLayers) {
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
     use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
-    use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
 
     let mut app = api;
 
@@ -1241,58 +1661,175 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         app = app.body_limit(layer);
     }
 
-    // access_log — extends the redact list with project additions
-    // from `[audit] redact_query_params`. Defaults are sensible so
-    // the layer mounts unconditionally.
-    let log_layer = AccessLogLayer::default().with_audit_settings(&s.audit);
-    app = app.access_log(log_layer);
+    // access_log is NOT mounted here any more. It lives in
+    // `Cli::mount_observability`, which runs whether or not the app
+    // calls `.with_settings_from_env()` — mounting it here made the
+    // request log, and with it the tenant field, conditional on a
+    // builder call the api template does not make (#1480). The redact
+    // list from `[audit] redact_query_params` still reaches the layer;
+    // `mount_observability` reads the same settings.
 
     // CORS — opt-in (returns None when no origins configured).
     if let Some(cors) = CorsLayer::from_settings(&s.security) {
         app = app.cors(cors);
     }
 
-    // security_headers (outermost — every response goes through).
-    // SecuritySettings::default() produces strict() so this mounts
-    // even when the [security] section is missing entirely.
-    let sec = SecurityHeadersLayer::from_settings(&s.security);
-    app = app.security_headers(sec);
+    // The caller owns where these go: the whole router for one tenant,
+    // the builder's outermost router under tenancy (#1700).
+    (app, outer_layers(&s.security))
+}
 
-    // host_validation (#611) — Django `ALLOWED_HOSTS` parity.
-    // Mounts when the list is non-empty (empty = DEBUG-style
-    // opt-out, layer wouldn't enforce anything anyway).
-    if !s.security.allowed_hosts.is_empty() {
-        use crate::host_validation::{AllowedHostsLayer, AllowedHostsRouterExt as _};
-        app = app.allowed_hosts(AllowedHostsLayer::from_settings_list(
-            s.security.allowed_hosts.iter().map(String::as_str),
-        ));
+/// The `[security]` layers that must wrap every route, the tenant login,
+/// admin and operator console included (#1699, #1700).
+#[cfg(any(feature = "config", feature = "tenancy"))]
+#[must_use = "these must wrap the served router, or the server has none of them"]
+pub(crate) struct OuterLayers {
+    headers: crate::security_headers::SecurityHeadersLayer,
+    allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
+    ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
+}
+
+#[cfg(any(feature = "config", feature = "tenancy"))]
+impl OuterLayers {
+    /// Innermost first: headers, the HTTPS redirect, then the Host
+    /// allowlist, so a bad Host is refused before it is redirected to.
+    #[cfg(feature = "config")]
+    fn apply(self, mut app: Router) -> Router {
+        use crate::host_validation::AllowedHostsRouterExt as _;
+        use crate::security_headers::SecurityHeadersRouterExt as _;
+        use crate::ssl_redirect::SslRedirectRouterExt as _;
+        app = app.security_headers(self.headers);
+        if let Some(l) = self.ssl_redirect {
+            app = app.ssl_redirect(l);
+        }
+        if let Some(l) = self.allowed_hosts {
+            app = app.allowed_hosts(l);
+        }
+        app
     }
 
-    // ssl_redirect (#613) — Django `SECURE_SSL_REDIRECT` +
-    // `SECURE_REDIRECT_EXEMPT` + `SECURE_PROXY_SSL_HEADER` parity.
-    // Opt-in: only mounts when explicitly enabled in settings —
-    // operators behind TLS-terminating LBs typically don't need
-    // it, so don't surprise them.
-    if matches!(s.security.secure_ssl_redirect, Some(true)) {
-        use crate::ssl_redirect::{SslRedirectLayer, SslRedirectRouterExt as _};
+    #[cfg(feature = "tenancy")]
+    fn apply_to<DB: sqlx::Database>(
+        self,
+        mut b: crate::server::Builder<DB>,
+    ) -> crate::server::Builder<DB> {
+        b = b.security_headers(self.headers);
+        if let Some(l) = self.ssl_redirect {
+            b = b.ssl_redirect(l);
+        }
+        if let Some(l) = self.allowed_hosts {
+            b = b.allowed_hosts(l);
+        }
+        b
+    }
+}
+
+/// Wrap the single-tenant router in the outer layers, when settings
+/// produced any.
+#[cfg(feature = "config")]
+fn wrap_outer((app, outer): (Router, Option<OuterLayers>)) -> Router {
+    match outer {
+        Some(o) => o.apply(app),
+        None => app,
+    }
+}
+
+#[cfg(feature = "config")]
+fn outer_layers(s: &crate::config::SecuritySettings) -> OuterLayers {
+    use crate::host_validation::AllowedHostsLayer;
+    use crate::ssl_redirect::SslRedirectLayer;
+    // An empty list is the opt-out; the layer would enforce nothing.
+    let allowed_hosts = (!s.allowed_hosts.is_empty())
+        .then(|| AllowedHostsLayer::from_settings_list(s.allowed_hosts.iter().map(String::as_str)));
+    // Opt-in: behind a TLS-terminating LB it is usually not wanted.
+    let ssl_redirect = matches!(s.secure_ssl_redirect, Some(true)).then(|| {
         let mut layer = SslRedirectLayer::new();
-        // SECURE_PROXY_SSL_HEADER — expect length-2 `[header, value]`.
-        // Malformed shapes are flagged by `manage check --deploy`;
-        // here we just ignore wrong-length entries to keep boot
-        // resilient.
-        if s.security.secure_proxy_ssl_header.len() == 2 {
-            layer = layer.proxy_ssl_header(
-                &s.security.secure_proxy_ssl_header[0],
-                &s.security.secure_proxy_ssl_header[1],
-            );
+        // Expect `[header, value]`; `check --deploy` flags other shapes.
+        if s.secure_proxy_ssl_header.len() == 2 {
+            layer = layer
+                .proxy_ssl_header(&s.secure_proxy_ssl_header[0], &s.secure_proxy_ssl_header[1]);
         }
-        if !s.security.secure_redirect_exempt.is_empty() {
-            layer = layer.exempt(s.security.secure_redirect_exempt.iter().cloned());
+        if !s.secure_redirect_exempt.is_empty() {
+            layer = layer.exempt(s.secure_redirect_exempt.iter().cloned());
         }
-        app = app.ssl_redirect(layer);
+        layer
+    });
+    OuterLayers {
+        // `SecuritySettings::default()` is strict(), so this always mounts.
+        headers: crate::security_headers::SecurityHeadersLayer::from_settings(s),
+        allowed_hosts,
+        ssl_redirect,
     }
+}
 
-    app
+/// Install the `[auth]` login limits, lockout policy and hash-slot wait,
+/// each only when one of its keys is set. A value the app installed in
+/// code wins; the ignored keys are logged.
+#[cfg(feature = "config")]
+fn apply_login_settings(a: &crate::config::AuthSettings) {
+    let ignored = |what: &str| {
+        tracing::warn!(
+            target: "rustango::manage",
+            "[auth] {what} keys are ignored: the app already configured it in code"
+        );
+    };
+    #[cfg(feature = "passwords")]
+    if let Some(ms) = a.hash_wait_ms {
+        let wait = std::time::Duration::from_millis(ms);
+        if !crate::passwords::configure_hash_wait_from_settings(wait) {
+            ignored("hash_wait_ms");
+        }
+    }
+    #[cfg(feature = "passwords")]
+    if a.argon2_memory_kib.is_some()
+        || a.argon2_iterations.is_some()
+        || a.argon2_parallelism.is_some()
+    {
+        use crate::passwords::{configure_argon2_from_settings, Argon2Params};
+        let d = Argon2Params::DEFAULT;
+        match Argon2Params::new(
+            a.argon2_memory_kib.unwrap_or(d.memory_kib()),
+            a.argon2_iterations.unwrap_or(d.iterations()),
+            a.argon2_parallelism.unwrap_or(d.parallelism()),
+        ) {
+            Ok(p) if !configure_argon2_from_settings(p) => ignored("argon2_*"),
+            Ok(_) => {}
+            // An invalid combination keeps the default cost (#1728).
+            Err(e) => tracing::error!(
+                target: "rustango::manage",
+                error = %e,
+                "[auth] argon2_* keys are invalid; keeping the default cost"
+            ),
+        }
+    }
+    #[cfg(feature = "admin")]
+    if a.login_ip_limit.is_some()
+        || a.login_ip_window_secs.is_some()
+        || a.login_global_limit.is_some()
+        || a.login_global_window_secs.is_some()
+    {
+        use crate::login_throttle::{configure_from_settings, LoginLimits, LoginThrottle};
+        if !configure_from_settings(LoginThrottle::new(LoginLimits::from_settings(a))) {
+            ignored("login_*");
+        }
+    }
+    #[cfg(feature = "cache")]
+    if a.lockout_threshold.is_some() || a.lockout_duration_secs.is_some() {
+        use crate::account_lockout::{
+            configure_from_settings, Lockout, DEFAULT_LOCKOUT_DURATION_SECS, DEFAULT_MAX_ATTEMPTS,
+        };
+        let lockout = Lockout::new(std::sync::Arc::new(crate::cache::InMemoryCache::new()))
+            .max_attempts(a.lockout_threshold.unwrap_or(DEFAULT_MAX_ATTEMPTS))
+            .lockout_duration(std::time::Duration::from_secs(
+                a.lockout_duration_secs
+                    .unwrap_or(DEFAULT_LOCKOUT_DURATION_SECS),
+            ));
+        if !configure_from_settings(lockout) {
+            ignored("lockout_*");
+        }
+    }
+    #[cfg(not(any(feature = "passwords", feature = "admin", feature = "cache")))]
+    let _ = (a, ignored);
 }
 
 /// Build a [`crate::tenancy::RouteConfig`] from a
@@ -1358,6 +1895,67 @@ fn routes_from_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `runserver`'s auto-migrate applies the system chain, like `manage migrate` (#2056).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn auto_migrate_applies_the_system_chain() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("app.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        auto_migrate(&pool, &dir).await.expect("auto-migrate");
+        let applied: i64 =
+            crate::sql::sqlx::query_scalar("SELECT COUNT(*) FROM __rustango_system_migrations__")
+                .fetch_one(pool.as_sqlite().unwrap())
+                .await
+                .expect("system ledger");
+        assert!(applied > 0, "no system migration applied");
+    }
+
+    /// `with_tenant_pools` reaches a SQLite tenancy verb (#1914): cap 0
+    /// skips the one tenant; the default config would warm it.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn sqlite_tenancy_verbs_honour_with_tenant_pools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+        let cli = Cli::new()
+            .tenancy()
+            .migrations_dir(tmp.path().join("migrations"))
+            .with_tenant_pools(crate::tenancy::TenantPoolsConfig {
+                max_cached_database_pools: 0,
+                ..Default::default()
+            });
+        let registry = crate::sql::Pool::connect_sqlite(&url)
+            .await
+            .expect("connect");
+        let run = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let mut out: Vec<u8> = Vec::new();
+        for args in [
+            run(&["migrate-registry"]),
+            run(&[
+                "create-tenant",
+                "acme",
+                "--mode",
+                "database",
+                "--backend",
+                "sqlite",
+                "--database-url",
+                &tenant_url,
+                "--no-migrate",
+            ]),
+            run(&["prewarm-pools"]),
+        ] {
+            cli.run_tenancy_verb_to(registry.clone(), &url, args, &mut out)
+                .await
+                .expect("verb");
+        }
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("skipped (cap) 1"), "{out}");
+    }
 
     #[test]
     fn defaults_are_sensible() {
@@ -1496,6 +2094,34 @@ mod tests {
     /// of the user's API router. Without `.with_settings`, the
     /// handle stays None — projects not using the layered loader
     /// pay no overhead.
+    /// One bad value used to boot on Cli defaults — no allowed_hosts,
+    /// headers or login limits (#1927). Only a missing file falls back.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_bad_settings_value_fails_boot_but_a_missing_file_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("default.toml"),
+            "[security]\nsecure_ssl_redirect = 1\n",
+        )
+        .unwrap();
+        let bad = crate::config::Settings::load_from(dir.path(), "dev");
+        assert!(matches!(bad, Err(crate::config::ConfigError::Shape(_))));
+        let cli = Cli::new().with_loaded_settings(bad);
+        assert!(cli.settings_for_layers.is_none());
+        let err = cli
+            .boot_settings_error()
+            .expect("a bad value must fail boot");
+        assert!(err.to_string().contains("secure_ssl_redirect"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let missing = crate::config::Settings::load_from(empty.path(), "dev");
+        assert!(Cli::new()
+            .with_loaded_settings(missing)
+            .boot_settings_error()
+            .is_none());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn with_settings_stashes_handle_for_runtime_layering() {
@@ -1540,8 +2166,78 @@ mod tests {
 
         // A setting that drives no layer must NOT trigger the warning.
         let mut s = Settings::default();
-        s.secret_key = Some("irrelevant".into());
+        s.database.url = Some("irrelevant".into());
         assert!(inert_layer_settings(&s).is_empty());
+    }
+
+    /// #1856 — `Cli::tenant_header` reaches the builder's resolver chain.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenant_header_reaches_the_builder() {
+        use crate::server::resolver_tests::{registry, x_org_pick};
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = registry().await;
+        let builder = |cli: Cli| {
+            let b = crate::server::Builder::from_pool(sq.clone(), url.clone(), "localhost");
+            cli.tenancy_builder(b, None)
+        };
+        assert_eq!(x_org_pick(&builder(Cli::new()), &sq).await, None);
+        let cli = Cli::new().tenant_header(crate::tenancy::HeaderResolver::default());
+        assert_eq!(
+            x_org_pick(&builder(cli), &sq).await.as_deref(),
+            Some("acme")
+        );
+    }
+
+    /// #1699, #1700 — what both tenancy paths hand the builder, checked
+    /// by request: headers, Host allowlist outermost, HTTPS redirect with
+    /// its proxy header and exempt paths.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_every_outer_layer() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        // Its registry has no `rustango_orgs`, so it opens the global breaker.
+        let _iso = crate::tenancy::isolated_resolver().await;
+
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec![".localhost".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        s.security.secure_proxy_ssl_header = vec!["x-forwarded-proto".into(), "https".into()];
+        s.security.secure_redirect_exempt = vec!["/app".into()];
+        let cli = Cli::new().with_settings(&s);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let (_, outer) = apply_settings_layers(Router::new(), &s);
+        let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+        let app = cli
+            .tenancy_builder(builder, Some(outer))
+            .into_router()
+            .await
+            .expect("assemble");
+
+        let send = |host: &str, uri: &str, https: bool| {
+            let mut req = Request::builder().uri(uri).header("host", host);
+            if https {
+                req = req.header("x-forwarded-proto", "https");
+            }
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        // Refused, not redirected to: the allowlist is outermost.
+        let r = send("evil.example", "/login", false).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // Plain HTTP is redirected; the proxy header and exempt path are not.
+        let r = send("acme.localhost", "/login", false).await.unwrap();
+        assert_eq!(r.status(), StatusCode::MOVED_PERMANENTLY);
+        let r = send("acme.localhost", "/login", true).await.unwrap();
+        assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+        assert!(r.headers().contains_key("x-frame-options"));
+        let r = send("acme.localhost", "/app", false).await.unwrap();
+        assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
     #[cfg(feature = "config")]
@@ -1605,12 +2301,38 @@ mod tests {
             .with_static("/uploads", "./var/uploads");
         assert_eq!(cli.static_dirs.len(), 2);
         assert_eq!(cli.static_dirs[0].0, "/static");
-        assert_eq!(cli.static_dirs[0].1, std::path::PathBuf::from("./assets"));
+        assert_eq!(
+            cli.static_dirs[0].1.root(),
+            std::path::Path::new("./assets")
+        );
         assert_eq!(cli.static_dirs[1].0, "/uploads");
         assert_eq!(
-            cli.static_dirs[1].1,
+            cli.static_dirs[1].1.root(),
             std::path::PathBuf::from("./var/uploads")
         );
+    }
+
+    /// `with_uploads` serves uploaded HTML as a download, `with_static` inline (#1849).
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn with_uploads_downloads_html() {
+        use tower::ServiceExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.html"), "<script></script>").unwrap();
+        let cli = Cli::new()
+            .with_static("/static", dir.path())
+            .with_uploads("/uploads", dir.path());
+        let app = mount_static_dirs(Router::new(), &cli.static_dirs);
+        let get = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(get("/uploads/x.html")).await.unwrap();
+        assert_eq!(r.headers()["content-disposition"], "attachment");
+        let r = app.oneshot(get("/static/x.html")).await.unwrap();
+        assert!(r.headers().get("content-disposition").is_none());
     }
 
     /// `Cli::with_welcome()` flips the flag for the runserver path.
@@ -1724,7 +2446,10 @@ mod tests {
 
         let app = mount_static_dirs(
             Router::new(),
-            &[("/static".into(), dir.path().to_path_buf())],
+            &[(
+                "/static".into(),
+                crate::static_files::StaticFiles::new(dir.path()),
+            )],
         );
         let resp = app
             .oneshot(
@@ -1736,5 +2461,400 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+}
+
+/// `Cli::with_health()` must reach every serving path (#1457).
+///
+/// Tested on the assembled router rather than on the source text of one
+/// `runserver` arm. The source-slicing guard this replaces was wrong
+/// three times — it matched the fix's own explanatory comment, then it
+/// matched the *Postgres* arm, then it could not see the third serving
+/// path at all — because each version checked a proxy for the property
+/// instead of the property, which is that a request gets a 200.
+#[cfg(all(
+    test,
+    feature = "admin",
+    feature = "sqlite",
+    feature = "runserver",
+    feature = "manage"
+))]
+mod assemble_app_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    /// Serializes this module's tests.
+    ///
+    /// `tracing` caches per callsite whether any subscriber is
+    /// interested, and that cache is process-global. The two health
+    /// tests issue requests with no subscriber installed, so whichever
+    /// reaches `tracing_layer`'s `info_span!` first can cache it as
+    /// "nobody cares" — and the request-id test below then finds the
+    /// span silently absent. Alone it passed; with the module it failed
+    /// every run, and rebuilding the cache was not enough on its own
+    /// because a sibling can poison it again a moment later.
+    fn global_tracing_state() -> &'static std::sync::Mutex<()> {
+        super::tracing_test_lock()
+    }
+
+    /// Take the lock, ignoring poisoning from an unrelated failure.
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        global_tracing_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    async fn status(app: &Router, path: &str) -> StatusCode {
+        app.clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .expect("request")
+            .status()
+    }
+
+    /// A handler's own log event carries the request id, with the
+    /// handler doing nothing to put it there.
+    ///
+    /// This is the property `request_id` existed for and never had:
+    /// `RequestIdLayer` was mounted nowhere, and the module's docs told
+    /// you to write `req_id = %id.0` on every call site by hand — which
+    /// is both tedious and silently misses every event you did not write,
+    /// the ORM's included (#1480).
+    ///
+    /// Asserted on captured output rather than on the extension, because
+    /// the extension was always there. What was missing is the id
+    /// reaching the *log*.
+    #[test]
+    fn a_handler_log_carries_the_request_id_without_asking() {
+        let _serial = serialized();
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        // A plain `#[test]` driving its own runtime, not `#[tokio::test]`.
+        //
+        // `set_default` installs a thread-local subscriber, and holding
+        // that across an `.await` in an async test proved racy: the
+        // events reached the test's subscriber while the *span* did not,
+        // so the captured lines had no span context maybe one run in six.
+        // Driving the whole request inside `with_default` keeps one
+        // subscriber current for span creation and every poll alike.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
+            .expect("sqlite");
+        // A handler that logs and says nothing about request ids.
+        let app = Cli::new()
+            .api(Router::new().route(
+                "/thing",
+                axum::routing::get(|| async {
+                    tracing::info!("handler ran");
+                    "ok"
+                }),
+            ))
+            .assemble_app(pool);
+
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+
+        let sent = "test-request-id-42";
+        // Rebuild the interest cache before issuing the request.
+        //
+        // `tracing` caches, per callsite, whether any subscriber cares.
+        // The sibling tests in this module issue requests too, and they
+        // run with no subscriber at all — so whichever of them reaches
+        // the `info_span!` in `tracing_layer` first gets it cached as
+        // "nobody is interested", and this test then finds the span
+        // silently absent. Alone it passes; with the module it failed
+        // every time. A thread-local default does not invalidate that
+        // cache on its own.
+        tracing::callsite::rebuild_interest_cache();
+
+        let response = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(
+                app.oneshot(
+                    Request::builder()
+                        .uri("/thing")
+                        .header("x-request-id", sent)
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+        })
+        .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some(sent),
+            "the inbound id should be echoed back"
+        );
+
+        let out = buf.contents();
+        assert!(
+            out.contains("handler ran"),
+            "the handler's event was not captured at all: {out}"
+        );
+        assert!(
+            out.contains(sent),
+            "the handler's event does not carry the request id. It is on the \
+             request span, so every event under the span should show it without \
+             the handler naming it:\n{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_health_mounts_both_endpoints() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_health().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::OK,
+            "`with_health()` set its flag and /health still 404s — that is #1457, \
+             and it reaches every serving path because they all assemble here"
+        );
+        assert_eq!(status(&app, "/ready").await, StatusCode::OK);
+    }
+
+    /// The other direction. Without this, the test above would pass even
+    /// if the endpoints were mounted unconditionally — which would make
+    /// it evidence of nothing.
+    #[tokio::test]
+    async fn without_with_health_they_are_absent() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::NOT_FOUND,
+            "health endpoints must be opt-in; mounting them always would make \
+             the positive test above vacuous"
+        );
+    }
+
+    /// #1700 — the single-tenant server keeps its `[security]` outer
+    /// layers: headers on, and a bad Host refused.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn assemble_app_applies_the_outer_layers() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into()];
+        let app = Cli::new()
+            .with_settings(&s)
+            .with_health()
+            .assemble_app(pool);
+        let send = |host: &str| {
+            let req = Request::builder().uri("/health").header("host", host);
+            app.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        let ok = send("example.com").await.expect("request");
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert!(ok.headers().contains_key("x-frame-options"));
+        let bad = send("evil.example").await.expect("request");
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// #1541 — a panic's 500 still carries CORS and the security headers.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_panic_500_carries_cors_and_security_headers() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let mut s = crate::config::Settings::default();
+        s.security.cors_allowed_origins = vec!["https://app.example".into()];
+        let app = Cli::new()
+            .with_settings(&s)
+            .api(Router::new().route(
+                "/boom",
+                axum::routing::get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom");
+                    }
+                    "unreachable"
+                }),
+            ))
+            .assemble_app(pool);
+        let req = Request::builder()
+            .uri("/boom")
+            .header("origin", "https://app.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("request");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let h = resp.headers();
+        assert_eq!(h["access-control-allow-origin"], "https://app.example");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert!(h.contains_key("x-frame-options"));
+        assert!(h["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+    }
+}
+
+/// Shared by every test module here that installs a subscriber or sends
+/// a request: `tracing`'s per-callsite interest cache is process-global.
+#[cfg(all(test, feature = "sqlite", feature = "manage"))]
+fn tracing_test_lock() -> &'static std::sync::Mutex<()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// #1514 — the request id, span and access log reach a build without
+/// `admin` (the `api` template's `manage` alone), not only the batteries ones.
+#[cfg(all(test, feature = "sqlite", feature = "manage"))]
+mod observability_without_admin_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        super::tracing_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A plain `#[test]` on its own runtime, so one subscriber is current
+    /// for the span and every poll (see `assemble_app_tests`).
+    #[test]
+    fn assembled_app_logs_the_request_with_its_id() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = serialized();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
+            .expect("sqlite");
+        let api = Router::new().route(
+            "/x",
+            axum::routing::get(|| async {
+                tracing::info!("handler ran");
+                "ok"
+            }),
+        );
+        let app = Cli::new().api(api).assemble_app(pool);
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+        let sent = "req-1514";
+        let res = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(
+                app.oneshot(
+                    Request::builder()
+                        .uri("/x")
+                        .header("x-request-id", sent)
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+        })
+        .expect("request");
+        assert!(
+            res.headers().contains_key("x-request-id"),
+            "no X-Request-Id on the assembled router: observability is gated off"
+        );
+        let out = buf.contents();
+        let handler_line = out.lines().find(|l| l.contains("handler ran"));
+        assert!(
+            handler_line.is_some_and(|l| l.contains(sent)),
+            "the handler's event is not in the request span: {out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.contains("rustango::access_log") && l.contains("/x")),
+            "no access-log line: {out}"
+        );
+    }
+
+    /// `check --deploy` sees an ungated admin mounted by `nest_with`.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn check_builds_the_nested_admin() {
+        let _serial = serialized();
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        Cli::new()
+            .nest_with("/admin", |p| crate::admin::router(p))
+            .build_nested(&pool);
+        let flagged = crate::admin::ungated_admin_built();
+        crate::admin::reset_ungated_admin_built();
+        assert!(flagged, "the nested admin was never built for the audit");
+    }
+
+    /// #2013 — `.with_welcome()` / `.with_health()` mount on a manage-only build.
+    #[tokio::test]
+    async fn welcome_and_health_mount_without_admin() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_welcome().with_health().assemble_app(pool);
+        for path in ["/", "/health"] {
+            let res = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .expect("request");
+            assert_eq!(
+                res.status(),
+                axum::http::StatusCode::OK,
+                "{path} not mounted"
+            );
+        }
+    }
+
+    /// `nest_with` builds its router from the serving pool, at assembly.
+    #[tokio::test]
+    async fn nest_with_builds_from_the_serving_pool() {
+        let _serial = serialized();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new()
+            .nest_with("/n", |p: crate::sql::Pool| {
+                let name = p.dialect().name();
+                Router::new().route("/x", axum::routing::get(move || async move { name }))
+            })
+            .assemble_app(pool);
+        let res = app
+            .oneshot(Request::builder().uri("/n/x").body(Body::empty()).unwrap())
+            .await
+            .expect("request");
+        let body = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"sqlite");
     }
 }

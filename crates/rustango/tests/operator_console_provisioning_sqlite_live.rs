@@ -69,6 +69,7 @@ async fn boot() -> Booted {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await.expect("seed operator");
 
@@ -85,6 +86,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -229,6 +232,7 @@ async fn the_org_list_hides_the_link_without_a_provisioner() {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await.expect("seed operator");
 
@@ -242,6 +246,8 @@ async fn the_org_list_hides_the_link_without_a_provisioner() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!("username={username}&password=letmein")))
@@ -289,6 +295,9 @@ async fn the_create_routes_require_a_session() {
                 Request::builder()
                     .method(method)
                     .uri(uri)
+                    // A valid CSRF pair, so the session gate is what refuses.
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::empty())
                     .unwrap(),
@@ -314,6 +323,8 @@ async fn test_connection_reports_why_and_creates_nothing() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/test-connection")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -368,6 +379,8 @@ async fn the_probe_refuses_the_registry_instead_of_blessing_it() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/test-connection")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -413,6 +426,8 @@ async fn submitting_the_form_provisions_a_tenant_and_redirects_to_its_run() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -482,6 +497,8 @@ async fn a_bad_submission_re_renders_the_form_with_the_reason() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -531,6 +548,8 @@ async fn the_stream_replays_a_finished_run_and_then_ends() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -598,6 +617,8 @@ async fn the_stream_resumes_from_a_given_seq() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -671,6 +692,8 @@ async fn the_run_index_lists_runs_and_links_to_each() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -729,6 +752,8 @@ async fn the_run_index_shows_why_a_run_failed() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -780,6 +805,8 @@ async fn a_run_page_past_the_end_clamps_to_real_data() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")

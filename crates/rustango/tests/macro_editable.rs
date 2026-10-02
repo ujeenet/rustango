@@ -1,4 +1,4 @@
-//! `#[rustango(editable = false)]` field attribute (Django parity #449).
+//! `#[rustango(editable = false)]` field attribute (#449).
 //!
 //! Covers:
 //! - macro threads the value through to `FieldSchema::editable`

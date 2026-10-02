@@ -5,8 +5,8 @@ fragmento renderizado, una llamada a una API de terceros — para que la siguien
 petición lo obtenga al instante en lugar de recalcularlo. **Rustango** te da un
 único trait `Cache` con backends intercambiables (in-memory, Redis, base de
 datos), un helper de cálculo-al-fallar (`get_or_set`) y helpers JSON tipados.
-Cambia el backend sin tocar un solo sitio de llamada — como el framework de caché
-de Django o la fachada `Cache` de Laravel.
+Cambia el backend sin tocar un solo sitio de llamada: las llamadas siguen
+igual, solo cambia la configuración.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](../img/caching.png)](../img/caching.png)
 
@@ -55,7 +55,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | dev, tests, un solo proceso (HashMap por proceso + TTL) |
 | `RedisCache` | `cache-redis` | producción; compartido entre réplicas |
-| `DbCache` | `cache` | producción sin Redis; una tabla `rustango_cache` |
+| `DatabaseCache` | `cache` | producción sin Redis; una tabla `rustango_cache` |
 | `NullCache` | `cache` | deshabilitar la caché (cada lectura falla) — práctico en tests |
 
 ---
@@ -146,6 +146,30 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` fija un TTL por defecto que se aplica cuando
 pasas `None`.
 
+### Un TTL es una cota superior, no una garantía
+
+`InMemoryCache` está **acotado en tamaño por defecto** — 256 MiB o 100 000
+entradas, lo que se alcance primero — con desalojo LRU aproximado. Una avalancha
+de claves únicas no puede hacer crecer el proceso sin límite, pero también
+significa que **una entrada puede desaparecer antes de que expire su TTL** si es
+la menos usada recientemente cuando se alcanza el presupuesto. El desalojo
+elimina primero las entradas ya expiradas y después las menos usadas
+recientemente, hasta cumplir ambos presupuestos.
+
+Así que trata una lectura de caché como «puede estar ausente» incluso dentro del
+TTL. Eso vale para cualquier backend de caché, pero aquí tiene una causa
+razonable y ajustable:
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // subir el presupuesto
+    .with_max_entries(0)                 // 0 = sin límite (comportamiento previo al acotado)
+```
+
+El TTL en sí se aplica de forma perezosa, en la lectura — no hay hilo de desalojo
+en segundo plano, así que una entrada expirada sigue ocupando su hueco hasta que
+algo la pida o el desalojo la alcance.
+
 ---
 
 ## Cambiar de backend
@@ -155,8 +179,34 @@ línea en el arranque — normalmente impulsado por la configuración para que
 difiera según el entorno:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (síncrono) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **pánico** — no se puede construir de forma síncrona | ✓ |
+| `db` | **pánico** — necesita un `&Pool` en tiempo de ejecución | error; constrúyelo donde esté el pool |
+
+El resolutor síncrono lanza un pánico en lugar de sustituir el backend
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). Antes avisaba y
+devolvía una caché en memoria, que no es una caché compartida degradada: es
+otra distinta. Una caché por proceso multiplica el límite de
+`CacheRateLimitLayer` por el número de réplicas y deja de hacer que
+`verify_single_use` falle en cerrado, así que el mismo enlace de restablecimiento
+funciona una vez por réplica. Ambas cosas están documentadas como funcionales
+*porque* la caché es compartida, y un aviso al arrancar no llega a quien depura
+eso una semana después.
+
+`db` no puede salir de `[cache]` en absoluto, porque `DatabaseCache` necesita un
+pool que los ajustes no llevan:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 En producción, apúntalo a Redis (compartido entre todas tus réplicas):
@@ -199,10 +249,12 @@ de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
 
 **Contadores atómicos y bloqueos.** `Cache::incr` está detrás del
 [rate limiting](middleware.md) y el bloqueo por cuenta; `Cache::add`
-(set-if-absent) está detrás de `DistributedLock`. Ambos son atómicos en
-`RedisCache` (`INCRBY` / `SET NX` nativos) y en `InMemoryCache` (que mantiene su
-cerrojo durante el read-modify-write); `DatabaseCache` deja ambos en el valor no
-atómico por defecto — suficiente para un proceso, pero usa Redis cuando un
+(set-if-absent) está detrás de `DistributedLock`. `Cache::add` es atómico en los tres —
+`RedisCache` (`SET NX`), `InMemoryCache` (que mantiene su cerrojo durante el
+read-modify-write) y `DatabaseCache`, que hace el test-and-set bajo cerrojos de
+fila, de modo que una carrera se resuelve con exactamente un ganador.
+`Cache::incr` es atómico en los dos primeros pero recae en el valor no atómico
+por defecto con `DatabaseCache`. Un `DistributedLock` es seguro en los tres; un
 contador o bloqueo deba ser exacto entre réplicas.
 
 Dos cosas que conviene saber:
@@ -210,7 +262,7 @@ Dos cosas que conviene saber:
 | | |
 |---|---|
 | **Es un namespace, no una frontera** | Todo sigue viviendo en un solo backend, y el código que tenga la caché *sin acotar* puede leer cualquier clave. La idea es que el camino ergonómico sea el correcto. |
-| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`. `InMemoryCache` filtra su mapa y `DatabaseCache` lanza un `DELETE … LIKE 'prefix%'`. Un backend que *no* puede enumerar — `FileCache` convierte las claves en rutas con hash — recurre a borrar todo y registra una advertencia. Es deliberado: borrar de menos dejaría que otro namespace leyera una entrada obsoleta, lo cual es un fallo de corrección; borrar de más solo cuesta un fallo de caché. |
+| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`, y todos los backends integrados lo implementan: `InMemoryCache` filtra su mapa, `DatabaseCache` lanza `DELETE … LIKE 'prefix%'` con `%`, `_` y el carácter de escape escapados, `RedisCache` usa `SCAN`+`MATCH` con los metacaracteres de glob escapados, y `FileCache` recorre su directorio y compara la clave guardada en cada entrada. Un backend que no lo implemente ahora devuelve un **error** en lugar de recurrir a un fallback. `DatabaseCache` guarda las claves de más de 255 bytes con hash y compara un prefijo de más de 190 bytes solo por sus primeros 190 bytes, así que puede borrar claves de más, nunca de menos. |
 
 El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la

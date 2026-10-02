@@ -261,9 +261,9 @@ async fn tenant_router_search_param_narrows_count_and_results() {
     assert_eq!(results[0]["name"], serde_json::json!("Bob"));
 }
 
-/// §9.116 — `?{field}=...` exact filter via `filter_fields`. Same
-/// Django-style lookups (`__gt`, `__icontains`, `__in`, `__isnull`)
-/// the static `router` path supports.
+/// §9.116 — `?{field}=...` exact filter via `filter_fields`. The same
+/// suffix lookups (`__gt`, `__icontains`, `__in`, `__isnull`) the static
+/// `router` path supports.
 #[tokio::test]
 async fn tenant_router_filter_param_exact_match() {
     let Some((slug, pool, app)) = fixture().await else {

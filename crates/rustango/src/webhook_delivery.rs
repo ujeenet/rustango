@@ -1,8 +1,8 @@
-//! Outbound webhook delivery — POSTs an HMAC-signed JSON payload to a
-//! subscriber URL via the background job queue.
+//! Outbound webhooks: POST an HMAC-signed JSON payload to a subscriber
+//! URL through the background job queue.
 //!
-//! Wraps the existing [`crate::webhook`] signing format and the
-//! [`crate::jobs`] retry-with-backoff machinery into a one-call API:
+//! Joins [`crate::webhook`] signing to the [`crate::jobs`] retry and
+//! backoff machinery behind one call:
 //!
 //! ```ignore
 //! use rustango::webhook::SignatureFormat;
@@ -28,27 +28,38 @@
 //! - Body: the payload re-serialized to JSON.
 //! - `Content-Type: application/json`
 //! - `User-Agent: rustango-webhook/<crate version>`
-//! - `X-Webhook-Id: <uuid>` — stable per delivery, retried as-is so the
-//!   receiver can dedup.
+//! - `X-Webhook-Id: <uuid>`, the same on every retry so the receiver
+//!   can drop duplicates.
 //! - `X-Webhook-Event: <event_name>`
-//! - `X-Webhook-Signature: <signature>` (header + format follow your
-//!   chosen [`SignatureFormat`]).
-//! - Any extra headers added via [`WebhookSubscription::header`].
+//! - `X-Webhook-Signature: <signature>`, in your chosen
+//!   [`SignatureFormat`].
+//! - Any extra headers from [`WebhookSubscription::header`].
 //!
 //! ## Retry policy
 //!
-//! Status codes are mapped to job outcomes:
+//! - 2xx: done.
+//! - 408, 429 and 5xx: retried with backoff, up to `MAX_ATTEMPTS`.
+//! - Other 4xx: dead-lettered at once. A bad URL or bad auth will not
+//!   fix itself.
+//! - Transport errors (refused connection, DNS, TLS): retried.
 //!
-//! - **2xx** — success, delivery completes.
-//! - **408 Request Timeout** / **429 Too Many Requests** / **5xx** —
-//!   `JobError::Retryable`; retried with exponential backoff up to
-//!   `MAX_ATTEMPTS` (default 8).
-//! - **other 4xx** — `JobError::Fatal`; goes straight to dead-letter,
-//!   no retries (a malformed URL or auth failure won't fix itself).
-//! - **transport errors** (connect refused, DNS failure, body too
-//!   large, etc.) — `JobError::Retryable`.
+//! Add more retryable codes with
+//! [`WebhookSubscription::retry_status_codes`].
 //!
-//! Customize per-subscription with [`WebhookSubscription::retry_status_codes`].
+//! ## Target checks
+//!
+//! Only `http` and `https`. Redirects are not followed. Every resolved
+//! address must be public; loopback, private, link-local, CGNAT and
+//! multicast targets are dead-lettered, and addresses are checked again
+//! at connect time. [`WebhookSubscription::allow_private_targets`]
+//! turns the address check off; the `RUSTANGO_OUTBOUND_ALLOW` list never
+//! applies, since a tenant may set the URL.
+//! Only the status code is kept on failure.
+//!
+//! [`SignatureFormat`]: crate::webhook::SignatureFormat
+//! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
+//! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
+//! [`WebhookSubscription::allow_private_targets`]: crate::webhook_delivery::WebhookSubscription::allow_private_targets
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,9 +70,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::jobs::{Job, JobError, JobQueue};
+use crate::outbound::{self, TargetError, TargetPolicy};
 use crate::webhook::{sign as sign_body, SignatureFormat};
 
-/// Header that carries the per-delivery UUID — receivers can dedup on it.
+/// Per-delivery UUID. Receivers can use it to drop duplicates.
 pub const HEADER_ID: &str = "X-Webhook-Id";
 /// Header that carries the event name.
 pub const HEADER_EVENT: &str = "X-Webhook-Event";
@@ -71,11 +83,10 @@ pub const HEADER_SIGNATURE: &str = "X-Webhook-Signature";
 /// User-Agent advertised on every delivery.
 pub static USER_AGENT: &str = concat!("rustango-webhook/", env!("CARGO_PKG_VERSION"));
 
-/// One outbound webhook event — the [`Job`] payload that the queue persists,
-/// retries, and eventually delivers (or dead-letters).
+/// One outbound webhook event: the [`Job`] payload the queue stores,
+/// retries and finally delivers or dead-letters.
 ///
-/// Constructed via [`WebhookSubscription::dispatch`] — you don't usually
-/// build this directly.
+/// [`WebhookSubscription::dispatch`] builds these for you.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
     pub id: String,
@@ -86,16 +97,19 @@ pub struct WebhookEvent {
     pub payload: Value,
     pub headers: HashMap<String, String>,
     pub timeout_secs: u64,
-    /// Status codes (besides 5xx, 408, 429) that should retry. Empty
-    /// uses the default policy.
+    /// Extra status codes to retry, on top of 408, 429 and 5xx.
     pub retry_status_codes: Vec<u16>,
+    /// Allow loopback, private and link-local targets. Off by default.
+    #[serde(default)]
+    pub allow_private_targets: bool,
 }
 
 #[async_trait::async_trait]
 impl Job for WebhookEvent {
     const NAME: &'static str = "rustango.webhook_delivery";
-    /// Webhooks typically retry for a long time — 8 attempts with the
-    /// queue's `1s · 2^attempt` backoff covers ~17 minutes.
+    /// 8 attempts in total, so 7 retries. With the queue's
+    /// `1s * 2^attempt` backoff that spans about two minutes. Raise it
+    /// to 11 for roughly 17 minutes.
     const MAX_ATTEMPTS: u32 = 8;
 
     async fn run(&self) -> Result<(), JobError> {
@@ -105,7 +119,7 @@ impl Job for WebhookEvent {
 
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     let body = serde_json::to_vec(&event.payload).map_err(|e| {
-        // Bad payload — won't fix itself.
+        // A bad payload will not fix itself.
         JobError::Fatal(format!("payload serialize: {e}"))
     })?;
     let signature = sign_body(
@@ -114,14 +128,23 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         &body,
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(event.timeout_secs.max(1)))
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
+    // Only the subscription opts in: the operator's allowlist is for SSO
+    // and Slack, and a tenant may own this URL.
+    let policy = if event.allow_private_targets {
+        TargetPolicy::AllowPrivate
+    } else {
+        TargetPolicy::public_only()
+    };
+    let egress =
+        outbound::shared(policy).map_err(|e| JobError::Queue(format!("build http client: {e}")))?;
+    let target = egress.check(&event.target_url).await.map_err(|e| match e {
+        TargetError::Dns(_) => JobError::Retryable(e.to_string()),
+        _ => JobError::Fatal(e.to_string()),
+    })?;
 
-    let mut req = client
-        .post(&event.target_url)
+    let mut req = target
+        .request(reqwest::Method::POST)
+        .timeout(Duration::from_secs(event.timeout_secs.max(1)))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(HEADER_ID, &event.id)
         .header(HEADER_EVENT, &event.event)
@@ -130,11 +153,19 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     for (k, v) in &event.headers {
         req = req.header(k.as_str(), v.as_str());
     }
+    // A default, as the per-call client had: a subscription header wins.
+    if !event
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("user-agent"))
+    {
+        req = req.header(reqwest::header::USER_AGENT, USER_AGENT);
+    }
 
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            // Transport / DNS / TLS — retry.
+            // Transport, DNS or TLS: worth retrying.
             return Err(JobError::Retryable(format!("transport: {e}")));
         }
     };
@@ -142,18 +173,12 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     if (200..300).contains(&status) {
         return Ok(());
     }
+    // Status only: the response body is never stored.
+    let msg = format!("status {status}");
     if event.retry_status_codes.contains(&status) || is_default_retryable(status) {
-        let body = resp.text().await.unwrap_or_default();
-        Err(JobError::Retryable(format!(
-            "status {status}: {}",
-            truncate(&body, 200)
-        )))
+        Err(JobError::Retryable(msg))
     } else {
-        let body = resp.text().await.unwrap_or_default();
-        Err(JobError::Fatal(format!(
-            "status {status}: {}",
-            truncate(&body, 200)
-        )))
+        Err(JobError::Fatal(msg))
     }
 }
 
@@ -161,24 +186,10 @@ fn is_default_retryable(status: u16) -> bool {
     status == 408 || status == 429 || (500..600).contains(&status)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_owned()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
-    }
-}
-
-// =====================================================================
-// WebhookSubscription — fluent builder + dispatch helper
-// =====================================================================
-
-/// Static config for one webhook subscriber, plus convenience methods to
-/// register the delivery handler and dispatch events.
+/// Config for one webhook subscriber, plus methods to register the
+/// delivery handler and send events.
 ///
-/// Keep one of these per subscription. Cheap to clone.
+/// Keep one per subscription. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct WebhookSubscription {
     target_url: String,
@@ -187,6 +198,7 @@ pub struct WebhookSubscription {
     headers: HashMap<String, String>,
     timeout: Duration,
     retry_status_codes: Vec<u16>,
+    allow_private_targets: bool,
 }
 
 impl WebhookSubscription {
@@ -198,6 +210,7 @@ impl WebhookSubscription {
             headers: HashMap::new(),
             timeout: Duration::from_secs(10),
             retry_status_codes: Vec::new(),
+            allow_private_targets: false,
         }
     }
 
@@ -219,26 +232,33 @@ impl WebhookSubscription {
         self
     }
 
-    /// Add status codes that should be retried in addition to the
-    /// defaults (408, 429, 5xx).
+    /// Retry these status codes too, on top of 408, 429 and 5xx.
     #[must_use]
     pub fn retry_status_codes(mut self, codes: impl IntoIterator<Item = u16>) -> Self {
         self.retry_status_codes.extend(codes);
         self
     }
 
-    /// Register the delivery [`Job`] on `queue`. Idempotent — call once
-    /// per process at startup before [`Self::dispatch`].
+    /// Allow delivery to loopback, private and link-local addresses, for
+    /// tests and intranet receivers. Off by default.
+    #[must_use]
+    pub fn allow_private_targets(mut self, allow: bool) -> Self {
+        self.allow_private_targets = allow;
+        self
+    }
+
+    /// Register the delivery [`Job`] on `queue`. Call once at startup,
+    /// before [`Self::dispatch`]. Safe to call twice.
     pub async fn register<Q: JobQueue>(queue: &Q) {
         queue.register::<WebhookEvent>().await;
     }
 
-    /// Build a [`WebhookEvent`] and enqueue it. Returns immediately —
-    /// delivery happens asynchronously on a worker.
+    /// Queue a [`WebhookEvent`] and return its id at once. A worker
+    /// delivers it later.
     ///
     /// # Errors
-    /// Returns the underlying [`JobError::Queue`] when the enqueue fails
-    /// (DB unavailable, channel closed, payload not serializable).
+    /// [`JobError::Queue`] if the enqueue fails: database down, channel
+    /// closed, or a payload that will not serialize.
     pub async fn dispatch<Q: JobQueue>(
         &self,
         queue: &Q,
@@ -257,15 +277,14 @@ impl WebhookSubscription {
             headers: self.headers.clone(),
             timeout_secs: self.timeout.as_secs().max(1),
             retry_status_codes: self.retry_status_codes.clone(),
+            allow_private_targets: self.allow_private_targets,
         };
         queue.dispatch(&event).await?;
         Ok(id)
     }
 }
 
-// `Arc<WebhookSubscription>` is the typical way apps pass a subscription
-// across handlers. The newtype lets us add methods cheaply later if
-// needed.
+// How apps usually share one subscription across handlers.
 pub type SharedSubscription = Arc<WebhookSubscription>;
 
 #[cfg(test)]
@@ -278,16 +297,14 @@ mod tests {
     use std::sync::Mutex;
     use tokio::net::TcpListener;
 
-    /// Spin up a tiny axum server on a random port. Returns the bound
-    /// URL plus a shutdown handle. The handler stashes incoming
-    /// (status,headers,body) into `received` and returns the configured
-    /// `respond_status`.
+    /// Start a tiny axum server on a random port. It records each
+    /// request into `received` and replies with `respond_status`.
     async fn start_server(
         respond_status: u16,
         received: Arc<Mutex<Vec<(reqwest::StatusCode, HashMap<String, String>, Vec<u8>)>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        // Capture the chosen status code in shared state so the handler
-        // can read it without it being part of the closure type.
+        // Shared state so the handler can read the status code without
+        // it changing the closure type.
         let status = Arc::new(std::sync::atomic::AtomicU16::new(respond_status));
         let status_clone = status.clone();
         let received_clone = received.clone();
@@ -326,7 +343,7 @@ mod tests {
         let h = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        // Tiny delay so the server is accept()-ing before we POST.
+        // Give the server a moment to start accepting.
         tokio::time::sleep(Duration::from_millis(20)).await;
         (url, h)
     }
@@ -341,6 +358,7 @@ mod tests {
         q.start().await;
 
         let id = WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .header("X-Tenant", "acme")
             .dispatch(&q, "order.created", &serde_json::json!({"order_id": 42}))
             .await
@@ -380,6 +398,7 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .signature_format(SignatureFormat::HexSha256WithPrefix)
             .dispatch(&q, "ping", &serde_json::json!({"x": 1}))
             .await
@@ -404,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_on_4xx_other_than_408_429() {
-        // 404 — Fatal, dead-letters immediately, no retry.
+        // 404 is fatal: dead-letter at once, no retry.
         let received = Arc::new(Mutex::new(Vec::new()));
         let (url, srv) = start_server(404, received.clone()).await;
 
@@ -422,11 +441,12 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "secret-bytes")
+            .allow_private_targets(true)
             .dispatch(&q, "ping", &serde_json::json!({}))
             .await
             .unwrap();
 
-        // Wait a beat for delivery + dead-letter callback.
+        // Wait for delivery and the dead-letter callback.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             received.lock().unwrap().len(),
@@ -441,9 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_on_5xx() {
-        // First two attempts fail with 503, third succeeds. With the
-        // default backoff (2s after first fail, 4s after second), wait
-        // ~7 seconds.
+        // Two 503s, then a 200. The queue backs off 1s, then 2s.
         let received = Arc::new(Mutex::new(Vec::new()));
         let status_seq = Arc::new(Mutex::new(vec![503u16, 503u16, 200u16]));
 
@@ -497,11 +515,12 @@ mod tests {
         q.start().await;
 
         WebhookSubscription::new(url, "s")
+            .allow_private_targets(true)
             .dispatch(&q, "ping", &serde_json::json!({}))
             .await
             .unwrap();
 
-        // 503 → 2s backoff → 503 → 4s backoff → 200. ~7s total.
+        // 503, 1s backoff, 503, 2s backoff, 200. The sleep leaves room.
         tokio::time::sleep(Duration::from_millis(7500)).await;
         let recv = received.lock().unwrap();
         assert!(
@@ -527,12 +546,209 @@ mod tests {
         assert!(!is_default_retryable(301));
     }
 
-    #[test]
-    fn truncate_appends_ellipsis_only_when_over_max() {
-        assert_eq!(truncate("short", 100), "short");
-        let long = "a".repeat(300);
-        let t = truncate(&long, 50);
-        assert_eq!(t.chars().count(), 51); // 50 chars + ellipsis
-        assert!(t.ends_with('…'));
+    fn event(url: String, allow_private_targets: bool) -> WebhookEvent {
+        WebhookEvent {
+            id: "id".into(),
+            event: "ping".into(),
+            target_url: url,
+            signing_secret: "s".into(),
+            signature_format: SignatureFormat::HexSha256WithPrefix,
+            payload: serde_json::json!({}),
+            headers: HashMap::new(),
+            timeout_secs: 5,
+            retry_status_codes: Vec::new(),
+            allow_private_targets,
+        }
+    }
+
+    async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let h = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, h)
+    }
+
+    /// Deliveries share one connection; the default User-Agent yields to
+    /// a subscription header (#1792).
+    #[tokio::test]
+    async fn deliveries_reuse_a_client_and_default_the_user_agent() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(
+                move |ConnectInfo(a): ConnectInfo<SocketAddr>, h: axum::http::HeaderMap| {
+                    let ua: Vec<String> = h
+                        .get_all("user-agent")
+                        .iter()
+                        .map(|v| v.to_str().unwrap().to_owned())
+                        .collect();
+                    s.lock().unwrap().push((a, ua));
+                    async { "ok" }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+        let srv = tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+        deliver(&event(url.clone(), true)).await.unwrap();
+        let mut custom = event(url, true);
+        custom
+            .headers
+            .insert("User-Agent".into(), "custom/1".into());
+        deliver(&custom).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].1, [USER_AGENT]);
+        assert_eq!(seen[1].1, ["custom/1"]);
+        assert_eq!(seen[0].0, seen[1].0, "one pooled connection");
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn refuses_private_targets_by_default() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let port = base.rsplit(':').next().unwrap();
+        for url in [
+            format!("{base}/hook"),
+            format!("http://localhost:{port}/hook"),
+            format!("http://[::ffff:127.0.0.1]:{port}/hook"),
+            "ftp://example.com/hook".to_owned(),
+        ] {
+            let err = deliver(&event(url.clone(), false)).await.unwrap_err();
+            assert!(matches!(err, JobError::Fatal(_)), "{url}: {err:?}");
+            let msg = format!("{err:?}");
+            assert!(!msg.contains("127.0.0.1") && !msg.contains("::1"), "{msg}");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no request reached the server"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn operator_allowlist_does_not_open_a_subscription() {
+        let _g = crate::outbound::ENV_LOCK.lock().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        std::env::set_var(crate::outbound::ALLOW_ENV, "127.0.0.0/8,localhost");
+        let err = deliver(&event(format!("{base}/hook"), false)).await;
+        std::env::remove_var(crate::outbound::ALLOW_ENV);
+        assert!(matches!(err, Err(JobError::Fatal(_))), "{err:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "request reached the server");
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn subscription_refuses_a_private_target_by_default() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        let dead = Arc::new(AtomicUsize::new(0));
+        let d = dead.clone();
+        q.on_dead_letter(move |_| {
+            let d = d.clone();
+            async move {
+                d.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+        q.start().await;
+        WebhookSubscription::new(format!("{base}/hook"), "s")
+            .dispatch(&q, "ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if dead.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(dead.load(Ordering::SeqCst), 1, "dead-lettered at once");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no request was sent");
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new()
+            .route(
+                "/hook",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, "/internal")],
+                    )
+                }),
+            )
+            .route(
+                "/internal",
+                post(move || {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    async { "secret" }
+                }),
+            );
+        let (base, srv) = serve(app).await;
+        let err = deliver(&event(format!("{base}/hook"), true))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, JobError::Fatal(m) if m == "status 307"),
+            "{err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "redirect was followed");
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn response_body_is_not_stored() {
+        let app = Router::new().route(
+            "/hook",
+            post(|| async { (axum::http::StatusCode::BAD_REQUEST, "INTERNAL-SECRET") }),
+        );
+        let (base, srv) = serve(app).await;
+        let err = deliver(&event(format!("{base}/hook"), true))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("INTERNAL-SECRET"), "{msg}");
+        assert!(
+            matches!(&err, JobError::Fatal(m) if m == "status 400"),
+            "{err:?}"
+        );
+        srv.abort();
     }
 }

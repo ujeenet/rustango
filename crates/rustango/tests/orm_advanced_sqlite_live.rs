@@ -44,6 +44,16 @@ pub struct Post {
     pub published: bool,
 }
 
+/// #1936: an FK whose SQL column differs from the Rust field name.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "adv_rpost")]
+pub struct RenamedFkPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(column = "author_id")]
+    pub author: ForeignKey<Author>,
+}
+
 async fn fresh_pool() -> Pool {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
@@ -224,38 +234,36 @@ async fn upsert_via_insert_query_with_do_update_works_on_sqlite() {
         .expect("recreate");
     }
     // First insert.
-    let q = InsertQuery {
-        model: Post::SCHEMA,
-        columns: vec!["title", "author", "published"],
-        values: vec![
+    let q = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["title", "author", "published"],
+        vec![
             SqlValue::from("unique-slot".to_owned()),
             SqlValue::from(alice),
             SqlValue::from(false),
         ],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["title"],
-            update_columns: vec!["published"],
-        }),
-    };
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["title"],
+        update_columns: vec!["published"],
+    });
     rustango::sql::insert_pool(&pool, &q)
         .await
         .expect("first upsert");
     // Conflict insert with different `published` flips the row.
-    let q2 = InsertQuery {
-        model: Post::SCHEMA,
-        columns: vec!["title", "author", "published"],
-        values: vec![
+    let q2 = InsertQuery::new(
+        Post::SCHEMA,
+        vec!["title", "author", "published"],
+        vec![
             SqlValue::from("unique-slot".to_owned()),
             SqlValue::from(alice),
             SqlValue::from(true),
         ],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["title"],
-            update_columns: vec!["published"],
-        }),
-    };
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["title"],
+        update_columns: vec!["published"],
+    });
     rustango::sql::insert_pool(&pool, &q2)
         .await
         .expect("conflict upsert");
@@ -344,4 +352,37 @@ async fn save_pool_updates_existing_row_on_sqlite() {
         .unwrap();
     assert_eq!(again.title, "published");
     assert!(again.published);
+}
+
+#[tokio::test]
+async fn select_related_on_renamed_fk_column_loads_parent_on_sqlite() {
+    let pool = fresh_pool().await;
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(
+        "CREATE TABLE adv_rpost (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         author_id INTEGER NOT NULL REFERENCES adv_author(id))",
+    )
+    .execute(sq)
+    .await
+    .expect("rpost table");
+    let (alice, _) = seed_basic(&pool).await;
+    let mut p = RenamedFkPost {
+        id: Auto::default(),
+        author: ForeignKey::from(alice),
+    };
+    p.save_pool(&pool).await.expect("save rpost");
+    let rows: Vec<RenamedFkPost> = RenamedFkPost::objects()
+        .select_related("author")
+        .fetch(&pool)
+        .await
+        .expect("fetch select_related");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].author.pk(), alice);
+    assert_eq!(
+        rows[0].author.value().map(|a| a.name.as_str()),
+        Some("Alice"),
+        "select_related must stitch the renamed-column FK"
+    );
 }

@@ -15,8 +15,8 @@
 //! let app = Router::new()
 //!     .route("/profile", get(profile))
 //!     .route("/posts/new", post(create_post))
-//!         .require_perm("post.add", pool.clone())   // inner — checked after auth
-//!     .require_auth(backends, pool.clone());          // outer — checked first
+//!         .require_perm("post.add")   // inner — checked after auth
+//!     .require_auth(backends);        // outer — checked first
 //!
 //! async fn profile(CurrentUser(user): CurrentUser) -> impl IntoResponse {
 //!     match user {
@@ -36,10 +36,12 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use crate::extractors::MountedTenantContext;
 use crate::sql::Pool;
 
 use super::auth_backends::{AuthError, AuthUser, BoxedBackend};
 use super::permissions;
+use super::{Org, TenancyError};
 
 // ------------------------------------------------------------------ AuthenticatedUser
 
@@ -89,19 +91,88 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
     }
 }
 
+// ------------------------------------------------------------------ Tenant pool resolution
+
+/// This request's Org, from the context [`MountedTenantContext`] picks.
+/// `None` when no context is mounted; `Some(Ok(None))` for an unknown tenant.
+pub(crate) async fn request_org(
+    parts: &Parts,
+    ext: &axum::http::Extensions,
+) -> Option<Result<Option<Org>, TenancyError>> {
+    Some(MountedTenantContext::of(ext)?.resolve(parts).await)
+}
+
+/// Signing keys and registry pool of the mounted tenant context.
+pub(crate) struct SessionKeys<'a> {
+    pub session: &'a crate::tenancy::session::SessionSecret,
+    pub operator: &'a crate::tenancy::session::SessionSecret,
+    pub registry: Pool,
+}
+
+/// The mounted context's [`SessionKeys`]. `None` when no context is mounted.
+pub(crate) fn session_keys(ext: &axum::http::Extensions) -> Option<SessionKeys<'_>> {
+    Some(MountedTenantContext::of(ext)?.session_keys())
+}
+
+/// `org`'s data pool, from the same context as `request_org`.
+/// `None` when no context is mounted.
+pub(crate) async fn request_pool(
+    ext: &axum::http::Extensions,
+    org: &Org,
+) -> Option<Result<Pool, TenancyError>> {
+    Some(MountedTenantContext::of(ext)?.pool_for(org).await)
+}
+
+/// The tenant and pool this request's credential must be checked
+/// against — resolved from **this request**, never captured when the
+/// router was built.
+///
+/// **Fails closed.** No context, no tenant, or a resolver error all
+/// reject — an unresolvable tenant is exactly the case where guessing
+/// is what the vulnerability was.
+async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org, Pool), Response> {
+    let org = match request_org(parts, ext).await {
+        Some(Ok(Some(org))) => org,
+        Some(Ok(None)) => return Err((StatusCode::NOT_FOUND, "unknown tenant").into_response()),
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "require_auth: tenant resolution failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tenant resolution failed",
+            )
+                .into_response());
+        }
+        None => {
+            tracing::error!(
+                "require_auth ran without a tenant context in request extensions — \
+                 mount the tenancy layer (server::Builder::tenant_pools) ahead of it"
+            );
+            return Err(
+                (StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response(),
+            );
+        }
+    };
+    match request_pool(ext, &org).await {
+        Some(Ok(pool)) => Ok((org, pool)),
+        Some(Err(e)) => {
+            tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant pool unavailable").into_response())
+        }
+        None => Err((StatusCode::INTERNAL_SERVER_ERROR, "tenant context missing").into_response()),
+    }
+}
+
 // ------------------------------------------------------------------ Internal states
 
 #[derive(Clone)]
 struct AuthState {
     backends: Arc<Vec<BoxedBackend>>,
-    pool: Pool,
     required: bool, // false = optional_auth
 }
 
 #[derive(Clone)]
 struct PermState {
     codename: &'static str,
-    pool: Pool,
 }
 
 // ------------------------------------------------------------------ Middleware handlers
@@ -122,13 +193,29 @@ async fn auth_middleware(
     let dummy = builder
         .body(())
         .unwrap_or_else(|_| axum::http::Request::new(()));
-    let (dummy_parts, _) = dummy.into_parts();
+    let (mut dummy_parts, _) = dummy.into_parts();
+
+    // The tenant for THIS request, not for the router.
+    let (org, pool) = match tenant_pool(&dummy_parts, req.extensions()).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    // Scope the Basic and API-key limits to this tenant and client.
+    dummy_parts
+        .extensions
+        .insert(super::TenantSlug(org.slug.clone()));
+    dummy_parts
+        .extensions
+        .insert(crate::login_throttle::ClientIp::from_parts(
+            req.extensions(),
+            req.headers(),
+        ));
 
     let mut authenticated: Option<AuthUser> = None;
     let mut error_response: Option<Response> = None;
 
     for backend in state.backends.iter() {
-        match backend.authenticate(&dummy_parts, &state.pool).await {
+        match backend.authenticate(&dummy_parts, &pool).await {
             Ok(Some(user)) => {
                 authenticated = Some(user);
                 break;
@@ -136,6 +223,10 @@ async fn auth_middleware(
             Ok(None) => {}
             Err(AuthError::Inactive) => {
                 error_response = Some((StatusCode::FORBIDDEN, "account inactive").into_response());
+                break;
+            }
+            Err(AuthError::Refused(refused)) => {
+                error_response = Some(refused.into_response());
                 break;
             }
             Err(e) => {
@@ -152,6 +243,7 @@ async fn auth_middleware(
     match authenticated {
         Some(user) => {
             req.extensions_mut().insert(AuthenticatedUser::from(user));
+            req.extensions_mut().insert(super::TenantSlug(org.slug));
             next.run(req).await
         }
         None if state.required => {
@@ -170,7 +262,16 @@ async fn perm_middleware(
     let Some(user) = user else {
         return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
     };
-    let ok = permissions::has_perm_pool(user.id, state.codename, &state.pool)
+    // Same tenant as the credential was checked against —
+    // a permission read against the wrong database is how tenant A's
+    // admin became tenant B's admin.
+    let (parts, body) = req.into_parts();
+    let pool = match tenant_pool(&parts, &parts.extensions).await {
+        Ok((_, p)) => p,
+        Err(resp) => return resp,
+    };
+    let req = Request::from_parts(parts, body);
+    let ok = permissions::has_perm_pool(user.id, state.codename, &pool)
         .await
         .unwrap_or(false);
     if !ok {
@@ -190,45 +291,61 @@ async fn perm_middleware(
 /// Call order matters: outer layer runs first. The usual pattern:
 ///
 /// ```text
-/// .require_perm("post.add", pool)   // inner — runs after auth
-/// .require_auth(backends, pool)      // outer — runs first
+/// .require_perm("post.add")   // inner — runs after auth
+/// .require_auth(backends)     // outer — runs first
 /// ```
+///
+/// # These took a `Pool` until 0.57.11
+///
+/// Dropping the argument is the migration:
+///
+/// ```text
+/// .require_auth(backends, pool.clone())  →  .require_auth(backends)
+/// .require_perm("post.add", pool)        →  .require_perm("post.add")
+/// ```
+///
+/// The pool now comes from the tenant resolved for each request. A
+/// caller-supplied one authenticated every host against one database,
+/// so no variant accepts one.
+///
+/// The tenancy layer must be mounted outside these — without a
+/// `TenantContext` in extensions they fail closed with a 500 rather
+/// than guess a database.
 pub trait RouterAuthExt<S> {
     /// Require a valid identity for all routes in this router. Injects
     /// [`AuthenticatedUser`] into extensions on success; returns 401 on failure.
-    fn require_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self;
+    fn require_auth(self, backends: Vec<BoxedBackend>) -> Self;
 
-    /// Like [`require_auth`] but does NOT return 401 for anonymous requests.
-    /// Useful for routes that serve both authenticated and anonymous users.
-    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self;
+    /// Like [`RouterAuthExt::require_auth`] but does NOT return 401 for
+    /// anonymous requests. Useful for routes that serve both
+    /// authenticated and anonymous users.
+    fn optional_auth(self, backends: Vec<BoxedBackend>) -> Self;
 
     /// Require `codename` permission on the already-resolved
     /// [`AuthenticatedUser`]. Must be placed inside (closer to handlers
     /// than) a `require_auth` layer.
-    fn require_perm(self, codename: &'static str, pool: Pool) -> Self;
+    fn require_perm(self, codename: &'static str) -> Self;
 }
 
 impl<S: Clone + Send + Sync + 'static> RouterAuthExt<S> for Router<S> {
-    fn require_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self {
+    fn require_auth(self, backends: Vec<BoxedBackend>) -> Self {
         let state = AuthState {
             backends: Arc::new(backends),
-            pool,
             required: true,
         };
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 
-    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self {
+    fn optional_auth(self, backends: Vec<BoxedBackend>) -> Self {
         let state = AuthState {
             backends: Arc::new(backends),
-            pool,
             required: false,
         };
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 
-    fn require_perm(self, codename: &'static str, pool: Pool) -> Self {
-        let state = PermState { codename, pool };
+    fn require_perm(self, codename: &'static str) -> Self {
+        let state = PermState { codename };
         self.layer(axum::middleware::from_fn_with_state(state, perm_middleware))
     }
 }

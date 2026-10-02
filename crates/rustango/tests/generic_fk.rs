@@ -46,26 +46,25 @@ async fn fresh_pool() -> Pool {
         .await
         .expect("ensure_seeded");
     // Create the app tables.
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query(
-            "CREATE TABLE gfk_post (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE gfk_comment (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                content_type_id INTEGER NOT NULL, \
-                object_pk INTEGER NOT NULL, \
-                body TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE gfk_post (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE gfk_comment (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            content_type_id INTEGER NOT NULL, \
+            object_pk INTEGER NOT NULL, \
+            body TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
     pool
 }
 
@@ -184,7 +183,7 @@ async fn get_object_returns_none_for_stale_content_type_id() {
 }
 
 /// A Comment row can store a GFK and the target Post is resolved correctly.
-/// This is the Django TaggedItem/Comment pattern the issue describes.
+/// This is the tagged-item / comment pattern the issue describes.
 #[tokio::test]
 async fn comment_with_generic_fk_resolves_post() {
     contenttypes::clear_cache();

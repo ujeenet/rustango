@@ -1,30 +1,14 @@
-//! Django-shape HTTP method restriction layer — mirrors
-//! `django.views.decorators.http.{require_http_methods, require_GET,
-//! require_POST, require_safe}`.
+//! HTTP method restriction layer — `require_methods`, `require_get`,
+//! `require_post`, `require_safe`.
 //!
-//! Django uses these as decorators on view functions:
+//! axum routes already pick a method, so this looks redundant until
+//! one handler must take GET and POST but not PUT, DELETE or PATCH.
+//! Then `Router::route("/x", any(handler))` plus
+//! `MethodRestrictLayer::any_of(["GET", "POST"])` does it without
+//! splitting the route.
 //!
-//! ```python
-//! @require_http_methods(["GET", "POST"])
-//! def my_view(request):
-//!     ...
-//!
-//! @require_POST
-//! def submit(request):
-//!     ...
-//! ```
-//!
-//! axum routes are method-aware out of the box (`Router::route("/x",
-//! get(handler))` only ever sees GETs), so the decorator pattern
-//! looks redundant — until you have a single handler that should
-//! accept e.g. both GET and POST but not PUT/DELETE/PATCH. Mounting
-//! `MethodRestrictLayer::any_of(["GET", "POST"])` lets a single
-//! `Router::route("/x", any(handler))` enforce that without
-//! re-routing.
-//!
-//! Returns `405 Method Not Allowed` with an RFC 7231-compliant
-//! `Allow:` header listing the accepted methods (browsers and HTTP
-//! caches use the header for negotiation).
+//! A rejected method gets `405 Method Not Allowed` with an `Allow:`
+//! header listing what is accepted, as RFC 7231 requires.
 //!
 //! ## Usage
 //!
@@ -40,7 +24,7 @@
 //!     .route("/feed", any(handler))
 //!     .require_methods(["GET", "HEAD", "POST"]);  // multi-method view
 //!
-//! // Convenience shortcuts mirror Django's per-verb decorators.
+//! // Convenience shortcuts for the common sets.
 //! let safe_only: Router = Router::new()
 //!     .route("/health", any(handler))
 //!     .require_safe();                            // GET / HEAD / OPTIONS
@@ -55,22 +39,19 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 
-/// Tower layer that gates a route on a fixed set of HTTP methods.
-/// Rejects unmatched methods with `405 Method Not Allowed` +
-/// canonical `Allow:` header. Constructed via [`Self::any_of`] or
-/// the [`MethodRestrictRouterExt`] convenience methods.
+/// Gates a route on a fixed set of HTTP methods. Anything else gets a
+/// `405` with an `Allow:` header. Build it with [`Self::any_of`] or
+/// through [`MethodRestrictRouterExt`].
 #[derive(Clone, Debug)]
 pub struct MethodRestrictLayer {
     allowed: Arc<Vec<Method>>,
-    /// Pre-rendered `Allow:` header value (`"GET, POST, HEAD"` etc.).
-    /// Cached so the 405 response path doesn't allocate per request.
+    /// Ready-made `Allow:` value, so a 405 allocates nothing.
     allow_header: Arc<String>,
 }
 
 impl MethodRestrictLayer {
-    /// Build a layer that accepts only the given methods. Empty
-    /// list is permitted but reaches every request with 405 — used
-    /// for sanity smoke-tests.
+    /// Accept only these methods. An empty list is allowed and
+    /// rejects everything with a 405.
     #[must_use]
     pub fn any_of<I, M>(methods: I) -> Self
     where
@@ -89,29 +70,28 @@ impl MethodRestrictLayer {
         }
     }
 
-    /// Django parity `@require_GET` — accept only GET.
+    /// Accept only GET.
     #[must_use]
     pub fn get_only() -> Self {
         Self::any_of([Method::GET])
     }
 
-    /// Django parity `@require_POST` — accept only POST.
+    /// Accept only POST.
     #[must_use]
     pub fn post_only() -> Self {
         Self::any_of([Method::POST])
     }
 
-    /// Django parity `@require_safe` — accept the cacheable / idempotent
-    /// methods (GET, HEAD, OPTIONS). RFC 7231 §4.2.1 calls these the
-    /// "safe" methods.
+    /// Accept GET, HEAD and OPTIONS — the methods RFC 7231 §4.2.1
+    /// calls safe.
     #[must_use]
     pub fn safe_only() -> Self {
         Self::any_of([Method::GET, Method::HEAD, Method::OPTIONS])
     }
 }
 
-/// Extension trait — `router.require_methods([…])` reads better at
-/// the call site than `.layer(MethodRestrictLayer::any_of([…]))`.
+/// `router.require_methods([…])` instead of
+/// `.layer(MethodRestrictLayer::any_of([…]))`.
 pub trait MethodRestrictRouterExt {
     /// Restrict this router to the given HTTP methods.
     #[must_use]
@@ -120,15 +100,15 @@ pub trait MethodRestrictRouterExt {
         I: IntoIterator<Item = M>,
         M: Into<Method>;
 
-    /// Django parity `@require_GET`.
+    /// Accept only GET.
     #[must_use]
     fn require_get(self) -> Self;
 
-    /// Django parity `@require_POST`.
+    /// Accept only POST.
     #[must_use]
     fn require_post(self) -> Self;
 
-    /// Django parity `@require_safe` — GET / HEAD / OPTIONS.
+    /// GET, HEAD and OPTIONS only.
     #[must_use]
     fn require_safe(self) -> Self;
 }
@@ -305,8 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_methods_list_rejects_everything() {
-        // Edge / smoke: an empty allowlist returns 405 for every method,
-        // with an empty Allow header. Useful for sanity tests.
+        // An empty allowlist: 405 everywhere, empty Allow header.
         let app = app(MethodRestrictLayer::any_of(Vec::<Method>::new()));
         let res = app.oneshot(req(Method::GET)).await.unwrap();
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);

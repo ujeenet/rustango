@@ -6,24 +6,9 @@
 use std::fmt::Write as _;
 
 use crate::core::{FieldSchema, FieldType};
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, Row};
 
-/// Escape a string for safe inclusion in HTML body or attribute context.
-pub(crate) fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
+/// Escape for HTML body or attribute context: the crate's one escaper (#1663).
+pub(crate) use crate::text::html_escape as escape;
 
 /// Parse a form-payload string into a typed [`serde_json::Value`]
 /// matching `field.ty`. Used by the admin audit emit to coerce form
@@ -69,6 +54,12 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
     }
 }
 
+/// A bool cell: JSON `true`/`false`, or the `1`/`0` SQLite and MySQL
+/// store when a row reaches JSON without the typed decode (#1730).
+fn json_bool(v: &serde_json::Value) -> Option<bool> {
+    v.as_bool().or_else(|| v.as_i64().map(|n| n != 0))
+}
+
 /// Backend-agnostic counterpart of [`render_value_for_input`]. Takes
 /// a `serde_json::Value` instead of a `PgRow` — call sites that fetch
 /// rows via the ORM (`Model::objects().fetch` then
@@ -90,8 +81,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             .as_f64()
             .map(|n| n.to_string())
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
-        FieldType::Bool => v
-            .as_bool()
+        FieldType::Bool => json_bool(v)
             .map(|b| b.to_string())
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
         FieldType::String | FieldType::Uuid => v.as_str().unwrap_or("").to_owned(),
@@ -180,13 +170,14 @@ pub(crate) fn render_gfk_select(
 /// Call sites that have an [`AdminConfig`](crate::core::AdminConfig)
 /// in scope should use [`render_input_with_widget`] directly and pass
 /// the override (#359) so per-model `formfield_overrides` apply.
+#[cfg(any(test, feature = "tenancy"))]
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     render_input_with_widget(field, value, pk_locked, None)
 }
 
 /// Same as [`render_input`] but consults an explicit widget override.
 ///
-/// Django-shape `formfield_overrides` (#359). When `widget` is
+/// Backs per-model `formfield_overrides`. When `widget` is
 /// `Some(name)` and matches a built-in widget identifier, the
 /// emitted markup matches the override instead of the FieldType
 /// default. Unknown names log a single tracing warning and fall
@@ -229,21 +220,36 @@ pub(crate) fn render_input_with_widget(
     render_input_default(field, value, pk_locked)
 }
 
+/// A `password`-widget input: always empty, `required` only when asked.
+pub(crate) fn render_secret_input(field: &FieldSchema, locked: bool, required: bool) -> String {
+    let name = escape(field.name);
+    let required = if required && !locked && !field.nullable && !field.blank {
+        " required"
+    } else {
+        ""
+    };
+    let readonly = if locked { " readonly" } else { "" };
+    format!(
+        r#"<input type="password" name="{name}" id="{name}" value="" autocomplete="new-password"{required}{readonly}>"#
+    )
+}
+
 /// Default FieldType-derived widget — extracted so
 /// [`render_input_with_widget`] can fall through to it after a
 /// widget-override miss without duplicating the dispatch table.
 fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
-    // #445 — Django-shape `blank = true` drops the `required` HTML
-    // attribute even on NOT-NULL columns (form may submit empty
-    // even when the DB is NOT NULL — empty string is a valid
-    // non-null value for CharField).
+    // `blank = true` drops the `required` HTML attribute even on
+    // NOT-NULL columns: an empty string is still a non-null value, so
+    // the form may submit empty.
+    // A locked input is never submitted-for, so it must not block submit.
     let required = if field.nullable
         || field.ty == FieldType::Bool
         || field.auto
         || field.primary_key
         || field.blank
+        || pk_locked
     {
         ""
     } else {
@@ -278,6 +284,17 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
     }
 
     match field.ty {
+        // A checkbox can't say NULL, so a nullable bool gets a tri-state select.
+        FieldType::Bool if field.nullable => {
+            let disabled = if pk_locked { " disabled" } else { "" };
+            let mut out = format!(r#"<select name="{name}" id="{name}"{disabled}>"#);
+            for (v, label) in [("", "Unknown"), ("true", "Yes"), ("false", "No")] {
+                let selected = if value == v { " selected" } else { "" };
+                let _ = write!(out, r#"<option value="{v}"{selected}>{label}</option>"#);
+            }
+            out.push_str("</select>");
+            out
+        }
         FieldType::Bool => {
             let checked = if value == "true" { " checked" } else { "" };
             format!(
@@ -327,9 +344,9 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Json => format!(
             r#"<textarea name="{name}" id="{name}"{readonly} style="font-family:monospace">{val}</textarea>"#
         ),
-        // `step="any"` on `type="number"` matches Django's
-        // DecimalField widget. Browsers handle precision via the
-        // `step` attribute when present; we omit it for now.
+        // `step="any"` on `type="number"` lets the browser accept any
+        // number of decimal places. A tighter `step` could encode the
+        // column scale; we omit it for now.
         FieldType::Decimal => format!(
             r#"<input type="number" step="any" inputmode="decimal" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
         ),
@@ -378,11 +395,13 @@ fn render_named_widget(
 ) -> Option<String> {
     let name = escape(field.name);
     let val = escape(value);
+    // A locked input is never submitted-for, so it must not block submit.
     let required = if field.nullable
         || field.ty == FieldType::Bool
         || field.auto
         || field.primary_key
         || field.blank
+        || pk_locked
     {
         ""
     } else {
@@ -396,9 +415,10 @@ fn render_named_widget(
             r#"<input type="hidden" name="{name}" id="{name}" value="{val}">"#
         )),
         // String-typed widgets.
-        "password" if matches!(field.ty, FieldType::String) => Some(format!(
-            r#"<input type="password" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
-        )),
+        // Never echoes the stored value.
+        "password" if matches!(field.ty, FieldType::String) => {
+            Some(render_secret_input(field, pk_locked, !required.is_empty()))
+        }
         "textarea" if matches!(field.ty, FieldType::String) => {
             let maxlen = field
                 .max_length
@@ -445,18 +465,9 @@ fn render_named_widget(
 
 // ============================================================== FK helpers
 
-/// Read a column value as a string, for use as a hash-map key or URL
-/// fragment. Returns `None` for `NULL` and for value types we don't
-/// support as PKs/FKs.
-#[cfg(feature = "postgres")]
-pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<String> {
-    read_value_as_string_at(row, field, field.column)
-}
-
 // ============================================================ v0.36 — tri-dialect JSON companions
 //
 // The `_json` family below mirrors the PG-typed `render_value` /
-// `read_value_as_string` / `read_value_as_string_at` /
 // `read_joined_value_as_html` / `read_value_as_json` API surface,
 // but takes a `&serde_json::Value` (the row object produced by
 // `crate::sql::row_to_json` / `row_to_json_my` / `row_to_json_sqlite`)
@@ -494,7 +505,7 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
     }
     let v = v.unwrap();
     match field.ty {
-        FieldType::Bool => match v.as_bool() {
+        FieldType::Bool => match json_bool(v) {
             Some(true) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
             _ => r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned(),
         },
@@ -550,7 +561,7 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
     }
 }
 
-/// Tri-dialect counterpart of [`read_value_as_string`]. JSON-shape
+/// Read a value as a string (map key or URL fragment). JSON-shape
 /// version: read the value at `field.name` and return its string
 /// form, or `None` for `NULL` / missing / unsupported types.
 pub(crate) fn read_value_as_string_json(
@@ -602,7 +613,7 @@ pub(crate) fn read_joined_value_as_html_json(
     let text: Option<String> = match field.ty {
         FieldType::I16 | FieldType::I32 | FieldType::I64 => v.as_i64().map(|n| n.to_string()),
         FieldType::F32 | FieldType::F64 => v.as_f64().map(|n| n.to_string()),
-        FieldType::Bool => v.as_bool().map(|b| b.to_string()),
+        FieldType::Bool => json_bool(v).map(|b| b.to_string()),
         FieldType::String
         | FieldType::Uuid
         | FieldType::Date
@@ -656,47 +667,8 @@ pub(crate) fn read_value_as_json_from_json(
             v.as_i64().map(Value::from).unwrap_or(v)
         }
         FieldType::F32 | FieldType::F64 => v.as_f64().map(Value::from).unwrap_or(v),
-        FieldType::Bool => v.as_bool().map(Value::from).unwrap_or(v),
+        FieldType::Bool => json_bool(&v).map(Value::from).unwrap_or(v),
         _ => v,
-    }
-}
-
-/// Variant of [`read_value_as_string`] that reads from an arbitrary
-/// column alias (e.g. `"facet_value"` after a `SELECT col AS facet_value`).
-/// Used by the facet-filter machinery (slice 10.4) which renames the
-/// column to keep its query independent of the source table's schema.
-#[cfg(feature = "postgres")]
-pub(crate) fn read_value_as_string_at(
-    row: &PgRow,
-    field: &FieldSchema,
-    column_alias: &str,
-) -> Option<String> {
-    match field.ty {
-        FieldType::I16 => row
-            .try_get::<Option<i16>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::I32 => row
-            .try_get::<Option<i32>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::I64 => row
-            .try_get::<Option<i64>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        FieldType::String => row
-            .try_get::<Option<String>, _>(column_alias)
-            .ok()
-            .flatten(),
-        FieldType::Uuid => row
-            .try_get::<Option<uuid::Uuid>, _>(column_alias)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        _ => None,
     }
 }
 
@@ -714,6 +686,7 @@ mod tests {
             nullable: true,
             primary_key: false,
             auto: false,
+            auto_now: false,
             unique: false,
             max_length: None,
             min: None,
@@ -794,6 +767,38 @@ mod tests {
         );
     }
 
+    /// A `1`/`0` bool checks and unchecks the box like `true`/`false` (#1730).
+    #[test]
+    fn integer_bool_renders_as_a_checkbox_value() {
+        let f = field("flag", "flag", FieldType::Bool);
+        for (v, want) in [
+            (json!(1), "true"),
+            (json!(0), "false"),
+            (json!(true), "true"),
+        ] {
+            let row = json!({ "flag": v });
+            assert_eq!(render_value_for_input_json(&row, &f), want);
+        }
+        assert!(render_value_json(&json!({ "flag": 1 }), &f).contains("yes"));
+    }
+
+    /// Joined and JSON-read bool cells turn `1`/`0` into `true`/`false` (#1730).
+    #[test]
+    fn integer_bool_reads_as_a_bool_in_joined_and_json_cells() {
+        let f = field("flag", "flag", FieldType::Bool);
+        for (v, want) in [(json!(1), true), (json!(0), false), (json!(true), true)] {
+            let joined = json!({ "a__flag": v.clone() });
+            assert_eq!(
+                read_joined_value_as_html_json(&joined, "a", &f).as_deref(),
+                Some(if want { "true" } else { "false" })
+            );
+            assert_eq!(
+                read_value_as_json_from_json(&json!({ "flag": v }), &f),
+                json!(want)
+            );
+        }
+    }
+
     #[test]
     fn read_value_as_string_at_json_uses_custom_key() {
         let row = json!({ "facet_value": 7 });
@@ -868,6 +873,23 @@ mod tests {
     }
 
     #[test]
+    fn render_input_nullable_bool_is_a_tri_state_select() {
+        let f = field("flag", "flag", FieldType::Bool);
+        let html = render_input(&f, "", false);
+        assert!(html.starts_with("<select"), "{html}");
+        assert!(
+            html.contains(r#"<option value="" selected>Unknown</option>"#),
+            "{html}"
+        );
+        assert!(render_input(&f, "false", false).contains(r#"value="false" selected"#));
+        let not_null = FieldSchema {
+            nullable: false,
+            ..f
+        };
+        assert!(render_input(&not_null, "true", false).contains(r#"type="checkbox""#));
+    }
+
+    #[test]
     fn render_input_choices_escape_html() {
         let mut f = field("status", "status", FieldType::String);
         f.choices = Some(&[(r#"<a>"#, r#"<b>"#)]);
@@ -880,9 +902,28 @@ mod tests {
         assert!(!html.contains("<b>"));
     }
 
+    /// A locked input is never read back, so it must not block submit (#1763).
+    #[test]
+    fn locked_input_is_not_required() {
+        let f = field("created_at", "created_at", FieldType::DateTime);
+        let html = render_input(&f, "", true);
+        assert!(html.contains(" readonly"), "{html}");
+        assert!(!html.contains(" required"), "{html}");
+    }
+
+    /// The password widget never echoes the stored value.
+    #[test]
+    fn password_widget_never_echoes_the_value() {
+        let mut f = field("password_hash", "password_hash", FieldType::String);
+        f.nullable = false;
+        let html = render_input_with_widget(&f, "$argon2id$stored", false, Some("password"));
+        assert!(!html.contains("argon2"), "{html}");
+        assert!(html.contains(" required"), "{html}");
+    }
+
     /// `#[rustango(blank)]` drops the `required` HTML attribute even
-    /// on NOT NULL columns — Django-shape "form may submit empty even
-    /// when DB is NOT NULL" semantics (#445).
+    /// on NOT NULL columns: the form may submit empty because an empty
+    /// string is not NULL.
     #[test]
     fn render_input_blank_drops_required_on_not_null_column() {
         let mut f = field("subtitle", "subtitle", FieldType::String);

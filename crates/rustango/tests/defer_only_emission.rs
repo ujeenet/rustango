@@ -68,7 +68,7 @@ fn defer_multiple_cols_excludes_all_named() {
 #[test]
 fn defer_empty_list_returns_all_columns() {
     // Edge case: `.defer(&[])` is a semantic no-op — every column
-    // survives. Matches Django's behavior.
+    // survives.
     let q = Post::objects().defer(&[]).compile().unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(

@@ -1,62 +1,38 @@
-//! Operator-facing admin console — replaces `protect_with_basic_auth`
-//! for operator routes with form-based login + a sidebar layout.
+//! Operator-facing admin console: form login plus a sidebar layout for
+//! operator routes.
 //!
-//! Independent from `rustango-admin` so the operator UX can evolve
-//! without touching the per-tenant admin look. Wired into the demo
-//! at the apex (`localhost:8080`); production deployments mount it
-//! the same way.
+//! It is kept separate from `rustango-admin` so the operator UI can
+//! change without touching the per-tenant admin look.
 //!
 //! ## Logging
 //!
-//! Two streams, both plain `tracing` events, so whatever subscriber the
-//! app installs decides the shape.
+//! Two `tracing` streams. The subscriber the app installs decides the
+//! format.
 //!
-//! **Actions** — one event per mutation, on target
-//! [`ACTION_TARGET`]:
+//! **Actions** — one event per mutation, on target [`ACTION_TARGET`]:
 //!
 //! ```text
 //! event=operator_action action=host_add operator_id=1
 //!   entity=rustango_orgs entity_id=acme fields=hostname,tenant_slug
 //! ```
 //!
-//! Emitted from the same function that writes the audit row, so the log
-//! stream and the durable trail describe the same set of actions. A
-//! failure to write that row is an `ERROR` with
-//! `event=operator_action_unrecorded` — the action happened and the
-//! record did not, which is the one case worth paging on.
-//!
-//! `fields` carries the *names* of what changed, never the values: an
-//! audit blob is one careless caller away from holding a credential,
-//! and logs travel further than the database does.
+//! The same function emits the event and writes the audit row, so the
+//! log and the durable trail agree. If the row fails to write you get an
+//! `ERROR` with `event=operator_action_unrecorded`: the action happened
+//! but was not recorded. `fields` lists the *names* that changed, never
+//! the values, because logs travel further than the database does.
 //!
 //! **Requests** — one event per request from [`crate::access_log`]
 //! (method, path, status, duration, IP), with `next` and `token`
 //! redacted out of query strings.
 //!
-//! ### Choosing the shape
-//!
-//! Format is the subscriber's job, not this module's. JSON for a
-//! collector, pretty for a terminal, either driven by settings:
-//!
-//! ```ignore
-//! rustango::logging::Setup::new().json().install();
-//! // or [logging] format = "json" in settings
-//! ```
-//!
-//! Route or silence console activity without touching the rest of
-//! tenancy by filtering on the target:
+//! Filter console activity by target:
 //!
 //! ```text
 //! RUST_LOG=warn,rustango::tenancy::operator_console::action=info
 //! ```
 //!
-//! For a different field set or destination — a collector wanting its
-//! own envelope, or events fanned to an external sink — add a
-//! `tracing_subscriber::Layer` and match on the target. The events are
-//! structured fields rather than formatted strings precisely so a layer
-//! can re-shape them without parsing.
-//!
-//! ## What it ships
+//! ## Routes
 //!
 //! * `GET  /login`               — form HTML
 //! * `POST /login`               — verify credentials, set cookie, redirect
@@ -68,15 +44,12 @@
 //! * `POST /orgs/{slug}/edit`    — submit edit (only when built with [`router_with_pools`])
 //! * `GET  /__static__/rustango.png` — embedded asset
 //!
-//! Operator-side mutations are limited by design — provisioning
-//! (`create-tenant`, `create-operator`) still runs through the `Cli`
-//! verbs because those have side effects (CREATE SCHEMA, migrations,
-//! password hashing) that don't fit a single HTTP form. The edit
-//! routes cover the post-creation knobs an operator legitimately
-//! needs to twiddle live: display name, host pattern, port, path
-//! prefix, active flag, and the resolved `database_url` for
-//! database-mode tenants. `database_url` is the only field with a
-//! pool-rebuild side effect — see [`org_edit_submit`].
+//! Creating tenants and operators still runs through the `Cli` verbs:
+//! they do work (CREATE SCHEMA, migrations, password hashing) that does
+//! not fit one HTTP form. The edit routes cover the knobs an operator
+//! changes live: display name, host pattern, port, path prefix, active
+//! flag, and `database_url` for database-mode tenants. Only
+//! `database_url` rebuilds a pool — see [`org_edit_submit`].
 //!
 //! ## Wiring
 //!
@@ -88,7 +61,7 @@
 //! let app = axum::Router::new().merge(console);
 //! ```
 
-/// Creating a tenant from the console, and watching it happen (#1322).
+/// Tenant creation from the console, and its progress view.
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
 mod decommission;
@@ -98,10 +71,8 @@ mod operators;
 mod provisioning;
 
 use crate::core::Column as _;
-// v0.34 — operator console no longer imports `PgPool` directly.
-// ConsoleState.registry is `crate::sql::Pool` (the backend-erasing
-// enum); all internal queries route through `fetch` /
-// `insert_pool` / `save_pool` / `update_pool`.
+// `ConsoleState.registry` is `crate::sql::Pool`, the backend-erasing enum,
+// so every query here works on any backend.
 use crate::sql::FetcherPool;
 use crate::storage::BoxedStorage;
 use axum::body::Body;
@@ -117,9 +88,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tera::{Context, Tera};
 
-// v0.38 — `session` (HMAC-signed cookies, SessionSecret) lives one
-// level up at `tenancy::session` so non-PG callers like
-// `DatabaseTenantContext` can reach it.
+// `session` (HMAC-signed cookies, SessionSecret) lives one level up at
+// `tenancy::session` so other callers can reach it too.
 pub use super::session::{self, SessionPayload, SessionSecret, SessionSecretError};
 use super::session::{COOKIE_NAME, SESSION_TTL_SECS};
 
@@ -132,72 +102,59 @@ const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
 
 /// Tracing target for operator actions.
 ///
-/// Its own target so a deployment can route or silence console activity
-/// without touching the rest of tenancy —
+/// It has its own target so a deployment can route or silence console
+/// activity on its own:
 /// `RUST_LOG=rustango::tenancy::operator_console::action=info`.
-/// Request logging is not here — it comes from
-/// [`crate::access_log`] under its own `rustango::access_log` target,
-/// the same middleware the admin uses.
+/// Request logs come from [`crate::access_log`] under a separate
+/// `rustango::access_log` target.
 pub const ACTION_TARGET: &str = "rustango::tenancy::operator_console::action";
 
 #[derive(Clone)]
 struct ConsoleState {
-    /// Backend-erasing registry pool. PG / MySQL / SQLite all share
-    /// one operator-console code path — every query inside the
-    /// console routes through `_pool` ORM helpers (`fetch` /
-    /// `insert_pool` / `save_pool`) which dispatch per-backend.
+    /// Backend-erasing registry pool, so one code path serves
+    /// PG / MySQL / SQLite.
     registry: crate::sql::Pool,
-    /// Optional pool cache. When `Some`, the operator console exposes
-    /// the `/orgs/{slug}/edit` mutation routes — needed because a
-    /// `database_url` rotation must drop the cached `TenantPool` for
-    /// that org so the next request rebuilds against the new URL.
-    /// When `None` (the legacy [`router`] entry point), edit routes
-    /// aren't mounted and the console stays read-only.
+    /// Pool cache. When `Some`, the `/orgs/{slug}/edit` routes are
+    /// mounted: rotating `database_url` must drop that org's cached
+    /// `TenantPool` so the next request rebuilds against the new URL.
+    /// With `None` (the [`router`] entry point) the console is read-only.
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
     /// When `Some`, the console can **create** tenants — see
-    /// [`provisioning`]. Separate from `pools` on purpose: creating a
-    /// tenant is strictly more dangerous than editing one (it takes a
-    /// database URL and connects to it), so a deployment opts into it
-    /// explicitly through [`router_with_provisioning`] rather than
-    /// getting it for free with the edit routes.
+    /// [`provisioning`]. Kept apart from `pools` because creating a
+    /// tenant takes a database URL and connects to it, so a deployment
+    /// opts in through [`router_with_provisioning`] instead of getting
+    /// it along with the edit routes.
     provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
     session_secret: Arc<SessionSecret>,
     tera: Arc<Tera>,
-    /// Storage backend for per-tenant brand assets (logo, favicon).
-    /// Defaults to `LocalStorage` rooted at `./var/brand` — override
-    /// via `RUSTANGO_BRAND_STORAGE_DIR`.
+    /// Storage for per-tenant brand assets (logo, favicon). Defaults to
+    /// `LocalStorage` under `./var/brand`; set `RUSTANGO_BRAND_STORAGE_DIR`
+    /// to change it.
     brand_storage: BoxedStorage,
-    /// Operator console's own (non-per-tenant) brand. Read at boot
-    /// from env, stamped into every render context so a deployment
-    /// can rebrand the console without touching templates.
+    /// The console's own brand, read from env at boot and put into every
+    /// render context so a deployment can rebrand without editing
+    /// templates.
     op_brand: Arc<OpBrand>,
-    /// Tenant-side session secret. When `Some`, the operator
-    /// console exposes `POST /orgs/{slug}/impersonate` — a flow
-    /// that mints a tenant-bound `TenantSessionPayload` with
-    /// `imp = Some(operator_id)` so the operator can open the
-    /// tenant admin as superuser without knowing a tenant
-    /// user's password. (#78, v0.27.8)
-    /// Wired by `Server::Builder::serve` (sharing the same
-    /// `SessionSecret::from_env_or_disk` instance the tenant
-    /// admin uses); custom mount points can opt in via the
-    /// `_with_impersonation` constructor variants.
+    /// Tenant-side session secret. When `Some`, the console exposes
+    /// `POST /orgs/{slug}/impersonate`, which mints a tenant-bound
+    /// `TenantSessionPayload` with `imp = Some(operator_id)` so an
+    /// operator can open the tenant admin without a tenant password.
+    /// `Server::Builder::serve` wires it; other mount points use the
+    /// `_with_impersonation` constructors.
     tenant_session_secret: Option<Arc<SessionSecret>>,
-    /// URL on the tenant admin where the operator console's
-    /// impersonation flow lands the browser to redeem a signed
-    /// handoff token (#88). Mirrors
+    /// URL on the tenant admin where impersonation lands the browser to
+    /// redeem a signed handoff token. Mirrors
     /// [`super::routes::RouteConfig::impersonation_handoff_url`].
-    /// Replaced the v0.27.8 cookie-domain handoff (which broke
-    /// on Chromium against the `localhost` PSL TLD). Default
-    /// `/_impersonation_handoff`.
+    /// Default `/_impersonation_handoff`.
     tenant_handoff_url: String,
 }
 
-/// Operator console branding resolved at boot. Static for the
-/// lifetime of the process; per-tenant branding lives on `Org`.
+/// Operator console branding, resolved once at boot. Per-tenant
+/// branding lives on `Org` instead.
 ///
-/// Resolution priority (most specific wins):
-/// 1. `RUSTANGO_OPERATOR_*` env vars (deploy-time override)
-/// 2. `[brand]` section in `config/<env>_settings.toml` (#87 wiring)
+/// Highest priority first:
+/// 1. `RUSTANGO_OPERATOR_*` env vars
+/// 2. `[brand]` in `config/<env>_settings.toml`
 /// 3. Hardcoded defaults
 #[derive(Debug, Clone)]
 struct OpBrand {
@@ -220,17 +177,17 @@ impl OpBrand {
         }
     }
 
-    /// Resolve the operator console branding from settings + env.
-    /// Order: defaults → `Settings.brand` (TOML) → env vars (which
-    /// win so deploy-time emergency overrides don't require a
-    /// config push). Best-effort on the TOML side — a missing
-    /// `config/default.toml` is silently skipped, same as
-    /// `Cli::with_settings_from_env`.
+    /// Resolve console branding: defaults, then `Settings.brand` from
+    /// TOML, then env vars, so an env override needs no config push.
+    /// A missing config file is skipped without error.
     fn from_env() -> Self {
         let mut out = Self::defaults();
         #[cfg(feature = "config")]
-        if let Ok(s) = crate::config::Settings::load_from_env() {
-            Self::apply_brand_settings(&mut out, &s.brand);
+        match crate::config::Settings::load_from_env() {
+            Ok(s) => Self::apply_brand_settings(&mut out, &s.brand),
+            Err(e) if e.is_missing_config() => {}
+            // A broken config should say so, not silently drop the brand (#1948).
+            Err(e) => warn_config_error(&e),
         }
         Self::apply_env_overrides(&mut out);
         out
@@ -296,29 +253,13 @@ impl OpBrand {
     }
 }
 
-/// Build the read-only operator-console `axum::Router`. Mount at the
-/// apex (production: `app.example.com`; demo: `localhost:8080`) — the
-/// console expects to live at the root, not nested under a path.
-///
-/// Use [`router_with_pools`] when you want operators to be able to
-/// edit org config (display name, host pattern, port, path prefix,
-/// active flag, `database_url`) live from the UI — that variant
-/// needs the [`TenantPools`] handle to evict the cached pool when
-/// `database_url` rotates.
-///
-/// Brand assets (logo / favicon uploads) go to the default
-/// [`branding::default_brand_storage`] (a `LocalStorage` rooted at
-/// `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`). To plug in S3 /
-/// R2 / B2 / MinIO / a CDN-fronted bucket, use
-/// [`router_with_brand_storage`].
 /// [`router_with_pools`] plus the routes that **create** tenants:
 /// `GET`/`POST /orgs/new`, `POST /orgs/test-connection`, and the
-/// provisioning run view + SSE stream.
+/// provisioning run view with its SSE stream.
 ///
-/// Separate constructor rather than a flag on the others, because
-/// creating a tenant is strictly more dangerous than editing one — it
+/// It is a separate constructor, not a flag, because creating a tenant
 /// takes a database URL from a form and connects to it. A deployment
-/// says yes to that explicitly.
+/// says yes to that on purpose.
 ///
 /// Build the provisioner with
 /// [`crate::tenancy::provision::Provisioner::new`], which closes over
@@ -335,12 +276,10 @@ impl OpBrand {
 ///
 /// ## Authorization
 ///
-/// Every authenticated operator who can reach the console can use
-/// these routes, by design (#1342): operators are uniformly fully
-/// capable, and there is no per-operator permission model to add one
-/// to. Authorization lives in which router a deployment assembles —
-/// [`router`] is read-only, [`router_with_pools`] can edit, this one
-/// can create tenants.
+/// Any operator who can reach the console can use these routes. There
+/// is no per-operator permission model; the choice of router *is* the
+/// authorization. [`router`] is read-only, [`router_with_pools`] can
+/// edit, this one can also create tenants.
 #[must_use]
 pub fn router_with_provisioning(
     registry: impl Into<crate::sql::Pool>,
@@ -359,6 +298,17 @@ pub fn router_with_provisioning(
     )
 }
 
+/// Build the read-only operator-console `axum::Router`. Mount it at the
+/// apex host; the console expects to live at the root, not under a path
+/// prefix.
+///
+/// Use [`router_with_pools`] to let operators edit org config (display
+/// name, host pattern, port, path prefix, active flag, `database_url`)
+/// from the UI. That variant needs a [`TenantPools`] handle so it can
+/// evict the cached pool when `database_url` changes.
+///
+/// Brand uploads go to [`branding::default_brand_storage`]. For S3, R2,
+/// B2, MinIO or a CDN-fronted bucket, use [`router_with_brand_storage`].
 #[must_use]
 pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> Router {
     router_inner(
@@ -372,11 +322,9 @@ pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> R
     )
 }
 
-/// Like [`router`] but also exposes `GET`/`POST /orgs/{slug}/edit`,
-/// powered by the supplied `TenantPools` (cache-eviction on
-/// `database_url` rotation). Production tenancy `Builder` wires this
-/// path so operators don't need a redeploy + manual SQL to fix a
-/// stale connection URL.
+/// Like [`router`], but also exposes `GET`/`POST /orgs/{slug}/edit`.
+/// The supplied pools handle evicts the cached pool when `database_url`
+/// changes, so fixing a stale connection URL needs no redeploy.
 #[must_use]
 pub fn router_with_pools(
     registry: impl Into<crate::sql::Pool>,
@@ -394,26 +342,18 @@ pub fn router_with_pools(
     )
 }
 
-/// Like [`router_with_pools`] but also wires the
-/// **operator-as-superuser tenant impersonation** flow (#78).
-/// Pass the same `tenant_session_secret` your `TenantAdminBuilder`
-/// uses so the handoff token the operator console mints will
-/// verify in the tenant admin.
+/// Like [`router_with_pools`], plus operator-as-superuser tenant
+/// impersonation. Pass the same `tenant_session_secret` your
+/// `TenantAdminBuilder` uses, or the handoff token will not verify.
 ///
-/// Since v0.29 (#88), the flow is a URL-token handoff instead of
-/// a cookie-domain handoff: the operator console mints a signed
-/// token, redirects the browser to
-/// `<sub>.<apex><tenant_handoff_url>?token=<...>`, and the tenant
-/// admin redeems the token + sets a host-scoped cookie. This
-/// works on every browser/host combination, including Chromium
-/// against `localhost` (where the older cookie-domain approach
-/// broke because Chromium treats `localhost` as a public-suffix
-/// TLD). The legacy `tenant_cookie_domain` parameter is gone —
-/// no impersonation cookie is set on the operator-console origin.
+/// The handoff goes through a URL token, not a cookie: the console
+/// mints a signed token and redirects to
+/// `<sub>.<apex><tenant_handoff_url>?token=<...>`; the tenant admin
+/// redeems it and sets a host-scoped cookie. No impersonation cookie is
+/// set on the operator-console origin.
 ///
-/// `Server::Builder::serve` calls this automatically since v0.27.8.
-/// Custom mount points opt in by replacing `router_with_pools` with
-/// this variant.
+/// `Server::Builder::serve` calls this for you. Other mount points swap
+/// `router_with_pools` for this variant.
 #[must_use]
 pub fn router_with_impersonation(
     registry: impl Into<crate::sql::Pool>,
@@ -434,18 +374,16 @@ pub fn router_with_impersonation(
     )
 }
 
-/// Full-control entry point — takes any [`BoxedStorage`] for brand
-/// asset storage. Use this with `S3Storage` (AWS / R2 / B2 / MinIO),
-/// a `LocalStorage` configured with `with_base_url` for CDN
-/// pre-fronting, or any user-supplied `Storage` impl. When the
-/// configured backend exposes URLs via `Storage::url`, rendered
-/// `<img src>` tags point straight at it — the framework's
-/// `/__brand__/{slug}/{filename}` static handler is only used as
-/// the fallback for backends that return `None` from `url()` (the
-/// default `LocalStorage` without `with_base_url`).
+/// Like [`router`], but takes any [`BoxedStorage`] for brand assets:
+/// `S3Storage` (AWS, R2, B2, MinIO), a `LocalStorage` with
+/// `with_base_url` behind a CDN, or your own `Storage` impl.
 ///
-/// `pools = Some(...)` mounts the org-edit + branding upload
-/// routes; `None` keeps the console read-only (matches `router`).
+/// If the backend returns a URL from `Storage::url`, `<img src>` points
+/// straight at it. Otherwise the built-in
+/// `/__brand__/{slug}/{filename}` handler serves the file.
+///
+/// `pools = Some(...)` mounts the org-edit and brand-upload routes;
+/// `None` keeps the console read-only.
 #[must_use]
 pub fn router_with_brand_storage(
     registry: impl Into<crate::sql::Pool>,
@@ -464,27 +402,25 @@ pub fn router_with_brand_storage(
     )
 }
 
-/// Default tenant-admin URL prefix when the operator console is
-/// constructed via a pre-RouteConfig entry point. Matches the
-/// v0.29 friendly-by-default value from #85 so projects on
-/// current rustango Just Work; legacy projects opt in via
-/// `router_with_impersonation`'s `tenant_admin_url` parameter.
+/// Handoff URL used by the constructors that do not take one.
+/// Same value as [`super::routes::RouteConfig`]'s default.
+/// A logged `500` whose body withholds the cause (#1955).
+fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
+    let body = crate::error::server_error_body(context, e);
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+}
+
 fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
 
-/// Every knob at once.
+/// Every knob at once. The named constructors above are shorthands
+/// over this one; use it for a combination they do not cover, such as
+/// impersonation **and** provisioning together.
 ///
-/// The named constructors above are thin wrappers over this, each
-/// fixing some arguments — which is fine until a caller wants a
-/// combination none of them covers (the tenancy `Builder` wants
-/// impersonation **and** provisioning). Rather than add a seventh
-/// positional constructor for each new pairing, this is the one that
-/// takes everything and the others stay as the convenient shorthands.
-///
-/// `pools` unlocks the edit routes, `provisioner` the create routes,
-/// `tenant_session_secret` impersonation. `None` for any of them
-/// simply does not mount those routes.
+/// `pools` unlocks the edit routes, `provisioner` the create routes and
+/// `tenant_session_secret` impersonation. `None` leaves those routes
+/// unmounted.
 #[must_use]
 pub fn router_full(
     registry: impl Into<crate::sql::Pool>,
@@ -506,6 +442,28 @@ pub fn router_full(
     )
 }
 
+/// [`router_full`] without its own access log, for `server::Builder` when
+/// it mounts observability itself; one line per request (#1788).
+pub(crate) fn router_full_unlogged(
+    registry: crate::sql::Pool,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    router_unlogged(
+        registry,
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+}
+
 fn router_inner(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
@@ -515,7 +473,37 @@ fn router_inner(
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
 ) -> Router {
-    let mut tera = Tera::default();
+    use crate::access_log::AccessLogRouterExt as _;
+    router_unlogged(
+        registry,
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+    .access_log(access_log_layer())
+}
+
+/// The console's own access log. `next` is redacted because the login
+/// bounce carries the attempted URL, `token` for the impersonation handoff.
+pub(crate) fn access_log_layer() -> crate::access_log::AccessLogLayer {
+    crate::access_log::AccessLogLayer::new()
+        .redact_additional("next")
+        .redact_additional("token")
+}
+
+fn router_unlogged(
+    registry: crate::sql::Pool,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    let mut tera = crate::template_extensions::html_tera();
     tera.add_raw_templates([
         (
             "_theme_tokens.html",
@@ -598,7 +586,10 @@ fn router_inner(
     // reachable from un-authenticated tenant pages.
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout))
+        .route("/logout", post(logout));
+    // Cacheable GET-only assets stay outside the CSRF layers, so no
+    // shared cache stores a `Set-Cookie` with them.
+    let assets = Router::new()
         .route("/__static__/rustango.png", get(static_rustango_png))
         .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
 
@@ -616,30 +607,30 @@ fn router_inner(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
-    // Registry-wide shared SSO providers (admin-sso) — always available to
-    // authenticated operators; writes go to the registry pool the console
-    // already holds.
+    // Registry-wide shared SSO providers (admin-sso): every operator sees
+    // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private
-            .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
-            .route("/sso-shared/{id}/delete", post(sso_shared_delete));
+        private = private.route("/sso-shared", get(sso_shared_list));
+        if edit_enabled {
+            private = private
+                .route("/sso-shared", post(sso_shared_create))
+                .route("/sso-shared/{id}/delete", post(sso_shared_delete))
+                .route(
+                    "/sso-shared/{id}/email-link",
+                    post(sso_shared_set_email_link),
+                );
+        }
     }
     if edit_enabled {
         private = private
-            // Who can sign in to this console. Behind the same gate as
-            // the tenant writes: `edit_enabled` is named for its first
-            // use (dropping a cached pool when a `database_url`
-            // rotates) but is in practice the switch between the
-            // read-only `router()` and a console that can change
-            // things, and creating an operator is emphatically the
-            // latter.
+            // Who can sign in to this console. `edit_enabled` is really
+            // the switch between a read-only console and one that can
+            // change things, and creating an operator is a change.
             .route("/operators", post(operators::operator_create))
-            // #1341 — opening every tenant's pool up front was CLI-only,
-            // so the one thing worth doing right after a deploy, a
-            // registry restart, or a credential rotation needed shell
-            // access. Gated on pools rather than on the provisioner:
-            // warming them needs no migrations directory.
+            // Open every tenant pool up front, e.g. after a deploy or a
+            // credential rotation. Gated on pools, not the provisioner:
+            // warming needs no migrations directory.
             .route(
                 "/orgs/prewarm",
                 get(orgs_post_only_redirect).post(prewarm_pools),
@@ -656,22 +647,15 @@ fn router_inner(
                 "/orgs/{slug}/edit",
                 get(org_edit_form).post(org_edit_submit),
             )
-            // v0.27.10 (#68) — branding endpoint accepts POST for
-            // multipart upload. Add a GET that bounces back to
-            // the parent edit form so a manual URL hit (or a
-            // browser session-expiry replay) doesn't 405.
+            // POST takes the multipart upload; GET bounces back to the
+            // edit form so a manual URL hit does not 405.
             .route(
                 "/orgs/{slug}/edit/branding",
                 get(org_post_only_redirect).post(org_edit_branding),
             )
-            // The extra hostnames a tenant answers on. Behind the same
-            // gate as `/edit`: binding a hostname changes which tenant
-            // serves that traffic, which is an edit in every sense that
-            // matters. The three writes are separate routes rather than
-            // one submit because they act on individual rows.
-            // Taking a tenant out of service. Behind the edit gate
-            // like the rest: `purge` is the most destructive thing this
-            // console can do, and a read-only one must not offer it.
+            // Taking a tenant out of service. Behind the edit gate:
+            // `purge` is the most destructive thing this console can
+            // do, and a read-only console must not offer it.
             .route(
                 "/orgs/{slug}/deactivate",
                 get(org_post_only_redirect).post(decommission::deactivate),
@@ -686,6 +670,10 @@ fn router_inner(
                 "/orgs/{slug}/test-connection",
                 post(provisioning::test_tenant_connection),
             )
+            // Extra hostnames a tenant answers on. Binding a hostname
+            // changes which tenant serves that traffic, so it sits
+            // behind the edit gate too. Three routes, not one submit,
+            // because each acts on a single row.
             .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
             .route(
                 "/orgs/{slug}/hosts/add",
@@ -701,11 +689,9 @@ fn router_inner(
             );
     }
     if provisioning_enabled {
-        // #1322 — creating a tenant, and watching it happen. Mounted
-        // only when the deployment supplied a provisioner: this is the
-        // console's most dangerous capability (it takes a database URL
-        // and connects to it), so it is opt-in rather than riding on
-        // the edit routes.
+        // Creating a tenant, and watching it happen. Mounted only when
+        // the deployment supplied a provisioner, because this takes a
+        // database URL and connects to it.
         private = private
             .route(
                 "/orgs/new",
@@ -736,12 +722,10 @@ fn router_inner(
             );
     }
     if impersonation_enabled {
-        // v0.27.8 (#78) — operator-as-superuser tenant admin login.
-        // Mints a tenant-bound impersonation cookie and 302s to
-        // the tenant admin's `/__admin/`. Audit-log entry recorded
-        // on every mint so each session is traceable to an
-        // operator id.
-        // v0.27.10 (#68) — same GET fallback as branding above.
+        // Operator-as-superuser tenant admin login: mint a handoff
+        // token and redirect to the tenant admin. Every mint writes an
+        // audit row, so a session traces back to an operator id.
+        // GET bounces back, as with branding above.
         private = private.route(
             "/orgs/{slug}/impersonate",
             get(org_post_only_redirect).post(org_impersonate),
@@ -752,47 +736,37 @@ fn router_inner(
         require_session,
     ));
 
-    // One event per request — method, path, status, duration, IP —
-    // from the middleware the admin already uses, rather than a second
-    // one written here. Without it a console 500 left nothing behind
-    // but the operator's screen.
-    //
-    // `next` is redacted because the login bounce carries the whole
-    // attempted URL, and `token` because impersonation handoff puts one
-    // in a query string.
-    use crate::access_log::AccessLogRouterExt as _;
-    public.merge(private).with_state(state).access_log(
-        crate::access_log::AccessLogLayer::new()
-            .redact_additional("next")
-            .redact_additional("token"),
-    )
+    // CSRF on every console POST, login included (#1710): a tenant
+    // subdomain is same-site with the apex, so `SameSite=Lax` does not
+    // stop it. The layer checks token and Origin first; inside it,
+    // `csrf_context` mints the token `render` puts in each form and sets
+    // its cookie, so the layer sees it set and adds no second one.
+    // Origin is the check that stops a tenant host: it can plant the
+    // cookie, and so knows the token.
+    public
+        .merge(private)
+        .route_layer(middleware::from_fn(
+            crate::admin::csrf_context::csrf_context,
+        ))
+        .route_layer(crate::forms::csrf::layer())
+        .merge(assets)
+        .with_state(state)
 }
 
-/// Stamp the operator-console branding fields onto every render
-/// context. Centralizing the keys keeps op_layout.html and op_login.html
-/// in sync without each handler remembering the four template names.
-/// A screenful, for every list the console renders.
-///
-/// One number rather than one per page, so a deployment with thousands
-/// of tenants and one with three behave the same way and nobody has to
-/// remember which list was the unbounded one.
+/// Rows per page, for every list the console renders. One number for
+/// all of them, so a deployment with three tenants and one with
+/// thousands behave the same way.
 pub(super) const PAGE_SIZE: usize = 50;
 
 /// One page of a console list.
 ///
-/// A thin adapter over [`crate::pagination::Paginator`] — the
-/// framework's own page-number paginator, which is built for exactly
-/// this (server-rendered list views: `offset()`, `limit()`, and an
-/// elided `1 … 7 8 9 … 42` range). This type only counts the rows,
-/// hands the paginator the number, and flattens the result into
+/// A thin adapter over [`crate::pagination::Paginator`]: it counts the
+/// rows, asks the paginator for the page, and flattens the result into
 /// template context.
 ///
-/// Shared rather than written per view because the arithmetic has a
-/// trap in it: `?page=<huge>` parses into an `i64` and then overflows a
-/// naive `(page - 1) * size`, which panicked a worker thread in debug
-/// and wrapped to a negative offset in release. `Paginator::get_page`
-/// clamps instead, so no list view can reintroduce that and none can
-/// disagree about what page 1 means.
+/// Use it instead of doing the arithmetic per view. A huge `?page=`
+/// overflows a naive `(page - 1) * size`; `Paginator::get_page` clamps
+/// instead.
 pub(super) struct Paged {
     pub(super) offset: i64,
     pub(super) limit: i64,
@@ -886,11 +860,7 @@ pub(super) async fn count_where(
     model: &'static crate::core::ModelSchema,
     where_clause: crate::core::WhereExpr,
 ) -> Result<i64, crate::sql::ExecError> {
-    let count = crate::core::CountQuery {
-        model,
-        where_clause,
-        search: None,
-    };
+    let count = crate::core::CountQuery::new(model, where_clause);
     crate::sql::count_rows_pool(pool, &count).await
 }
 
@@ -912,16 +882,20 @@ pub(super) struct ListQuery {
     pub(super) notice: Option<String>,
 }
 
-/// Render, or say why not.
+/// Render a template, or return a 500 that names it.
 ///
-/// The console's older handlers use `.unwrap_or_default()`, which turns
-/// a template error into an empty `200` — a blank page with no clue
-/// anywhere. That cost real time: a missing key in a Tera comparison
-/// rendered nothing and looked like a routing problem. A 500 naming the
-/// template is worth far more than a page that lies about having
-/// worked.
+/// Prefer this to `.unwrap_or_default()`, which turns a template error
+/// into a blank `200` with no clue what went wrong.
 fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
-    match state.tera.render(template, ctx) {
+    // Every console form posts this back; `csrf::layer()` checks it (#1710).
+    let mut ctx = ctx.clone();
+    // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
+    // the multipart branding form, whose body the layer cannot read).
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_input", &crate::forms::csrf::csrf_input_html(&token));
+        ctx.insert("csrf_token", &token);
+    }
+    match state.tera.render(template, &ctx) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             let mut detail = e.to_string();
@@ -931,21 +905,16 @@ fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body>
                 detail.push_str(&s.to_string());
                 source = s.source();
             }
-            tracing::error!(
-                target: "rustango::tenancy::operator_console",
-                template,
-                error = %detail,
-                "operator console template failed to render"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not render {template}: {detail}"),
+            server_error(
+                "operator_console::render",
+                &format!("could not render {template}: {detail}"),
             )
-                .into_response()
         }
     }
 }
 
+/// Put the console branding keys into a render context. Doing it in
+/// one place keeps `op_layout.html` and `op_login.html` in sync.
 fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
@@ -969,18 +938,12 @@ async fn require_session(
     mut req: axum::http::Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let cookie_value = read_cookie(&headers, COOKIE_NAME);
-    let payload = cookie_value
-        .as_deref()
+    let payload = crate::cookies::cookie_from_headers(&headers, COOKIE_NAME)
         .and_then(|v| session::decode(&state.session_secret, v).ok());
-    // v0.27.10 (#68) — when a non-GET request hits an expired
-    // session, redirecting straight to login makes the browser
-    // turn the original POST into a GET on the way back (303 →
-    // GET), which then 405s on POST-only routes like
-    // `/orgs/{slug}/edit/branding` and `/orgs/{slug}/impersonate`.
-    // Sanitize the `next` URL down to the parent GET URL before
-    // the bounce. The operator loses unsaved form data either
-    // way; at least they don't see a 405 page.
+    // A 303 back from login turns the original POST into a GET, which
+    // then 405s on POST-only routes. Trim `next` down to the parent GET
+    // URL first. Unsaved form data is lost either way, but the operator
+    // does not land on a 405 page.
     let method = req.method().clone();
     let raw_next = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let safe_next = sanitize_next_for_method(&method, raw_next);
@@ -996,18 +959,19 @@ async fn require_session(
             let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
                 return redirect_to_login(&safe_next).into_response();
             };
-            // v0.28.4 (#77) — invalidate sessions issued before the
-            // operator's last password rotation. NULL means the
-            // operator hasn't rotated since v0.28.4 — those
-            // sessions stay valid.
-            if let Some(ts) = op.password_changed_at {
-                if payload.iat < ts.timestamp() {
-                    return redirect_to_login(&safe_next).into_response();
-                }
+            // Drop sessions issued before the last password change or logout.
+            if !session::session_survives(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            ) {
+                return redirect_to_login(&safe_next).into_response();
             }
-            // The chrome `op_layout.html` needs, for any generic view
-            // an app mounts here: those build their context from the
-            // model and know nothing about this layout. Gated because
+            // Chrome for `op_layout.html`, so a generic view mounted
+            // here renders with the console layout. Gated because
             // `tenancy` does not depend on `template_views`.
             #[cfg(feature = "template_views")]
             {
@@ -1030,11 +994,9 @@ async fn require_session(
     }
 }
 
-/// v0.27.10 (#68) — GET handler for POST-only sub-form routes
-/// (`/orgs/{slug}/edit/branding`, `/orgs/{slug}/impersonate`).
-/// A bare GET on these used to 405; now it bounces back to
-/// the parent edit form so the operator lands somewhere
-/// useful instead of staring at a Method-Not-Allowed page.
+/// GET handler for POST-only sub-form routes. It bounces back to the
+/// parent edit form, so a bare GET lands somewhere useful instead of
+/// on a 405 page.
 async fn org_post_only_redirect(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Redirect {
@@ -1051,15 +1013,11 @@ async fn orgs_post_only_redirect() -> Redirect {
     Redirect::to("/orgs")
 }
 
-/// Open a pool for every active database-mode tenant (#1341).
+/// Open a pool for every active database-mode tenant.
 ///
-/// Worth doing right after a deploy or a registry restart, and after a
-/// credential rotation — it turns "the first request to each tenant pays
-/// the connect" into one deliberate wait, and surfaces an unreachable
-/// tenant before a user finds it.
-///
-/// The report is a notice rather than a page: there is nothing to browse,
-/// and PRG keeps a reload from re-opening every pool.
+/// Run it after a deploy, a registry restart or a credential rotation.
+/// It moves the connect cost off the first request to each tenant, and
+/// it shows an unreachable tenant before a user finds it.
 async fn prewarm_pools(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
@@ -1110,17 +1068,12 @@ fn orgs_notice(msg: &str, is_error: bool) -> Response<Body> {
     Redirect::to(&format!("/orgs?{key}={}", urlencoding_lite(msg))).into_response()
 }
 
-/// v0.27.10 (#68) — when an unauthenticated non-GET request
-/// would round-trip through `/login?next=…` and back, the
-/// resulting GET re-issues the original URL — which 405s on
-/// POST-only routes. Rewrite `path` to a safe-GET equivalent
-/// based on the original method.
+/// Rewrite a `next` path so the bounce back from `/login` lands on a
+/// URL that answers GET.
 ///
-/// Conservative table: when the method is GET / HEAD, the
-/// raw path is fine. Otherwise we strip back to the closest
-/// known parent that has a GET handler. For paths we don't
-/// recognize, we strip down to `/` so the operator at least
-/// lands somewhere reachable.
+/// GET and HEAD keep the path as-is. Anything else strips back to the
+/// nearest known parent with a GET handler, or to `/` when the path is
+/// not recognised.
 fn sanitize_next_for_method(method: &axum::http::Method, path: &str) -> String {
     if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
         return path.to_owned();
@@ -1167,12 +1120,12 @@ struct LoginQuery {
 async fn login_form(
     State(state): State<ConsoleState>,
     Query(q): Query<LoginQuery>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("next", &q.next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &q.error);
-    Html(state.tera.render("op_login.html", &ctx).unwrap_or_default())
+    render(&state, "op_login.html", &ctx)
 }
 
 #[derive(Deserialize)]
@@ -1185,68 +1138,45 @@ struct LoginSubmit {
 
 async fn login_submit(
     State(state): State<ConsoleState>,
+    ip: crate::login_throttle::ClientIp,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
+    use crate::login_throttle::{LoginRefused, LoginScope};
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
-    let meta = meta_from_headers(&headers, Some("/login"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
 
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default. Resolve the operator id up front so the lockout is keyed
-    // by id (`op:<id>`), not the raw username: only an *existing* account
-    // accrues failures, so an attacker can't lock arbitrary names. A
-    // locked account is rejected before `authenticate` runs the verify.
-    #[cfg(feature = "cache")]
-    let pre_id: Option<i64> = {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-        auth::Operator::objects()
-            .where_(auth::Operator::username.eq(form.username.clone()))
-            .fetch(&state.registry)
-            .await
-            .ok()
-            .and_then(|rows: Vec<auth::Operator>| rows.into_iter().next())
-            .and_then(|op| op.id.get().copied())
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(&LoginScope::Operator, &ip, &form.username)
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
     };
-    #[cfg(feature = "cache")]
-    if let Some(id) = pre_id {
-        if crate::account_lockout::shared()
-            .is_locked(&format!("op:{id}"))
-            .await
-        {
-            send_user_login_failed(UserLoginFailedContext {
-                source: "operator",
-                attempted_username: Some(form.username.clone()),
-                reason: AuthFailureReason::InvalidCredentials,
-                request: meta.clone(),
-            })
-            .await;
-            return Redirect::to(&format!(
-                "/login?error=Too+many+failed+attempts.+Try+again+later.&next={}",
-                urlencoding_lite(&next)
-            ))
-            .into_response();
+    let found = match auth::find_operator(&state.registry, &form.username).await {
+        Ok(op) => op,
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
+    if let Some(op) = &found {
+        if let Err(refused) = attempt.resolve(&op.username).await {
+            return refused.into_response();
         }
     }
 
     let principal =
-        match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
-            .await
-        {
+        match auth::check_operator_password(&state.registry, found, &form.password).await {
             Ok(Some(op)) => op,
             Ok(None) => {
-                // Audit M1 — count the failure against the resolved id
-                // (existing accounts only, so no arbitrary-name DoS).
-                #[cfg(feature = "cache")]
-                if let Some(id) = pre_id {
-                    let _ = crate::account_lockout::shared()
-                        .record_failure(&format!("op:{id}"))
-                        .await;
-                }
+                attempt.failed().await;
                 send_user_login_failed(UserLoginFailedContext {
                     source: "operator",
                     attempted_username: Some(form.username.clone()),
@@ -1260,18 +1190,20 @@ async fn login_submit(
                 ))
                 .into_response();
             }
+            Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
             Err(e) => {
                 tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
             }
         };
     let oid = principal.id.get().copied().unwrap_or_default();
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared()
-        .clear(&format!("op:{oid}"))
-        .await;
-    let payload = SessionPayload::new(oid, SESSION_TTL_SECS);
+    attempt.succeeded().await;
+    let mut payload = SessionPayload::new(
+        oid,
+        SESSION_TTL_SECS,
+        session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
+    );
+    payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
         .path("/")
@@ -1303,13 +1235,32 @@ async fn login_submit(
 
 async fn logout(
     State(state): State<ConsoleState>,
+    extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
 ) -> Response<Body> {
-    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the session cookie so the signal carries
     // operator_id. Receivers tolerate `None`.
     let oid = decode_operator_session(&headers, &state.session_secret);
-    let meta = meta_from_headers(&headers, Some("/logout"));
+    let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
+    // End the operator's sessions everywhere, impersonation ones included.
+    let revoked = match live_operator_session(&state, &headers).await {
+        Ok(Some((op, iat))) => crate::session::revoke_sessions::<auth::Operator>(
+            &state.registry,
+            op.id.get().copied().unwrap_or_default(),
+            op.sessions_revoked_at,
+            iat,
+        )
+        .await
+        .map(drop),
+        Ok(None) => Ok(()),
+        // Never report a logout that did not happen.
+        Err(e) => Err(e),
+    };
+    if let Err(e) = revoked {
+        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "logout revoke");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+    }
     let clear = Cookie::build((COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -1334,18 +1285,42 @@ async fn logout(
     resp
 }
 
+/// The operator and cookie `iat` behind a still-valid session cookie, so a
+/// stale cookie cannot end the newer sessions. `Err` when the lookup fails.
+async fn live_operator_session(
+    state: &ConsoleState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(auth::Operator, i64)>, crate::sql::ExecError> {
+    let Some(payload) = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)
+        .and_then(|val| session::decode(&state.session_secret, val).ok())
+    else {
+        return Ok(None);
+    };
+    let op = auth::Operator::objects()
+        .where_(auth::Operator::id.eq(payload.oid))
+        .fetch(&state.registry)
+        .await?
+        .into_iter()
+        .next();
+    Ok(op
+        .filter(|op| {
+            session::session_survives(
+                &state.session_secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            )
+        })
+        .map(|op| (op, payload.iat)))
+}
+
 /// Best-effort: decode the operator session cookie to recover the
 /// operator id for audit signals. `None` on any error.
 fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecret) -> Option<i64> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';').map(str::trim) {
-        if let Some(val) = part.strip_prefix(&format!("{COOKIE_NAME}=")) {
-            if let Ok(p) = session::decode(secret, val) {
-                return Some(p.oid);
-            }
-        }
-    }
-    None
+    let val = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)?;
+    session::decode(secret, val).ok().map(|p| p.oid)
 }
 
 // ----------------------------- views
@@ -1357,22 +1332,14 @@ async fn change_password_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
     ctx.insert("error", &params.get("error"));
     ctx.insert("success", &params.get("ok"));
-    Html(
-        state
-            .tera
-            .render("op_change_password.html", &ctx)
-            .unwrap_or_else(|e| {
-                tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "op_change_password.html render");
-                "<!doctype html><h1>Change-password page unavailable</h1>".to_owned()
-            }),
-    )
+    render(&state, "op_change_password.html", &ctx)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1383,17 +1350,16 @@ struct OpChangePasswordForm {
     confirm_password: String,
 }
 
-/// `POST /change-password` — verify the operator's current
-/// password, hash the new one, persist it + bump
-/// `password_changed_at`. The session middleware
-/// (`require_session`) already invalidates cookies whose
-/// `iat` predates `password_changed_at`, so the session this
-/// request is running on may be the LAST request that cookie
-/// can serve — the next click bounces to login. Mirror of
-/// `tenancy::admin::change_password_submit` for tenant users.
+/// `POST /change-password`: check the current password, hash the new
+/// one, save it and bump `password_changed_at`.
+///
+/// `require_session` rejects cookies minted under the old password,
+/// so this request is the last one the current cookie can serve; the
+/// next click goes to login.
 async fn change_password_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    ip: crate::login_throttle::ClientIp,
     Form(form): Form<OpChangePasswordForm>,
 ) -> Response<Body> {
     let redir = |query: &str| -> Response<Body> {
@@ -1410,8 +1376,8 @@ async fn change_password_submit(
     if form.new_password == form.current_password {
         return redir_err("New password must differ from the current password.");
     }
-    if form.new_password.chars().count() < 8 {
-        return redir_err("New password must be at least 8 characters.");
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return redir_err(&e.message);
     }
 
     let op_id = op.id.get().copied().unwrap_or(0);
@@ -1419,12 +1385,9 @@ async fn change_password_submit(
         return redir_err("Session is missing an operator id; please log in again.");
     }
 
-    // Re-fetch the canonical Operator row via the ORM so the lookup
-    // and the subsequent password rotate are bi-dialect. `op` from
-    // the extension is a snapshot taken in `require_session`; using
-    // the live registry row matches the tenant flow + protects
-    // against the rare race where a peer operator just rotated this
-    // account.
+    // `op` from the extension is a snapshot taken in `require_session`.
+    // Re-read the live row so we do not overwrite a change another
+    // operator just made.
     let mut op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
         .fetch(&state.registry)
@@ -1441,13 +1404,33 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let ok =
-        super::password::verify(&form.current_password, &op_row.password_hash).unwrap_or(false);
+    let verify = async {
+        match super::password::verify_async(&form.current_password, &op_row.password_hash).await {
+            Ok(ok) => Ok(ok),
+            Err(super::TenancyError::Busy) => Err(crate::login_throttle::LoginRefused::Busy),
+            Err(_) => Ok(false),
+        }
+    };
+    let ok = match crate::login_throttle::shared()
+        .verify_current_password(
+            &crate::login_throttle::LoginScope::Operator,
+            &ip,
+            &op_row.username,
+            verify,
+        )
+        .await
+    {
+        Ok(ok) => ok,
+        Err(refused) => return refused.into_response(),
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };
     op_row.password_hash = new_hash;
@@ -1462,17 +1445,12 @@ async fn change_password_submit(
 async fn welcome(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-) -> Html<String> {
+) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "home");
     ctx.insert("operator_username", &op.username);
-    Html(
-        state
-            .tera
-            .render("op_welcome.html", &ctx)
-            .unwrap_or_default(),
-    )
+    render(&state, "op_welcome.html", &ctx)
 }
 
 async fn orgs_list(
@@ -1487,7 +1465,7 @@ async fn orgs_list(
     use crate::core::Model as _;
     let paged = match Paged::of_model(&state.registry, super::Org::SCHEMA, q.page).await {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let rows: Vec<super::Org> = match super::Org::objects()
         .order_by(&[("slug", false)])
@@ -1497,7 +1475,7 @@ async fn orgs_list(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let view: Vec<_> = rows
         .into_iter()
@@ -1519,9 +1497,7 @@ async fn orgs_list(
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
     ctx.insert("edit_enabled", &state.pools.is_some());
-    // Drives the "New tenant" button. Without this the create page
-    // exists but nothing links to it — which is exactly the state
-    // this shipped in first.
+    // Drives the "New tenant" button.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
     ctx.insert("error", &q.error);
     ctx.insert("notice", &q.notice);
@@ -1530,11 +1506,10 @@ async fn orgs_list(
 }
 
 // ---- Shared SSO providers (registry-wide, `admin-sso`) --------------
-// An operator defines a provider once here and it is offered on EVERY
-// tenant's login page (`SharedSsoProvider`, registry scope). Per-tenant
-// providers are managed by each tenant from its own admin (`SsoProvider`),
-// which the type-erased console can't reach — a clean split: shared here,
-// per-tenant there. Both merge at login (tenant wins on slug clash).
+// A provider defined here (`SharedSsoProvider`, registry scope) is
+// offered on every tenant's login page. Each tenant manages its own
+// providers (`SsoProvider`) from its own admin. Both lists merge at
+// login; the tenant one wins on a slug clash.
 #[cfg(feature = "admin-sso")]
 #[derive(serde::Deserialize)]
 struct SharedSsoForm {
@@ -1547,6 +1522,7 @@ struct SharedSsoForm {
     scopes: Option<String>,
     sort_order: Option<i32>,
     enabled: Option<String>,
+    allow_email_link: Option<String>,
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1560,7 +1536,7 @@ async fn sso_shared_list(
             .await
         {
             Ok(r) => r,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+            Err(e) => return server_error("operator_console", &e),
         };
     rows.sort_by_key(|p| p.sort_order);
     let view: Vec<_> = rows
@@ -1574,6 +1550,7 @@ async fn sso_shared_list(
                 "issuer_url": p.issuer_url,
                 "client_id": p.client_id,
                 "enabled": p.enabled,
+                "allow_email_link": p.allow_email_link,
                 "sort_order": p.sort_order,
             })
         })
@@ -1583,13 +1560,8 @@ async fn sso_shared_list(
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("providers", &view);
-    Html(
-        state
-            .tera
-            .render("op_sso_shared.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    ctx.insert("edit_enabled", &state.pools.is_some());
+    render(&state, "op_sso_shared.html", &ctx)
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1609,17 +1581,54 @@ async fn sso_shared_create(
         enabled: form.enabled.as_deref() == Some("on"),
         sort_order: form.sort_order.unwrap_or(0),
         scopes: form.scopes.filter(|s| !s.trim().is_empty()),
+        allow_email_link: form.allow_email_link.as_deref() == Some("on"),
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create failed: {e}"),
-        )
-            .into_response();
+        return server_error("create failed", &e);
     }
     Redirect::to("/sso-shared").into_response()
+}
+
+/// The wanted `allow_email_link` value, `on` or `off`.
+#[cfg(feature = "admin-sso")]
+#[derive(serde::Deserialize)]
+struct EmailLinkForm {
+    allow_email_link: String,
+}
+
+/// Set `allow_email_link` in place (only that column), so the id and its links survive.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_set_email_link(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Form(form): Form<EmailLinkForm>,
+) -> Response<Body> {
+    use crate::sql::UpdaterPool as _;
+    let allow = match form.allow_email_link.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "allow_email_link must be on or off",
+            )
+                .into_response()
+        }
+    };
+    match super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .update()
+        .set("allow_email_link", allow)
+        .execute_pool(&state.registry)
+        .await
+    {
+        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
+        Err(e) => server_error("update failed", &e),
+    }
 }
 
 #[cfg(feature = "admin-sso")]
@@ -1642,36 +1651,22 @@ async fn sso_shared_delete(
 
 // ----------------------------- /orgs/{slug}/edit
 //
-// Reuses the framework's existing admin form pipeline:
-// * [`crate::admin::render::render_input`] turns each `FieldSchema`
-//   into the right `<input>` HTML — number for ints, checkbox for
-//   bool, text/textarea for strings, datetime-local for timestamps.
-// * [`crate::admin::render::render_value_for_input`] reads the
-//   current value out of the row as a prefill string.
-// * [`crate::forms::collect_values`] parses the submitted form
-//   against `Org::SCHEMA` and produces `(column, SqlValue)` pairs
-//   with full per-field bound checks (max_length, min/max, type).
+// Built on the admin form pipeline:
+// [`crate::admin::render::render_input`] for the `<input>` HTML,
+// [`crate::admin::render::render_value_for_input`] for the prefill, and
+// [`crate::forms::collect_values`] to parse the submit against
+// `Org::SCHEMA` with per-field checks.
 //
-// What stays bespoke:
-// * Lock list — `slug`, `storage_mode`, `schema_name`, `id`,
-//   `created_at` must not be editable from this surface (would
-//   orphan tenant data or break invariants).
-// * `database_url` masking — never echo the existing literal back to
-//   the browser; show only the secret-reference shape (e.g.
-//   `env:DATABASE_URL_ACME`) and treat empty submit as "keep current".
-// * Pool eviction on `database_url` change — calls
-//   [`TenantPools::invalidate`] so the next request rebuilds the
-//   cached pool with new credentials.
+// Three things are specific to this form: the lock list below,
+// `database_url` masking, and calling [`TenantPools::invalidate`] when
+// `database_url` changes so the next request rebuilds the pool.
 
-/// Names of `Org` fields that are display-only on the edit form.
-/// `logo_path` / `favicon_path` are populated by the multipart
-/// upload sub-form (`POST /orgs/{slug}/edit/branding`) — never via
-/// the regular config edit, so they live in the locked section.
+/// `Org` fields that are display-only on the edit form.
 ///
-/// `backend_kind` (v0.33) is locked too — changing the backend mid-life
-/// would orphan the tenant's data on the old driver. The
-/// `migrate-tenant-storage` verb is the supported migration path
-/// (issue #58 once it gains a backend-translation step).
+/// `logo_path` and `favicon_path` come from the upload sub-form
+/// instead. `backend_kind` is locked because switching backends would
+/// leave the tenant's data on the old driver; use the
+/// `migrate-tenant-storage` verb for that.
 const LOCKED_ORG_FIELDS: &[&str] = &[
     "id",
     "slug",
@@ -1711,7 +1706,7 @@ async fn org_edit_form(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => return server_error("operator_console", &e),
     };
     let Some(org_row) = rows.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
@@ -1791,25 +1786,16 @@ async fn org_edit_form(
         "impersonate_enabled",
         &state.tenant_session_secret.is_some(),
     );
-    Html(
-        state
-            .tera
-            .render("op_orgs_edit.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
+    render(&state, "op_orgs_edit.html", &ctx)
 }
 
-/// `POST /orgs/{slug}/edit` — apply the changes via
-/// [`crate::forms::collect_values`] (same parser the per-app admin
-/// uses on `update_submit`) and emit a partial UPDATE for only the
-/// columns the form actually supplied.
+/// `POST /orgs/{slug}/edit`: parse the form with
+/// [`crate::forms::collect_values`] and write the columns it supplied
+/// through [`crate::tenancy::org_edit::apply_values`].
 ///
-/// Side effects:
-/// * `database_url` change → [`TenantPools::invalidate(slug)`] so
-///   the next request to that tenant rebuilds the pool with new
-///   credentials.
-/// * `active = false` → resolver chain returns 404 for that tenant.
+/// Two side effects: changing `database_url` calls
+/// [`TenantPools::invalidate`] so the next request rebuilds the pool,
+/// and `active = false` makes the resolver return 404 for that tenant.
 async fn org_edit_submit(
     State(state): State<ConsoleState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
@@ -1823,11 +1809,9 @@ async fn org_edit_submit(
         .as_ref()
         .expect("edit routes only mounted when pools is Some");
 
-    // `database_url` blank → operator wants to keep the current
-    // value. Strip from the form AND extend the skip list so
-    // `collect_values` doesn't even consider it (otherwise the
-    // missing-field would be parsed as NULL and the row's
-    // existing url would be wiped on submit).
+    // A blank `database_url` means "keep the current one". Drop it from
+    // the form and add it to the skip list, or `collect_values` reads
+    // the missing field as NULL and wipes the stored URL.
     let database_url_supplied = form
         .get(DATABASE_URL_FIELD)
         .is_some_and(|s| !s.trim().is_empty());
@@ -1838,10 +1822,8 @@ async fn org_edit_submit(
     if !database_url_supplied {
         skip.push(DATABASE_URL_FIELD);
     }
-    // Bool-checkbox: HTML omits the field when unchecked. The admin's
-    // collect_values pipeline understands that via `parse_form_value`,
-    // which returns `false` for missing bool fields. Nothing to do
-    // here — just trust the parser.
+    // An unticked checkbox is absent from the form; `collect_values`
+    // reads it as `false` for a NOT NULL bool (`active`), NULL if nullable.
 
     let collected = match crate::forms::collect_values(super::Org::SCHEMA, &form, &skip) {
         Ok(v) => v,
@@ -1851,65 +1833,14 @@ async fn org_edit_submit(
         return redirect_with_error(&slug, "no editable fields supplied");
     }
 
-    // Fetch existing for change detection (database_url rotation).
-    // ORM path so registry-backend stays plug-and-play.
-    let existing_orgs: Vec<super::Org> = match super::Org::objects()
-        .where_(super::Org::slug.eq(slug.clone()))
-        .fetch(&state.registry)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
-    let Some(existing_org) = existing_orgs.into_iter().next() else {
-        return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
-    };
-    let new_database_url = collected.iter().find_map(|(c, v)| {
-        if *c == DATABASE_URL_FIELD {
-            match v {
-                crate::core::SqlValue::String(s) => Some(s.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    });
-    let database_url_changed = new_database_url
-        .as_deref()
-        .is_some_and(|new| existing_org.database_url.as_deref() != Some(new));
-
-    // Build the UPDATE through the ORM's `UpdateQuery` IR + run it
-    // via `update_pool` so the SQL gets compiled with the right
-    // dialect (PG `$N` / MySQL `?` / SQLite `?`) + identifier
-    // quoting. Replaces the prior hand-rolled `UPDATE "…" SET … = $N
-    // WHERE …` string which was PG-only.
-    let assignments: Vec<crate::core::Assignment> = collected
-        .iter()
-        .map(|(col, val)| crate::core::Assignment {
-            column: *col,
-            value: val.clone().into(),
-        })
-        .collect();
-    let update_q = crate::core::UpdateQuery {
-        model: super::Org::SCHEMA,
-        set: assignments,
-        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
-            column: "slug",
-            op: crate::core::Op::Eq,
-            value: crate::core::SqlValue::String(slug.clone()),
-        }]),
-    };
-    if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
-        return redirect_with_error(&slug, &format!("update failed: {e}"));
-    }
-
-    // Drop the cached `Org` before anything else acts on the write.
-    // Resolution serves from that cache now, so without this the pool
-    // is evicted and then immediately rebuilt from the stale row — the
-    // rotation this handler promises would report success while the
-    // next request reconnected with the old credential. `active =
-    // false` has the same shape: the tenant would keep serving.
-    super::invalidate_org_cache();
+    // The CLI's write path, so the console runs the same routing
+    // validators and host-clash check (#1931).
+    let applied =
+        match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
+            Ok(a) => a,
+            Err(e) => return redirect_with_error(&slug, &e.to_string()),
+        };
+    let database_url_changed = applied.database_url_rotated;
 
     if database_url_changed {
         pools.invalidate(&slug).await;
@@ -1926,15 +1857,11 @@ async fn org_edit_submit(
         "action".into(),
         serde_json::Value::String("org.edit".into()),
     );
-    let touched_cols: Vec<String> = collected
+    let touched_cols: Vec<&str> = applied
+        .touched
         .iter()
-        .filter_map(|(c, _)| {
-            if *c == DATABASE_URL_FIELD {
-                None
-            } else {
-                Some((*c).to_owned())
-            }
-        })
+        .copied()
+        .filter(|c| *c != DATABASE_URL_FIELD)
         .collect();
     detail.insert("fields".into(), serde_json::json!(touched_cols));
     if database_url_changed {
@@ -1943,7 +1870,10 @@ async fn org_edit_submit(
     emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
 
     let notice = if database_url_changed {
-        format!("updated `{slug}` (pool evicted — next request rebuilds with new URL)")
+        format!(
+            "updated `{slug}` (this server switched now; others within {} s)",
+            crate::tenancy::resolver::CACHE_TTL.as_secs()
+        )
     } else {
         format!("updated `{slug}`")
     };
@@ -1964,15 +1894,11 @@ fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
     .into_response()
 }
 
-/// Emit one audit row for an operator-side action against
-/// `rustango_orgs`. Always opens with `tenant_slug` + `operator_id`
-/// in the changes blob; callers add per-action keys via `extra`.
-/// Failure is logged but never blocks the primary workflow — same
-/// contract as the impersonation audit emission.
+/// Write one audit row for an operator action on `rustango_orgs`. The
+/// changes blob always holds `tenant_slug` and `operator_id`; add more
+/// keys through `extra`. A write failure is logged, never fatal.
 ///
-/// `source` shape: `operator:<id>:<verb>` (e.g.
-/// `operator:1:impersonating`, `operator:1:edit`,
-/// `operator:1:branding`). Lets post-hoc forensics filter
+/// `source` reads `operator:<id>:<verb>`, so a later search can tell
 /// operator activity from tenant-user activity.
 async fn emit_op_audit(
     registry: &crate::sql::Pool,
@@ -1989,12 +1915,9 @@ async fn emit_op_audit(
     emit_registry_audit(registry, "rustango_orgs", slug, operator_id, verb, changes).await;
 }
 
-/// The same trail for an action whose subject is not a tenant.
-///
-/// `emit_op_audit` above hardcodes `rustango_orgs`, which is right for
-/// everything that acts on a tenant and wrong for everything else —
-/// operator management acts on `rustango_operators`, and recording that
-/// under the orgs table would make the entity column a lie.
+/// The same trail for an action whose subject is not a tenant, so the
+/// entity column names the real table. [`emit_op_audit`] is the
+/// `rustango_orgs` shorthand over this.
 async fn emit_registry_audit(
     registry: &crate::sql::Pool,
     entity_table: &'static str,
@@ -2006,14 +1929,10 @@ async fn emit_registry_audit(
     let mut changes = extra;
     changes.insert("operator_id".into(), serde_json::json!(operator_id));
 
-    // The same action, to the log stream. Emitted here rather than at
-    // each call site so the trail and the logs cannot describe
-    // different sets of actions — every console mutation already comes
-    // through this function.
-    //
-    // Field *names* only, never the blob: today's callers put column
-    // names in `changes` rather than values, and logging it whole would
-    // make the next caller's habit a credential leak.
+    // Log the action here, not at each call site, so the log and the
+    // audit trail always cover the same actions. Field *names* only:
+    // logging the whole blob would leak a credential the day a caller
+    // puts a value in it.
     let fields: Vec<&str> = changes
         .keys()
         .filter(|k| k.as_str() != "operator_id")
@@ -2038,9 +1957,8 @@ async fn emit_registry_audit(
         changes: serde_json::Value::Object(changes),
     };
     if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
-        // The action happened; only its durable record did not. Loud,
-        // because an audit trail with a hole in it is worse than one
-        // that is merely incomplete.
+        // The action happened but was not recorded. Loud on purpose: a
+        // trail with a silent hole in it is worse than a short one.
         tracing::error!(
             target: ACTION_TARGET,
             event = "operator_action_unrecorded",
@@ -2054,27 +1972,19 @@ async fn emit_registry_audit(
     }
 }
 
-// v0.34 — `bind_sql_value` was used by the old hand-rolled UPDATE
-// path. The dynamic UPDATE now goes through
-// `crate::sql::update_pool(&Pool, &UpdateQuery)` which compiles
-// per-dialect SQL + binds via the ORM's internal `bind_query`. The
-// hand-rolled helper is dead code; left removed.
-
 // ----------------------------- /orgs/{slug}/edit/branding (multipart)
 //
-// The main `/orgs/{slug}/edit` form is `application/x-www-form-urlencoded`
-// and posts the org's scalar config. Asset uploads need multipart, so
-// they ride a dedicated sub-form. Each part is independently validated
-// (content-type + size) by `branding::save_brand_asset`. After the
-// file lands on disk we update the matching `Org.{logo,favicon}_path`
-// column so subsequent renders pick it up.
+// The main edit form is url-encoded and posts the org's scalar config.
+// Uploads need multipart, so they get their own sub-form.
+// `branding::save_brand_asset` checks each part's content type and
+// size. Once the file is stored we update `Org.{logo,favicon}_path`.
 async fn org_edit_branding(
     State(state): State<ConsoleState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
     Extension(op): Extension<auth::Operator>,
     mut mp: Multipart,
 ) -> Response<Body> {
-    let mut updates: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut updates: Vec<(BrandAssetKind, &'static str, String)> = Vec::new();
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().map(str::to_owned);
         let kind = match name.as_deref() {
@@ -2105,7 +2015,7 @@ async fn org_edit_branding(
                     BrandAssetKind::Logo => "logo_path",
                     BrandAssetKind::Favicon => "favicon_path",
                 };
-                updates.push((column, Some(filename)));
+                updates.push((kind, column, filename));
             }
             Err(branding::BrandError::TooLarge { actual, max }) => {
                 return redirect_with_error(
@@ -2131,13 +2041,9 @@ async fn org_edit_branding(
     use crate::core::Model as _;
     let assignments: Vec<crate::core::Assignment> = updates
         .iter()
-        .map(|(col, v)| crate::core::Assignment {
+        .map(|(_, col, v)| crate::core::Assignment {
             column: *col,
-            value: v
-                .as_ref()
-                .map(|s| crate::core::SqlValue::String(s.clone()))
-                .unwrap_or(crate::core::SqlValue::Null)
-                .into(),
+            value: crate::core::SqlValue::String(v.clone()).into(),
         })
         .collect();
     let update_q = crate::core::UpdateQuery {
@@ -2152,6 +2058,13 @@ async fn org_edit_branding(
     if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
+    // Only now does no column name the old file (#1933).
+    for (kind, _, kept) in &updates {
+        if let Err(e) = branding::prune_brand_asset(&slug, *kind, kept, &state.brand_storage).await
+        {
+            tracing::warn!(slug = %slug, error = %e, "stale brand file not deleted");
+        }
+    }
     // Branding lives on the `Org` row that resolution caches, so an
     // upload without this leaves the previous logo rendering until the
     // entry expires.
@@ -2164,7 +2077,7 @@ async fn org_edit_branding(
     let operator_id = op.id.get().copied().unwrap_or(0);
     let assets: Vec<String> = updates
         .iter()
-        .map(|(col, _)| match *col {
+        .map(|(_, col, _)| match *col {
             "logo_path" => "logo".to_owned(),
             "favicon_path" => "favicon".to_owned(),
             other => other.to_owned(),
@@ -2207,10 +2120,7 @@ async fn serve_brand_asset(
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => server_error("operator_console::brand_asset", &e),
     }
 }
 
@@ -2227,58 +2137,28 @@ async fn static_rustango_png() -> Response<Body> {
 
 // ----------------------------- helpers
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
-}
+// The crate's one query-value encoder (#1663); it also escapes `/`.
+use crate::url_codec::url_encode as urlencoding_lite;
 
-/// Minimal URL-encoder for the small set of characters we need to
-/// quote in a `next=` query param. Avoids pulling in `urlencoding`
-/// as a dep for ~6 lines of work.
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-/// Drop suspicious next paths — only allow same-origin relative
-/// targets so an attacker can't redirect post-login to an external
-/// site.
+/// Check a caller-supplied `?next=` before it reaches `Location`.
+///
+/// Only same-origin relative paths pass, so a post-login redirect
+/// cannot be pointed at another site. The check itself lives in
+/// [`crate::auth_decorators::safe_next`].
 fn sanitize_next(next: Option<&str>) -> String {
-    match next {
-        Some(s) if s.starts_with('/') && !s.starts_with("//") && !s.contains("://") => s.to_owned(),
-        _ => "/".to_owned(),
-    }
+    next.and_then(crate::auth_decorators::safe_next)
+        .unwrap_or_else(|| "/".to_owned())
 }
 
 // ============================================================== /orgs/{slug}/impersonate
 //
-// v0.27.8 (#78) — "Open admin as superuser →" button on
-// `/orgs/{slug}/edit`. Originally minted a tenant-bound
-// `TenantSessionPayload` cookie on the apex domain and 302'd to
-// the tenant admin. v0.29 (#88) flipped the flow to a URL-token
-// handoff: the operator console mints a short-lived signed
-// `HandoffPayload` and 302s to
-// `<sub>.<apex><handoff_url>?token=<...>`. The tenant admin
-// redeems the token + sets a host-scoped cookie, which Chromium
-// accepts even on the `localhost` PSL TLD where the cookie-domain
-// approach failed.
+// Behind the "Open admin as superuser" button on `/orgs/{slug}/edit`.
+// The console mints a short-lived signed `HandoffPayload` and redirects
+// to `<sub>.<apex><handoff_url>?token=<...>`. The tenant admin redeems
+// the token and sets a host-scoped cookie, which browsers accept even
+// on `localhost`.
 //
-// Banner + audit-log entries on both ends still make impersonation
-// visible + traceable.
+// A banner and audit rows on both ends keep impersonation visible.
 
 async fn org_impersonate(
     State(state): State<ConsoleState>,
@@ -2287,13 +2167,11 @@ async fn org_impersonate(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Response<Body> {
     let Some(tenant_secret) = state.tenant_session_secret.clone() else {
-        // Should never happen — the route is only mounted when
-        // the secret was supplied. Defensive guard.
+        // Unreachable: the route is mounted only with a secret.
         return (StatusCode::SERVICE_UNAVAILABLE, "impersonation disabled").into_response();
     };
-    // Look up the org so we can refuse impersonation against
-    // inactive tenants, and so the audit-log entry has the
-    // correct context.
+    // Look up the org so we can refuse an inactive tenant and give the
+    // audit row the right context.
     let orgs: Vec<super::Org> = match super::Org::objects()
         .where_(super::Org::slug.eq(slug.clone()))
         .fetch(&state.registry)
@@ -2320,13 +2198,17 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
-    let payload =
-        handoff::HandoffPayload::new(operator_id, slug.clone(), handoff::HANDOFF_TTL_SECS);
+    let mut payload = handoff::HandoffPayload::new(
+        operator_id,
+        slug.clone(),
+        handoff::HANDOFF_TTL_SECS,
+        handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
+    );
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let token = handoff::mint(&tenant_secret, &payload);
 
-    // Audit-log entry on the operator side. The tenant admin
-    // emits a separate entry the first time an impersonation
-    // session lands on a write — both ends are visible.
+    // Audit row on the operator side. The tenant admin writes its own
+    // when an impersonated session first makes a change.
     let mut detail = serde_json::Map::new();
     detail.insert(
         "action".into(),
@@ -2334,44 +2216,29 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect URL: tenant subdomain + the configured
-    // impersonation handoff path + `?token=...`. The tenant admin
-    // redeems the token, sets the impersonation cookie host-scoped
-    // to its own subdomain, and bounces the browser onward to the
-    // admin index.
-    //
-    // Scheme: respect `RUSTANGO_TENANT_SCHEME` for explicit
-    // overrides; otherwise default to http for local dev.
+    // Build the redirect: tenant subdomain, the handoff path, and the
+    // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
+    // http for local dev.
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    let prefix = handoff_prefix(org.path_prefix.as_deref());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
     } else {
-        // Fall back to apex composition: <slug>.<apex>. The
-        // apex isn't directly in ConsoleState; pull from env
-        // as the operator console already does in OpBrand.
+        // No host pattern: a path-prefix tenant lives on the apex,
+        // any other on `<slug>.<apex>`.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
-        format!("{}.{}", slug, apex)
+        if prefix.is_empty() {
+            format!("{}.{}", slug, apex)
+        } else {
+            apex
+        }
     };
-    // Port: prefer the explicit `RUSTANGO_TENANT_PORT` env var
-    // (deployments where the listener and the public-facing port
-    // differ — e.g. behind a reverse proxy). Otherwise reuse the
-    // port from the inbound request's Host header so dev (`:8080`)
-    // and apex-on-standard-port prod (no port suffix) both Just
-    // Work without configuration.
-    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
-        .ok()
-        .filter(|s| !s.is_empty() && s != "80" && s != "443")
-        .map(|p| format!(":{p}"))
-        .or_else(|| {
-            headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|h| h.rsplit_once(':').map(|(_, port)| port.to_owned()))
-                .filter(|p| !p.is_empty() && p != "80" && p != "443")
-                .map(|p| format!(":{p}"))
-        })
-        .unwrap_or_default();
-    let handoff_path = state.tenant_handoff_url.trim_end_matches('/');
+    let port_suffix = handoff_port_suffix(
+        org.port,
+        std::env::var("RUSTANGO_TENANT_PORT").ok(),
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+    );
+    let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
     let redirect_to = format!("{scheme}://{host}{port_suffix}{handoff_path}?token={token}");
@@ -2393,6 +2260,179 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
+}
+
+/// The org's path prefix for the handoff URL, or `""` when the stored
+/// value is not one segment: `//evil.example` would redirect off-site.
+fn handoff_prefix(path_prefix: Option<&str>) -> &str {
+    path_prefix
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| crate::tenancy::provision::validate_path_prefix(p).is_ok())
+        .unwrap_or("")
+}
+
+/// Port for the handoff URL. A port-routed org's own port wins (#1933);
+/// then `RUSTANGO_TENANT_PORT`; then the console request's port.
+fn handoff_port_suffix(
+    org_port: Option<i32>,
+    env_port: Option<String>,
+    host: Option<&str>,
+) -> String {
+    let usable = |p: &str| !p.is_empty() && p != "80" && p != "443";
+    if let Some(p) = org_port {
+        let p = p.to_string();
+        return if usable(&p) {
+            format!(":{p}")
+        } else {
+            String::new()
+        };
+    }
+    env_port
+        .filter(|p| usable(p))
+        .or_else(|| {
+            host.and_then(|h| h.rsplit_once(':'))
+                .map(|(_, p)| p.to_owned())
+                .filter(|p| usable(p))
+        })
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default()
+}
+
+/// Names only where the config broke; the error text can quote a secret.
+#[cfg(feature = "config")]
+fn warn_config_error(e: &crate::config::ConfigError) {
+    tracing::warn!(
+        target: "rustango::tenancy::operator_console",
+        at = %e.location(),
+        "the config does not load; console branding uses defaults"
+    );
+}
+
+#[cfg(all(test, feature = "config", feature = "runtime"))]
+mod config_warn_tests {
+    #[test]
+    fn a_broken_config_logs_its_line_not_its_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/default.toml"),
+            "[database]\nurl = \"postgres://app:s3cret@db/app\n",
+        )
+        .unwrap();
+        let err = crate::config::Settings::load_from(&dir.path().join("config"), "dev")
+            .expect_err("unterminated string");
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || super::warn_config_error(&err));
+        let logged = out.contents();
+        assert!(!logged.contains("s3cret"), "{logged}");
+        assert!(logged.contains("line 2"), "{logged}");
+    }
+}
+
+#[cfg(test)]
+mod handoff_port_tests {
+    use super::{handoff_port_suffix, handoff_prefix};
+
+    #[test]
+    fn only_a_valid_path_prefix_reaches_the_handoff_url() {
+        assert_eq!(handoff_prefix(Some("/acme/")), "/acme");
+        assert_eq!(handoff_prefix(None), "");
+        for bad in ["//evil.example", "/a/b", "acme", "/a?b", "/@evil"] {
+            assert_eq!(handoff_prefix(Some(bad)), "", "`{bad}`");
+        }
+    }
+
+    #[test]
+    fn a_port_routed_org_lands_on_its_own_port() {
+        let env = Some("9000".to_owned());
+        assert_eq!(
+            handoff_port_suffix(Some(8443), env.clone(), Some("ops:8080")),
+            ":8443"
+        );
+        assert_eq!(handoff_port_suffix(None, env, Some("ops:8080")), ":9000");
+        assert_eq!(handoff_port_suffix(None, None, Some("ops:8080")), ":8080");
+        assert_eq!(handoff_port_suffix(Some(443), None, Some("ops:8080")), "");
+    }
+}
+
+/// #1526. These exercise `sanitize_next` — the function the login
+/// handler actually calls, whose result reaches `Redirect::to` — and
+/// not the public `urls::url_has_allowed_host_and_scheme` helper,
+/// which this codebase never calls and which the original fix went
+/// into.
+#[cfg(test)]
+mod sanitize_next_tests {
+    use super::sanitize_next;
+
+    #[test]
+    fn a_backslash_the_browser_rewrites_is_refused() {
+        // Each reaches the network as protocol-relative `//evil…`
+        // after the browser's `\` → `/` rewrite (WHATWG URL 4.4),
+        // while starting with `/` in the source text.
+        for hostile in [
+            "/\\evil.example/x",
+            "/\\\\evil.example/x",
+            "\\/evil.example/x",
+            "/%5Cevil.example/x",
+        ] {
+            assert_eq!(
+                sanitize_next(Some(hostile)),
+                "/",
+                "`{hostile}` must not reach Location",
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_shapes_are_still_refused() {
+        for hostile in [
+            "//evil.example/x",
+            "https://evil.example",
+            "javascript:1",
+            // The browser strips TAB, CR and LF while parsing a URL
+            // (WHATWG URL 4.1), so each of these leaves as the
+            // protocol-relative `//evil.example` (#1604 security-001).
+            "/\x09/evil.example/x",
+            "/\x0d/evil.example/x",
+            "/\x0a/evil.example/x",
+        ] {
+            assert_eq!(sanitize_next(Some(hostile)), "/", "{hostile}");
+        }
+        assert_eq!(sanitize_next(None), "/");
+    }
+
+    #[test]
+    fn an_ordinary_path_still_survives() {
+        // The control: tightening must not send every operator to `/`
+        // after login, which would pass the assertions above.
+        for ok in ["/orgs", "/orgs/acme/edit", "/orgs?page=2&q=a"] {
+            assert_eq!(sanitize_next(Some(ok)), ok, "{ok} should survive");
+        }
+    }
+}
+
+#[cfg(test)]
+mod redirect_to_login_tests {
+    use super::redirect_to_login;
+
+    /// `next` is fully encoded and decodes back to the path it came from.
+    #[test]
+    fn next_round_trips_through_the_location() {
+        let resp = redirect_to_login("/orgs/acme edit?tab=1&x=2");
+        let loc = resp.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Forgs%2Facme%20edit%3Ftab%3D1%26x%3D2");
+        let next = loc.strip_prefix("/login?next=").unwrap();
+        assert_eq!(
+            crate::url_codec::url_decode(next),
+            "/orgs/acme edit?tab=1&x=2"
+        );
+    }
 }
 
 #[cfg(test)]

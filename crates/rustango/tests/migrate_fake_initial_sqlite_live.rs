@@ -93,9 +93,7 @@ fn write_dir(mig: &Migration) -> PathBuf {
 }
 
 async fn ledger_has(pool: &Pool, name: &str) -> bool {
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let count: i64 = sqlx::query(&format!(
         "SELECT COUNT(*) AS c FROM {LEDGER} WHERE name = ?"
     ))
@@ -130,9 +128,7 @@ async fn fake_initial_records_without_running_when_table_exists() {
     let dir = write_dir(&m);
 
     // Simulate the old `ensure_table` era: the table already exists, with data.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     sqlx::query(&format!(
         "CREATE TABLE {table} (id INTEGER PRIMARY KEY, note TEXT)"
     ))
@@ -194,9 +190,7 @@ async fn fake_initial_creates_normally_when_table_absent() {
     assert!(ledger_has(&pool, name).await);
 
     // The table was actually created (a real INSERT works).
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     sqlx::query(&format!("INSERT INTO {table} (id) VALUES (1)"))
         .execute(sq)
         .await
@@ -228,9 +222,7 @@ async fn fake_initial_creates_only_missing_tables_on_partial_state() {
     let dir = write_dir(&m);
 
     // Only t1 pre-exists, and it holds data that must survive.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     sqlx::query(&format!(
         "CREATE TABLE {t1} (id INTEGER PRIMARY KEY, note TEXT)"
     ))
@@ -297,9 +289,7 @@ async fn fake_initial_handles_create_table_plus_indexes() {
     let dir = write_dir(&m);
 
     // Pre-existing (ensure_table-era) table with data.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     sqlx::query(&format!(
         "CREATE TABLE {table} (id INTEGER PRIMARY KEY, note TEXT)"
     ))
@@ -357,9 +347,7 @@ async fn fake_initial_refuses_index_on_foreign_table() {
     );
     let dir = write_dir(&m);
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     for t in [created, other] {
         sqlx::query(&format!("CREATE TABLE {t} (id INTEGER PRIMARY KEY)"))
             .execute(sq)

@@ -1,4 +1,4 @@
-//! Django-parity #403 — `Translator::from_settings(&I18nSettings)`
+//! Issue #403 — `Translator::from_settings(&I18nSettings)`
 //! bootstraps a translator from TOML's `LANGUAGE_CODE` /
 //! `LANGUAGES` / `LOCALE_PATHS` shape so deployments don't need to
 //! instantiate the translator in code.

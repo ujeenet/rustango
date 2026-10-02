@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet::limit_offset_pagination()` on
-//! SQLite (Django-parity #1010). DRF-shape `?limit=&offset=` windowing:
+//! SQLite (issue #1010). `?limit=&offset=` windowing:
 //! asserts the window walks by offset, echoes `count`/`limit`/`offset`,
 //! defaults sensibly, and clamps hostile bounds.
 

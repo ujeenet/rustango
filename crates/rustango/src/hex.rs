@@ -1,10 +1,8 @@
-//! Tiny lowercase-hex codec — pure, no external deps. Lives outside
-//! [`crate::crypto`] so call sites that don't compile `hmac` / `sha2`
-//! (pagination cursor encoding, `row_to_json` binary columns) can
-//! still share one implementation.
+//! Small lowercase-hex codec with no dependencies.
 //!
-//! Renames `crate::crypto::hex_encode` from v0.42; the older path is
-//! kept as a re-export for the `hmac`-deps codepath.
+//! It sits outside [`crate::crypto`] so callers that do not build
+//! `hmac` and `sha2`, such as pagination cursors and `row_to_json`,
+//! can share the same code. `crate::crypto` re-exports it.
 
 /// Render `bytes` as a lowercase hex string (no separator).
 #[must_use]

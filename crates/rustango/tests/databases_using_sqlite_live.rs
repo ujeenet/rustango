@@ -114,6 +114,6 @@ async fn using_routes_reads_to_the_registered_alias() {
 #[tokio::test]
 #[should_panic(expected = "no database registered under alias")]
 async fn using_unknown_alias_panics_with_a_clear_message() {
-    // Never registered → loud failure (Django's ConnectionDoesNotExist).
+    // Never registered → loud failure, not a silent fallback.
     let _ = Widget::objects().using("md332_definitely_unregistered_alias");
 }

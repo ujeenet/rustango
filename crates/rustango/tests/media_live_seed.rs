@@ -98,7 +98,7 @@ async fn seed_media_rows_for_inspection() {
         key_prefix: "media-seed/direct".into(),
         mime: "text/plain".into(),
         original_filename: "manifesto.txt".into(),
-        size_bytes: 27,
+        size_bytes: 30,
         uploaded_by_id: Some(3),
         collection_id: None,
         ttl: Duration::from_secs(60),
@@ -111,6 +111,7 @@ async fn seed_media_rows_for_inspection() {
     let resp = reqwest::Client::new()
         .put(&ticket.upload_url)
         .header("Content-Type", "text/plain")
+        .header("If-None-Match", "*")
         .body("rustango media is first-class.".as_bytes().to_vec())
         .send()
         .await

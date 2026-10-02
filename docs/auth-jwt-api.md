@@ -9,7 +9,7 @@ ships that as `JwtLifecycle` — and a batteries-included router that mounts
 [![JWT auth API: login issues an access+refresh pair, refresh rotates and blacklists the old token, logout revokes via a JTI store](img/auth-jwt-api.png)](img/auth-jwt-api.png)
 
 > **Source:** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
-> `JwtClaims`) and `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
+> `JwtClaims`) and `rustango::tenancy::auth_routes` (`JwtAuth`, `Config`) +
 > `rustango::jti_store` (`JtiStore`, `InMemoryJtiStore`) — behind `jwt` +
 > `tenancy`.
 >
@@ -38,7 +38,7 @@ ships that as `JwtLifecycle` — and a batteries-included router that mounts
 
 ## The built-in router
 
-`jwt_router` mounts the standard four endpoints against the per-tenant
+`JwtAuth::router()` mounts the standard four endpoints against the per-tenant
 `rustango_users` table — the ~50 lines of login boilerplate every project
 otherwise rewrites:
 
@@ -46,7 +46,7 @@ otherwise rewrites:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (revokes the JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + optional `{refresh}` | `204` (revokes both JTIs) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifies the password with [argon2id](auth-passwords.md), then issues a
@@ -55,15 +55,23 @@ pair. Paths, TTLs, and the signing key are configurable via `Config`.
 ## Wiring it up
 
 ```rust
-use rustango::tenancy::auth_routes::{jwt_router, Config};
+use axum::middleware::from_fn_with_state;
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 
+let auth = JwtAuth::new(Config::default());
 rustango::manage::Cli::new()
     .tenancy()
     .api(my_app::urls::api()
-        .merge(jwt_router(Config::default())))   // mounts /api/auth/*
+        .layer(from_fn_with_state(auth.clone(), require_bearer)) // your routes
+        .merge(auth.router()))                                   // /api/auth/*
     .run()
     .await
 ```
+
+Build **one** `JwtAuth` and pass clones of it everywhere. Each instance has its
+own in-memory revocation list, so with two, a logout on the router is not seen
+by `require_bearer` and the token keeps working until it expires. A shared
+`jti_store` (Redis, database) removes that split too.
 
 `Config::default()` signs with `RUSTANGO_SESSION_SECRET` (the same key as the
 admin session cookie) and uses 15-min access / 7-day refresh TTLs. Override
@@ -133,6 +141,14 @@ By default `refresh` **preserves** the token's custom claims. If permissions may
 have changed (role revoked, scope downgraded), use `refresh_with(token, new_claims)`
 to substitute a fresh payload while still blacklisting the old refresh JTI.
 
+`POST /api/auth/refresh` adds three checks: a password change since login ends the
+chain, no chain outlives `Config::refresh_absolute_ttl_secs` (30 days) from login, and
+replaying an already-rotated token revokes the whole chain. A retry within about
+`Config::refresh_reuse_grace_secs` (10–20 s) of the rotation only gets a 401, so an
+honest client that sent two refreshes stays logged in; the cost is that a thief who
+replays inside that window does not trigger the revoke. Revocation is only as strong
+as the JTI store (an in-memory one forgets on restart).
+
 ---
 
 ## Revocation and the JTI store
@@ -146,6 +162,23 @@ let pair = jwt.issue_pair(1);
 assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
+
+### Send the refresh token to `/logout`
+
+Revoking the bearer alone ends a token that would have expired in minutes
+anyway. The refresh token is the one with days of life, and it can mint fresh
+access tokens for its whole TTL — so a logout that leaves it alive doesn't end
+the session, it postpones it:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // revokes the long-lived half too
+```
+
+The body is optional, so clients written against the older endpoint keep
+working unchanged — they simply revoke less. Send it. Both halves are pinned to
+the calling tenant, so one subdomain cannot revoke another's token.
 
 The blacklist lives in a pluggable `JtiStore`. The default `InMemoryJtiStore` is
 **single-process and loses revocations on restart** — fine for one instance. Any
@@ -201,7 +234,7 @@ exactly one `true`, or the single-use refresh guarantee is gone.
 
 Because verification consults the store, `verify_access`, `verify_refresh`,
 `refresh`, `revoke` and the MCP/tenant token helpers
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) are all
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) are all
 `async`. Token **expiry is checked before** the store is consulted, so an
 expired token never costs a round trip.
 
@@ -232,13 +265,26 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   [Session](auth-sessions.md) is revocable but needs a per-request store lookup;
   `JwtLifecycle` is the middle path — stateless verify, plus a JTI blocklist for
   the revocations you actually need (logout, rotation).
-- **HTTP endpoints are tenant-scoped.** `jwt_router` resolves users via the
+- **HTTP endpoints are tenant-scoped.** `JwtAuth::router()` resolves users via the
   tenant context + `rustango_users`; mount it in a `.tenancy()` app. The token
   engine (`JwtLifecycle`) itself has no such requirement.
 - **Pair this with** the [auth backend chain](auth-backends.md)'s `JwtBackend`
   to authenticate arbitrary routes from the `Authorization: Bearer` header.
 - **HS256 signing**, 32-byte key floor — same algorithm and constraints as
   [standalone JWT](auth-jwt.md#security-model).
+- **The tokens are ordinary JWTs**, so anything that verifies a JWT can verify
+  these: `jwt.io`, your platform's standard library, an API gateway, another
+  service you hand a token to. Three segments, a JOSE header of
+  `{"alg":"HS256","typ":"JWT"}`, signed over `header.payload`.
+
+  Until [#1397](https://github.com/ujeenet/rustango/issues/1397) they were two
+  segments with no header, signed over the payload alone — readable by nothing
+  but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
+  custom verifier to work around that, you can drop it.
+
+  Tokens minted before the fix are still accepted on verify so an upgrade does
+  not log anyone out. That compatibility path is removed in 0.58, by which point
+  any token in the old shape has long expired.
 
 
 ---

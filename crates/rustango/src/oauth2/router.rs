@@ -137,15 +137,14 @@ async fn login_handler(
     // 5-minute window — if the user takes longer to log in we issue a fresh flow.
     let cookie =
         format!("{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{secure}");
+    // Provider config can yield bytes a header rejects: a 500, not a panic (#1541).
+    let (Ok(cookie), Ok(location)) = (cookie.parse(), auth_url.parse()) else {
+        tracing::error!(target: "rustango::error", provider = %provider_name, "oauth2 login: authorize URL or cookie is not a valid header value");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        cookie.parse().expect("valid cookie header"),
-    );
-    headers.insert(
-        header::LOCATION,
-        auth_url.parse().expect("valid location header"),
-    );
+    headers.insert(header::SET_COOKIE, cookie);
+    headers.insert(header::LOCATION, location);
     (StatusCode::SEE_OTHER, headers).into_response()
 }
 
@@ -181,14 +180,14 @@ async fn callback_handler(
     let Some(provider) = state.registry.get(&tenant, &provider_name) else {
         return (StatusCode::NOT_FOUND, "unknown provider").into_response();
     };
-    let Some(sealed) = read_cookie(&headers, FLOW_COOKIE) else {
+    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, FLOW_COOKIE) else {
         return (
             StatusCode::BAD_REQUEST,
             "missing flow cookie — start at /login",
         )
             .into_response();
     };
-    let flow = match open_flow(&sealed, &state.flow_secret) {
+    let flow = match open_flow(sealed, &state.flow_secret) {
         Ok(f) => f,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}")).into_response()
@@ -211,8 +210,13 @@ async fn callback_handler(
                 .into_response()
         }
         Err(e) => {
+            // `e` can carry the IdP body or upstream addresses: log it only (#1847).
             tracing::warn!(error = %e, provider = %provider_name, "oauth2 callback failed");
-            return (StatusCode::BAD_GATEWAY, format!("auth failed: {e}")).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                "authentication failed at the identity provider",
+            )
+                .into_response();
         }
     };
 
@@ -231,17 +235,6 @@ async fn callback_handler(
         }
         Err(AuthError(msg)) => (StatusCode::BAD_GATEWAY, msg).into_response(),
     }
-}
-
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in cookie_header.split(';') {
-        let kv = kv.trim();
-        if let Some(rest) = kv.strip_prefix(&format!("{name}=")) {
-            return Some(rest.to_owned());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -380,18 +373,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        // A reader that never finds the cookie says "missing" instead.
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("invalid flow cookie"));
     }
 
-    #[test]
-    fn read_cookie_extracts_named_value() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            "session=abc; rustango_oauth_flow=xyz; theme=dark"
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(read_cookie(&headers, FLOW_COOKIE).as_deref(), Some("xyz"));
-        assert!(read_cookie(&headers, "missing").is_none());
+    /// #1847 — an upstream failure's text (here a blocked address) stays out of the 502.
+    #[tokio::test]
+    async fn callback_upstream_error_is_not_echoed() {
+        let registry = OAuth2Registry::new();
+        let mut p = providers::google("cid", "csec", "https://app/cb");
+        p.token_url = "https://10.9.8.7/token".into();
+        registry.register("acme", p);
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loc = login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let state = loc
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let set = login.headers().get(header::SET_COOKIE).unwrap();
+        let pair = set.to_str().unwrap().split(';').next().unwrap().to_owned();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/auth/acme/google/callback?code=abc&state={state}"))
+                    .header(header::COOKIE, pair)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, "authentication failed at the identity provider");
+    }
+
+    /// The cookie set by `/login` is read back and opened on callback: a
+    /// wrong `state` then fails the CSRF check, not the cookie lookup.
+    #[tokio::test]
+    async fn callback_reads_the_flow_cookie_from_login() {
+        let registry = OAuth2Registry::new();
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let set = login.headers().get(header::SET_COOKIE).unwrap();
+        let pair = set.to_str().unwrap().split(';').next().unwrap().to_owned();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/callback?code=abc&state=not-the-state")
+                    .header(header::COOKIE, format!("other=1; {pair}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "CSRF state mismatch");
     }
 }

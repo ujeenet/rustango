@@ -2,7 +2,7 @@
 
 Un modèle est une struct Rust qui correspond à une table de base de données. Ajoutez `#[derive(Model)]`,
 annotez les champs, et **Rustango** génère le schéma, un point d'entrée de requête type-safe,
-et les méthodes `save`/`find`/`delete` — les modèles de Django ou l'Eloquent de Laravel,
+et les méthodes `save`/`find`/`delete` — un modèle façon Active Record,
 avec le compilateur qui vérifie vos colonnes. Ceci est la référence de **déclaration** :
 chaque type de champ, chaque option de clé primaire, et chaque
 attribut `#[rustango(...)]`. Pour *interroger* les modèles une fois déclarés, voir
@@ -91,14 +91,14 @@ type par dialecte, si bien que le même modèle fonctionne sur PostgreSQL, MySQL
 | `f32` | `REAL` | `FLOAT` | `REAL` |
 | `f64` | `DOUBLE PRECISION` | `DOUBLE` | `REAL` |
 | `bool` | `BOOLEAN` | `TINYINT(1)` | `INTEGER` (0/1) |
-| `String` | `TEXT` | `TEXT` | `TEXT` |
+| `String` | `TEXT` | `LONGTEXT` | `TEXT` |
 | `String` + `max_length = N` | `VARCHAR(N)` | `VARCHAR(N)` | `TEXT` |
 | `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | `TEXT` (ISO-8601) |
 | `chrono::NaiveDate` | `DATE` | `DATE` | `TEXT` |
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -123,7 +123,7 @@ pub struct Gadget {
 ```
 
 > **Précision décimale.** Le `NUMERIC` de PostgreSQL est à précision arbitraire ; MySQL utilise
-> `DECIMAL(38,10)` (38 chiffres, 10 décimales — l'ajustement portable le plus large) ; SQLite
+> `DECIMAL(65,28)` (toute valeur `rust_decimal` y tient) ; SQLite
 > utilise l'affinité `NUMERIC`. Utilisez `rust_decimal::Decimal` pour l'argent, jamais `f64`.
 
 ### Types spécifiques à PostgreSQL
@@ -225,6 +225,9 @@ aléatoire, `default_uuid_v7` un v7 triable dans le temps (meilleure localité d
 pub id: Auto<uuid::Uuid>,
 ```
 
+Un `INSERT` brut qui omet une colonne `auto_uuid` reçoit le `DEFAULT` de la base : un v4 sur Postgres et
+SQLite, mais le `UUID()` de MySQL est un v1 (basé sur l'heure et l'hôte).
+
 ### Clés primaires composites
 
 Les clés primaires multi-colonnes natives ne sont **pas prises en charge** — exactement un champ peut être
@@ -285,6 +288,9 @@ type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | validation de plage à l'écriture |
 | `blank` / `editable` | `#[rustango(editable = false)]` | comportement formulaire/admin |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | COMMENT de colonne |
+
+INSERT et UPDATE vérifient ces règles sur les valeurs littérales. Une valeur
+`set_expr(F(..))` est calculée par la base, elle n'est donc pas vérifiée.
 
 `choices`, `default`, `auto_now_add`, et la suppression logique ensemble (tous vérifiés) :
 
@@ -351,8 +357,16 @@ Déclarés sur le **modèle** :
   `.where_(Post::author_id.eq(42))` pour des filtres vérifiés à la compilation.
 - **Des chercheurs (finders)** — `find(pk, &pool)` → `Option<Self>` ; `find_or_fail(pk, &pool)` →
   `Self` (erreur si absent) ; `find_many(pks, &pool)` ; `find_or_insert(...)`.
-- **Des écrivains (writers)** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (met à jour
-  seulement certaines colonnes), `insert_pool` (insertion explicite), `delete`.
+- **Des écrivains (writers)** — `save_pool` (INSERT ou UPDATE), `insert_pool`
+  (insertion explicite), `delete_pool`, et `save_partial(&["title"], &pool)`
+  (met à jour seulement certaines colonnes). Les `save` / `insert` / `delete`
+  nus n'en sont **pas** des alias : ils prennent un `sqlx::PgPool` spécifique au
+  pilote et sont `#[cfg(feature = "postgres")]`, donc sur un build `sqlite` ou
+  `mysql` ils n'existent tout simplement pas. La famille `_pool` prend
+  `rustango::sql::Pool` et fonctionne sur les trois — écrivez celle-là sauf si
+  vous savez être sur Postgres. Ce nommage inversé est suivi dans
+  [#1293](https://github.com/ujeenet/rustango/issues/1293) ; voir
+  [api-conventions](api-conventions.md#fonctions).
 - **La suppression logique** (si activée) — `soft_delete`, `restore`, `force_delete` ;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -392,7 +406,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `manager(ext = "Trait")` | chemin de trait | génère un trait d'extension de manager personnalisé |
 | `manager_fn` | `"published"` | ajoute un accesseur de manager en plus de `objects()` |
 | `get_latest_by` | `"created_at"` | colonne par défaut pour `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | ordre relatif au parent, à la manière de Django |
+| `order_with_respect_to` | `"parent"` | ordre des lignes enfants relatif au parent |
 | `index(...)` | `columns`, `method`, `name` | index secondaire (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | contrainte d'unicité composite |
 | `index_together` | `"a, b"` | index composite non unique |
@@ -419,10 +433,15 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `default` | `"sql literal"` | DEFAULT de colonne |
 | `null` | indicateur | nullable (ou utilisez `Option<T>`) |
 | `unique` | indicateur | contrainte d'unicité |
+| `index` / `index(...)` | indicateur, ou `unique`, `name`, `method` | index mono-colonne sur ce champ |
 | `choices` | `"v:Label, …"` | valeurs énumérées |
 | `min` / `max` | nombre | validation de plage |
 | `blank` | indicateur | autorise le vide dans les formulaires/admin |
 | `editable` | `true`/`false` | éditabilité formulaire/admin |
+| `verbose_name` | `"Label"` | libellé lisible du champ dans les formulaires/admin |
+| `help_text` | `"…"` | texte d'aide rendu sous le widget de formulaire/admin |
+| `validators` | `"name, name"` | validateurs nommés à exécuter sur ce champ |
+| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK |
 | `auto_now` | indicateur | réglé à l'heure actuelle à chaque save |
 | `auto_now_add` | indicateur | réglé à l'heure actuelle à l'insertion |
 | `auto_uuid` | indicateur | UUID v4 côté Rust (sur `Auto<Uuid>`) |

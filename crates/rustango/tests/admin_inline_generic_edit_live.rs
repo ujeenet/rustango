@@ -32,7 +32,11 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 #[derive(Model, Debug, Clone)]
@@ -361,5 +365,226 @@ async fn generic_inline_update_cannot_reparent_via_form_payload() {
     assert_eq!(
         object_pk, post_a_pk,
         "object_pk must NOT change — slice 2 skips polymorphic columns on UPDATE"
+    );
+}
+
+/// #1667: a tag PK owned by another post matches nothing, for UPDATE and DELETE.
+#[tokio::test]
+async fn generic_inline_cannot_touch_another_parents_row() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    fresh(&pool).await;
+    let p = rustango::sql::Pool::from(pool.clone());
+
+    let mut post_a = Post {
+        id: Auto::Unset,
+        title: "A".into(),
+    };
+    post_a.save_pool(&p).await.unwrap();
+    let post_a_pk = *post_a.id.get().unwrap();
+    let mut post_b = Post {
+        id: Auto::Unset,
+        title: "B".into(),
+    };
+    post_b.save_pool(&p).await.unwrap();
+
+    let mut tag = Tag {
+        id: Auto::Unset,
+        content_type_id: 0,
+        object_pk: 0,
+        name: "b-tag".into(),
+    };
+    tag.set_content_object_for::<Post>(&p, *post_b.id.get().unwrap())
+        .await
+        .unwrap();
+    tag.save_pool(&p).await.unwrap();
+    let tag_id_s = tag.id.get().unwrap().to_string();
+
+    for delete in [false, true] {
+        let mut form: HashMap<&str, &str> = HashMap::new();
+        form.insert("title", "A");
+        form.insert("gige_tag-TOTAL_FORMS", "1");
+        form.insert("gige_tag-INITIAL_FORMS", "1");
+        form.insert("gige_tag-MAX_NUM_FORMS", "");
+        form.insert("gige_tag-0-id", tag_id_s.as_str());
+        form.insert("gige_tag-0-name", "hijacked");
+        if delete {
+            form.insert("gige_tag-0-DELETE", "on");
+        }
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/gige_post/{post_a_pk}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(urlencode(&form)))
+            .unwrap();
+        let res = rustango::admin::router(pool.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "delete={delete}");
+    }
+
+    let names: Vec<(String,)> = sqlx::query_as(r#"SELECT name FROM "gige_tag""#)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(names, vec![("b-tag".to_owned(),)]);
+}
+
+/// Field names differ from the GFK columns, so the overflow link must map them.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "gigc_post")]
+#[rustango(app = "gige_blog")]
+#[allow(dead_code)]
+pub struct CapPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "gigc_note")]
+#[rustango(app = "gige_blog")]
+#[rustango(generic_fk(name = "target", ct_column = "ct_id", pk_column = "obj_id"))]
+#[allow(dead_code)]
+pub struct CapNote {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(column = "ct_id")]
+    pub kind: i64,
+    #[rustango(column = "obj_id")]
+    pub target_pk: i64,
+    #[rustango(max_length = 40)]
+    pub name: String,
+}
+
+register_admin_inline_generic!(
+    parent = "gigc_post",
+    child = "gigc_note",
+    ct = "ct_id",
+    pk = "obj_id",
+    kind = InlineKind::Tabular,
+    label = "Notes",
+    fields = &["name"],
+    extra = 2,
+);
+
+async fn get_html(app: &axum::Router, uri: &str) -> String {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "{uri}");
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// Past the formset cap the generic inline renders a TOTAL_FORMS the POST
+/// accepts and links the rest by field name (#1977).
+#[tokio::test]
+async fn generic_inline_past_the_cap_saves_and_links_the_rest() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let p = rustango::sql::Pool::from(pool.clone());
+    contenttypes::ensure_seeded(&p).await.unwrap();
+    for sql in [
+        r#"DROP TABLE IF EXISTS "gigc_note", "gigc_post" CASCADE"#,
+        r#"CREATE TABLE "gigc_post" (id BIGSERIAL PRIMARY KEY, title VARCHAR(200) NOT NULL)"#,
+        r#"CREATE TABLE "gigc_note" (id BIGSERIAL PRIMARY KEY, ct_id BIGINT NOT NULL,
+               obj_id BIGINT NOT NULL, name VARCHAR(40) NOT NULL)"#,
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let ct = contenttypes::ContentType::get_for_model::<CapPost>(&p)
+        .await
+        .unwrap()
+        .unwrap();
+    let ct = *ct.id.get().unwrap();
+    let mut posts = Vec::new();
+    for title in ["Big", "Other"] {
+        let mut post = CapPost {
+            id: Auto::Unset,
+            title: title.into(),
+        };
+        post.save_pool(&p).await.unwrap();
+        posts.push(*post.id.get().unwrap());
+    }
+    let (pk, other) = (posts[0], posts[1]);
+    sqlx::query(r#"INSERT INTO "gigc_note" (ct_id, obj_id, name) VALUES ($1, $2, 'other')"#)
+        .bind(ct)
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO "gigc_note" (ct_id, obj_id, name)
+           SELECT $1, $2, 'n' || g FROM generate_series(1, 1001) g"#,
+    )
+    .bind(ct)
+    .bind(pk)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ids: Vec<i64> =
+        sqlx::query_scalar(r#"SELECT id FROM "gigc_note" WHERE obj_id = $1 ORDER BY id"#)
+            .bind(pk)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    let app = rustango::admin::Builder::new(p.clone())
+        .admin_prefix("")
+        .build();
+    let html = get_html(&app, &format!("/gigc_post/{pk}/edit")).await;
+    let marker = r#"name="gigc_note-TOTAL_FORMS" value=""#;
+    let at = html.find(marker).expect("management form") + marker.len();
+    let total = html[at..at + html[at..].find('"').unwrap()].to_owned();
+
+    let more = html.find("inline-form-more").expect("overflow link");
+    let at = more + html[more..].find(r#"href=""#).unwrap() + 6;
+    let href = html[at..at + html[at..].find('"').unwrap()]
+        .replace("&amp;", "&")
+        .replace("&#x2F;", "/");
+    assert_eq!(href, format!("/gigc_note?kind={ct}&target_pk={pk}"));
+    let list = get_html(&app, &href).await;
+    assert!(list.contains("&mdash; 1001 rows"), "link filters the list");
+
+    let (id0, id1) = (ids[0].to_string(), ids[1].to_string());
+    let form: HashMap<&str, &str> = HashMap::from([
+        ("title", "Big"),
+        ("gigc_note-TOTAL_FORMS", total.as_str()),
+        ("gigc_note-0-id", id0.as_str()),
+        ("gigc_note-0-name", "renamed"),
+        ("gigc_note-1-id", id1.as_str()),
+        ("gigc_note-1-name", "n2"),
+        ("gigc_note-1-DELETE", "on"),
+    ]);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/gigc_post/{pk}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(urlencode(&form)))
+        .unwrap();
+    let status = app.clone().oneshot(req).await.unwrap().status();
+    assert!(status.is_redirection(), "TOTAL_FORMS={total}: got {status}");
+
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as(r#"SELECT id, name FROM "gigc_note" WHERE obj_id = $1 ORDER BY id"#)
+            .bind(pk)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1000, "one rendered row deleted, the rest kept");
+    assert_eq!(rows[0], (ids[0], "renamed".to_owned()));
+    assert_ne!(rows[1].0, ids[1], "ticked row is gone");
+    assert_eq!(
+        rows.last().unwrap().0,
+        *ids.last().unwrap(),
+        "unrendered row kept"
     );
 }

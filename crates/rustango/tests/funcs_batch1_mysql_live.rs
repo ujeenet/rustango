@@ -43,7 +43,7 @@ async fn pool() -> Option<Pool> {
         .max_connections(2)
         .connect(&url)
         .await
-        .ok()?;
+        .unwrap_or_else(|e| panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}"));
     let _ = sqlx::query("DROP TABLE IF EXISTS funcs_b1_my_demo")
         .execute(&mp)
         .await;

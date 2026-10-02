@@ -447,3 +447,89 @@ async fn pruning_removes_finished_runs_and_keeps_unfinished_ones() {
         "an unfinished run must survive pruning at any age"
     );
 }
+
+/// At boot, a run left `running` by a process that died is closed as
+/// failed; a live one and a finished one are left alone (#1883).
+#[tokio::test]
+async fn stale_running_runs_are_reaped() {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    let (pools, url, _tmp) = registry().await;
+    let migrations = tempfile::tempdir().expect("migrations dir");
+    migrate_registry(&pools, &url, migrations.path()).await;
+    let reg = pools.registry_pool();
+    let open = |slug: &'static str| {
+        let reg = reg.clone();
+        async move {
+            let run = store::open_migrate_run(&reg, Some(slug), None)
+                .await
+                .unwrap();
+            run.id.get().copied().unwrap()
+        }
+    };
+    let (dead, live, done) = (open("dead").await, open("live").await, open("done").await);
+    for id in [dead, done] {
+        store::ProvisioningRun::objects()
+            .where_(store::ProvisioningRun::id.eq(id))
+            .update()
+            .set(
+                "started_at",
+                chrono::Utc::now() - chrono::Duration::hours(2),
+            )
+            .execute_pool(&reg)
+            .await
+            .unwrap();
+    }
+    store::finish_run(&reg, done, RunState::Succeeded, None)
+        .await
+        .unwrap();
+
+    let reaped = store::reap_stale_runs(&reg, std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert_eq!(reaped, 1);
+    let state = |id| {
+        let reg = reg.clone();
+        async move { RunState::parse(&store::run_by_id(&reg, id).await.unwrap().unwrap().state) }
+    };
+    assert_eq!(state(dead).await, RunState::Failed);
+    assert_eq!(state(live).await, RunState::Running);
+    assert_eq!(state(done).await, RunState::Succeeded);
+}
+
+/// A run closed as interrupted keeps that state when its task, still
+/// alive after all, finishes later (#1883).
+#[tokio::test]
+async fn a_reaped_run_is_not_flipped_back_by_its_task() {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    let (pools, url, _tmp) = registry().await;
+    let migrations = tempfile::tempdir().expect("migrations dir");
+    migrate_registry(&pools, &url, migrations.path()).await;
+    let reg = pools.registry_pool();
+    let run = store::open_migrate_run(&reg, Some("slow"), None)
+        .await
+        .unwrap();
+    let id = run.id.get().copied().unwrap();
+    store::ProvisioningRun::objects()
+        .where_(store::ProvisioningRun::id.eq(id))
+        .update()
+        .set(
+            "started_at",
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .execute_pool(&reg)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::reap_stale_runs(&reg, std::time::Duration::from_secs(3600))
+            .await
+            .unwrap(),
+        1
+    );
+    store::finish_run(&reg, id, RunState::Succeeded, None)
+        .await
+        .unwrap();
+    let state = store::run_by_id(&reg, id).await.unwrap().unwrap().state;
+    assert_eq!(RunState::parse(&state), RunState::Failed);
+}

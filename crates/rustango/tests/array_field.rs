@@ -1,5 +1,5 @@
-//! Unit coverage for `Array<T>` PostgreSQL array columns — Django
-//! `ArrayField` (#341). No database required: asserts the derived
+//! Unit coverage for `Array<T>` PostgreSQL array columns
+//! (#341). No database required: asserts the derived
 //! schema's `FieldType::Array` mapping and the per-dialect column-type
 //! emission (`text[]` / `integer[]` / `bigint[]` on PG; degraded `TEXT`
 //! on MySQL / SQLite, where arrays are unsupported by language).

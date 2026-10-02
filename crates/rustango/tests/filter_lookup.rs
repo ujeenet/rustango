@@ -1,4 +1,4 @@
-//! Tri-dialect emission tests for Django-shape `.filter("field__lookup", value)`
+//! Tri-dialect emission tests for `.filter("field__lookup", value)`
 //! (issue #71). The suffix parser is dialect-independent — these tests
 //! pin the SQL string + the placeholder dialect shape + the
 //! transformed-value (e.g. `%rust%` wrapping for `__icontains`).
@@ -303,7 +303,7 @@ fn between_emits_between_clause() {
 
 #[test]
 fn range_alias_emits_between_clause() {
-    // Django uses `__range`; rustango accepts both for ergonomics.
+    // `__range` is an accepted alias for `__between`.
     let qs = Post::objects().filter(
         "views__range",
         SqlValue::List(vec![SqlValue::I64(10), SqlValue::I64(100)]),
@@ -529,8 +529,8 @@ fn unknown_field_errors_at_compile() {
         r,
         Err(QueryError::UnknownLookup { ref suffix, .. }) if suffix == "eq"
     ));
-    // (NB: `__eq` isn't in the supported set — Django doesn't have
-    // `__eq`, only `__exact`. Document this in the cookbook.)
+    // (NB: `__eq` isn't in the supported set — the spelling is
+    // `__exact`. Document this in the cookbook.)
 }
 
 // ---------- Multiple filters AND-join ----------

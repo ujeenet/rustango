@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rustango
+      POSTGRES_PASSWORD: rustango
+      POSTGRES_DB: platform_commerce_saas_dev
+    # Without this the data lives in the container's writable layer, so
+    # `docker compose down` deletes your development database and `up`
+    # hands back an empty one, with nothing said either way (#1309).
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustango -d platform_commerce_saas_dev"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  # Hot-reload Rust dev container. `cargo watch -x run` rebuilds and
+  # restarts the binary on every source edit.
+  # Skip it and run cargo on the host with
+  # `docker compose up -d --no-deps postgres`.
+  rust:
+    # Dockerfile.dev, not Dockerfile: the plain one is the deployable
+    # release image, which copies the source in and would defeat the
+    # bind mount below.
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - cargo-target:/app/target
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+    environment:
+      CARGO_TARGET_DIR: /app/target
+      CARGO_INCREMENTAL: "1"
+    command: bash -c "cargo watch -x run"
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  cargo-target:
+  cargo-registry:
+  cargo-git:

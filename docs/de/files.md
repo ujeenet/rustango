@@ -181,12 +181,112 @@ use rustango::media::{Media, MediaManager};
 
 let manager = MediaManager::new_pool(pool.clone(), registry);
 // Hand the browser a short-lived download link:
-let url = manager.presigned_get(&media, Duration::from_secs(3600)).await?;
+// Liefert Option<String> — None bei Backends, die nicht signieren können (z. B. lokale Platte).
+let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {
+    return Err(/* keine signierte URL für dieses Backend */);
+};
 ```
 
 Er kümmert sich außerdem um Soft-Delete und das Bereinigen von Waisen. Der vollständige Ablauf wird
 in `media_sqlite_live.rs` erprobt; die vorsignierten/Direct-Upload-Methoden des Managers sind
 PostgreSQL-orientiert.
+
+### Medien auf einer öffentlichen Seite ausliefern
+
+Eine öffentliche Seite geht **nicht** über `media::router`. Dieser Router ist
+die interne Verwaltungs-API — Uploads, Löschungen, Tags, Blättern — und er
+antwortet allen, die nicht angemeldet sind, auf jeder Route absichtlich mit
+`401`.
+
+Ermittle die URL stattdessen im eigenen Handler:
+
+```rust
+// deine eigene öffentliche Route
+let url = manager.public_url(media_id).await?;   // Option<String>, ohne Signatur
+```
+
+`public_url` ist ein Datenbank-Lookup plus ein String; es signiert nichts und
+wartet auf keinen Signierer — deshalb passt es in eine Seite. Zwei
+Auslieferungsmodelle, und die Wahl dazwischen ist die eigentliche Entscheidung:
+
+| | öffentlicher Bucket / CDN | privater Bucket + Presigned |
+|---|---|---|
+| Adresse | `manager.public_url(id)` — stabil | `manager.presigned_get(&m, ttl)` — läuft ab |
+| cachebar | ja, von Browsern und CDNs | nein; der Router sendet `no-store` |
+| wer darf laden | jede:r mit der URL | jede:r mit der URL, bis sie abläuft |
+| wofür | öffentliche Seiten, `<img src>` | der Verwaltungs-Router, interne Tools |
+
+`public_url` sagt dir, **wo** das Objekt ausgeliefert *würde*; es macht das
+Objekt nicht lesbar. Zeigt es auf einen privaten Bucket, bekommst du eine
+korrekte URL und einen 403 — dieser Fall will eine Presigned-URL, die bewusst
+weder cachebar noch teilbar ist.
+
+Für Dateien auf der lokalen Platte statt in einem Bucket erledigt das der
+Static-Handler bereits, ganz ohne Media-Zeile:
+
+```rust
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+```
+
+**Wenn du gerade einen `AllowAll`-Authorizer schreiben wolltest, damit eine
+öffentliche Seite funktioniert: nicht tun.** Das öffnet alle 16 Routen — auch
+`DELETE` und das Presigned `PUT` — für alle, und genau dieses Loch hat 0.57.7
+geschlossen.
+
+### Der Verwaltungs-Router braucht eine Autorisierungs-Policy
+
+`media::router` hängt 16 JSON-Routen über den Manager, allesamt
+Verwaltungs-Aktionen auf der Mediathek. **Jede einzelne davon ist abgesichert,
+und es gibt keinen freizügigen Standard.** Baue ihn mit `media_router_with`
+und übergib eine Policy:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — der alte Konstruktor — ist deprecated und antwortet
+auf jeder Route mit `403`. Das ist eine bewusste Verhaltensänderung in
+0.57.7: davor nahmen diese Routen überhaupt keinen Authentifizierungs-,
+Autorisierungs- oder Tenant-Extractor entgegen, also lieferte
+`GET /media/{id}` die Zeile **und eine vorsignierte S3-Download-URL** an
+jeden, der eine Ganzzahl raten konnte, und `POST /uploads/begin` erzeugte ein
+vorsigniertes `PUT` für ein vom Aufrufer gewähltes Key-Präfix.
+
+`MediaPerms` (braucht das `tenancy`-Feature) prüft die
+`{tabelle}.{aktion}`-Permission-Codenamen, die der Admin ohnehin verwendet —
+`rustango_media.view` zum Lesen, `rustango_media_collections.add` zum Anlegen
+eines Ordners und so weiter. Hänge es **innerhalb** von `require_auth` ein,
+das die Identität injiziert, die es liest; ohne das ist jede Anfrage ein
+`401`. Superuser überspringen die Prüfung.
+
+Drei Dinge, die es nicht leistet:
+
+- **Entscheidungen auf Zeilenebene.** Ein `rustango_media.view` liest *jede*
+  Media-Zeile per id. `MediaManager` hält einen Pool, ein mandantenfähiges
+  Deployment grenzt Zeilen also selbst ein — dafür implementierst du
+  `MediaAuthorizer`. `MediaTarget` benennt die Zeile (`Media(id)`,
+  `Collection(id)`, `CollectionSubtree(id)`, …) genau dafür.
+- **Den Objektspeicher eingrenzen.** `disk` kommt bei `POST /uploads/begin` vom
+  Aufrufer, und die `StorageRegistry` ist prozessweit — Pool-pro-Mandant trennt
+  die Datenbank, nicht den Bucket: ein bloßes `rustango_media.add` schreibt in
+  jede Disk, die der Prozess kennt. Grenze sie mit
+  `MediaPerms::new(pool).allow_disks(["user-uploads"])` ein. Präfixe innerhalb
+  einer Disk brauchen weiterhin `MediaAuthorizer`, dem `key_prefix` übergeben wird.
+- **Raten, was eine neue Route bedeutet.** `MediaAction` und `MediaTarget`
+  sind `#[non_exhaustive]`; beende eine selbst geschriebene Policy mit
+  `_ => false`, dann kommt eine später ergänzte Route abgelehnt statt
+  erlaubt an.
+
+Wichtig für eine eigene Policy: `DELETE /collections/{id}` löscht den ganzen
+**Teilbaum** und hängt die Medien auf jeder Ebene um, kommt also als
+`Delete(CollectionSubtree(id))` an, nicht als `Delete(Collection(id))` — und
+unter `MediaPerms` braucht es zusätzlich `rustango_media.change` neben
+`rustango_media_collections.delete`, weil es in die Medientabelle schreibt.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md)
+enthält die Migrationshinweise.
 
 ### Wie die Medientabellen angelegt werden
 
@@ -214,7 +314,7 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 **`Storage`-Trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitiv) · `.randomize_filename(bool)`. Verwendet von
 `save_uploads(multipart, &cfg, &storage)`.
 

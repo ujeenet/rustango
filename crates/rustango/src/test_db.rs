@@ -1,36 +1,26 @@
-//! Test-time DB isolation — Django's `TestCase` / `TransactionTestCase`
-//! analogs. Issue #39.
+//! Database isolation for tests, in four tiers.
 //!
-//! ## Four-tier shape
+//! There are no test base classes here. Each tier is a helper you
+//! wrap around the test body, so pick the cheapest one that works:
 //!
-//! Django ships four test base classes with distinct DB semantics.
-//! rustango is a function-style framework, so the analogs are
-//! helpers that callers wrap around the test body:
+//! | Tier                   | Helper                                 | Use when …                                              |
+//! |------------------------|----------------------------------------|---------------------------------------------------------|
+//! | no database            | plain `#[tokio::test]`                 | no DB access — fastest.                                 |
+//! | rolled-back writes     | [`with_rollback`]                      | reads / writes that should be rolled back at end.       |
+//! | committed writes       | [`with_truncate_after`]                | code under test commits (signals, on_commit hooks).     |
+//! | real socket            | [`crate::test_server::LiveServer`]     | needs a real listening socket (browser, websockets).    |
 //!
-//! | Django class            | rustango analog                        | Use when …                                              |
-//! |-------------------------|----------------------------------------|---------------------------------------------------------|
-//! | `SimpleTestCase`        | plain `#[tokio::test]`                 | no DB access — fastest.                                 |
-//! | `TestCase`              | [`with_rollback`]                      | reads / writes that should be rolled back at end.       |
-//! | `TransactionTestCase`   | [`with_truncate_after`]                | code under test commits (signals, on_commit hooks).     |
-//! | `LiveServerTestCase`    | [`crate::test_server::LiveServer`]     | needs a real listening socket (Selenium, websockets).   |
+//! The two DB helpers differ in what happens between tests:
 //!
-//! ## Why a separate helper per tier?
+//! - `with_rollback` runs the body in a transaction that always
+//!   rolls back. It is the fastest, but nothing that waits for a
+//!   real commit runs: no signals, no `on_commit` hooks, no commit
+//!   triggers.
+//! - `with_truncate_after` lets the body commit, then clears the
+//!   listed tables. The body sees committed state and the next test
+//!   starts clean, at the cost of the truncate.
 //!
-//! Each tier has a different "what happens between tests" guarantee:
-//!
-//! - `with_rollback` wraps the body in a transaction that ALWAYS
-//!   rolls back. Fastest. But invisible to code paths that check for
-//!   a committed state (signals, `on_commit` hooks, FK triggers
-//!   firing on real commit).
-//! - `with_truncate_after` commits real rows during the body, then
-//!   truncates the listed tables after — so the body sees committed
-//!   state, and the next test starts clean. Slower than
-//!   `with_rollback` because every test pays the truncate cost.
-//!
-//! Django's `TestCase` wraps each test method in a transaction that
-//! always rolls back, so mutations during one test never leak into
-//! the next. Rust has no test classes; the analog is an explicit
-//! helper that test code wraps around its body:
+//! The common case:
 //!
 //! ```ignore
 //! use rustango::test_db::with_rollback;
@@ -41,10 +31,11 @@
 //!     with_rollback(&pool, |tx| Box::pin(async move {
 //!         // Inserts here are visible to assertions inside the
 //!         // closure, but rolled back when it returns.
-//!         insert_tx(tx, &article_q("First")).await?;
-//!         insert_tx(tx, &article_q("Second")).await?;
+//!         let mut tx = tx.lock().await?;
+//!         insert_tx(&mut tx, &article_q("First")).await?;
+//!         insert_tx(&mut tx, &article_q("Second")).await?;
 //!
-//!         let count = count_tx::<Article>(tx).await?;
+//!         let count = count_tx::<Article>(&mut tx).await?;
 //!         assert_eq!(count, 2);
 //!         Ok(())
 //!     })).await.unwrap();
@@ -53,80 +44,60 @@
 //! }
 //! ```
 //!
-//! ## Why a separate helper instead of `atomic()`?
+//! ## Why not `atomic()`?
 //!
-//! [`crate::sql::atomic`] commits on `Ok` and rolls back on `Err`.
-//! Tests want the rollback unconditionally so the schema stays
-//! clean for the next test. [`with_rollback`] swaps the commit
-//! branch for a rollback while preserving the closure's return
-//! value.
+//! [`crate::sql::atomic`] commits on `Ok`. A test wants the rollback
+//! every time, so [`with_rollback`] rolls back instead and still
+//! hands back the closure's value. It is an `atomic` block otherwise:
+//! the closure gets the same [`AtomicTx`], and an `atomic()` on the same
+//! pool inside it runs in a savepoint that rolls back with it.
 //!
-//! ## Caveats vs Django
+//! ## Limits
 //!
-//! - **Per-test isolation only**: the rollback wraps a single
-//!   closure. Tests still share a process-wide DB connection pool;
-//!   the rollback only resets data this test inserted.
-//! - **Concurrency**: parallel tests still race on shared rows
-//!   they didn't insert. Pair with a suite-wide `tokio::Mutex` if
-//!   the test touches process-global state (per the project's
-//!   global-state mutex convention).
-//! - **`on_commit` callbacks**: they NEVER fire here, by design —
-//!   the tx always rolls back, so deferred work would be a phantom.
-//!   `with_rollback` also clears any callbacks the closure registered.
-//! - **SAVEPOINTs**: nested calls behave as nested savepoints via
-//!   sqlx's transaction shape. Outer rollback discards inner work
-//!   even if inner committed.
-//!
-//! Issue #39 partial — full TestCase / TransactionTestCase /
-//! SimpleTestCase / LiveServerTestCase hierarchy is a separate slice.
+//! - The rollback covers one closure. Tests share the pool, so it
+//!   only undoes what this test wrote.
+//! - Parallel tests can still race on rows they did not insert. Take
+//!   a suite-wide `tokio::Mutex` when a test touches global state.
+//! - `on_commit` callbacks never fire under `with_rollback`, by
+//!   design, and any the closure registered are cleared.
+//! - Nested calls and nested `atomic()` blocks on the same pool act as
+//!   savepoints. The outer rollback throws away their work too.
+//! - Drop the `tx.lock()` guard before a nested `atomic()` or a
+//!   `bulk_insert_pool`: while it is held they fail with `NestedAtomic`.
 
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::sql::{raw_execute_pool, transaction_pool, ExecError, Pool, PoolTx};
+use crate::sql::{raw_execute_tx, write_transaction_pool, AtomicTx, ExecError, Pool};
 
-/// Run `f` inside a transaction that ALWAYS rolls back when the
-/// closure returns, regardless of whether the closure returned
-/// `Ok` or `Err`. The transaction-rollback step happens after the
-/// closure's value is captured, so callers see the closure's
-/// original result.
+/// Run `f` in a transaction that ALWAYS rolls back when the closure
+/// returns, on `Ok` and on `Err` alike. The rollback happens after
+/// the closure's value is captured, so you get that value back.
 ///
-/// On `Err` the closure result is returned as-is. On `Ok` the
-/// closure result is returned after the rollback completes
-/// successfully; if the rollback itself fails (network blip /
-/// connection drop) the closure's Ok is converted to that
-/// driver error.
+/// The closure gets an [`AtomicTx`]: lock it per statement. An `atomic()`
+/// on `pool` inside it is a savepoint of this transaction (#1761).
+///
+/// An `Err` from the closure passes straight through. An `Ok` turns
+/// into an error only if the rollback itself fails.
 ///
 /// # Errors
-/// - The closure's own error (transitively).
-/// - `BEGIN` / `ROLLBACK` driver errors.
+/// - The closure's own error.
+/// - `BEGIN` or `ROLLBACK` driver errors.
 pub async fn with_rollback<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
-        &'tx mut PoolTx<'_>,
+        &'tx AtomicTx,
     ) -> Pin<Box<dyn Future<Output = Result<T, ExecError>> + Send + 'tx>>,
 {
-    let mut tx = transaction_pool(pool).await?;
-    let result = f(&mut tx).await;
-    // ALWAYS roll back, regardless of `result`. A failing rollback
-    // (driver/network) is reported as the new error only when the
-    // closure succeeded — otherwise the closure's own error takes
-    // priority.
-    let rollback = tx.rollback().await;
-    match (result, rollback) {
-        (Ok(v), Ok(())) => Ok(v),
-        (Ok(_), Err(e)) => Err(ExecError::Driver(e)),
-        (Err(e), _) => Err(e),
-    }
+    crate::sql::rolled_back(pool, f).await
 }
 
-/// Sugar around [`with_rollback`] that wraps the body in
-/// `Box::pin(async move { … })` so callers don't have to. Identical
-/// semantics:
+/// [`with_rollback`] with the `Box::pin(async move { … })` wrapper
+/// written for you. Behaves the same:
 ///
 /// ```ignore
 /// rustango::with_rollback!(&pool, |tx| {
-///     insert_tx(tx, &q).await?;
+///     insert_tx(&mut *tx.lock().await?, &q).await?;
 ///     // ... assertions ...
 ///     Ok(())
 /// }).await
@@ -138,35 +109,26 @@ macro_rules! with_rollback {
     }};
 }
 
-/// Run `f` to completion, then truncate `tables` regardless of the
-/// closure's result. Django's `TransactionTestCase` analog: the
-/// closure's writes COMMIT (so it sees real post-commit state —
-/// signals fire, `on_commit` hooks fire, FK triggers fire), and the
-/// teardown step clears those tables so the next test starts clean.
+/// Run `f`, then clear `tables` whatever the result, even when `f`
+/// panics (the panic is re-raised after the clear). This is the
+/// `TransactionTestCase` shape: the closure's writes commit, so
+/// signals, `on_commit` hooks and commit triggers all fire, and the
+/// teardown leaves the tables clean for the next test.
 ///
-/// Per-dialect strategy mirrors [`crate::migrate::manage`] `flush`:
-/// - **Postgres**: one `TRUNCATE TABLE t1, t2, ... RESTART IDENTITY
-///   CASCADE` statement. Atomic, FK-aware, sequence-resetting.
-/// - **MySQL / SQLite**: per-table `DELETE FROM "<table>"` in
-///   the listed order. Sequences are NOT reset.
+/// The clear is [`truncate_tables`]: one transaction, any table order.
 ///
-/// The closure's return value is preserved unchanged. Truncate
-/// failures surface as the new error ONLY when the closure
-/// succeeded — otherwise the closure's error takes priority (so the
-/// real failure isn't masked by a noisy teardown).
+/// The closure's value comes back unchanged. A failed truncate
+/// becomes the error only when the closure succeeded, so a noisy
+/// teardown cannot hide the real failure.
 ///
-/// **Concurrency**: this helper commits real rows. Tests calling it
-/// against the same tables must serialize (the project convention
-/// is a suite-wide `tokio::sync::Mutex<()>`) — see the
-/// "Tests on global state need a mutex" memory note. Truncate races
-/// across parallel `cargo test` workers would otherwise wipe each
-/// other's setup mid-flight.
+/// **Concurrency**: this commits real rows, so tests using the same
+/// tables must run one at a time behind a suite-wide
+/// `tokio::sync::Mutex<()>`. Otherwise one worker's truncate wipes
+/// another's setup.
 ///
-/// **Passing tables explicitly**: callers list only the tables they
-/// touch. Truncating every registered model table would couple every
-/// test to every other app's tables — slow and brittle. If a test
-/// really wants the "wipe everything" shape, `manage flush --yes`
-/// does that.
+/// List only the tables the test touches. Clearing every model's
+/// table would tie each test to every other app. For a full wipe,
+/// use `manage flush --yes`.
 ///
 /// ```ignore
 /// use rustango::test_db::with_truncate_after;
@@ -196,64 +158,54 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, ExecError>> + Send,
 {
-    let result = f().await;
+    // Catch a panic in the body so the clear still runs (#1959).
+    let mut body = Box::pin(async move { f().await });
+    let result = std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(panic) => std::task::Poll::Ready(Err(panic)),
+        }
+    })
+    .await;
     let truncate = truncate_tables(pool, tables).await;
     match (result, truncate) {
-        (Ok(v), Ok(())) => Ok(v),
-        (Ok(_), Err(e)) => Err(e),
-        (Err(e), _) => Err(e),
+        (Err(panic), _) => std::panic::resume_unwind(panic),
+        (Ok(Ok(v)), Ok(())) => Ok(v),
+        (Ok(Ok(_)), Err(e)) => Err(e),
+        (Ok(Err(e)), _) => Err(e),
     }
 }
 
-/// Truncate every table in `tables`, dialect-aware. Public so callers
-/// can reuse the per-dialect clear logic outside [`with_truncate_after`]
-/// (custom test fixtures, manual teardown).
+/// Clear every table in `tables`, in one transaction, in any order.
+/// Public so fixtures and manual teardown can reuse it outside
+/// [`with_truncate_after`]. The statements come from
+/// [`crate::sql::Dialect::clear_tables_sql`]:
+/// - **Postgres**: `TRUNCATE … RESTART IDENTITY CASCADE`; ids restart
+///   and referencing tables are cleared too.
+/// - **MySQL**: `DELETE` with FK checks off for that statement; ids
+///   keep counting and rows in unlisted tables that point here stay.
+/// - **SQLite**: `DELETE` with FK checks deferred to `COMMIT`, which
+///   fails if an unlisted table still points at a cleared row.
 ///
-/// On Postgres this is one `TRUNCATE` statement; on MySQL/SQLite it's
-/// per-table `DELETE FROM`. Returns the first driver error, but does
-/// NOT short-circuit — every remaining table is still attempted on
-/// the per-table path so partial cleanup happens even when one fails.
-///
-/// Passing an empty slice is a no-op (returns `Ok(())`).
+/// An empty slice does nothing.
 ///
 /// # Errors
-/// - The first driver error encountered (per-table path collects
-///   subsequent errors but reports only the first).
+/// The first driver error; the whole clear is then rolled back.
 pub async fn truncate_tables(pool: &Pool, tables: &[&str]) -> Result<(), ExecError> {
     if tables.is_empty() {
         return Ok(());
     }
-    let dialect = pool.dialect().name();
-    if dialect == "postgres" {
-        let quoted: Vec<String> = tables
-            .iter()
-            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
-            .collect();
-        let sql = format!(
-            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
-            quoted.join(", "),
-        );
-        raw_execute_pool(pool, &sql, Vec::new()).await?;
-        Ok(())
-    } else {
-        let mut first_err: Option<ExecError> = None;
-        for table in tables {
-            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
-            if let Err(e) = raw_execute_pool(pool, &sql, Vec::new()).await {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+    let mut tx = write_transaction_pool(pool).await?;
+    for sql in pool.dialect().clear_tables_sql(tables) {
+        raw_execute_tx(&mut tx, &sql, Vec::new()).await?;
     }
+    tx.commit().await.map_err(ExecError::Driver)?;
+    Ok(())
 }
 
-/// Sugar around [`with_truncate_after`] mirroring the
-/// [`with_rollback!`](crate::with_rollback) macro shape:
+/// [`with_truncate_after`] in the same macro shape as
+/// [`with_rollback!`](crate::with_rollback):
 ///
 /// ```ignore
 /// rustango::with_truncate_after!(&pool, &["articles", "comments"], {
@@ -271,31 +223,26 @@ macro_rules! with_truncate_after {
 
 #[cfg(test)]
 mod tests {
-    // Live-database tests need a real connection pool. The
-    // pure-logic tests cover the macro shape via type-check; the
-    // rollback behavior is exercised by integration tests in
-    // crates that wire a real Pool.
+    // These only type-check the macro shape. Rollback behaviour
+    // needs a real pool, so integration tests cover it.
 
     use super::{truncate_tables, with_rollback, with_truncate_after};
 
     #[test]
     fn macro_and_function_compile() {
-        // Compile-only: pin the function + macro signatures so a
-        // refactor doesn't silently change them. The body never
-        // executes — the closure isn't called.
+        // Compile-only: pins the function and macro signatures so a
+        // refactor cannot change them quietly.
         let _ = || async {
-            // This closure never executes; the test exists to catch
-            // macro hygiene regressions.
-            // `unused_variables` for the same reason as `unreachable_code`:
-            // the `unimplemented!()` initialiser diverges, so every use of
-            // `pool` below is unreachable and the binding reads as unused.
+            // The closure never runs. `unimplemented!()` diverges, so
+            // every use of `pool` is unreachable and the binding
+            // reads as unused; hence both allows.
             #[allow(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
             {
                 let pool: &crate::sql::Pool = unimplemented!();
                 let _r: Result<i32, _> =
                     with_rollback(pool, |_tx| Box::pin(async move { Ok(42) })).await;
                 let _r2: Result<i32, _> = crate::with_rollback!(pool, |tx| {
-                    let _: &mut crate::sql::PoolTx<'_> = tx;
+                    let _: &crate::sql::AtomicTx = tx;
                     Ok(42)
                 })
                 .await;

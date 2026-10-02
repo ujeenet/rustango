@@ -1,4 +1,4 @@
-//! `Q!()` compile-time-resolved Django-shape filter macro — closes
+//! `Q!()` compile-time-resolved filter macro — closes
 //! #269 / T1.7.
 //!
 //! Each test exercises one lookup suffix end-to-end:

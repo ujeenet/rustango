@@ -5,10 +5,9 @@
 //! request. The shared key is never transmitted, and replay attacks
 //! are bounded by a configurable `X-Date` tolerance window.
 //!
-//! Distinct from [`crate::api_keys`] (bearer-token style — the key
-//! itself rides the wire on every call): pick HMAC when callers can
-//! sign and you don't trust the channel; pick bearer when TLS is
-//! enough and you want the simplest possible client.
+//! With [`crate::api_keys`] the key itself travels on every call.
+//! Pick HMAC when callers can sign and you do not trust the channel.
+//! Pick bearer tokens when TLS is enough and clients must stay simple.
 //!
 //! ## Wire format
 //!
@@ -22,15 +21,18 @@
 //!
 //! ```text
 //! <UPPER-METHOD>\n
+//! <LOWERCASE-HOST>\n
 //! <PATH>\n
 //! <SORTED-QUERY-STRING>\n
 //! <X-DATE>\n
 //! <HEX-SHA256(BODY)>
 //! ```
 //!
-//! Sorted query so `?b=2&a=1` and `?a=1&b=2` produce the same
-//! signature. Body is hashed (SHA-256 hex) — saves the verifier from
-//! buffering and re-hashing inside HMAC.
+//! The host is the `Host` header (or the HTTP/2 authority) without the
+//! port. Unpinned, a replay to another service sharing the key passes
+//! if it keeps the first `Host`; shared keys need [`HmacAuthLayer::host`].
+//! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
+//! The body is hashed first, so the verifier hashes it only once.
 //!
 //! ## Quick start
 //!
@@ -54,6 +56,8 @@
 //!
 //! Use [`sign_request`] to build the `Authorization` header value
 //! that this layer will accept.
+//!
+//! [`sign_request`]: crate::hmac_auth::sign_request
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -62,8 +66,11 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderValue, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode};
+use axum::response::IntoResponse as _;
 use base64::Engine;
+
+use crate::api_errors::ApiError;
 use subtle::ConstantTimeEq;
 use tower::Service;
 
@@ -73,9 +80,8 @@ const SCHEME: &str = "HMAC-SHA256";
 const DEFAULT_TOLERANCE_SECS: u64 = 300; // 5 min — RFC convention
 const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
-/// Closure that maps `key_id` → `Option<secret>`. Implementors typically
-/// look up the key in a DB / cache. Returning `None` rejects the
-/// request with 401.
+/// Maps a `key_id` to its secret, usually from a database or cache.
+/// Return `None` to reject the request with 401.
 pub type KeyResolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 #[derive(Clone)]
@@ -88,11 +94,12 @@ struct HmacAuthConfig {
     resolver: KeyResolver,
     tolerance_secs: u64,
     body_limit: usize,
-    /// Audit M5 — optional replay defense. When set, each authentic
-    /// request's signature is recorded in the cache (TTL = the tolerance
-    /// window) and a repeat within that window is rejected. The X-Date
-    /// window alone only *bounds* replay; this closes it. Opt-in because
-    /// it needs a shared cache and the `cache` feature.
+    /// Signed host when set; else the request's own.
+    host: Option<SignedHost>,
+    /// Optional replay defence. When set, each valid signature is
+    /// stored for twice the tolerance and a repeat is rejected. The
+    /// `X-Date` window alone only limits how long a replay works;
+    /// this stops it. Opt-in, because it needs a shared cache.
     #[cfg(feature = "cache")]
     nonce_store: Option<Arc<dyn crate::cache::Cache>>,
 }
@@ -105,6 +112,7 @@ impl HmacAuthLayer {
                 resolver,
                 tolerance_secs: DEFAULT_TOLERANCE_SECS,
                 body_limit: DEFAULT_BODY_LIMIT,
+                host: None,
                 #[cfg(feature = "cache")]
                 nonce_store: None,
             }),
@@ -118,24 +126,44 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Audit M5 — enable replay protection backed by a shared
-    /// [`crate::cache::Cache`]. After a request's signature verifies, it
-    /// is recorded for `tolerance_secs`; a replay carrying the same
-    /// signature within that window is rejected with 401. Use a shared
-    /// backend (Redis / DB) across instances; an in-process cache only
-    /// protects a single replica.
+    /// Turn on replay protection backed by a [`crate::cache::Cache`].
+    /// A verified signature is stored for `2 × tolerance_secs`, and the
+    /// same signature again in that window gets a 401.
     ///
-    /// Defense-in-depth on top of the X-Date window — without it, a
-    /// captured signed request is replayable until the window expires.
+    /// **Use a shared backend such as Redis.** An in-process cache
+    /// only protects one replica, so a replay sent to another replica
+    /// still works. Without this, a captured request can be replayed
+    /// until the `X-Date` window closes. A `NullCache` keeps nothing,
+    /// so it is accepted with a warning.
     #[cfg(feature = "cache")]
     #[must_use]
     pub fn nonce_store(mut self, store: Arc<dyn crate::cache::Cache>) -> Self {
+        if store.stores_nothing() {
+            tracing::warn!(
+                target: "rustango::hmac_auth",
+                "HMAC nonce store keeps nothing (`NullCache`), so replay protection is off; \
+                 use a Redis or database cache"
+            );
+        }
         Arc::make_mut(&mut self.inner).nonce_store = Some(store);
         self
     }
 
-    /// Cap the body size we'll buffer for hashing. Requests over this
-    /// are rejected with 413. Default 10 MiB.
+    /// Verify against this host instead of the request's `Host`. Needed when
+    /// services share a key, or behind a proxy that rewrites `Host`.
+    ///
+    /// # Panics
+    /// If `host` is empty or not a valid host name.
+    #[must_use]
+    pub fn host(mut self, host: &str) -> Self {
+        let pinned = SignedHost::parse(host)
+            .unwrap_or_else(|| panic!("HmacAuthLayer::host: invalid host {host:?}"));
+        Arc::make_mut(&mut self.inner).host = Some(pinned);
+        self
+    }
+
+    /// Largest body this will buffer for hashing. A bigger request
+    /// gets a 413. Default 10 MiB.
     #[must_use]
     pub fn body_limit(mut self, n: usize) -> Self {
         Arc::make_mut(&mut self.inner).body_limit = n;
@@ -213,6 +241,13 @@ async fn verify_request(
         None => return Err(deny("unknown key id")),
     };
 
+    let host = match &cfg.host {
+        Some(h) => h.clone(),
+        None => match request_host(&req) {
+            Ok(h) => h,
+            Err(msg) => return Err(deny(msg)),
+        },
+    };
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or("").to_owned();
@@ -224,38 +259,44 @@ async fn verify_request(
     };
     let body_hash = sha256_hex(&bytes);
 
-    let canonical = canonical_request(method.as_str(), &path, &query, &date, &body_hash);
+    let canonical = canonical_request(
+        method.as_str(),
+        Some(&host),
+        &path,
+        &query,
+        &date,
+        &body_hash,
+    );
     let expected_sig = hmac_sha256(&secret, canonical.as_bytes());
 
     if expected_sig.ct_eq(&parsed.signature).unwrap_u8() == 0 {
         return Err(deny("signature mismatch"));
     }
 
-    // Audit M5 — replay defense (only after the signature is proven, so
-    // an unauthenticated attacker can't flood the cache). The signature
-    // is unique per (method, path, query, date, body), so a replay
-    // carries the identical signature; record it for the tolerance
-    // window and reject a repeat. exists+set isn't atomic — two truly
-    // concurrent identical requests could race — but that window is
-    // sub-millisecond and this is defense-in-depth over X-Date.
+    // Replay defence. It runs only after the signature checks out, so
+    // an unauthenticated attacker cannot fill the cache. A signature
+    // is unique per method, host, path, query, date and body, so a replay
+    // carries the same one. `add` claims it in one step, so of two
+    // simultaneous copies only one wins.
     #[cfg(feature = "cache")]
     if let Some(store) = &cfg.nonce_store {
         let nonce_key = format!(
             "hmac_nonce:{}",
             base64::engine::general_purpose::STANDARD.encode(&parsed.signature)
         );
-        match store.exists(&nonce_key).await {
-            Ok(true) => return Err(deny("replayed request")),
-            Ok(false) => {
-                let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
-                // Fail open on a cache write error — the X-Date window
-                // still bounds replay; don't make auth depend on the
-                // cache being writable.
-                let _ = store.set(&nonce_key, "1", Some(ttl)).await;
-            }
-            // Fail open on a cache read error (availability over the
-            // narrow in-window replay risk); the X-Date check still ran.
-            Err(_) => {}
+        // X-Date is accepted ±tolerance, so a signature stays valid for
+        // up to 2 × tolerance; keep the nonce that long.
+        let ttl = std::time::Duration::from_secs(cfg.tolerance_secs.saturating_mul(2));
+        match store.add(&nonce_key, "1", Some(ttl)).await {
+            Ok(true) => {}
+            Ok(false) => return Err(deny("replayed request")),
+            // Auth must not depend on the cache, and X-Date still
+            // bounds a replay, so pass, but say so.
+            Err(e) => tracing::warn!(
+                target: "rustango::hmac_auth",
+                error = %e,
+                "HMAC nonce store failed; replay check skipped for this request"
+            ),
         }
     }
 
@@ -263,24 +304,11 @@ async fn verify_request(
 }
 
 fn deny(msg: &str) -> Response<Body> {
-    let body = format!(r#"{{"error":"unauthorized","reason":"{msg}"}}"#);
-    let mut resp = Response::new(Body::from(body));
-    *resp.status_mut() = StatusCode::UNAUTHORIZED;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    ApiError::unauthorized(msg).into_response()
 }
 
 fn too_large() -> Response<Body> {
-    let mut resp = Response::new(Body::from(r#"{"error":"payload too large"}"#));
-    *resp.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    ApiError::from_status(StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response()
 }
 
 // =====================================================================
@@ -316,8 +344,58 @@ fn parse_auth(value: &str) -> Option<ParsedAuth> {
     })
 }
 
+/// The host a signature covers: lowercase, no port, no trailing dot, IPv6
+/// bracketed. Only built here, so signer and verifier cannot fold it differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignedHost(String);
+
+impl SignedHost {
+    /// `None` for an empty or malformed host, or one with userinfo.
+    fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if let Ok(ip) = raw.parse::<std::net::Ipv6Addr>() {
+            return Some(Self(format!("[{ip}]")));
+        }
+        let authority = raw.parse::<axum::http::uri::Authority>().ok()?;
+        if authority.as_str().contains('@') {
+            return None;
+        }
+        let host = authority.host();
+        if let Some(ip) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            return ip
+                .parse::<std::net::Ipv6Addr>()
+                .ok()
+                .map(|ip| Self(format!("[{ip}]")));
+        }
+        let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+        (!host.is_empty()).then_some(Self(host))
+    }
+}
+
+/// The `Host` header, or the HTTP/2 `:authority` when there is none.
+/// Both present and naming different hosts is refused.
+fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
+    let header = match req.headers().get(axum::http::header::HOST) {
+        Some(v) => match v.to_str().ok().and_then(SignedHost::parse) {
+            Some(h) => Some(h),
+            None => return Err("malformed Host"),
+        },
+        None => None,
+    };
+    let target = match req.uri().authority() {
+        Some(a) => Some(SignedHost::parse(a.as_str()).ok_or("malformed request target")?),
+        None => None,
+    };
+    match (header, target) {
+        (Some(h), Some(t)) if h != t => Err("Host does not match the request target"),
+        (Some(h), _) | (None, Some(h)) => Ok(h),
+        (None, None) => Err("missing Host"),
+    }
+}
+
 fn canonical_request(
     method: &str,
+    host: Option<&SignedHost>,
     path: &str,
     query: &str,
     date: &str,
@@ -325,8 +403,9 @@ fn canonical_request(
 ) -> String {
     let sorted_query = sort_query(query);
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
+        host.map_or("", |h| h.0.as_str()),
         path,
         sorted_query,
         date,
@@ -343,9 +422,7 @@ fn sort_query(q: &str) -> String {
     pairs.join("&")
 }
 
-// SHA-256 / HMAC-SHA256 / hex-encode helpers live in
-// [`crate::crypto`] — re-exported as the same names so the existing
-// call sites read unchanged.
+// The SHA-256, HMAC and hex helpers live in `crate::crypto`.
 use crate::crypto::{hmac_sha256, sha256_hex};
 
 fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
@@ -365,40 +442,50 @@ fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
 // =====================================================================
 
 /// Build the `Authorization` header value for a request signed with
-/// `secret` for key id `key_id`. Caller is responsible for setting
-/// `X-Date` to a matching RFC 3339 timestamp.
-///
-/// `body` may be empty for GET/DELETE requests.
+/// `secret` under `key_id`. You must also set `X-Date` to the same
+/// RFC 3339 timestamp. `host` is the server's host name (a port is
+/// ignored; an invalid one signs nothing a server accepts). `body` may be
+/// empty for GET or DELETE.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn sign_request(
     key_id: &str,
     secret: &[u8],
     method: &str,
+    host: &str,
     path: &str,
     query: &str,
     date_rfc3339: &str,
     body: &[u8],
 ) -> String {
     let body_hash = sha256_hex(body);
-    let canonical = canonical_request(method, path, query, date_rfc3339, &body_hash);
+    let canonical = canonical_request(
+        method,
+        SignedHost::parse(host).as_ref(),
+        path,
+        query,
+        date_rfc3339,
+        &body_hash,
+    );
     let sig = hmac_sha256(secret, canonical.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig);
     format!("{SCHEME} keyId={key_id},signature={sig_b64}")
 }
 
-/// Convenience: pick `now()` as the date and return both headers
-/// (the date + the authorization). Date is RFC 3339 / ISO 8601.
+/// Sign with the current time and return both headers: the RFC 3339
+/// date and the authorization value.
 #[must_use]
 pub fn sign_now(
     key_id: &str,
     secret: &[u8],
     method: &str,
+    host: &str,
     path: &str,
     query: &str,
     body: &[u8],
 ) -> (String, String) {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let auth = sign_request(key_id, secret, method, path, query, &now, body);
+    let auth = sign_request(key_id, secret, method, host, path, query, &now, body);
     (now, auth)
 }
 
@@ -408,6 +495,8 @@ mod tests {
     use axum::routing::post;
     use axum::Router;
     use tower::{Layer, ServiceExt};
+
+    const HOST: &str = "api.test";
 
     fn resolver_for(key: &'static str, secret: &'static [u8]) -> KeyResolver {
         Arc::new(move |k| {
@@ -438,10 +527,11 @@ mod tests {
     ) -> Request<Body> {
         // Split path + query from a "/r?x=1" style input.
         let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
-        let (date, auth) = sign_now(key_id, secret, method, path, query, body);
+        let (date, auth) = sign_now(key_id, secret, method, HOST, path, query, body);
         Request::builder()
             .method(method)
             .uri(path_query)
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::from(body.to_vec()))
@@ -464,11 +554,15 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_AUTH, "HMAC-SHA256 keyId=k1,signature=ZA==")
             .body(Body::empty())
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 401);
+        let b = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "unauthorized", "the ApiError envelope (#1193)");
     }
 
     #[tokio::test]
@@ -478,6 +572,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, "2026-05-02T12:00:00Z")
             .body(Body::empty())
             .unwrap();
@@ -504,15 +599,119 @@ mod tests {
         assert_eq!(resp.status(), 401);
     }
 
+    /// Sign for `signed_for`; send with `host` (a header) and `uri`.
+    async fn status_for(
+        layer: HmacAuthLayer,
+        signed_for: &str,
+        uri: &str,
+        host: Option<&str>,
+    ) -> u16 {
+        let (date, auth) = sign_now("k1", b"secret", "POST", signed_for, "/r", "", b"x");
+        let mut req = Request::builder().method("POST").uri(uri);
+        if let Some(h) = host {
+            req = req.header("host", h);
+        }
+        let req = req
+            .header(HEADER_DATE, date)
+            .header(HEADER_AUTH, auth)
+            .body(Body::from("x"))
+            .unwrap();
+        let svc = layer.layer(app().into_service::<Body>());
+        svc.oneshot(req).await.unwrap().status().as_u16()
+    }
+
+    /// #1836 — a signature for one host fails on another sharing the key.
+    #[tokio::test]
+    async fn a_signature_is_bound_to_its_host() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("a.test")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("b.test")).await,
+            401
+        );
+        // Case and port do not change the signed host.
+        assert_eq!(
+            status_for(layer(), "A.test", "/r", Some("a.test:8443")).await,
+            200
+        );
+        assert_eq!(status_for(layer(), "a.test", "/r", None).await, 401);
+    }
+
+    /// The HTTP/2 authority stands in for `Host`, and must agree with it.
+    #[tokio::test]
+    async fn the_request_authority_is_the_host_and_must_agree() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        let h2 = "https://a.test/r";
+        assert_eq!(status_for(layer(), "a.test", h2, None).await, 200);
+        assert_eq!(status_for(layer(), "b.test", h2, Some("b.test")).await, 401);
+        assert_eq!(status_for(layer(), "a.test", h2, Some("b.test")).await, 401);
+    }
+
+    /// A pinned host is what gets verified, whatever `Host` says.
+    #[tokio::test]
+    async fn a_pinned_host_replaces_the_request_host() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret")).host("api.test");
+        assert_eq!(
+            status_for(layer(), "api.test", "/r", Some("backend:8080")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "backend", "/r", Some("backend:8080")).await,
+            401
+        );
+    }
+
+    /// One spelling per host: IPv6 bracketed, trailing dot dropped, junk refused.
+    #[test]
+    fn signed_host_has_one_spelling() {
+        let p = |s: &str| SignedHost::parse(s).map(|h| h.0);
+        assert_eq!(p("[::1]:8080").as_deref(), Some("[::1]"));
+        assert_eq!(p("::1").as_deref(), Some("[::1]"));
+        assert_eq!(p("[0:0::1]").as_deref(), Some("[::1]"));
+        assert_eq!(p("A.test.").as_deref(), Some("a.test"));
+        assert_eq!(p("a.test.:443").as_deref(), Some("a.test"));
+        for bad in ["", " ", ".", "a b", "u@a.test", "[zz]"] {
+            assert_eq!(p(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid host")]
+    fn an_empty_pin_is_refused() {
+        let _ = HmacAuthLayer::new(resolver_for("k1", b"secret")).host("");
+    }
+
+    /// The signer and the verifier fold IPv6 and a trailing dot the same way.
+    #[tokio::test]
+    async fn ipv6_and_trailing_dot_hosts_verify() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        assert_eq!(
+            status_for(layer(), "::1", "/r", Some("[::1]:8080")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test.", "/r", Some("a.test")).await,
+            200
+        );
+        assert_eq!(
+            status_for(layer(), "a.test", "/r", Some("a.test.")).await,
+            200
+        );
+    }
+
     #[tokio::test]
     async fn body_tampering_rejected() {
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"));
         let svc = layer.layer(app().into_service::<Body>());
         // Sign with one body, but ship a different one.
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"original");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"original");
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::from("tampered".to_owned()))
@@ -528,11 +727,12 @@ mod tests {
         let store = std::sync::Arc::new(InMemoryCache::new());
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
         // One signed request, replayed verbatim (identical signature).
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"hello");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"hello");
         let mk = || {
             Request::builder()
                 .method("POST")
                 .uri("/r")
+                .header("host", HOST)
                 .header(HEADER_DATE, date.clone())
                 .header(HEADER_AUTH, auth.clone())
                 .body(Body::from("hello"))
@@ -546,16 +746,188 @@ mod tests {
         assert_eq!(svc.oneshot(mk()).await.unwrap().status(), 401);
     }
 
+    /// A cache whose `exists` is slow, so a check-then-set lets two
+    /// copies through; `add` stays the inner cache's atomic one.
+    #[cfg(feature = "cache")]
+    struct SlowExists(crate::cache::InMemoryCache);
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SlowExists {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            // Read, then stall: the answer goes stale before the caller acts.
+            let seen = self.0.exists(k).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            seen
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.0.add(k, v, ttl).await
+        }
+    }
+
+    /// #1828 — two copies of one request sent at once: only one gets in.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn simultaneous_replays_let_only_one_through() {
+        let store = Arc::new(SlowExists(crate::cache::InMemoryCache::new()));
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "", b"hello");
+        let send = || {
+            let svc = layer.clone().layer(app().into_service::<Body>());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/r")
+                .header("host", HOST)
+                .header(HEADER_DATE, date.clone())
+                .header(HEADER_AUTH, auth.clone())
+                .body(Body::from("hello"))
+                .unwrap();
+            async move { svc.oneshot(req).await.unwrap().status().as_u16() }
+        };
+        let (a, b) = tokio::join!(send(), send());
+        let mut got = [a, b];
+        got.sort_unstable();
+        assert_eq!(got, [200, 401], "both copies of a replay were accepted");
+    }
+
+    /// A request dated `tolerance` ahead is valid for `2 × tolerance`,
+    /// so its nonce must outlive a plain `tolerance`.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_future_dated_request_cannot_be_replayed_after_tolerance() {
+        let store = Arc::new(crate::cache::InMemoryCache::new());
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+            .tolerance_secs(2)
+            .nonce_store(store);
+        let date = (chrono::Utc::now() + chrono::Duration::seconds(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let auth = sign_request("k1", b"secret", "POST", HOST, "/r", "", &date, b"x");
+        let send = || {
+            let svc = layer.clone().layer(app().into_service::<Body>());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/r")
+                .header("host", HOST)
+                .header(HEADER_DATE, date.clone())
+                .header(HEADER_AUTH, auth.clone())
+                .body(Body::from("x"))
+                .unwrap();
+            async move { svc.oneshot(req).await.unwrap().status().as_u16() }
+        };
+        assert_eq!(send().await, 200);
+        // Past `tolerance`, but X-Date is still inside the window.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert_eq!(send().await, 401, "the replay outlived its nonce");
+    }
+
+    /// A cache that fails every call.
+    #[cfg(feature = "cache")]
+    struct Down;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Down {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+    }
+
+    /// A nonce store outage lets the request through, but not silently.
+    #[cfg(all(feature = "cache", feature = "runtime"))]
+    #[test]
+    fn a_failing_nonce_store_passes_and_warns() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let layer =
+                HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(Arc::new(Down));
+            let svc = layer.layer(app().into_service::<Body>());
+            let req = build_signed("POST", "/r", b"x", "k1", b"secret");
+            rt.block_on(svc.oneshot(req)).unwrap().status()
+        });
+        assert_eq!(status, 200);
+        let out = buf.contents();
+        assert!(out.contains("nonce store failed"), "{out}");
+        assert!(out.contains("rustango::hmac_auth"), "{out}");
+    }
+
+    /// #1828 — a nonce store that keeps nothing is not a silent no-op.
+    #[cfg(all(feature = "cache", feature = "runtime"))]
+    #[test]
+    fn a_null_nonce_store_warns() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+                .nonce_store(Arc::new(crate::cache::NullCache));
+            let _ = HmacAuthLayer::new(resolver_for("k1", b"secret"))
+                .nonce_store(Arc::new(crate::cache::InMemoryCache::new()));
+        });
+        let out = buf.contents();
+        assert_eq!(out.matches("replay protection is off").count(), 1, "{out}");
+        assert!(out.contains("rustango::hmac_auth"), "{out}");
+    }
+
     #[tokio::test]
     async fn query_reordering_does_not_break_signature() {
         let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"));
         let svc = layer.layer(app().into_service::<Body>());
         // Sign with one query order; ship a different order — must still pass
         // because we sort before signing on both ends.
-        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "a=1&b=2", b"");
+        let (date, auth) = sign_now("k1", b"secret", "POST", HOST, "/r", "a=1&b=2", b"");
         let req = Request::builder()
             .method("POST")
             .uri("/r?b=2&a=1")
+            .header("host", HOST)
             .header(HEADER_DATE, date)
             .header(HEADER_AUTH, auth)
             .body(Body::empty())
@@ -571,10 +943,11 @@ mod tests {
         // Sign with a date 10 min in the past.
         let old = (chrono::Utc::now() - chrono::Duration::minutes(10))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let auth = sign_request("k1", b"secret", "POST", "/r", "", &old, b"");
+        let auth = sign_request("k1", b"secret", "POST", HOST, "/r", "", &old, b"");
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, old)
             .header(HEADER_AUTH, auth)
             .body(Body::empty())
@@ -590,6 +963,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/r")
+            .header("host", HOST)
             .header(HEADER_DATE, "2026-05-02T12:00:00Z")
             .header(HEADER_AUTH, "Bearer some-token")
             .body(Body::empty())
@@ -621,8 +995,23 @@ mod tests {
 
     #[test]
     fn canonical_request_is_deterministic() {
-        let a = canonical_request("POST", "/r", "x=1&y=2", "2026-05-02T12:00:00Z", "abc");
-        let b = canonical_request("post", "/r", "y=2&x=1", "2026-05-02T12:00:00Z", "abc");
+        let h = SignedHost::parse("API.test:443");
+        let a = canonical_request(
+            "POST",
+            h.as_ref(),
+            "/r",
+            "x=1&y=2",
+            "2026-05-02T12:00:00Z",
+            "abc",
+        );
+        let b = canonical_request(
+            "post",
+            h.as_ref(),
+            "/r",
+            "y=2&x=1",
+            "2026-05-02T12:00:00Z",
+            "abc",
+        );
         // Method case + query order shouldn't change the canonical form.
         assert_eq!(a, b);
     }

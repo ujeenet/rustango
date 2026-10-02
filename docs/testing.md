@@ -5,18 +5,18 @@ booting a server or touching the network. **Rustango**'s `TestClient` runs your
 router **in-process**: you call `client.get("/path")`, it routes the request
 through the real stack (extractors, middleware, handlers) and hands back the
 response to assert on. Add transaction-rollback isolation for database tests and
-a set of response assertions, and you have Django's test client + `TestCase`, in
-Rust.
+a set of response assertions, and a whole request flow is testable without a
+socket.
 
 [![Testing in Rustango: TestClient wraps your Router and sends in-process requests through the real handler stack; the TestResponse exposes status, text, and JSON to assert on — no socket, no server](img/testing.png)](img/testing.png)
 
 > **New to a term here?** *router*, *handler*, *fixture*, *rollback* — see the
 > [glossary](glossary.md).
 
-> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …), and `rustango::test_db` (`with_rollback`) — always
-> compiled.
+> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`) — needs
+> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_assertions`
+> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) and
+> `rustango::test_db` (`with_rollback`) are ungated.
 >
 > **Runnable version:** the snippets below *are* a passing test —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -30,6 +30,7 @@ Rust.
 - [Sending JSON, headers, and bodies](#sending-json-headers-and-bodies)
 - [Testing a real API](#testing-a-real-api)
 - [Database tests with rollback](#database-tests-with-rollback)
+- [Live suites, and why a green run may prove nothing](#live-suites-and-why-a-green-run-may-prove-nothing)
 - [Response assertion helpers](#response-assertion-helpers)
 - [See also](#see-also)
 
@@ -138,22 +139,102 @@ use rustango::test_db::with_rollback;
 
 #[tokio::test]
 async fn creating_a_post_persists_it() {
-    with_rollback(&pool, |tx| async move {
-        // ... insert + assert against `tx` ...
+    with_rollback(&pool, |tx| Box::pin(async move {
+        // ... insert + assert against `&mut *tx.lock().await?` ...
         // everything here is rolled back when the closure returns
-    }).await;
+        Ok(())
+    })).await.unwrap();
 }
 ```
+
+The `Box::pin` is required, not stylistic: the bound is
+`for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+which is how the closure gets to borrow `tx` across its own await points. An
+`atomic()` on the same pool inside the closure is a savepoint and rolls back too;
+drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`. The
+closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
+rollback happens either way, so the `unwrap` is about your assertions, not
+about cleanup.
 
 For SQLite, the `*_sqlite_live.rs` tests throughout this repo use an in-memory
 database per test instead — also fully isolated, with zero external setup.
 
 ---
 
+## Live suites, and why a green run may prove nothing
+
+Tests named `*_live.rs` talk to a real database. Most need nothing from you; the
+rest need an environment variable, and **when it is missing they do not fail.
+They return, and the run reports success.**
+
+That is deliberate — it keeps `cargo test` working on a laptop with no server —
+but it means a passing run is not evidence the suite ran. Worth knowing before
+you read a green result as coverage.
+
+### Which variable each suite wants
+
+| Variable | Suites | What they need |
+|---|---:|---|
+| *(none)* | 223 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 131 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 63 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | A reachable Redis. |
+
+A suite reading two variables is counted under both, so the column does not sum
+to the number of files.
+
+The `*_tri.rs` suites are counted under both server variables. They read no
+variable themselves — `Backend::pool()` does the lookup — and they run their
+SQLite arm with nothing set, so counting them as needing nothing would be
+technically survivable and practically wrong: the two arms that need a server
+are the reason those suites exist. Start both servers, or a tri suite reports
+a healthy pass count having exercised one backend of three.
+
+MySQL is the one that catches people: it reads its own variable, so a shell with
+only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL
+one.
+
+### Run them one at a time
+
+The live suites share one database and most drop or truncate the framework
+tables in setup, so running them in parallel makes them fight over the
+catalog. Use the `live` profile, which sets `test-threads = 1`:
+
+```bash
+cargo nextest run --profile live --workspace --all-features
+```
+
+Without it the failures are many and none of them are real: 758 against
+PostgreSQL, 95 against MySQL, 0 either way with the profile. The
+`tokio::sync::Mutex` guards inside those suites do not help, because nextest
+runs each test in its own process and a mutex in one does not reach another.
+
+This is a workaround, not a fix — see #1624 for per-process databases, which
+would restore the parallelism.
+
+### Telling a skip from a pass
+
+Most skips are a bare early `return` with no output at all. A minority print a
+line to stderr first, which `cargo test` hides unless you ask:
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+The reliable signal is the count. A live suite that reports `0 passed` — or far
+fewer than the file contains — skipped. `running 2 tests … 2 passed` with no
+server running means those two tests returned early.
+
+If you want a suite to fail rather than skip when its server is missing, set the
+variable to a deliberately bad URL: it will then fail at connect, which is a
+louder and more honest signal than a skip.
+
+---
+
 ## Response assertion helpers
 
 For raw `axum::Response` values (e.g. from `tower::oneshot`), `test_assertions`
-reads like Django's `assertContains` / `assertRedirects`:
+gives ready-made checks for status, redirects and cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

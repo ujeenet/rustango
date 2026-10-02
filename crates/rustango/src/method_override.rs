@@ -1,18 +1,16 @@
-//! HTTP method override — rewrite POST → PUT / PATCH / DELETE based on
-//! a hidden form field or header.
+//! Method override: turn a POST into PUT, PATCH or DELETE from a
+//! hidden form field or a header.
 //!
-//! HTML `<form>` only emits GET or POST — no PUT, PATCH, or DELETE.
-//! The standard Laravel / Express convention is a hidden `_method`
-//! field (or `X-HTTP-Method-Override` header) carrying the intended
-//! verb; the server rewrites the request before routing.
+//! An HTML `<form>` can only send GET or POST. The usual workaround,
+//! from Laravel and Express, is a hidden `_method` field or an
+//! `X-HTTP-Method-Override` header naming the real verb, which the
+//! server applies before routing.
 //!
-//! ## Why a tower Layer (not Router::layer)
+//! ## Why a tower Layer, not `Router::layer`
 //!
-//! axum 0.8's `Router::layer(...)` runs the middleware AROUND the
-//! selected handler — after routing. To rewrite the method BEFORE
-//! routing dispatches, the layer must wrap the entire Router. Use
-//! [`tower::ServiceBuilder`] (or call `MethodOverrideLayer::layer`
-//! directly) to compose:
+//! `Router::layer(...)` runs after routing, around the chosen handler.
+//! The method has to change before routing, so the layer must wrap the
+//! whole Router. Use [`tower::ServiceBuilder`]:
 //!
 //! ```ignore
 //! use rustango::method_override::MethodOverrideLayer;
@@ -37,23 +35,25 @@
 //!
 //! ## Strategies
 //!
-//! Tried in this order (whichever fires first wins):
+//! The first one that matches wins:
 //!
-//! 1. `X-HTTP-Method-Override` header (preferred — works for any
-//!    Content-Type, cheaper than parsing the body).
-//! 2. `_method` form field, when the request is
-//!    `application/x-www-form-urlencoded` AND the body is small enough.
-//!    Body-parse limit is configurable (default 64 KiB).
+//! 1. The `X-HTTP-Method-Override` header. Preferred: it works with
+//!    any Content-Type and needs no body parse.
+//! 2. The `_method` form field, when the request is
+//!    `application/x-www-form-urlencoded` and the body fits the limit
+//!    (64 KiB by default).
 //!
 //! ## Safety
 //!
-//! - Only POST requests are rewritten — never GET / HEAD / OPTIONS,
-//!   regardless of what the client claims.
-//! - The override target must be in the configured allow-list. Default:
-//!   PUT, PATCH, DELETE. Anything else is ignored.
-//! - The body is read once into memory when checking the form-field
-//!   strategy — large uploads should use the header strategy and skip
-//!   the body parse entirely.
+//! - Only POST is rewritten. GET, HEAD and OPTIONS never are, whatever
+//!   the client sends.
+//! - The target verb must be in the allow-list. Default: PUT, PATCH,
+//!   DELETE. Anything else is ignored.
+//! - **Keep CSRF protection on.** A form now picks the verb, so a
+//!   cross-site POST can reach a DELETE route. A rewritten request is
+//!   no safer than the POST it arrived as.
+//! - The form-field path reads the whole body into memory. A form over
+//!   the limit gets `413`. For large uploads, use the header instead.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -61,15 +61,15 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, Method, Request, Response};
+use axum::http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use tower::Service;
 
 const DEFAULT_HEADER: &str = "x-http-method-override";
 const DEFAULT_FORM_FIELD: &str = "_method";
 const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
 
-/// Configuration for [`MethodOverrideService`]. Implements
-/// [`tower::Layer`] so it composes with `ServiceBuilder`.
+/// Settings for [`MethodOverrideService`]. It is a [`tower::Layer`],
+/// so it works with `ServiceBuilder`.
 #[derive(Clone)]
 pub struct MethodOverrideLayer {
     cfg: Arc<MethodOverrideConfig>,
@@ -139,8 +139,8 @@ impl<S> tower::Layer<S> for MethodOverrideLayer {
     }
 }
 
-/// The wrapped service. Inspects each incoming POST for an override
-/// strategy and rewrites the method before forwarding to `inner`.
+/// The wrapped service. It checks each POST for an override and
+/// changes the method before calling `inner`.
 #[derive(Clone)]
 pub struct MethodOverrideService<S> {
     inner: S,
@@ -168,46 +168,60 @@ where
         let cfg = Arc::clone(&self.cfg);
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let req = maybe_rewrite(req, &cfg).await;
-            inner.call(req).await
+            match maybe_rewrite(req, &cfg).await {
+                Ok(req) => inner.call(req).await,
+                Err(refused) => Ok(refused),
+            }
         })
     }
 }
 
-async fn maybe_rewrite(req: Request<Body>, cfg: &MethodOverrideConfig) -> Request<Body> {
+/// `Err` is the response to send instead: the body was consumed and
+/// could not be read whole, so the handler must not see it empty (#1866).
+async fn maybe_rewrite(
+    req: Request<Body>,
+    cfg: &MethodOverrideConfig,
+) -> Result<Request<Body>, Response<Body>> {
     if req.method() != Method::POST {
-        return req;
+        return Ok(req);
     }
 
-    // 1. Header strategy — cheap, no body parse.
+    // 1. Header: cheap, no body parse.
     if let Some(target) = header_method(req.headers(), cfg.header_name) {
         if cfg.allowed.contains(&target) {
-            return swap_method(req, target);
+            return Ok(swap_method(req, target));
         }
     }
 
-    // 2. Form-field strategy — parse the body if it's a form payload.
+    // 2. Form field: only for a urlencoded body.
     if is_form_content_type(req.headers()) {
         let (parts, body) = req.into_parts();
         let bytes = match to_bytes(body, cfg.body_limit).await {
             Ok(b) => b,
-            Err(_) => {
-                // Body too large or stream error — pass through with
-                // an empty body since we already consumed it.
-                return Request::from_parts(parts, Body::empty());
+            Err(e) => {
+                let too_large = std::error::Error::source(&e)
+                    .is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
+                let status = if too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                let mut refused = Response::new(Body::empty());
+                *refused.status_mut() = status;
+                return Err(refused);
             }
         };
         if let Some(target) = form_method(&bytes, cfg.form_field) {
             if cfg.allowed.contains(&target) {
                 let mut parts = parts;
                 parts.method = target;
-                return Request::from_parts(parts, Body::from(bytes));
+                return Ok(Request::from_parts(parts, Body::from(bytes)));
             }
         }
-        return Request::from_parts(parts, Body::from(bytes));
+        return Ok(Request::from_parts(parts, Body::from(bytes)));
     }
 
-    req
+    Ok(req)
 }
 
 fn header_method(headers: &HeaderMap, name: &str) -> Option<Method> {
@@ -243,42 +257,11 @@ fn form_method(bytes: &[u8], field: &str) -> Option<Method> {
     None
 }
 
-fn percent_decode_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut bytes = s.bytes().peekable();
-    while let Some(b) = bytes.next() {
-        if b == b'+' {
-            out.push(' ');
-        } else if b == b'%' {
-            if let (Some(hi), Some(lo)) = (bytes.next(), bytes.next()) {
-                if let (Some(h), Some(l)) = (hex(hi), hex(lo)) {
-                    out.push(char::from(h * 16 + l));
-                    continue;
-                }
-                out.push('%');
-                out.push(hi as char);
-                out.push(lo as char);
-            } else {
-                out.push('%');
-            }
-        } else {
-            out.push(char::from(b));
-        }
-    }
-    out
-}
+// The crate's form decoder; the old copy decoded bytes as Latin-1 (#1663).
+use crate::url_codec::url_decode as percent_decode_string;
 
 fn percent_decode_eq(encoded: &str, expected: &str) -> bool {
     percent_decode_string(encoded) == expected
-}
-
-fn hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn swap_method(req: Request<Body>, target: Method) -> Request<Body> {
@@ -296,8 +279,7 @@ mod tests {
     use std::sync::Arc as StdArc;
     use tower::{Layer, ServiceExt};
 
-    /// Wrap an inner Router with the layer (so routing sees the
-    /// rewritten method).
+    /// Wrap a Router so routing sees the rewritten method.
     fn wrap(
         inner: Router,
         layer: MethodOverrideLayer,
@@ -520,8 +502,9 @@ mod tests {
         assert_eq!(&bytes[..], b"get");
     }
 
+    /// An over-limit form used to reach the handler with an empty body (#1866).
     #[tokio::test]
-    async fn body_above_limit_passes_through_as_post() {
+    async fn body_above_limit_is_413_and_never_reaches_the_handler() {
         let p = StdArc::new(AtomicBool::new(false));
         let pc = p.clone();
         let r = Router::new().route(
@@ -545,10 +528,10 @@ mod tests {
             ))
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
-            p.load(Ordering::SeqCst),
-            "body too large -> handler stays POST"
+            !p.load(Ordering::SeqCst),
+            "the handler ran on a consumed, empty body"
         );
     }
 
@@ -586,6 +569,12 @@ mod tests {
         assert_eq!(percent_decode_string("hello%20world"), "hello world");
         assert_eq!(percent_decode_string("hello+world"), "hello world");
         assert_eq!(percent_decode_string("a%21"), "a!");
+    }
+
+    /// UTF-8, not Latin-1: `%C3%A9` is one `é`, not `Ã©` (#1663).
+    #[test]
+    fn percent_decode_reads_utf8() {
+        assert_eq!(percent_decode_string("caf%C3%A9"), "café");
     }
 
     #[test]

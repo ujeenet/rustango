@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
-//! Tests for `rustango::migrate::manage::run` — the Django-style
-//! `manage.py` analog.
+//! Tests for `rustango::migrate::manage::run` — the `manage`
+//! subcommand dispatcher.
 //!
 //! Most of `manage::run` is glue over already-tested runner functions,
 //! so these tests focus on:
@@ -836,4 +836,63 @@ async fn help_lists_new_commands() {
     for cmd in &["about", "check", "docs", "version"] {
         assert!(output.contains(cmd), "help missing `{cmd}`");
     }
+}
+
+/// #1988 — a second dir regenerates a baseline the ledger already names;
+/// `migrate` must restore a framework table and column the DB lacks.
+/// Runs in a database of its own, since it drops framework schema.
+#[cfg(feature = "tenancy")]
+#[tokio::test]
+async fn migrate_from_a_dir_without_system_restores_the_schema() {
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let _g = live_lock().lock().await;
+    let admin = admin.as_postgres().unwrap().clone();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let db = format!("rustango_1988_{}", std::process::id());
+    let (base, _) = url.rsplit_once('/').unwrap();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pg = PgPool::connect(&format!("{base}/{db}")).await.unwrap();
+    let pool: rustango::sql::Pool = pg.clone().into();
+
+    let first = fresh_dir("1988a").join("migrations");
+    std::fs::create_dir_all(&first).unwrap();
+    manage::run(&pool, &first, args(&["migrate"]))
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE rustango_user_permissions")
+        .execute(&pg)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE rustango_users DROP COLUMN password_changed_at")
+        .execute(&pg)
+        .await
+        .unwrap();
+
+    let second = fresh_dir("1988b").join("migrations");
+    std::fs::create_dir_all(&second).unwrap();
+    let result = manage::run(&pool, &second, args(&["migrate"])).await;
+    let present: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_name = 'rustango_user_permissions'), \
+                (SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_name = 'rustango_users' AND column_name = 'password_changed_at')",
+    )
+    .fetch_one(&pg)
+    .await
+    .unwrap();
+    pg.close().await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute(&admin)
+        .await;
+    result.expect("a second dir migrates the same database");
+    assert_eq!(present, (1, 1), "the dropped table or column was skipped");
 }

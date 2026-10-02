@@ -5,9 +5,9 @@ votre handler ne la voie et après qu'il a produit une réponse. C'est là que
 vivent les préoccupations transversales : journalisation, limitation de débit,
 en-têtes de sécurité, CSRF, résolution de la locale et du fuseau horaire.
 **Rustango** fournit un catalogue riche de middlewares prêts à l'emploi et rend
-l'écriture des vôtres possible en quelques lignes. Si vous venez de Django,
-c'est la liste `MIDDLEWARE` ; d'Express, c'est `app.use()` ; de Laravel, c'est
-le kernel HTTP — la même idée, rattachée à votre routeur.
+l'écriture des vôtres possible en quelques lignes. Dans Express, c'est
+`app.use()` ; dans Laravel, c'est le kernel HTTP — la même idée, rattachée à
+votre routeur.
 
 [![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 
@@ -46,19 +46,28 @@ le kernel HTTP — la même idée, rattachée à votre routeur.
 
 Il existe deux formes, et vous utiliserez les deux :
 
-1. **Un `tower::Layer`** — une structure middleware réutilisable et
-   configurable. Chaque composant intégré en est un (`SecurityHeadersLayer`,
-   `RateLimitLayer`, …). Vous attachez un layer avec le `.layer(...)` d'axum,
-   ou — pour la plupart des composants intégrés — avec un **one-liner de trait
-   d'extension** qui se lit mieux :
+1. **Une structure de configuration plus un one-liner `…RouterExt`** — la forme
+   de la plupart des composants intégrés. Le type `…Layer` est une structure de
+   configuration, *pas* un `tower::Layer` : il est installé par son trait
+   d'extension, qui l'enveloppe dans `axum::middleware::from_fn` en interne.
+   `SecurityHeadersLayer`, `RateLimitLayer`, `RequestIdLayer`, `CorsLayer`,
+   `EtagLayer`, `CompressionLayer`, `BodyLimitLayer`, `IdempotencyLayer` et
+   `AccessLogLayer` ont tous cette forme, donc `.layer(…)` sur eux ne compile
+   pas :
 
    ```rust
    use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
 
-   // These two are equivalent; the second is the ergonomic form.
-   let app = router.layer(SecurityHeadersLayer::strict());
+   // La méthode RouterExt est la seule forme — le nom finit par `Layer`, mais
+   // le type n'implémente pas `tower::Layer`.
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
+
+   Ceux qui sont réellement des `tower::Layer` — et acceptent donc `.layer(…)` —
+   sont `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
+   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` et le builder
+   `api_version`. Vérifiez avant de recourir à `.layer(…)` :
+   `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Chaque module intégré exporte un trait `…RouterExt` (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Amenez-le dans la portée et vous obtenez une méthode
@@ -146,7 +155,7 @@ obtenir la méthode.
 | Restreindre les méthodes HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
 | **Observabilité** | | |
 | Identifiant de requête (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
-| Journal d'accès (PII expurgées) | `AccessLogLayer` | `.access_log(..)` |
+| [Journal d'accès](logging.md#le-journal-daccès) (PII expurgées) | `AccessLogLayer` | `.access_log(..)` |
 | Spans `tracing` | `TracingLayer` | `.layer(..)` |
 | En-tête `Server-Timing` | `ServerTimingLayer` | `.server_timing(..)` |
 | IP client réelle (derrière des proxys) | `RealIpLayer` | `.real_ip(..)` |
@@ -162,6 +171,12 @@ obtenir la méthode.
 | Rechargement à chaud | `LiveReloadLayer` | `.livereload(..)` |
 | Panneau de débogage | `DebugPanelLayer` | `.debug_panel(..)` |
 
+Avec `tenancy`, montez `CachePageLayer` dans la couche tenancy : sur un router
+passé au builder du serveur. Il met le tenant résolu dans la clé ; hors de la
+couche tenancy il ne voit pas le tenant et ne met rien en cache. Un CDN devant
+doit aussi varier selon l'en-tête du tenant (`X-Org`), sinon il mélangera
+lui-même les tenants.
+
 Les sections suivantes détaillent celles que la requête a demandées.
 
 ---
@@ -169,8 +184,8 @@ Les sections suivantes détaillent celles que la requête a demandées.
 ## Middleware sensible à la locale
 
 `LocaleMiddleware` résout une locale par requête et l'injecte dans la requête
-afin que n'importe quel handler puisse la lire. L'ordre de sélection est celui
-de Django : **cookie → `Accept-Language` → valeur par défaut**. La première
+afin que n'importe quel handler puisse la lire. L'ordre de sélection est le
+suivant : **cookie → `Accept-Language` → valeur par défaut**. La première
 locale que vous listez est la valeur par défaut, sauf si vous la surchargez.
 
 ```rust
@@ -200,8 +215,10 @@ loc.direction()  // "ltr" / "rtl" — feed straight into <html dir="…">
 loc.is_rtl()     // true for ar, he, fa, …
 ```
 
-Le nom du cookie est par défaut `django_language` (compatible Django) ;
-changez-le avec `.cookie_name("…")`, ou passez `None` pour désactiver
+Le nom du cookie est par défaut `django_language` — un nom historique conservé
+pour des raisons de compatibilité ; changez-le avec `.cookie_name("my_locale".to_string())` — le paramètre est
+`impl Into<Option<String>>`, ce que `&str` ne satisfait pas, donc un littéral nu
+est une erreur de borne de trait — ou passez `None` pour désactiver
 entièrement la recherche par cookie. L'ordre de résolution, vérifié de bout en
 bout :
 
@@ -227,8 +244,8 @@ négociation par en-tête, montez un sous-routeur par locale avec
 Il n'y a délibérément **aucun layer de fuseau horaire**. À la place, le
 framework vous donne un décalage actif task-local (`rustango::i18n::timezone`)
 et un décodeur d'en-tête/cookie, et vous composez un middleware d'une ligne qui
-l'active — l'exemple canonique du « écrivez le vôtre ». Cela reflète le
-`USE_TZ=True` de Django : stockez en UTC, affichez selon l'horloge locale de
+l'active — l'exemple canonique du « écrivez le vôtre ». Le principe est le
+suivant : stockez en UTC, affichez selon l'horloge locale de
 l'utilisateur.
 
 ```rust
@@ -372,8 +389,11 @@ non-concordance donne un `403 Forbidden` :
 ```
 
 Dans les templates Tera, `{{ csrf_token }}` donne le jeton brut et
-`{{ csrf_input }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
-un dans chaque formulaire. Surchargez les noms de cookie/en-tête ou le flag
+`{{ csrf_input | safe }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
+un dans chaque formulaire. Le `| safe` est obligatoire : Tera échappe `.html`
+automatiquement, sans quoi le formulaire ne porte aucun champ `_csrf` et chaque
+POST renvoie 403. Le formulaire de connexion de l'admin fait exactement cela —
+voir `crates/rustango/src/admin/templates/login.html`. Surchargez les noms de cookie/en-tête ou le flag
 `Secure` avec `csrf::with_config(CsrfConfig)` ; pour des configurations SPA,
 ajoutez `.with_trusted_origins([...])` pour activer la vérification de
 défense en profondeur de l'en-tête Origin en plus du jeton. Pour des endpoints
@@ -411,8 +431,6 @@ Le pattern est une petite structure `Layer` qui construit un `Service`, plus
 `rustango::request_id` est la plus petite référence complète à copier :
 
 - `RequestIdLayer` — le layer configurable (`::default()`, `.always_generate()`),
-- `RequestIdService<S>` — enveloppe le service interne ; lit/pose l'en-tête
-  `X-Request-Id` à l'intérieur de `call`,
 - `RequestId` — un extracteur `FromRequestParts` pour que les handlers puissent
   lire l'identifiant,
 - `RequestIdRouterExt` — fournit `Router::request_id(layer)`.

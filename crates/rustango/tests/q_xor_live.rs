@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 //! Live PG test for `WhereExpr::Xor` runtime semantics (issue #27).
-//! Verifies the canonical binary rewrite + Django's N-ary odd-parity
+//! Verifies the canonical binary rewrite + the N-ary odd-parity
 //! tally produce the right row counts end-to-end. Skips silently when
 //! `DATABASE_URL` is unset.
 
@@ -30,7 +30,9 @@ fn lock() -> &'static Mutex<()> {
 
 async fn fresh_pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::PgPool::connect(&url).await.ok()?;
+    let pool = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
     sqlx::query(r#"DROP TABLE IF EXISTS "qxor_live_person" CASCADE"#)
         .execute(&pool)
         .await

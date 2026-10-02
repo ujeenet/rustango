@@ -1,14 +1,7 @@
-//! Django-shape test factories — `factory_boy` parity.
+//! Test fixture builders, in the style of `factory_boy`.
 //!
-//! `factory_boy` is the de-facto Django fixture builder: declare a
-//! factory, get `Factory.build()` (no DB) / `Factory.create()` (DB)
-//! and `Factory.create_batch(n)` for free, with `Sequence(...)` for
-//! per-call unique values. The Python design exists because Python
-//! has no struct-update syntax — building a `User(name=..., email=...,
-//! created_at=...)` ten times is tedious.
-//!
-//! Rust *does* have struct update syntax + `Default::default()`, so
-//! you can already write:
+//! Struct update syntax and `Default::default()` already cover most
+//! of what `factory_boy` does in Python:
 //!
 //! ```ignore
 //! let users: Vec<User> = (0..10)
@@ -16,10 +9,9 @@
 //!     .collect();
 //! ```
 //!
-//! This module ships the two factory_boy primitives that are still
-//! useful on top of that: a [`Sequence`] for thread-safe per-call
-//! unique values, and a [`Factory`] trait that adds [`Factory::build_batch`]
-//! / [`Factory::build_pool`] for the create-many DB pattern.
+//! This module adds the two pieces that are still useful on top:
+//! [`Sequence`] for unique per-call values, and the [`Factory`]
+//! trait with [`Factory::build_batch`].
 //!
 //! ## Example
 //!
@@ -51,31 +43,28 @@
 //! assert_eq!(three[2].username, "user-2");
 //! ```
 //!
-//! Issue #432.
+//! [`Factory`]: crate::test_factory::Factory
+//! [`Factory::build_batch`]: crate::test_factory::Factory::build_batch
+//! [`Sequence`]: crate::test_factory::Sequence
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Atomically-incrementing counter that produces a fresh value on
-/// each [`Sequence::next`] call. Mirrors `factory.Sequence(lambda n: ...)`.
+/// A counter that gives a fresh value on every [`Sequence::next`]
+/// call, like `factory.Sequence(lambda n: ...)`.
 ///
-/// The closure is called with the current counter value (starting
-/// at `0`) and returns the per-call output. Counter is `AtomicU64`,
-/// so the sequence is safe to share across threads / tasks — multiple
-/// tests calling `factory.usernames.next()` in parallel each get a
-/// unique value.
+/// Your closure receives the counter, starting at `0`. The counter
+/// is atomic, so parallel callers each get their own value.
 ///
-/// `Sequence` does not implement `Clone` — every clone would share
-/// the same atomic counter, which is usually NOT what callers want
-/// (each factory instance should have its own sequence). Build a
-/// new `Sequence::new(...)` per factory.
+/// There is no `Clone`: clones would share one counter. Give each
+/// factory its own `Sequence::new(...)`.
 pub struct Sequence<T> {
     counter: AtomicU64,
     factory: Box<dyn Fn(u64) -> T + Send + Sync>,
 }
 
 impl<T> Sequence<T> {
-    /// Build a sequence whose `next()` returns `factory(0)`,
-    /// `factory(1)`, `factory(2)`, ...
+    /// A sequence whose `next()` returns `factory(0)`, `factory(1)`,
+    /// and so on.
     pub fn new<F>(factory: F) -> Self
     where
         F: Fn(u64) -> T + Send + Sync + 'static,
@@ -86,42 +75,36 @@ impl<T> Sequence<T> {
         }
     }
 
-    /// Increment the internal counter and return the next value.
+    /// Return the next value and bump the counter.
     pub fn next(&self) -> T {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         (self.factory)(n)
     }
 
-    /// Current counter value (the index the next `next()` call will
-    /// see). Useful in assertions.
+    /// The index the next `next()` call will use.
     #[must_use]
     pub fn current(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
     }
 
-    /// Reset the counter to `0`. Useful between test runs that need
-    /// deterministic IDs.
+    /// Set the counter back to `0`, for tests that need fixed IDs.
     pub fn reset(&self) {
         self.counter.store(0, Ordering::Relaxed);
     }
 }
 
-/// Trait for factory_boy-shape model builders.
+/// A builder for test objects.
 ///
-/// Implementors override [`Factory::build`] to construct one in-memory
-/// instance — the rest (`build_batch`, `build_pool`, `build_batch_pool`)
-/// are derived.
-///
-/// `Item` is the type the factory produces — typically a model struct
-/// or a DTO.
+/// Implement [`Factory::build`]; `build_batch` comes for free.
+/// `Item` is what the factory produces, usually a model struct.
 pub trait Factory {
     type Item;
 
-    /// Build one in-memory instance. Implementations usually pull
-    /// per-call unique values out of internal [`Sequence`] fields.
+    /// Build one object in memory. Most implementations take their
+    /// unique values from a [`Sequence`] field.
     fn build(&self) -> Self::Item;
 
-    /// Build `n` in-memory instances by calling `build()` in a loop.
+    /// Build `n` objects by calling `build()` in a loop.
     fn build_batch(&self, n: usize) -> Vec<Self::Item> {
         (0..n).map(|_| self.build()).collect()
     }

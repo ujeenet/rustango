@@ -1,7 +1,7 @@
 # Decoradores de acceso
 
 Una vez que un usuario está autenticado, restringes rutas. **Rustango** entrega
-la familia `@login_required` de Django como **capas** de axum componibles: adjunta
+para ello una familia de **capas** de axum componibles: adjunta
 una a un router y las peticiones anónimas son rechazadas — redirigidas con 302 a
 tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 (flujo de API) — antes de que lleguen siquiera al handler.
@@ -87,7 +87,8 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `active_required(url)` | `active_required_or_403()` | con sesión iniciada **y** `active` |
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | predicado sobre la fila `User` |
-| `permission_required(url, codename)` | `permission_required_or_403(codename)` | posee el codename de permiso |
+| `permission_required(url, codename)` † | `permission_required_or_403(codename)` | posee el codename de permiso |
+† `permission_required` es la única barrera de esta columna que no siempre redirige. Un visitante **anónimo** recibe el 302 a `login_url`; quien sí ha iniciado sesión pero carece del codename recibe un **403** pelado, sin redirección ni cuerpo (`auth_decorators.rs:560`). Las otras cuatro redirigen en todos los casos de fallo.
 
 Todas son capas tower — `.layer(...)`-las sobre un router o subrouter.
 

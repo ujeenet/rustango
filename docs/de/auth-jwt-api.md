@@ -10,7 +10,7 @@ Refresh und **Widerruf** für das Abmelden. **Rustango** liefert das als
 [![JWT-Auth-API: login stellt ein Access+Refresh-Paar aus, refresh rotiert und setzt den alten Token auf die Sperrliste, logout widerruft über einen JTI-Speicher](../img/auth-jwt-api.png)](../img/auth-jwt-api.png)
 
 > **Quelle:** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
-> `JwtClaims`) und `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
+> `JwtClaims`) und `rustango::tenancy::auth_routes` (`JwtAuth`, `Config`) +
 > `rustango::jti_store` (`JtiStore`, `InMemoryJtiStore`) — hinter `jwt` +
 > `tenancy`.
 >
@@ -39,7 +39,7 @@ Refresh und **Widerruf** für das Abmelden. **Rustango** liefert das als
 
 ## Der eingebaute Router
 
-`jwt_router` hängt die vier Standard-Endpunkte gegen die tenant-spezifische
+`JwtAuth::router()` hängt die vier Standard-Endpunkte gegen die tenant-spezifische
 Tabelle `rustango_users` ein — die ~50 Zeilen Login-Boilerplate, die jedes
 Projekt sonst neu schreibt:
 
@@ -47,7 +47,7 @@ Projekt sonst neu schreibt:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (widerruft die JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + optional `{refresh}` | `204` (widerruft beide JTIs) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifiziert das Passwort mit [argon2id](auth-passwords.md) und stellt dann
@@ -57,15 +57,24 @@ konfigurierbar.
 ## Die Verdrahtung
 
 ```rust
-use rustango::tenancy::auth_routes::{jwt_router, Config};
+use axum::middleware::from_fn_with_state;
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 
+let auth = JwtAuth::new(Config::default());
 rustango::manage::Cli::new()
     .tenancy()
     .api(my_app::urls::api()
-        .merge(jwt_router(Config::default())))   // hängt /api/auth/* ein
+        .layer(from_fn_with_state(auth.clone(), require_bearer)) // Ihre Routen
+        .merge(auth.router()))                                   // /api/auth/*
     .run()
     .await
 ```
+
+Bauen Sie **ein** `JwtAuth` und reichen Sie überall Klone davon weiter. Jede
+Instanz hat ihre eigene In-Memory-Sperrliste. Bei zwei Instanzen sieht
+`require_bearer` ein Logout am Router nicht, und das Token gilt weiter, bis es
+abläuft. Ein gemeinsamer `jti_store` (Redis, Datenbank) beseitigt diese
+Trennung ebenfalls.
 
 `Config::default()` signiert mit `RUSTANGO_SESSION_SECRET` (demselben Schlüssel
 wie das Admin-Session-Cookie) und verwendet TTLs von 15 Min. Access / 7 Tage
@@ -139,6 +148,14 @@ herabgestuft), verwenden Sie `refresh_with(token, new_claims)`, um ein frisches
 Payload einzusetzen, während die alte Refresh-JTI dennoch auf die Sperrliste
 gesetzt wird.
 
+`POST /api/auth/refresh` prüft zusätzlich: Eine Passwortänderung seit dem Login beendet
+die Kette, keine Kette überlebt `Config::refresh_absolute_ttl_secs` (30 Tage) ab dem
+Login, und das erneute Senden eines bereits rotierten Tokens widerruft die ganze Kette.
+Eine Wiederholung innerhalb von etwa `Config::refresh_reuse_grace_secs` (10–20 s) nach
+der Rotation bekommt nur eine 401, damit ein ehrlicher Client mit zwei Refreshes
+angemeldet bleibt; der Preis: Ein Dieb in diesem Fenster löst keinen Widerruf aus. Der
+Widerruf ist nur so stark wie der JTI-Store (ein In-Memory-Store vergisst beim Neustart).
+
 ---
 
 ## Widerruf und der JTI-Speicher
@@ -152,6 +169,24 @@ let pair = jwt.issue_pair(1);
 assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
+
+### Den Refresh-Token an `/logout` senden
+
+Nur den Bearer zu widerrufen beendet einen Token, der ohnehin in Minuten
+abgelaufen wäre. Der Refresh-Token ist derjenige mit tagelanger Lebensdauer und
+kann während seiner gesamten TTL neue Access-Token ausstellen — ein Logout, das
+ihn am Leben lässt, beendet die Sitzung also nicht, es verschiebt sie nur:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // widerruft auch die langlebige Hälfte
+```
+
+Der Body ist optional, sodass Clients, die gegen den älteren Endpunkt
+geschrieben wurden, unverändert weiterlaufen — sie widerrufen einfach weniger.
+Senden Sie ihn. Beide Hälften sind an den aufrufenden Mandanten gebunden, sodass
+eine Subdomain den Token einer anderen nicht widerrufen kann.
 
 Die Sperrliste liegt in einem austauschbaren `JtiStore`. Der Standard
 `InMemoryJtiStore` ist **einprozessig und verliert Widerrufe beim Neustart** —
@@ -207,7 +242,7 @@ Sonst ist die Einmalverwendungs-Garantie für Refresh-Tokens verloren.
 
 Da die Verifizierung den Speicher konsultiert, sind `verify_access`,
 `verify_refresh`, `refresh`, `revoke` und die MCP-/Tenant-Token-Helfer
-(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) alle
+(`mcp::verify_agent_token`, `tenancy::auth_routes::JwtAuth::verify_for_tenant`) alle
 `async`. Der **Ablauf wird vor** dem Speicherzugriff geprüft, ein abgelaufener
 Token kostet also keinen Roundtrip.
 
@@ -240,7 +275,7 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   aber eine Speicherabfrage pro Anfrage; `JwtLifecycle` ist der Mittelweg —
   zustandslose Verifizierung, plus eine JTI-Sperrliste für die Widerrufe, die Sie
   tatsächlich brauchen (Logout, Rotation).
-- **HTTP-Endpunkte sind tenant-bezogen.** `jwt_router` löst Benutzer über den
+- **HTTP-Endpunkte sind tenant-bezogen.** `JwtAuth::router()` löst Benutzer über den
   Tenant-Kontext + `rustango_users` auf; hängen Sie ihn in einer
   `.tenancy()`-App ein. Die Token-Engine (`JwtLifecycle`) selbst hat diese
   Anforderung nicht.
@@ -249,6 +284,19 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   `Authorization: Bearer`-Header zu authentifizieren.
 - **HS256-Signierung**, 32-Byte-Schlüssel-Untergrenze — derselbe Algorithmus und
   dieselben Einschränkungen wie beim [eigenständigen JWT](auth-jwt.md#sicherheitsmodell).
+- **Die Tokens sind gewöhnliche JWTs**, also kann alles, was ein JWT prüft, auch
+  diese prüfen: `jwt.io`, die Standardbibliothek deiner Plattform, ein
+  API-Gateway, ein anderer Dienst, dem du ein Token gibst. Drei Segmente, ein
+  JOSE-Header `{"alg":"HS256","typ":"JWT"}`, signiert über `header.payload`.
+
+  Bis [#1397](https://github.com/ujeenet/rustango/issues/1397) waren es zwei
+  Segmente ohne Header, signiert nur über die Payload — lesbar von nichts außer
+  rustango und sogar von `rustango::jwt::decode` abgelehnt. Wer dafür einen
+  eigenen Verifier geschrieben hat, kann ihn wegwerfen.
+
+  Vor dem Fix ausgestellte Tokens werden beim Verifizieren weiterhin akzeptiert,
+  damit ein Upgrade niemanden ausloggt. Dieser Kompatibilitätspfad entfällt in
+  0.58, wenn jedes Token der alten Form längst abgelaufen ist.
 
 
 ---

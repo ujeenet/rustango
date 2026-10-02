@@ -1,8 +1,8 @@
 # L'admin
 
 **Rustango** génère une interface d'administration complète à partir de vos
-modèles — la même idée que l'admin de Django ou un panneau Laravel
-Nova/Filament, mais avec **zéro boilerplate par modèle**. Ajoutez
+modèles — un back-office prêt à l'emploi pour parcourir et modifier vos
+données, mais avec **zéro boilerplate par modèle**. Ajoutez
 `#[derive(Model)]`, montez l'admin une fois, et chaque modèle obtient une vue
 liste avec recherche, filtres, tri, pagination et actions groupées ; un
 formulaire de création/édition regroupé en fieldsets ; l'édition inline des
@@ -142,9 +142,9 @@ détail.
 | `readonly_fields` | `"created_at"` | Champs affichés en texte (sans saisie) sur le formulaire de modification. |
 | `raw_id_fields` | `"author_id"` | Champs FK édités via une saisie d'id brut + un lien de recherche (bien adapté aux grandes tables cibles). |
 | `autocomplete_fields` | `"author_id"` | Champs FK édités via un typeahead Ajax adossé à l'endpoint `__autocomplete` de la cible. |
-| `prepopulated_fields` | `"slug:title"` | Remplit automatiquement un champ en slugifiant un autre au fur et à mesure de la saisie (`cible:source` ; combinez les sources avec `+`). |
+| `prepopulated_fields` | `"slug:title"` | Remplit automatiquement un champ en slugifiant un autre au fur et à mesure de la saisie (`target:source` ; combinez les sources avec `+`). |
 | `list_select_related` | `"all"` / `"none"` / `"author_id"` | Contrôle la JOIN automatique des colonnes FK dans la requête de liste. `"all"` (par défaut) joint chaque FK ; `"none"` désactive ; une liste CSV restreint aux FK nommées. |
-| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`champ:widget`) — voir le [tableau des widgets](#widgets-de-formulaire). |
+| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`field:widget`) — voir le [tableau des widgets](#widgets-de-formulaire). |
 | `actions_on_top` | `true` | Affiche la barre d'actions groupées au-dessus de la liste (par défaut `true`). |
 | `actions_on_bottom` | `false` | Affiche une seconde barre d'actions sous la liste (par défaut `false`). |
 
@@ -210,7 +210,7 @@ Chaque champ affiche une saisie correspondant à son type par défaut —
 `<input type="number">` pour les entiers, `type="date"`/`datetime-local` pour
 les dates, `type="checkbox"` pour les booléens, un `<textarea>` pour les
 chaînes longues, un `<select>` pour les colonnes FK, et ainsi de suite.
-Remplacez-le par champ avec `formfield_overrides = "champ:widget"` :
+Remplacez-le par champ avec `formfield_overrides = "field:widget"` :
 
 | Widget | S'applique à | Affiche |
 |---|---|---|
@@ -249,8 +249,9 @@ formulaire au lieu de saisies.
 
 ## Inlines
 
-Les inlines affichent les lignes d'un modèle enfant sur la page du parent
-(inlines Django). Enregistrez-en un au niveau du module :
+Les inlines affichent les lignes d'un modèle enfant directement sur la page du
+parent, si bien que les deux se modifient dans un seul formulaire. Enregistrez-en
+un au niveau du module :
 
 ```rust
 rustango::register_admin_inline!(
@@ -384,8 +385,8 @@ rustango::register_admin_list_filter!(
 
 ## Vues personnalisées, querysets et permissions
 
-Trois macros d'enregistrement supplémentaires reflètent les hooks
-`ModelAdmin` de Django :
+Trois macros d'enregistrement supplémentaires se greffent sur le comportement
+d'un modèle enregistré :
 
 - **Pages d'admin personnalisées** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
@@ -499,6 +500,7 @@ sauf indication contraire) :
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
 | `with_session_auth(secret)` | Exige une connexion par cookie (`/login` + `/logout`). |
+| `logout_url(u)` | Cible POST du bouton Déconnexion de la barre latérale. Par défaut `{admin_prefix}/logout` ; les admins de tenant la pointent vers leur route de déconnexion tenancy. |
 | `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo au-dessus du titre. |
@@ -538,8 +540,8 @@ montent à `/<table>/<suffix>`.
 
 ## La référence de modèle
 
-Chaque admin embarque une référence de modèle en direct (l'admindocs de
-Django) à `<prefix>/__docs` — un catalogue en lecture seule de chaque modèle
+Chaque admin embarque une référence de modèle en direct à
+`<prefix>/__docs` — un catalogue en lecture seule de chaque modèle
 enregistré avec ses champs, colonnes, types, drapeaux (PK, unique, …) et
 relations. Rien à configurer ; elle est générée à partir de vos modèles, donc
 elle ne dérive jamais du schéma.

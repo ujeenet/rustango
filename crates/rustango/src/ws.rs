@@ -1,18 +1,21 @@
-//! WebSocket handler scaffold — fan-out via the SSE [`EventBus`].
+//! WebSocket handler built on the SSE [`EventBus`].
 //!
-//! axum gives you the upgrade primitive; this module provides the
-//! production conveniences on top:
+//! axum gives you the upgrade; this module adds what a server needs on
+//! top of it:
 //!
-//! - **Fan-out**: every connected client receives every message sent
-//!   to the bus, via [`crate::sse::EventBus`] under the hood.
-//! - **Auto JSON**: messages are `Serialize` + `Deserialize` types,
-//!   serialized and decoded for you.
-//! - **Keep-alive**: configurable ping interval keeps connections from
-//!   getting reaped by intermediaries.
-//! - **Slow-consumer handling**: lagging clients receive a synthetic
-//!   `Lagged(n)` notification (their `recv` returned `Lagged`) instead
-//!   of being silently dropped — they can decide whether to resync or
-//!   carry on.
+//! - **Fan-out**: every connected client gets every message sent to the
+//!   [`crate::sse::EventBus`].
+//! - **JSON**: messages are `Serialize` + `Deserialize` types, encoded
+//!   and decoded for you.
+//! - **Keep-alive**: a ping interval stops proxies from closing idle
+//!   connections.
+//! - **Slow clients**: a lagging client gets a `{"_lagged":n}` message
+//!   instead of being dropped, so it can resync.
+//!
+//! The upgrade itself is yours to guard: axum does not check the
+//! `Origin` header, so a page on any site can open a socket to you.
+//! Check `Origin` (and authenticate the user) before calling
+//! `on_upgrade`.
 //!
 //! ## Quick start
 //!
@@ -32,7 +35,8 @@
 //!     ws: WebSocketUpgrade,
 //!     State(hub): State<WsHub<Tick>>,
 //! ) -> Response {
-//!     ws.on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+//!     // Applies `max_message_bytes` to the frame reader too.
+//!     hub.upgrade(ws)
 //! }
 //!
 //! let app = Router::new().route("/ws", get(ws_route)).with_state(hub);
@@ -40,6 +44,8 @@
 //! // From anywhere — fire one message at every connected client:
 //! hub.broadcast(Tick { value: 42 });
 //! ```
+//!
+//! [`EventBus`]: crate::sse::EventBus
 
 use std::time::Duration;
 
@@ -50,8 +56,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::sse::EventBus;
 
-/// Hub that fans messages out to every connected WebSocket. Cheap to
-/// clone — internally an `Arc<broadcast::Sender>` plus config.
+/// Fans messages out to every connected WebSocket. Cheap to clone.
 #[derive(Clone)]
 pub struct WsHub<T: Clone + Send + 'static> {
     bus: EventBus<T>,
@@ -64,12 +69,13 @@ pub struct WsConfig {
     /// How often to send a `Ping` frame when the connection is idle.
     /// Default: 30 seconds.
     pub keepalive: Duration,
-    /// Optional handler invoked for every text message received from
-    /// the client. The handler returns `Some(reply)` to send something
-    /// back, or `None` to ignore. Default: `None` (server-push only).
+    /// Called for every text message from the client. Return
+    /// `Some(reply)` to answer, `None` to ignore. Default: `None`,
+    /// meaning server-push only.
     pub on_message: Option<fn(&str) -> Option<String>>,
-    /// Optional max payload size — close the connection if a message
-    /// exceeds this. Default: 1 MiB.
+    /// Close the connection if a message is larger than this.
+    /// Default: 1 MiB. Only [`WsHub::upgrade`] enforces it before the
+    /// message is buffered; a bare `on_upgrade` checks it afterwards.
     pub max_message_bytes: usize,
 }
 
@@ -97,17 +103,16 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
         Self { bus, config }
     }
 
-    /// Override the keepalive interval. Lower = better dead-connection
-    /// detection, higher = less network chatter. Default: 30 seconds.
+    /// Set the keepalive interval. Shorter spots dead connections
+    /// sooner; longer means less traffic. Default: 30 seconds.
     #[must_use]
     pub fn keepalive(mut self, interval: Duration) -> Self {
         self.config.keepalive = interval;
         self
     }
 
-    /// Set a per-message text handler. Returning `Some(reply)` echoes
-    /// back to the originating client only (NOT a broadcast). Use the
-    /// hub's [`Self::broadcast`] for fan-out from the handler if needed.
+    /// Set the text-message handler. A `Some(reply)` goes back to that
+    /// one client only. For fan-out, call [`Self::broadcast`].
     #[must_use]
     pub fn on_message(mut self, f: fn(&str) -> Option<String>) -> Self {
         self.config.on_message = Some(f);
@@ -120,9 +125,23 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
         self
     }
 
-    /// Send `event` to every currently connected client. Drops with no
-    /// effect when zero clients are connected. Returns the number of
-    /// receivers that observed the send.
+    /// Upgrade with the frame and message reader capped at
+    /// `max_message_bytes`, then run [`ws_handler`]. A bare
+    /// `on_upgrade` reads up to 64 MiB before the size check (#1957).
+    #[must_use = "the upgrade response must be returned"]
+    pub fn upgrade(&self, ws: axum::extract::WebSocketUpgrade) -> axum::response::Response
+    where
+        T: DeserializeOwned,
+    {
+        let hub = self.clone();
+        let max = self.config.max_message_bytes;
+        ws.max_message_size(max)
+            .max_frame_size(max)
+            .on_upgrade(move |socket| ws_handler(socket, hub))
+    }
+
+    /// Send `event` to every connected client and return how many
+    /// receivers saw it. With no clients it does nothing.
     pub fn broadcast(&self, event: T) -> usize {
         self.bus.send(event)
     }
@@ -132,22 +151,23 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
         self.bus.receiver_count()
     }
 
-    /// Borrow the underlying [`EventBus`] — useful when you want to
-    /// share it with a non-WebSocket subscriber (e.g. an SSE handler).
+    /// Borrow the [`EventBus`], for example to share it with an SSE
+    /// handler.
     #[must_use]
     pub fn bus(&self) -> &EventBus<T> {
         &self.bus
     }
 }
 
-/// One connected WebSocket. Spawn from your axum handler:
+/// Drive one connected WebSocket. [`WsHub::upgrade`] calls it with
+/// the size cap applied; call it yourself only if you set that cap:
 ///
 /// ```ignore
-/// ws.on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+/// ws.max_message_size(n).on_upgrade(move |socket| ws_handler(socket, hub.clone()))
 /// ```
 ///
-/// The future runs until the client disconnects, the keepalive ping
-/// fails, or the broadcast channel is exhausted.
+/// It returns when the client disconnects, a ping fails, or the bus
+/// closes.
 pub async fn ws_handler<T>(mut socket: WebSocket, hub: WsHub<T>)
 where
     T: Clone + Send + Serialize + DeserializeOwned + 'static,
@@ -174,8 +194,7 @@ where
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
-                    // Tell the client they missed `n` events so they
-                    // can resync rather than silently drift.
+                    // Tell the client it missed `n` events so it can resync.
                     let _ = socket
                         .send(Message::Text(
                             format!(r#"{{"_lagged":{n}}}"#).into(),
@@ -185,8 +204,8 @@ where
                 Err(RecvError::Closed) => return,
             },
 
-            // Inbound: read from the socket so disconnects are noticed
-            // promptly + optional message handler runs.
+            // Inbound: read the socket so disconnects show up quickly
+            // and `on_message` can run.
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(t))) => {
                     if t.len() > max_bytes {
@@ -206,8 +225,7 @@ where
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }
-                    // No default handler for binary; subclass via
-                    // wrapping ws_handler if you need it.
+                    // Binary frames are dropped; wrap ws_handler to handle them.
                 }
                 Some(Ok(Message::Ping(p))) => {
                     if socket.send(Message::Pong(p)).await.is_err() {
@@ -242,6 +260,56 @@ mod tests {
     #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
     struct Tick {
         value: i64,
+    }
+
+    /// `upgrade` caps the frame reader: a frame header announcing more
+    /// than `max_message_bytes` closes the socket at once instead of
+    /// waiting to buffer the payload (#1957).
+    #[tokio::test]
+    async fn upgrade_refuses_an_oversized_frame_before_buffering_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let hub = WsHub::new(EventBus::<Tick>::new(4)).max_message_bytes(1024);
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
+                let hub = hub.clone();
+                async move { hub.upgrade(ws) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            tcp.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(
+            head.starts_with(b"HTTP/1.1 101"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        // Masked binary frame header claiming a 2 MiB payload; no payload follows.
+        let mut frame = vec![0x82, 0x80 | 127];
+        frame.extend_from_slice(&(2u64 * 1024 * 1024).to_be_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 4]);
+        tcp.write_all(&frame).await.unwrap();
+
+        let mut sink = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(3), tcp.read_to_end(&mut sink)).await;
+        assert!(
+            closed.is_ok(),
+            "the server kept waiting for the oversized payload"
+        );
     }
 
     #[tokio::test]
@@ -310,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_subscriber_sees_lagged_error() {
-        // Demonstrate the EventBus lag behavior the handler relies on.
+        // The lag behaviour the handler relies on.
         let bus: EventBus<Tick> = EventBus::new(2);
         let mut rx = bus.subscribe();
         // Fill past capacity so the subscriber lags.

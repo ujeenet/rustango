@@ -1,4 +1,4 @@
-//! `rustango::server` — Django-style runserver builder.
+//! `rustango::server` — the builder behind `manage runserver`.
 //!
 //! Owns every line of boilerplate that's identical across tenancy
 //! apps: connect to `DATABASE_URL`, build `TenantPools`, mount the
@@ -35,5 +35,7 @@ mod builder;
 
 #[cfg(feature = "runserver")]
 pub use app::AppBuilder;
+#[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
+pub(crate) use builder::resolver_tests;
 #[cfg(feature = "tenancy")]
 pub use builder::{ApiRouter, Builder};

@@ -1,6 +1,6 @@
 //! Integration test for slice 9.0g — verify the macro + inventory
 //! pipeline records `module_path!()` correctly and
-//! `ModelEntry::resolved_app_label` infers a Django-shape app label
+//! `ModelEntry::resolved_app_label` infers an app label
 //! from a model's module location, with the explicit
 //! `#[rustango(app = "...")]` attribute taking precedence.
 

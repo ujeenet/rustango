@@ -1,4 +1,4 @@
-//! `#[rustango(choices = "...")]` field attribute (Django parity #446).
+//! `#[rustango(choices = "...")]` field attribute (#446).
 //!
 //! Covers:
 //! - macro parses comma-separated `value:Label` pairs onto `FieldSchema::choices`

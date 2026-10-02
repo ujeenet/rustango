@@ -4,6 +4,7 @@ use crate::core::QueryError;
 
 /// Raised while lowering a `SelectQuery` to a parameterized statement.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SqlError {
     /// `Op::In` was used with something other than `SqlValue::List`.
     #[error("`Op::In` requires `SqlValue::List`")]
@@ -29,32 +30,30 @@ pub enum SqlError {
     #[error("`Op::JsonContains` / `Op::JsonContainedBy` require `SqlValue::Json`")]
     JsonOpRequiresJson,
 
-    /// PG ArrayField operators (`@>`, `<@`, `&&`) require
-    /// [`crate::core::SqlValue::Array`]. A plain `List` would expand
-    /// to comma-separated placeholders — the wrong shape for array
-    /// comparison, which needs a single PG array parameter.
+    /// The array operators need a [`crate::core::SqlValue::Array`],
+    /// which binds as one parameter. A `List` would expand to
+    /// separate placeholders, which is the wrong shape.
     #[error(
         "`Op::ArrayContains` / `Op::ArrayContainedBy` / `Op::ArrayOverlap` require `SqlValue::Array`"
     )]
     ArrayOpRequiresArray,
 
-    /// `BulkUpdateQuery` was used on a model with no `#[rustango(primary_key)]`
-    /// field — the WHERE clause cannot be formed.
+    /// `BulkUpdateQuery` on a model with no primary key, so there is
+    /// nothing to match rows on.
     #[error("bulk UPDATE requires a primary key on the model")]
     MissingPrimaryKey,
 
-    /// A relation aggregate (`Expr::RelAggregate`, issue #830) other than
-    /// `COUNT` was emitted without a target column. The builder should
-    /// always supply one for `SUM`/`AVG`/`MAX`/`MIN`; this guards the
-    /// writer against a malformed node rather than emitting invalid SQL.
+    /// A relation aggregate other than `COUNT` arrived with no
+    /// target column. The builder always supplies one, so this
+    /// catches a hand-built node.
     #[error("relation aggregate `{kind}` requires a target column")]
     RelAggregateMissingColumn { kind: &'static str },
 
-    /// `Op::In` with an empty list — Postgres does not accept `IN ()`.
+    /// `Op::In` with an empty list; SQL has no `IN ()`.
     #[error("empty `IN` list is not supported")]
     EmptyInList,
 
-    /// `InsertQuery` had no columns — Postgres does not accept zero-column inserts.
+    /// `InsertQuery` had no columns.
     #[error("INSERT requires at least one column")]
     EmptyInsert,
 
@@ -62,39 +61,33 @@ pub enum SqlError {
     #[error("INSERT columns ({columns}) and values ({values}) length mismatch")]
     InsertShapeMismatch { columns: usize, values: usize },
 
-    /// `UpdateQuery` had no assignments — `UPDATE ... SET` requires at least one.
+    /// `UpdateQuery` had no assignments; `SET` needs at least one.
     #[error("UPDATE requires at least one assignment in `set`")]
     EmptyUpdateSet,
 
-    /// `BulkInsertQuery` had no rows — caller should short-circuit.
+    /// `BulkInsertQuery` had no rows; return early instead.
     #[error("bulk INSERT requires at least one row")]
     EmptyBulkInsert,
 
-    /// Macro-generated `Model::bulk_insert` was called with rows that
-    /// disagree on whether their `Auto<T>` PKs are `Set` or `Unset`.
-    /// Mixed-shape inserts aren't supported in v0.4 — the column list
-    /// must be consistent across the batch. Either set every PK or
-    /// leave every PK unset; for surgical mixes, call `insert` per row.
+    /// `bulk_insert` got rows that disagree on whether their
+    /// `Auto<T>` PKs are set, but one statement needs one column
+    /// list. Set every PK or none; for a mix, insert row by row.
     #[error("bulk INSERT requires every row's `Auto<T>` PKs to agree on Set vs Unset; mixed Set/Unset is not supported")]
     BulkAutoMixed,
 
-    /// `bulk_insert` returned a different number of rows than were
-    /// requested — sanity check before populating Auto fields.
+    /// `bulk_insert` returned a different number of rows than it was
+    /// given, checked before filling in the `Auto` fields.
     #[error("bulk INSERT RETURNING returned {actual} rows but {expected} were inserted")]
     BulkInsertReturningMismatch { expected: usize, actual: usize },
 
-    /// `WhereExpr::Or(vec![])` — a disjunction with no children
-    /// matches no rows. The writer rejects it so the user catches the
-    /// programming error instead of silently fetching an empty
-    /// result. (`WhereExpr::And(vec![])` is fine — represents
-    /// "no filters" and is the default.)
+    /// An `Or` with no children, which would match nothing. It is
+    /// rejected so the mistake shows up instead of an empty result.
+    /// An empty `And` is fine: that means "no filters".
     #[error("`WhereExpr::Or` with an empty branch list matches no rows; was that intentional?")]
     EmptyOrBranch,
 
-    /// `WhereExpr::Xor(vec![])` — issue #27. XOR over zero operands
-    /// is vacuously false (an empty "odd-number-of-trues" tally is
-    /// `0 % 2 = 1` → false), almost always a programming error.
-    /// Sibling to [`Self::EmptyOrBranch`].
+    /// An `Xor` with no children, which is always false. As with
+    /// [`Self::EmptyOrBranch`], that is almost always a mistake.
     #[error("`WhereExpr::Xor` with an empty branch list matches no rows; was that intentional?")]
     EmptyXorBranch,
 
@@ -106,61 +99,46 @@ pub enum SqlError {
     )]
     DialectQueryCompilationNotImplemented { dialect: &'static str },
 
-    /// A query operator is supported by the rustango IR but has no
-    /// equivalent (or no equivalent yet) in the active dialect.
-    /// Examples: `ILIKE` and the JSONB `?` / `?|` / `?&` / `@>` / `<@`
-    /// operators are Postgres-only; `IS DISTINCT FROM` is in standard
-    /// SQL but `MySQL` only ships the inverse `<=>` (null-safe equal)
-    /// — translation is on the v0.23.0-batch4 punch-list.
+    /// The IR has this operator but the active dialect has nothing
+    /// to write it as. The JSONB operators, for one, are
+    /// Postgres-only.
     #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
     OperatorNotSupportedInDialect {
         op: &'static str,
         dialect: &'static str,
     },
 
-    /// An ON CONFLICT clause shape isn't expressible in the active
-    /// dialect's syntax. Postgres supports
-    /// `ON CONFLICT (col) DO UPDATE SET col = EXCLUDED.col`; `MySQL`'s
-    /// `ON DUPLICATE KEY UPDATE` doesn't take a target column list
-    /// (it triggers on any unique violation), so a `DoUpdate` with a
-    /// non-empty `target` cannot be translated 1:1.
+    /// The active dialect cannot express this `ON CONFLICT` shape.
+    /// MySQL, for one, has no target column list.
     #[error("ON CONFLICT shape `{shape}` is not supported by the `{dialect}` dialect")]
     ConflictNotSupportedInDialect {
         shape: &'static str,
         dialect: &'static str,
     },
 
-    /// A [`crate::core::BinOp`] variant has no dialect-portable
-    /// translation on this backend. Today raised only for
-    /// `BinOp::BitXor` on SQLite (SQLite has `&`, `|`, `<<`, `>>` but
-    /// no bitwise-XOR operator). Caller can either route to a different
-    /// op (e.g. `(a | b) - (a & b)`) or restrict the feature to
-    /// PG / MySQL.
+    /// A [`crate::core::BinOp`] this backend cannot write. Only
+    /// `BitXor` on SQLite so far, which has the other bitwise
+    /// operators but not that one; `(a | b) - (a & b)` is the same
+    /// thing.
     #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
     OpNotSupportedInDialect {
         op: &'static str,
         dialect: &'static str,
     },
 
-    /// A Postgres-specific aggregate (`array_agg`, `string_agg`,
-    /// `jsonb_agg`, etc.) was requested on a non-PG backend. Issue #33.
-    /// MySQL has `GROUP_CONCAT` and `JSON_ARRAYAGG` that overlap
-    /// semantically but the syntax differs enough that we don't
-    /// auto-translate — caller should branch on `pool.dialect().name()`
-    /// or restrict the feature to PG-only deployments.
+    /// A Postgres-only aggregate such as `array_agg` or `jsonb_agg`
+    /// on another backend. MySQL's nearest equivalents differ enough
+    /// that they are not translated automatically, so branch on
+    /// `pool.dialect().name()` yourself.
     #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
     AggregateNotSupportedInDialect {
         aggregate: &'static str,
         dialect: &'static str,
     },
 
-    /// A scalar function (issue #2) was built with the wrong number of
-    /// arguments — e.g. `Substr` with 2 args, `NullIf` with 3, or
-    /// `Concat` with 0. The builder-side API constrains arity for
-    /// fixed-arity calls (compile error), but the IR is permissive
-    /// enough that hand-rolled `Expr::Function { args: vec![...] }`
-    /// could trip this — the emitter catches it before reaching the
-    /// database with a confusing parse error.
+    /// A scalar function with the wrong number of arguments. The
+    /// builders fix the count at compile time, so this catches a
+    /// hand-built `Expr::Function` before the database sees it.
     #[error("function `{func}` expects {expected} arg(s), got {got}")]
     FunctionArityMismatch {
         func: &'static str,
@@ -168,26 +146,20 @@ pub enum SqlError {
         got: usize,
     },
 
-    /// A `CASE WHEN … END` expression was built with no branches.
-    /// SQL requires at least one `WHEN` clause; the public builder
-    /// API ([`crate::core::case()`]) doesn't prevent zero-branch
-    /// construction, so the writer surfaces this here.
+    /// A `CASE` with no branches. SQL needs at least one `WHEN`, and
+    /// [`crate::core::case()`] does not stop you building none.
     #[error("CASE expression must have at least one WHEN branch")]
     EmptyCaseBranches,
 
-    /// A `CASE WHEN <cond> …` branch had an empty predicate (e.g.
-    /// `WhereExpr::And(vec![])`). The standard "no WHERE filter"
-    /// marker is legal at the top of an UPDATE/DELETE, but inside a
-    /// `WHEN` it would produce `WHEN  THEN …` with a hole — a parse
-    /// error on every backend. Reject it loudly here.
+    /// A `CASE` branch with an empty predicate. An empty `And` means
+    /// "no filter" at the top of an UPDATE, but inside a `WHEN` it
+    /// would leave a hole that no backend parses.
     #[error("CASE WHEN branch condition must not be empty")]
     EmptyCaseWhenCondition,
 
-    /// `Expr::OuterRef("col")` was emitted outside any subquery
-    /// scope (issue #5). `OuterRef` only makes sense inside a
-    /// correlated subquery — the writer needs at least two scope
-    /// frames on the stack (outer + subquery) to resolve the column
-    /// against the enclosing query. Programming error.
+    /// An `OuterRef` outside any subquery. It only means something
+    /// inside a correlated subquery, where there is an enclosing
+    /// query to resolve the column against.
     #[error(
         "`OuterRef(\"{column}\")` used outside of a subquery — \
          it can only appear inside Exists / NotExists / InSubquery / \
@@ -195,20 +167,13 @@ pub enum SqlError {
     )]
     OuterRefOutsideSubquery { column: &'static str },
 
-    /// `Expr::Aggregate(...)` was emitted in a SQL slot that doesn't
-    /// allow aggregate function calls (issue #88). Every dialect
-    /// (PG, MySQL, SQLite) rejects aggregates in `WHERE` /
-    /// `UPDATE SET` / `JOIN ON` / `GROUP BY` / `RETURNING` /
-    /// non-aggregate `SELECT` projections; only `HAVING`, the SELECT
-    /// list of an aggregating query, and that query's `ORDER BY`
-    /// are valid homes for an aggregate call. The writer enforces
-    /// this upfront with a clear error rather than passing the SQL
-    /// through to the database, which would surface a less
-    /// helpful "aggregate functions are not allowed in WHERE" or
-    /// equivalent. Programming error — restructure the query to
-    /// reference an aggregate annotation alias via the auto-routing
-    /// `QuerySet::filter(...)` (which goes to HAVING) or move the
-    /// aggregate to the SELECT list.
+    /// An aggregate call where SQL does not allow one. Only
+    /// `HAVING`, an aggregating query's SELECT list, and that
+    /// query's `ORDER BY` accept them.
+    ///
+    /// Filter on an annotation alias instead, which
+    /// `QuerySet::filter` routes to `HAVING`, or move the aggregate
+    /// into the SELECT list.
     #[error(
         "`Expr::Aggregate(...)` used outside of an aggregate-accepting \
          SQL slot — aggregates may only appear in SELECT projection, \
@@ -216,33 +181,24 @@ pub enum SqlError {
     )]
     AggregateOutsideAggregateContext,
 
-    /// A JOIN was constructed with an empty `on` predicate
-    /// (`WhereExpr::And(vec![])` — the legitimate "no WHERE filter"
-    /// marker at the top of an UPDATE/DELETE/SELECT). Inside a JOIN's
-    /// ON it would emit `ON ` with a literal hole, which every
-    /// backend rejects at parse. Mirror of `EmptyCaseWhenCondition`
-    /// for the JOIN-ON context.
+    /// A JOIN with an empty `on` predicate, which would leave a hole
+    /// after `ON`. [`Self::EmptyCaseWhenCondition`] for joins.
     #[error("JOIN `on` predicate must not be empty")]
     EmptyJoinOnCondition,
 
-    /// An aggregate function isn't supported by the active dialect
-    /// (issue #6). Today raised only for `StdDev` / `StdDevPop` /
-    /// `Variance` / `VariancePop` on SQLite, which has no built-in
-    /// statistical aggregates. Caller can either switch dialects,
-    /// drop the offending annotation, or compute the variance
-    /// formula in app code.
+    /// The active dialect does not have this aggregate. Only the
+    /// statistical ones on SQLite so far, which has none built in;
+    /// compute them in your own code instead.
     #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
     AggregateNotSupported {
         aggregate: &'static str,
         dialect: &'static str,
     },
 
-    /// An ill-formed `AggregateExpr` tree was passed in (issue #6) —
-    /// e.g. `Coalesced { Coalesced { … } }` or `Filtered { Filtered {
-    /// … } }`. The public [`crate::core::aggregates`] builder never
-    /// produces these, so this is a "hand-rolled IR" programmer
-    /// error. `wrapper` names the offending shape for the error
-    /// message.
+    /// A badly nested `AggregateExpr`, such as a `Coalesced` inside
+    /// a `Coalesced`. The [`crate::core::aggregates`] builders never
+    /// make one, so this catches hand-built IR. `wrapper` names the
+    /// shape.
     #[error("nested aggregate wrapper `{wrapper}` is not supported")]
     NestedAggregateWrapper { wrapper: &'static str },
 
@@ -271,6 +227,7 @@ pub enum SqlError {
 
 /// Raised while compiling, writing, or executing a query end-to-end.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExecError {
     #[error(transparent)]
     Query(#[from] QueryError),
@@ -281,10 +238,51 @@ pub enum ExecError {
     #[error(transparent)]
     Driver(#[from] sqlx::Error),
 
+    /// A write that cannot record its audit rows, refused on an audited
+    /// model rather than run unaudited (#1747).
+    #[error("`{table}` is audited: {reason}")]
+    AuditUnsupported {
+        table: &'static str,
+        reason: &'static str,
+    },
+
+    /// The audit row for a write failed, so the write was rolled back.
+    /// A server fault, even when the driver error inside is a rejection.
+    #[error("`{table}` audit write failed: {source}")]
+    AuditWrite {
+        table: &'static str,
+        #[source]
+        source: Box<ExecError>,
+    },
+
+    /// An INSERT's database-generated PK could not be read back: a PK
+    /// type the backend can't return, or a failed decode.
+    #[error("cannot read the generated primary key `{table}.{column}`")]
+    GeneratedPkUnreadable {
+        table: &'static str,
+        column: &'static str,
+    },
+
     /// `insert_returning` was called with an `InsertQuery` carrying no
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
+
+    /// A nested `atomic()` or `lock()` found the transaction in use: a
+    /// `TxGuard` still held, or two nested blocks at once (`join!`).
+    #[error("atomic transaction in use: drop the `TxGuard` and run nested blocks one at a time")]
+    NestedAtomic,
+
+    /// The `atomic` transaction was rolled back: a savepoint failed, or a
+    /// statement error ended it (PG error, MySQL deadlock). Nothing committed.
+    #[error("the atomic transaction was rolled back after a failed statement")]
+    AtomicAborted,
+
+    /// The server ended the `atomic` transaction without a failed statement,
+    /// e.g. a MySQL DDL / TRUNCATE / LOCK TABLES implicit commit. Writes before
+    /// and after it may already be committed, so do not blindly retry.
+    #[error("the server ended the atomic transaction early; some writes may be committed")]
+    AtomicEndedEarly,
 
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a
@@ -315,9 +313,13 @@ pub enum ExecError {
     #[error("no content type registered for model `{table}` — seed `rustango_content_types` (run migrate)")]
     ContentTypeNotRegistered { table: &'static str },
 
+    /// An M2M manager was used on a source with no primary key yet (#1926).
+    #[error("m2m on `{through}` needs a saved source row; its primary key is unset")]
+    M2mUnsavedSource { through: &'static str },
+
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
-    /// filter that matches more than one row. Django's
-    /// `MultipleObjectsReturned`. Tighten the filter or use
+    /// filter that matches more than one row, so there is no single
+    /// object to return. Tighten the filter or use
     /// [`crate::query::QuerySet::first`] when ambiguity is
     /// acceptable.
     #[error("`{op}` filter matched {count} rows on `{table}`; expected at most 1")]
@@ -326,6 +328,14 @@ pub enum ExecError {
         table: &'static str,
         count: usize,
     },
+}
+
+impl ExecError {
+    /// A UNIQUE or primary-key violation, on any backend.
+    #[cfg(feature = "template_views")]
+    pub(crate) fn is_unique_violation(&self) -> bool {
+        matches!(self, Self::Driver(sqlx::Error::Database(db)) if db.is_unique_violation())
+    }
 }
 
 // =====================================================================
@@ -350,16 +360,208 @@ pub enum ExecError {
 /// returns `false` for every error — there's no MySQL driver
 /// compiled in so this code path can't fire.
 #[cfg(feature = "mysql")]
+#[must_use]
 pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
     if let crate::sql::sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
+        return db
+            .try_downcast_ref::<crate::sql::sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|my| mysql_duplicate_decision(my.number()));
     }
     false
 }
 
+/// The decision, over the error *number*, so a test can reach it
+/// without a driver error.
+///
+/// Numbers, not `SQLSTATE`s. This predicate used to match SQLSTATE
+/// `42000`, which on MySQL 8 is the catch-all for DDL errors — it also
+/// covers 1064 syntax error, 1071 key-too-long, 1072 unknown key column
+/// and 1170 TEXT-in-index. `run_ddl_idempotent` therefore returned `Ok`
+/// for statements that never ran (#1646). The `|| contains("Duplicate
+/// key name")` arm was English-only on top of that; MySQL localises.
+// Its only caller is `cfg(mysql)`, but the tests above it run on every
+// backend, so compile it always rather than gate it.
+#[cfg_attr(not(feature = "mysql"), allow(dead_code))]
+#[must_use]
+pub(crate) fn mysql_duplicate_decision(number: u16) -> bool {
+    matches!(
+        number,
+        1050  // ER_TABLE_EXISTS_ERROR
+        | 1061  // ER_DUP_KEYNAME
+        | 1826 // ER_FK_DUP_NAME
+    )
+}
+
 /// `cfg(not(mysql))` stub — see the documented variant above.
 #[cfg(not(feature = "mysql"))]
+#[must_use]
 pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
     false
+}
+
+/// `true` when `e` is `PostgreSQL` losing a race to create an object that
+/// another session created first (#1458).
+///
+/// `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
+/// **not atomic** in `PostgreSQL`. Two sessions can both pass the
+/// existence check and both try to insert the catalogue row; the loser
+/// gets an error even though the object it asked for now exists. This
+/// is documented Postgres behaviour, not a version quirk.
+///
+/// That is exactly what two processes starting together do — the
+/// documented web + worker topology, where both call
+/// `DatabaseJobQueue::ensure_table_pool` at boot. Before this predicate
+/// the loser's error propagated and killed the process; under a
+/// container restart policy the only trace was a restart count.
+///
+/// Two SQLSTATEs, because the race has two shapes:
+///
+/// * `23505` — `unique_violation` on `pg_class_relname_nsp_index`,
+///   raised by the concurrent `CREATE INDEX`. The constraint name is
+///   checked as well as the code, so an ordinary unique violation in
+///   application data is never swallowed.
+/// * `42P07` — `duplicate_table` / `duplicate_object`, raised by the
+///   concurrent `CREATE TABLE`.
+///
+/// On a build without the `postgres` feature the predicate returns
+/// `false` for every error — there is no Postgres driver compiled in,
+/// so this path cannot fire.
+#[cfg(feature = "postgres")]
+#[must_use]
+pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
+    if let crate::sql::sqlx::Error::Database(db) = e {
+        return pg_dup_object_decision(db.code().as_deref(), &db.message());
+    }
+    false
+}
+
+/// The decision, separated from the driver type so it can be tested.
+///
+/// The predicate above needs a `sqlx::Error::Database`, which cannot be
+/// constructed outside the driver — so a test of the *narrowing* had to
+/// go through a live query, and the obvious one (`raw_execute_pool` with
+/// a duplicate key) never reaches this code at all: `run_ddl_idempotent`
+/// is the only caller. The narrowing was therefore untested, and
+/// widening `23505` to `true` would have gone unnoticed.
+///
+/// Which catalogue indexes matter is not obvious, and getting it wrong
+/// leaves half the race unfixed:
+///
+/// * `pg_class_relname_nsp_index` — the relation row. Raised by a racing
+///   `CREATE INDEX IF NOT EXISTS`, and by `CREATE TABLE` for the table
+///   itself.
+/// * `pg_type_typname_nsp_index` — Postgres creates a composite **type**
+///   for every table, so a racing `CREATE TABLE IF NOT EXISTS` can lose
+///   on the type row instead of the relation row. Omitting this leaves
+///   the table half of the race crashing exactly as before.
+/// * `pg_namespace_nspname_index` — the schema row, for a racing
+///   `CREATE SCHEMA IF NOT EXISTS`. Tenant provisioning in schema mode
+///   issues one per tenant.
+///
+/// Everything else under `23505` stays an error: a bare unique violation
+/// is ordinary application data, and swallowing those would hide real
+/// bugs — a worse failure than the one being fixed.
+// Its only non-test caller is the Postgres error path, so a
+// SQLite- or MySQL-only build sees it as dead. Kept compiled there
+// anyway: the unit tests that pin these SQLSTATEs must run on every
+// build, not only the one that can reach the caller.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(crate) fn pg_dup_object_decision(code: Option<&str>, message: &str) -> bool {
+    match code {
+        // duplicate_table / duplicate_object — the non-racing spelling
+        // of "it already exists", which is the whole post-condition.
+        Some("42P07" | "42710") => true,
+        Some("23505") => [
+            "pg_class_relname_nsp_index",
+            "pg_type_typname_nsp_index",
+            "pg_namespace_nspname_index",
+        ]
+        .iter()
+        .any(|idx| message.contains(idx)),
+        _ => false,
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod pg_dup_object_tests {
+    use super::pg_dup_object_decision as decide;
+
+    /// Every shape the concurrent-DDL race actually produces.
+    #[test]
+    fn the_race_shapes_are_swallowed() {
+        assert!(decide(
+            Some("42P07"),
+            "relation \"rustango_jobs\" already exists"
+        ));
+        assert!(decide(Some("42710"), "object already exists"));
+        assert!(decide(
+            Some("23505"),
+            "duplicate key value violates unique constraint \
+             \"pg_class_relname_nsp_index\""
+        ));
+        // The table half of the race, which the first version missed.
+        assert!(
+            decide(
+                Some("23505"),
+                "duplicate key value violates unique constraint \
+                 \"pg_type_typname_nsp_index\""
+            ),
+            "a racing CREATE TABLE can lose on the composite-type row rather than \
+             the relation row; missing it leaves half of #1458 unfixed"
+        );
+        assert!(decide(
+            Some("23505"),
+            "duplicate key value violates unique constraint \
+             \"pg_namespace_nspname_index\""
+        ));
+    }
+
+    /// The narrowing. This is the assertion that was missing: flip the
+    /// `23505` arm to an unconditional `true` and this fails.
+    #[test]
+    fn an_ordinary_unique_violation_is_not_swallowed() {
+        assert!(
+            !decide(
+                Some("23505"),
+                "duplicate key value violates unique constraint \"users_email_key\""
+            ),
+            "a unique violation on application data must stay an error — swallowing \
+             it would hide real bugs, which is worse than the race being fixed"
+        );
+        assert!(!decide(Some("23503"), "foreign key violation"));
+        assert!(!decide(Some("42P01"), "relation does not exist"));
+        assert!(!decide(None, "pg_class_relname_nsp_index"));
+    }
+}
+
+/// `cfg(not(postgres))` stub — see the documented variant above.
+#[cfg(not(feature = "postgres"))]
+#[must_use]
+pub fn is_pg_dup_object_error(_e: &crate::sql::sqlx::Error) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod mysql_duplicate_tests {
+    use super::mysql_duplicate_decision as decide;
+
+    #[test]
+    fn the_three_duplicate_numbers_are_swallowed() {
+        assert!(decide(1050), "ER_TABLE_EXISTS_ERROR");
+        assert!(decide(1061), "ER_DUP_KEYNAME");
+        assert!(decide(1826), "ER_FK_DUP_NAME");
+    }
+
+    /// The regression this function exists to stop. Every one of these
+    /// reports SQLSTATE `42000`, so the old predicate swallowed them
+    /// and `run_ddl_idempotent` reported success for an index that was
+    /// never created (#1646). Measured on MySQL 8.0.46.
+    #[test]
+    fn the_rest_of_sqlstate_42000_still_propagates() {
+        assert!(!decide(1064), "syntax error");
+        assert!(!decide(1071), "key too long");
+        assert!(!decide(1072), "unknown column in key");
+        assert!(!decide(1170), "BLOB/TEXT in key without a length");
+        assert!(!decide(1062), "ER_DUP_ENTRY: the index genuinely failed");
+    }
 }

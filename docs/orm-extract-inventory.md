@@ -1,6 +1,18 @@
 # `rustango-orm` Extraction — Inventory
 
-Issue [#141](https://github.com/ujeenet/rustango/issues/141). Authoritative file list + public-API surface for the standalone ORM crate. Locks the contract so downstream slices in the [#149 epic](https://github.com/ujeenet/rustango/issues/149) can move files in parallel without re-relitigating scope.
+> **Historical. The epic is closed and the extraction was deferred.**
+> [#149](https://github.com/ujeenet/rustango/issues/149) and its runtime
+> slice [#144](https://github.com/ujeenet/rustango/issues/144) are both
+> closed, and no `rustango-orm` crate exists — the blocker is entanglement
+> between m2m and signals/contenttypes, which cannot be split without
+> dragging those along.
+>
+> Kept as the record of what the boundary would have been, and of the file
+> and LOC counts **as they stood when it was written** — `sql/` has since
+> been reorganised, so treat every number below as a snapshot rather than
+> a description of the tree today.
+
+Issue [#141](https://github.com/ujeenet/rustango/issues/141). File list + public-API surface as scoped for the standalone ORM crate, written to lock the contract so slices in the #149 epic could move files in parallel without re-relitigating scope.
 
 ## Modules that move to `rustango-orm`
 
@@ -99,13 +111,17 @@ pub use postgres::Postgres;
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use super::executor::{
-        annotate_count_children, annotate_count_children_on, bulk_insert_on,
-        delete_on, fetch_aggregate_on, fetch_with_prefetch, insert_on,
-        insert_returning_on, raw_query_on, select_one_row_on, select_rows_on,
-        update_on,
+        bulk_insert_on, delete_on, fetch_with_prefetch, insert_on,
+        insert_returning_on, update_on,
     };
 }
 ```
+
+> Shrunk by [#1431](https://github.com/ujeenet/rustango/issues/1431). The module
+> now holds only what the derive macro emits; `fetch_aggregate_on`,
+> `select_rows_on` and the two `annotate_count_children` forms are public on
+> `rustango::sql`, and `raw_query_on` / `select_one_row_on` were emitted by
+> nothing and are deleted.
 
 ### `rustango-orm::query` (2 files, 3,400 LOC)
 

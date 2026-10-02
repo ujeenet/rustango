@@ -2,8 +2,8 @@
 
 Ein Modell ist ein Rust-Struct, das auf eine Datenbanktabelle abgebildet wird. Füge
 `#[derive(Model)]` hinzu, annotiere die Felder, und **Rustango** generiert das Schema,
-einen typsicheren Abfrage-Einstiegspunkt sowie `save`/`find`/`delete`-Methoden — Djangos
-Modelle oder Laravels Eloquent, mit dem Compiler, der deine Spalten prüft. Dies ist die
+einen typsicheren Abfrage-Einstiegspunkt sowie `save`/`find`/`delete`-Methoden — ein
+Active-Record-Modell, bei dem der Compiler deine Spalten prüft. Dies ist die
 **Deklarations**-Referenz: jeder Feldtyp, jede Primärschlüssel-Option und jedes
 `#[rustango(...)]`-Attribut. Für das *Abfragen* von Modellen, sobald sie deklariert sind,
 siehe das [ORM-Kochbuch](orm.md).
@@ -93,14 +93,14 @@ pro Dialekt ab, sodass dasselbe Modell auf PostgreSQL, MySQL und SQLite funktion
 | `f32` | `REAL` | `FLOAT` | `REAL` |
 | `f64` | `DOUBLE PRECISION` | `DOUBLE` | `REAL` |
 | `bool` | `BOOLEAN` | `TINYINT(1)` | `INTEGER` (0/1) |
-| `String` | `TEXT` | `TEXT` | `TEXT` |
+| `String` | `TEXT` | `LONGTEXT` | `TEXT` |
 | `String` + `max_length = N` | `VARCHAR(N)` | `VARCHAR(N)` | `TEXT` |
 | `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | `TEXT` (ISO-8601) |
 | `chrono::NaiveDate` | `DATE` | `DATE` | `TEXT` |
 | `chrono::NaiveTime` | `TIME` | `TIME(6)` | `TEXT` |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | `TEXT` |
 | `serde_json::Value` | `JSONB` | `JSON` | `TEXT` |
-| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38,10)` | `NUMERIC` |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(65,28)` | `NUMERIC` |
 | `Vec<u8>` | `BYTEA` | `LONGBLOB` | `BLOB` |
 | `Option<T>` | `T NULL` | `T NULL` | `T` (nullable) |
 
@@ -125,7 +125,7 @@ pub struct Gadget {
 ```
 
 > **Dezimalpräzision.** PostgreSQL `NUMERIC` ist beliebig genau; MySQL verwendet
-> `DECIMAL(38,10)` (38 Stellen, 10 Nachkommastellen — die breiteste portable Passung);
+> `DECIMAL(65,28)` (jeder `rust_decimal`-Wert passt);
 > SQLite verwendet `NUMERIC`-Affinität. Verwende `rust_decimal::Decimal` für Geld,
 > niemals `f64`.
 
@@ -230,6 +230,9 @@ v4, `default_uuid_v7` ein zeitlich sortierbares v7 (besser für Index-Lokalität
 pub id: Auto<uuid::Uuid>,
 ```
 
+Ein rohes `INSERT` ohne eine `auto_uuid`-Spalte bekommt den DB-`DEFAULT`: ein v4 auf Postgres und SQLite,
+aber MySQLs `UUID()` ist ein v1 (aus Zeit und Host).
+
 ### Zusammengesetzte Primärschlüssel
 
 Native mehrspaltige Primärschlüssel werden **nicht unterstützt** — genau ein Feld darf
@@ -291,6 +294,9 @@ mit `select_related` (ebenfalls im ORM-Leitfaden).
 | `min` / `max` | `#[rustango(min = 0, max = 100)]` | Bereichsvalidierung beim Schreiben |
 | `blank` / `editable` | `#[rustango(editable = false)]` | Formular-/Admin-Verhalten |
 | `db_comment = "…"` | `#[rustango(db_comment = "cents")]` | Spalten-COMMENT |
+
+INSERT und UPDATE prüfen diese Regeln bei literalen Werten. Ein `set_expr(F(..))`-Wert
+wird von der Datenbank berechnet und daher nicht geprüft.
 
 `choices`, `default`, `auto_now_add` und Soft-Delete zusammen (alle verifiziert):
 
@@ -357,8 +363,16 @@ Auf dem **Modell** deklariert:
   `.where_(Post::author_id.eq(42))` für compilergeprüfte Filter.
 - **Finder** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (Fehler, wenn nicht vorhanden); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writer** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (nur einige Spalten
-  aktualisieren), `insert_pool` (explizites Einfügen), `delete`.
+- **Writer** — `save_pool` (INSERT oder UPDATE), `insert_pool` (explizites
+  Einfügen), `delete_pool` und `save_partial(&["title"], &pool)` (nur einige
+  Spalten aktualisieren). Die nackten `save` / `insert` / `delete` sind **keine**
+  Aliase davon: sie nehmen einen treiberspezifischen `sqlx::PgPool` und sind
+  `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
+  `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
+  und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
+  sicher auf Postgres sind. Die vertauschte Benennung wird in
+  [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt; siehe
+  [api-conventions](api-conventions.md#funktionen).
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -399,7 +413,7 @@ spezifischer.
 | `manager(ext = "Trait")` | Trait-Pfad | ein benutzerdefiniertes Manager-Erweiterungs-Trait generieren |
 | `manager_fn` | `"published"` | einen Manager-Accessor über `objects()` hinaus hinzufügen |
 | `get_latest_by` | `"created_at"` | Standardspalte für `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | Django elternrelative Ordnung |
+| `order_with_respect_to` | `"parent"` | Ordnung der Kindzeilen relativ zum Elternobjekt |
 | `index(...)` | `columns`, `method`, `name` | Sekundärindex (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | zusammengesetzter Unique-Constraint |
 | `index_together` | `"a, b"` | zusammengesetzter Nicht-Unique-Index |
@@ -426,10 +440,15 @@ spezifischer.
 | `default` | `"sql literal"` | Spalten-DEFAULT |
 | `null` | Flag | nullable (oder verwende `Option<T>`) |
 | `unique` | Flag | Unique-Constraint |
+| `index` / `index(...)` | Flag, oder `unique`, `name`, `method` | Einspaltiger Index auf diesem Feld |
 | `choices` | `"v:Label, …"` | aufgezählte Werte |
 | `min` / `max` | Zahl | Bereichsvalidierung |
 | `blank` | Flag | Leereingabe in Formularen/Admin erlauben |
 | `editable` | `true`/`false` | Bearbeitbarkeit in Formular/Admin |
+| `verbose_name` | `"Label"` | Lesbare Feldbezeichnung in Formular/Admin |
+| `help_text` | `"…"` | Hilfetext unter dem Formular-/Admin-Widget |
+| `validators` | `"name, name"` | benannte Validatoren für dieses Feld |
+| `related_name` | `"posts"` | Name des Reverse-Accessors am FK-Ziel |
 | `auto_now` | Flag | bei jedem Speichern auf jetzt setzen |
 | `auto_now_add` | Flag | beim Einfügen auf jetzt setzen |
 | `auto_uuid` | Flag | Rust-seitiges UUID v4 (auf `Auto<Uuid>`) |

@@ -1,4 +1,4 @@
-//! Django-parity #349 — `register_admin_computed!` with `link = …`
+//! Issue #349 — `register_admin_computed!` with `link = …`
 //! callable advertises a per-row click target. The admin list view
 //! wraps the rendered cell in `<a href="{url}">…</a>` when the
 //! callable returns `Some(url)`, and leaves it alone otherwise.

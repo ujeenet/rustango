@@ -28,18 +28,11 @@ pub struct Evt {
 }
 
 fn update_set(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Evt::SCHEMA,
-        set: vec![Assignment {
-            column: "year_out",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Evt::SCHEMA,
+        vec![Assignment::new("year_out", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- NOW() ----------
@@ -56,10 +49,36 @@ fn now_emits_now_on_pg_mysql_current_timestamp_on_sqlite() {
     let my = MySql.compile_update(&q).unwrap();
     assert!(my.sql.contains("= NOW()"), "MySQL: {}", my.sql);
 
+    // SQLite must NOT emit bare `CURRENT_TIMESTAMP`. It did until
+    // #1464: a SQLite datetime column is TEXT compared
+    // lexicographically, so `CURRENT_TIMESTAMP`'s
+    // `YYYY-MM-DD HH:MM:SS` and the RFC3339 every other write path
+    // produces are two shapes in one column, and comparisons across
+    // them are wrong. `now()` reaches that through `SET col = now()`
+    // and `WHERE col < now()`.
+    //
+    // Asserted as "writes the same shape as everything else" rather
+    // than against a literal, so the one place that owns the format
+    // stays the one place that owns it.
     let sq = Sqlite.compile_update(&q).unwrap();
-    assert!(sq.sql.contains("= CURRENT_TIMESTAMP"), "SQLite: {}", sq.sql);
-    // SQLite version emits the keyword without parens.
-    assert!(!sq.sql.contains("CURRENT_TIMESTAMP("), "SQLite: {}", sq.sql);
+    assert!(
+        !sq.sql.contains("= CURRENT_TIMESTAMP"),
+        "SQLite must not write the legacy space-separated shape: {}",
+        sq.sql
+    );
+    assert!(
+        sq.sql.contains("strftime("),
+        "SQLite should emit a strftime in the canonical shape: {}",
+        sq.sql
+    );
+    // The canonical marks: `T` separator, six fractional digits, an
+    // explicit `+00:00`. Same shape the DDL default and the bind path
+    // produce, which is the property that matters.
+    assert!(
+        sq.sql.contains("%Y-%m-%dT%H:%M:%f000+00:00"),
+        "SQLite's now() must use the canonical format: {}",
+        sq.sql
+    );
 }
 
 #[test]
@@ -88,7 +107,7 @@ fn pg_extract_year_emits_extract_from_with_int_cast() {
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
         stmt.sql
-            .contains(r#"CAST(EXTRACT(YEAR FROM "created_at") AS INTEGER)"#),
+            .contains(r#"CAST(EXTRACT(YEAR FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER)"#),
         "got: {}",
         stmt.sql
     );
@@ -152,7 +171,7 @@ fn pg_extract_weekday_uses_dow_with_int_cast() {
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
         stmt.sql
-            .contains(r#"CAST(EXTRACT(DOW FROM "created_at") AS INTEGER)"#),
+            .contains(r#"CAST(EXTRACT(DOW FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER)"#),
         "got: {}",
         stmt.sql
     );
@@ -238,7 +257,8 @@ fn pg_trunc_year_emits_date_trunc_with_year_unit() {
     let q = update_set(trunc_year(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"DATE_TRUNC('year', "created_at")"#),
+        stmt.sql
+            .contains(r#"DATE_TRUNC('year', "created_at", 'UTC')"#),
         "got: {}",
         stmt.sql
     );
@@ -270,7 +290,9 @@ fn sqlite_trunc_year_emits_strftime_with_year_template() {
 fn pg_trunc_month_emits_date_trunc_with_month_unit() {
     let q = update_set(trunc_month(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
-    assert!(stmt.sql.contains(r#"DATE_TRUNC('month', "created_at")"#));
+    assert!(stmt
+        .sql
+        .contains(r#"DATE_TRUNC('month', "created_at", 'UTC')"#));
 }
 
 #[test]
@@ -299,7 +321,9 @@ fn sqlite_trunc_month_emits_strftime_with_month_template() {
 fn pg_trunc_day_emits_date_trunc() {
     let q = update_set(trunc_day(F("created_at")));
     let stmt = Postgres.compile_update(&q).unwrap();
-    assert!(stmt.sql.contains(r#"DATE_TRUNC('day', "created_at")"#));
+    assert!(stmt
+        .sql
+        .contains(r#"DATE_TRUNC('day', "created_at", 'UTC')"#));
 }
 
 #[test]
@@ -338,8 +362,9 @@ fn extract_year_of_F_column_composes_with_other_funcs() {
     let q = update_set(nested);
     let stmt = Postgres.compile_update(&q).unwrap();
     assert!(
-        stmt.sql
-            .contains(r#"GREATEST(CAST(EXTRACT(YEAR FROM "created_at") AS INTEGER), $1)"#),
+        stmt.sql.contains(
+            r#"GREATEST(CAST(EXTRACT(YEAR FROM ("created_at" AT TIME ZONE 'UTC')) AS INTEGER), $1)"#
+        ),
         "got: {}",
         stmt.sql
     );

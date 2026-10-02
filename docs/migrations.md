@@ -1,6 +1,6 @@
 # Migrations & the migration engine
 
-**Rustango** ships a Django-style migration engine: you edit your models,
+**Rustango** ships a model-driven migration engine: you edit your models,
 run `makemigrations` to generate a versioned JSON file describing the
 schema change, and `migrate` to apply it. Since **0.48** the framework
 even migrates **its own** `rustango_*` tables through the same engine —
@@ -36,9 +36,15 @@ Its files are generated from the compiled framework models — and they're
 **`#[cfg(feature = …)]`-aware**: a feature-gated column or table is
 compiler-stripped when the feature is off, so enabling a feature makes
 `makemigrations` emit an `AddColumn` / `CreateTable` and disabling it
-emits a `DropColumn` / `DropTable`. Scaffolded tenant projects ship an
+emits a `DropColumn` / `DropTable`. Scaffolded projects ship an
 **empty** `system/migrations/`; the first `cargo run -- migrate`
 generates and applies it (see [scaffolding](scaffolding.md)).
+
+**Commit `system/migrations/` and deploy it with the binary**, as the
+scaffolded `Dockerfile` does. Regenerated names depend on features and
+version, so when the folder is empty `migrate` ignores the ledger names:
+it creates the framework tables and columns the database lacks, then
+records the new chain. It never drops anything on that path.
 
 `migrate` applies the system chain **before** your project's migrations.
 In tenancy mode the two scopes deliberately overlap on the shared
@@ -51,12 +57,19 @@ without tenancy. Non-tenancy apps that use a framework subsystem (e.g.
 
 ## Squash reconciliation — `Migration.replaces`
 
-A **squash** collapses a run of historical migrations into one freshly
-generated file that recreates the same end state — handy when a stack of
-half-finished migrations is easier to regenerate than to fix. The catch:
-the file's `CREATE TABLE`s would collide on any database that already
-applied the migrations it collapsed (a colleague's checkout, staging,
-CI).
+A **squash** collapses a run of migrations into one freshly generated file
+that recreates the same end state — handy when a stack of half-finished
+migrations is easier to regenerate than to fix.
+
+**It only ever collapses *pending* migrations.** `migrate --squash` filters
+the directory to the files the ledger has not applied, so anything already
+run on this database is left alone; with nothing pending it is a no-op. The
+word "historical" is misleading here — a squash is a dev-iteration tool for
+migrations you have not shipped yet.
+
+The catch: the generated file's `CREATE TABLE`s would still collide on any
+database that *had* applied the migrations it collapsed (a colleague's
+checkout, staging, CI).
 
 `migrate --squash` solves this by stamping the new file's **`replaces`**
 list with the names it collapsed:
@@ -77,7 +90,7 @@ automatic and depends entirely on what's already there:
 |---|---|
 | fresh — no history, no tables | runs the squash for real |
 | every replaced migration is in the ledger | records it, tombstones the predecessors, **no DDL** |
-| tables exist but the ledger has no history | records it, **no DDL** (Django's cross-ledger `--fake-initial`) |
+| tables exist but the ledger has no history | records it, **no DDL** (the [guarded fake-initial](#the-guarded-fake-initial-reconcile)) |
 | only *some* replaced rows / tables present | **refused** — names what's missing, tells you to resolve by hand |
 
 The **partial** case is a hard error on purpose: no automatic choice is
@@ -131,6 +144,11 @@ repair.
 ---
 
 ## Repairing drift by hand — `migrate --fake`
+
+> **Needs the `tenancy` feature.** `--fake`, `--system` and `--all-tenants`
+> are parsed only by the tenancy dispatcher. On a single-tenant build the
+> `migrate` verb takes a positional target, `--dry-run` and `--squash`, and
+> rejects anything else with `unknown flag`.
 
 When the database is already in the target state but the ledger doesn't
 know it (a DB set up out-of-band, a dropped ledger, a partially-succeeded

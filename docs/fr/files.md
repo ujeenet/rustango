@@ -182,12 +182,115 @@ use rustango::media::{Media, MediaManager};
 
 let manager = MediaManager::new_pool(pool.clone(), registry);
 // Hand the browser a short-lived download link:
-let url = manager.presigned_get(&media, Duration::from_secs(3600)).await?;
+// Renvoie Option<String> — None sur les backends qui ne savent pas signer (p. ex. disque local).
+let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {
+    return Err(/* pas d'URL signée pour ce backend */);
+};
 ```
 
 Il gère aussi la suppression douce et la purge des orphelins. Le flux complet est mis à l'épreuve
 dans `media_sqlite_live.rs` ; les méthodes présignées/de téléversement direct du manager sont
 orientées PostgreSQL.
+
+### Servir des médias sur une page publique
+
+Une page publique ne passe **pas** par `media::router`. Ce routeur est l'API
+de gestion interne — envois, suppressions, tags, navigation — et il répond
+`401` à quiconque n'est pas authentifié, sur chacune de ses routes, par
+conception.
+
+Calculez plutôt l'URL depuis votre propre handler :
+
+```rust
+// votre propre route publique
+let url = manager.public_url(media_id).await?;   // Option<String>, sans signature
+```
+
+`public_url` est une requête en base plus une chaîne ; il ne signe rien et
+n'attend aucun signataire, et c'est pourquoi il convient à une page. Deux
+modèles de livraison, et choisir entre eux est la vraie décision :
+
+| | bucket public / CDN | bucket privé + présigné |
+|---|---|---|
+| adresse | `manager.public_url(id)` — stable | `manager.presigned_get(&m, ttl)` — expire |
+| cachable | oui, par les navigateurs et les CDN | non ; le routeur envoie `no-store` |
+| qui peut récupérer | quiconque a l'URL | quiconque a l'URL, jusqu'à expiration |
+| pour quoi | pages publiques, `<img src>` | le routeur de gestion, outils internes |
+
+`public_url` indique **où** l'objet *serait* servi ; il ne le rend pas
+lisible. Pointez-le vers un bucket privé et vous obtiendrez une URL correcte
+et un 403 — ce cas veut une URL présignée, délibérément ni cachable ni
+partageable.
+
+Pour des fichiers sur disque local plutôt que dans un bucket, le handler de
+fichiers statiques fait déjà cela, sans aucune ligne média :
+
+```rust
+Cli::new(pool).with_uploads("/uploads", "./var/uploads")
+```
+
+**Si vous alliez écrire un authorizer `AllowAll` pour faire marcher une page
+publique, arrêtez.** Cela ouvre les 16 routes — y compris `DELETE` et le `PUT`
+présigné — à tout le monde, ce qui est exactement la faille que 0.57.7 a
+refermée.
+
+### Le routeur de gestion exige une politique d'autorisation
+
+`media::router` monte 16 routes JSON au-dessus du manager, toutes des actions
+de gestion sur la médiathèque. **Toutes sont protégées, et il n'existe aucun
+défaut permissif.** Construisez-le avec `media_router_with` et fournissez une
+politique :
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — l'ancien constructeur — est déprécié et répond
+désormais `403` sur chaque route. C'est un changement de comportement
+délibéré en 0.57.7 : auparavant ces routes ne prenaient aucun extracteur
+d'authentification, d'autorisation ni de tenant, si bien que
+`GET /media/{id}` renvoyait la ligne **et une URL de téléchargement S3
+présignée** à quiconque savait deviner un entier, et `POST /uploads/begin`
+émettait un `PUT` présigné pour un préfixe de clé choisi par l'appelant.
+
+`MediaPerms` (nécessite la feature `tenancy`) vérifie les codenames de
+permission `{table}.{action}` que l'admin utilise déjà —
+`rustango_media.view` pour lire, `rustango_media_collections.add` pour créer
+un dossier, etc. Montez-le **à l'intérieur** de `require_auth`, qui injecte
+l'identité qu'il lit ; sans cela toute requête est un `401`. Les
+superutilisateurs contournent la vérification.
+
+Trois choses qu'il ne fait pas :
+
+- **Les décisions au niveau de la ligne.** Un `rustango_media.view` lit
+  *n'importe quelle* ligne de média par id. `MediaManager` détient un seul
+  pool, un déploiement multi-tenant délimite donc les lignes lui-même —
+  c'est le rôle de `MediaAuthorizer`. `MediaTarget` nomme la ligne
+  (`Media(id)`, `Collection(id)`, `CollectionSubtree(id)`, …) exactement
+  pour cela.
+- **Délimiter le stockage d'objets.** `disk` est fourni par l'appelant sur
+  `POST /uploads/begin` et le `StorageRegistry` est à l'échelle du processus :
+  un pool par locataire isole la base de données et non le bucket, donc un
+  simple `rustango_media.add` écrit dans n'importe quel disque que le processus
+  connaît. Précisez lesquels avec
+  `MediaPerms::new(pool).allow_disks(["user-uploads"])`. Les préfixes au sein
+  d'un disque exigent toujours `MediaAuthorizer`, qui reçoit `key_prefix`.
+- **Deviner ce que signifie une nouvelle route.** `MediaAction` et
+  `MediaTarget` sont `#[non_exhaustive]` : terminez votre politique par
+  `_ => false` et une route ajoutée plus tard arrivera refusée plutôt
+  qu'autorisée.
+
+À retenir si vous écrivez la vôtre : `DELETE /collections/{id}` supprime tout
+le **sous-arbre** et réaffecte les médias à chaque niveau, il arrive donc
+comme `Delete(CollectionSubtree(id))` et non `Delete(Collection(id))` — et
+sous `MediaPerms` il exige `rustango_media.change` en plus de
+`rustango_media_collections.delete`, parce qu'il écrit dans la table des
+médias.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md)
+contient les notes de migration.
 
 ### Comment les tables de médias sont créées
 
@@ -216,7 +319,7 @@ jamais créées.
 **Trait `Storage` :** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`.
 
-**`UploadConfig` :** `new(prefix)` · `.max_bytes(n)` · `.allowed_extensions(&[..])`
+**`UploadConfig` :** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible à la casse) · `.randomize_filename(bool)`. Utilisé par
 `save_uploads(multipart, &cfg, &storage)`.
 

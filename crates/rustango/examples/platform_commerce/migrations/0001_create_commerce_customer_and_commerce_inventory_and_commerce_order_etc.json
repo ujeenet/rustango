@@ -1,0 +1,945 @@
+{
+  "name": "0001_create_commerce_customer_and_commerce_inventory_and_commerce_order_etc",
+  "created_at": "2026-09-14T21:47:18.320140+00:00",
+  "atomic": true,
+  "snapshot": {
+    "tables": [
+      {
+        "name": "commerce_customer",
+        "model": "Customer",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "email",
+            "column": "email",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 254,
+            "unique": true
+          },
+          {
+            "name": "full_name",
+            "column": "full_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 120
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "loyalty_tier",
+            "column": "loyalty_tier",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 16,
+            "default": "'bronze'"
+          }
+        ]
+      },
+      {
+        "name": "commerce_inventory",
+        "model": "InventoryItem",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "location",
+            "column": "location",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "on_hand",
+            "column": "on_hand",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "product_id",
+            "column": "product_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_product",
+              "on": "id"
+            }
+          },
+          {
+            "name": "updated_at",
+            "column": "updated_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          }
+        ]
+      },
+      {
+        "name": "commerce_order",
+        "model": "Order",
+        "fields": [
+          {
+            "name": "assigned_picker_id",
+            "column": "assigned_picker_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_staff",
+              "on": "id"
+            }
+          },
+          {
+            "name": "customer_id",
+            "column": "customer_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_customer",
+              "on": "id"
+            }
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "note",
+            "column": "note",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "placed_at",
+            "column": "placed_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "reference",
+            "column": "reference",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32,
+            "unique": true
+          },
+          {
+            "name": "status",
+            "column": "status",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 16,
+            "default": "'pending'"
+          },
+          {
+            "name": "total_cents",
+            "column": "total_cents",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "commerce_order_line",
+        "model": "OrderLine",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "order_id",
+            "column": "order_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_order",
+              "on": "id"
+            }
+          },
+          {
+            "name": "product_id",
+            "column": "product_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_product",
+              "on": "id"
+            }
+          },
+          {
+            "name": "quantity",
+            "column": "quantity",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "unit_price_cents",
+            "column": "unit_price_cents",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "commerce_product",
+        "model": "Product",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "description",
+            "column": "description",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
+            "name": "price_cents",
+            "column": "price_cents",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "sku",
+            "column": "sku",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "commerce_shipment_event",
+        "model": "ShipmentEvent",
+        "fields": [
+          {
+            "name": "at",
+            "column": "at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "detail",
+            "column": "detail",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "kind",
+            "column": "kind",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "order_id",
+            "column": "order_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "commerce_order",
+              "on": "id"
+            }
+          },
+          {
+            "name": "tenant_slug",
+            "column": "tenant_slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64
+          }
+        ]
+      },
+      {
+        "name": "commerce_staff",
+        "model": "StaffMember",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 120
+          }
+        ]
+      },
+      {
+        "name": "rustango_admin_users",
+        "model": "AdminUser",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "is_superuser",
+            "column": "is_superuser",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "false"
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_audit_log",
+        "model": "AuditLog",
+        "fields": [
+          {
+            "name": "changes",
+            "column": "changes",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_pk",
+            "column": "entity_pk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "entity_table",
+            "column": "entity_table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "occurred_at",
+            "column": "occurred_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()"
+          },
+          {
+            "name": "operation",
+            "column": "operation",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "source",
+            "column": "source",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          }
+        ]
+      },
+      {
+        "name": "rustango_content_types",
+        "model": "ContentType",
+        "fields": [
+          {
+            "name": "app_label",
+            "column": "app_label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "model_name",
+            "column": "model_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "table",
+            "column": "table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          }
+        ]
+      },
+      {
+        "name": "rustango_media",
+        "model": "Media",
+        "fields": [
+          {
+            "name": "collection_id",
+            "column": "collection_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "deleted_at",
+            "column": "deleted_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "derived_from_id",
+            "column": "derived_from_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "disk",
+            "column": "disk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "metadata",
+            "column": "metadata",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "mime",
+            "column": "mime",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "original_filename",
+            "column": "original_filename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 512
+          },
+          {
+            "name": "size_bytes",
+            "column": "size_bytes",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "status",
+            "column": "status",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "storage_key",
+            "column": "storage_key",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 512
+          },
+          {
+            "name": "uploaded_at",
+            "column": "uploaded_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "uploaded_by_id",
+            "column": "uploaded_by_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_collections",
+        "model": "MediaCollection",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "deleted_at",
+            "column": "deleted_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "description",
+            "column": "description",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "default": ""
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "parent_id",
+            "column": "parent_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "slug",
+            "column": "slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_tag_links",
+        "model": "MediaTagLink",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "media_id",
+            "column": "media_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "tag_id",
+            "column": "tag_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_media_tags",
+              "on": "id"
+            }
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_tags",
+        "model": "MediaTag",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "slug",
+            "column": "slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255,
+            "unique": true
+          }
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "name": "commerce_inventory_product_id_location_idx",
+        "table": "commerce_inventory",
+        "columns": [
+          "product_id",
+          "location"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "commerce_order_line_order_id_product_id_idx",
+        "table": "commerce_order_line",
+        "columns": [
+          "order_id",
+          "product_id"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_entity_table_entity_pk_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "entity_table",
+          "entity_pk"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_occurred_at_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "occurred_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_collection_id_idx",
+        "table": "rustango_media",
+        "columns": [
+          "collection_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_collections_parent_id_idx",
+        "table": "rustango_media_collections",
+        "columns": [
+          "parent_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_disk_storage_key_idx",
+        "table": "rustango_media",
+        "columns": [
+          "disk",
+          "storage_key"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_status_idx",
+        "table": "rustango_media",
+        "columns": [
+          "status"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_tag_links_media_id_tag_id_idx",
+        "table": "rustango_media_tag_links",
+        "columns": [
+          "media_id",
+          "tag_id"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_tag_links_tag_id_idx",
+        "table": "rustango_media_tag_links",
+        "columns": [
+          "tag_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      }
+    ]
+  },
+  "forward": [
+    {
+      "schema": {
+        "CreateTable": "commerce_customer"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_inventory"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_order"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_order_line"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_product"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_shipment_event"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "commerce_staff"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "commerce_inventory_product_id_location_idx",
+          "table": "commerce_inventory",
+          "columns": [
+            "product_id",
+            "location"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "commerce_order_line_order_id_product_id_idx",
+          "table": "commerce_order_line",
+          "columns": [
+            "order_id",
+            "product_id"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    }
+  ]
+}

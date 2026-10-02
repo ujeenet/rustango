@@ -28,18 +28,11 @@ pub struct Doc {
 }
 
 fn update_set(value: Expr) -> UpdateQuery {
-    UpdateQuery {
-        model: Doc::SCHEMA,
-        set: vec![Assignment {
-            column: "rank",
-            value,
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(1),
-        }),
-    }
+    UpdateQuery::new(
+        Doc::SCHEMA,
+        vec![Assignment::new("rank", value)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+    )
 }
 
 // ---------- PG: native emission ----------

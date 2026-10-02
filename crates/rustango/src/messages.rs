@@ -1,14 +1,13 @@
-//! Django's [messages framework](https://docs.djangoproject.com/en/6.0/ref/contrib/messages/),
-//! ported to a cookie-backed signed-storage shape. Issue #9.
+//! Flash messages, backed by a signed cookie.
 //!
-//! Powers the standard POST→303→render flash idiom: a handler stages
-//! a one-shot message ("Saved successfully"), redirects, the next
-//! render reads + clears the message from the cookie.
+//! Use it for the POST→303→render flash idiom: a handler stages a
+//! one-shot message ("Saved successfully") and redirects. The next
+//! render reads the message and clears the cookie.
 //!
 //! ```ignore
 //! use rustango::messages;
 //!
-//! const SECRET: &[u8] = b"app-wide secret — derive from Settings.secret_key";
+//! const SECRET: &[u8] = b"app-wide secret — load it from your secret store";
 //!
 //! async fn save_handler(headers: HeaderMap) -> Response {
 //!     // … do the save …
@@ -29,40 +28,25 @@
 //!
 //! ## Storage
 //!
-//! Default storage is a signed cookie (`HMAC-SHA256` over the encoded
-//! payload). The cookie body is `base64url(payload).base64url(sig)`
-//! and is dropped when read so messages are one-shot (matching
-//! Django's behavior). Session-backed storage that survives cookie
-//! eviction is queued as a follow-up.
+//! The cookie body is `base64url(payload).base64url(signature)`,
+//! signed with `HMAC-SHA256`. Reading drops it, so a message shows
+//! exactly once.
 //!
-//! ## Tampering / replay
+//! ## Tampering and replay
 //!
-//! Bad / missing signatures → `drain` returns an empty Vec. Forged
-//! cookies don't crash the handler; they're just ignored. Replayed
-//! cookies (browser kept the value past the clear-cookie response)
-//! re-show the messages once — the next drain clears them.
+//! A bad or missing signature makes `drain` return an empty Vec, so a
+//! forged cookie is ignored instead of crashing the handler. If the
+//! browser replays a cookie past the clear response, the messages show
+//! once more and the next drain clears them.
 //!
-//! ## Out of scope (queued as follow-ups)
+//! ## Security
 //!
-//! - **`Secure` cookie attribute** — currently the cookie ships with
-//!   `HttpOnly` + `SameSite=Lax` but no `Secure`. Mirror the
-//!   [`crate::forms::csrf::CsrfConfig`] shape — `secure: bool`
-//!   default true + `allow_insecure_for_dev()` opt-out — once the
-//!   config-struct surface lands. Lower stakes than CSRF (one-shot
-//!   UI hints) but worth following the same convention.
-//! - **Session-backed storage** + **FallbackStorage** (cookie + session
-//!   fallback) — requires plumbing through `sessions::SessionStore`.
-//! - **Middleware-shape auto-apply** — current API requires callers to
-//!   thread the cookie into the response manually. A response-side
-//!   layer that auto-applies is feasible but adds tower-service
-//!   complexity.
-//! - **`SuccessMessageMixin` on CBVs** — small wiring on
-//!   `CreateView` / `UpdateView` for the common "post-save flash"
-//!   pattern.
-//! - **`MESSAGE_TAGS` global setting** — Django maps `{ERROR: 'danger'}`
-//!   for Bootstrap CSS classes; the rustango shape exposes the `tags`
-//!   field per message so the template can do whatever mapping it
-//!   wants directly.
+//! The cookie is sent with `HttpOnly` and `SameSite=Lax`, but **not**
+//! `Secure`, so it can travel over plain HTTP. Terminate TLS in front
+//! of the app, and don't put anything sensitive in a message body.
+//!
+//! There is no middleware: you must attach the returned `Set-Cookie`
+//! to the response yourself.
 
 use std::str::FromStr;
 
@@ -71,7 +55,7 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-/// Message severity, mirroring Django's five-level scheme.
+/// Message severity, in five levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Debug,
@@ -82,9 +66,8 @@ pub enum Level {
 }
 
 impl Level {
-    /// Stable wire-format tag. Used in the cookie payload + the
-    /// `level` field stamped into the Tera context. Lowercase so it
-    /// composes directly with Bootstrap-style class names
+    /// Stable lowercase tag used in the cookie payload and in the
+    /// template context, so it drops straight into a class name
     /// (`message message--success`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -125,9 +108,9 @@ impl<'de> serde::Deserialize<'de> for Level {
     }
 }
 
-/// One flash message. The `tags` field carries Django-style
-/// `extra_tags` (free-form, typically CSS class names) that the
-/// template renders alongside the level-derived class.
+/// One flash message. `tags` is a free-form
+/// string, usually CSS class names, that the template renders next to
+/// the class derived from the level.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub level: Level,
@@ -136,22 +119,23 @@ pub struct Message {
     pub tags: String,
 }
 
-/// Cookie name the messages framework writes / reads. Distinct from
-/// the session / CSRF cookies so they don't collide.
+/// Cookie name this module reads and writes. Separate from the
+/// session and CSRF cookies so they don't collide.
 pub const MESSAGES_COOKIE: &str = "rustango_messages";
 
-/// Maximum number of messages staged in the cookie at any time.
-/// Past this point the **oldest** message is dropped — chosen because
-/// recently-pushed flashes are almost always the relevant ones (the
-/// "thing just happened" feedback). A `tracing::warn` fires on each
-/// drop so misbehaving callers surface in logs rather than silently
-/// losing data. 50 is far above any reasonable POST→303 flow.
+/// How many messages the cookie may hold. Above this the **oldest**
+/// is dropped, because the newest flash is the one the user just
+/// caused. Each drop logs a `tracing::warn`, so a caller that keeps
+/// pushing shows up in the logs. [`MAX_COOKIE_BYTES`] caps the size.
 pub const MAX_MESSAGES: usize = 50;
 
-/// Append a message to the storage cookie and return the updated
-/// `Set-Cookie` header value the caller should attach to the
-/// response. `extra_tags` is whatever class-name-ish string the
-/// template wants alongside the level (`""` if you don't care).
+/// Largest `Set-Cookie` value [`push`] emits; oldest messages go first
+/// to stay under it. Browsers cap a cookie at about 4096 bytes.
+pub const MAX_COOKIE_BYTES: usize = 4000;
+
+/// Append a message and return the `Set-Cookie` value to attach to
+/// the response. `extra_tags` is an extra class-name string for the
+/// template; pass `""` if you don't need one.
 ///
 /// ```ignore
 /// let cookie = messages::push(
@@ -176,30 +160,69 @@ pub fn push(
         body: body.to_owned(),
         tags: extra_tags.to_owned(),
     });
-    // Cap total staged count so the cookie doesn't grow past the
-    // 4KB browser limit. Drop oldest first (recent messages are the
-    // ones the user just produced and most wants to see). Tracing
-    // warn fires on each drop so misbehaving callers surface.
-    while existing.len() > MAX_MESSAGES {
+    // Drop oldest first, by count and then by size: a browser drops a
+    // cookie over 4 KB whole, taking every message with it (#1957).
+    loop {
+        let cookie = set_cookie(secret, &existing, false);
+        if existing.len() <= MAX_MESSAGES && cookie.len() <= MAX_COOKIE_BYTES {
+            return cookie;
+        }
+        if existing.len() == 1 {
+            // Never drop the newest: shorten it until it fits.
+            return truncate_to_fit(secret, existing.remove(0));
+        }
         let dropped = existing.remove(0);
         tracing::warn!(
             target: "rustango::messages",
             level = %dropped.level.as_str(),
             body = %dropped.body,
-            "messages cookie exceeded MAX_MESSAGES={MAX_MESSAGES} — dropped oldest message"
+            "messages cookie over MAX_MESSAGES={MAX_MESSAGES} or {MAX_COOKIE_BYTES} bytes — dropped oldest message"
         );
     }
-    set_cookie(secret, &existing, false)
 }
 
-/// Read every staged message and produce a clear-cookie value the
-/// caller should attach to the response so the messages don't show
-/// up again on the next render. One-shot semantics: subsequent
-/// drains see an empty list until something pushes again.
+/// The cookie for `msg` alone, its body cut at the longest char
+/// boundary that fits [`MAX_COOKIE_BYTES`] (tags too, if they alone overflow).
+fn truncate_to_fit(secret: &[u8], mut msg: Message) -> String {
+    let fits =
+        |m: &Message| set_cookie(secret, std::slice::from_ref(m), false).len() <= MAX_COOKIE_BYTES;
+    let full = std::mem::take(&mut msg.body);
+    if !fits(&msg) {
+        msg.tags.clear();
+    }
+    let cuts: Vec<usize> = full
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([full.len()])
+        .collect();
+    // Largest cut that fits; cut 0 (empty body) always does.
+    let (mut lo, mut hi) = (0, cuts.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        msg.body = full[..cuts[mid]].to_owned();
+        if fits(&msg) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    msg.body = full[..cuts[lo]].to_owned();
+    tracing::warn!(
+        target: "rustango::messages",
+        level = %msg.level.as_str(),
+        kept = msg.body.len(),
+        of = full.len(),
+        "message alone exceeds {MAX_COOKIE_BYTES} bytes — truncated its body"
+    );
+    set_cookie(secret, std::slice::from_ref(&msg), false)
+}
+
+/// Read every staged message, plus a clear-cookie value to attach to
+/// the response so they don't show again. Later drains see an empty
+/// list until something pushes again.
 ///
-/// `clear_cookie` is `Some` whenever messages were drained (even an
-/// empty Vec doesn't trigger a clear — we only clear when there was
-/// something to clear).
+/// The clear-cookie is `None` when no valid cookie was present, since
+/// there is nothing to clear.
 #[must_use]
 pub fn drain(secret: &[u8], headers: &axum::http::HeaderMap) -> (Vec<Message>, Option<String>) {
     let Some(messages) = read_cookie(secret, headers) else {
@@ -244,12 +267,8 @@ pub fn error(secret: &[u8], headers: &axum::http::HeaderMap, body: &str) -> Stri
 // ------------------------------------------------------------------ redirect-with-message
 
 /// Stage a message at `level` and return a `302 Found` redirect to
-/// `url` with the `Set-Cookie` header pre-attached. Combines the
-/// "push + build response + attach cookie" idiom that handlers
-/// otherwise hand-roll in 4-5 lines per flash redirect.
-///
-/// Mirrors Django's `messages.add_message + redirect(url)` flow —
-/// the canonical post-save flash pattern.
+/// `url` with the `Set-Cookie` already attached — the staging step
+/// and the redirect in one call.
 ///
 /// ```ignore
 /// use rustango::messages::{redirect_with_message, Level};
@@ -262,10 +281,10 @@ pub fn error(secret: &[u8], headers: &axum::http::HeaderMap, body: &str) -> Stri
 /// }
 /// ```
 ///
-/// On `HeaderValue::from_str` failure (the cookie value somehow
-/// contains a forbidden byte — should never happen with normal
-/// message bodies) the redirect is returned WITHOUT the cookie, so
-/// the navigation still works but the message is silently dropped.
+/// If the cookie value contains a byte a header may not carry (it
+/// should not happen with normal message bodies), the redirect is
+/// returned without the cookie: navigation still works, but the
+/// message is dropped.
 #[must_use]
 pub fn redirect_with_message(
     secret: &[u8],
@@ -288,9 +307,7 @@ pub fn redirect_with_message(
     res
 }
 
-/// Sugar for [`redirect_with_message`] at `Level::Success`. The
-/// success path of the post-save flash idiom: stage a green message,
-/// redirect to the list view.
+/// Sugar for [`redirect_with_message`] at `Level::Success`.
 #[must_use]
 pub fn redirect_with_success(
     secret: &[u8],
@@ -336,12 +353,9 @@ pub fn redirect_with_error(
 
 // ------------------------------------------------------------------ Tera helper
 
-/// Drain messages from the request cookie and stamp them into the
-/// Tera context as `messages` — a list of `{level, body, tags}`
-/// objects. Returns the clear-cookie the caller attaches to the
-/// response. Pairs with [`crate::shortcuts::render`] /
-/// [`crate::template_views`] for the standard
-/// `{% for msg in messages %}…{% endfor %}` template pattern.
+/// Drain the messages and put them in the Tera context as
+/// `messages`, a list of `{level, body, tags}`. Returns the
+/// clear-cookie to attach to the response.
 ///
 /// ```jinja
 /// {% for msg in messages %}
@@ -363,13 +377,7 @@ pub fn stamp_into_context(
 // ------------------------------------------------------------------ cookie internals
 
 fn read_cookie(secret: &[u8], headers: &axum::http::HeaderMap) -> Option<Vec<Message>> {
-    let raw = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|h| h.to_str().ok())?;
-    let value = raw
-        .split(';')
-        .map(str::trim)
-        .find_map(|kv| kv.strip_prefix(MESSAGES_COOKIE)?.strip_prefix('='))?;
+    let value = crate::cookies::cookie_from_headers(headers, MESSAGES_COOKIE)?;
     let (payload_b64, sig_b64) = value.split_once('.')?;
     let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
@@ -387,9 +395,9 @@ fn set_cookie(secret: &[u8], messages: &[Message], clearing: bool) -> String {
         URL_SAFE_NO_PAD.encode(&payload),
         URL_SAFE_NO_PAD.encode(&sig)
     );
-    // Path=/ so messages drain on any subsequent request, SameSite=Lax
-    // so they survive the post-redirect GET, HttpOnly so JS can't
-    // exfiltrate (messages can carry validation hints).
+    // Path=/ so any later request drains them, SameSite=Lax so they
+    // survive the redirect GET, HttpOnly so JS cannot read them
+    // (a message body can carry validation hints).
     let max_age = if clearing { "Max-Age=0; " } else { "" };
     format!("{MESSAGES_COOKIE}={body}; Path=/; SameSite=Lax; HttpOnly; {max_age}")
 }
@@ -425,8 +433,8 @@ mod tests {
         h
     }
 
-    /// Extract the cookie value portion from a `Set-Cookie` header
-    /// string so we can fold it back into the next request's `Cookie:`.
+    /// Take the `name=value` part of a `Set-Cookie` so it can go back
+    /// into the next request's `Cookie:` header.
     fn cookie_from_set(set: &str) -> String {
         let first = set.split(';').next().unwrap();
         first.to_owned()
@@ -492,22 +500,20 @@ mod tests {
     fn tampered_cookie_returns_empty_doesnt_crash() {
         let set = push(SECRET, &empty_headers(), Level::Success, "real", "");
         let cookie = cookie_from_set(&set);
-        // Replace one character mid-payload so the signature no longer
-        // verifies. Stays ASCII so the `&str` boundary doesn't shift.
+        // Change one byte of the payload so the signature fails.
+        // Stays ASCII so the `&str` boundaries don't shift.
         let eq = cookie.find('=').unwrap();
         let mut tampered = String::with_capacity(cookie.len());
         tampered.push_str(&cookie[..=eq]);
         let target = &cookie[eq + 1..];
         let first_char = target.chars().next().unwrap();
-        // Flip "A↔B" style — base64url alphabet, so picking the
-        // opposite-case version of the first char produces a different
-        // valid base64url symbol.
+        // Swapping case gives another valid base64url symbol.
         let flipped = if first_char.is_ascii_uppercase() {
             first_char.to_ascii_lowercase()
         } else if first_char.is_ascii_lowercase() {
             first_char.to_ascii_uppercase()
         } else {
-            // Digit or `-`/`_` — toggle to a known different symbol.
+            // Digit or `-`/`_`: use a symbol we know differs.
             'X'
         };
         tampered.push(flipped);
@@ -557,8 +563,7 @@ mod tests {
 
     #[test]
     fn push_caps_at_max_messages_drops_oldest() {
-        // Push enough to exceed MAX_MESSAGES (50) — the bound should
-        // drop oldest first so the most-recent N survive.
+        // Push past MAX_MESSAGES; the oldest should go first.
         let mut headers = empty_headers();
         let total = MAX_MESSAGES + 5;
         for i in 0..total {
@@ -569,9 +574,50 @@ mod tests {
         }
         let (msgs, _) = drain(SECRET, &headers);
         assert_eq!(msgs.len(), MAX_MESSAGES, "must cap at MAX_MESSAGES");
-        // Oldest dropped → first surviving is `msg-5` (we pushed 0..54).
+        // We pushed 0..54, so the first survivor is `msg-5`.
         assert_eq!(msgs[0].body, "msg-5");
         assert_eq!(msgs.last().unwrap().body, format!("msg-{}", total - 1));
+    }
+
+    /// Long messages stay under the browser's cookie size limit by
+    /// dropping the oldest, so the newest still arrives (#1957).
+    #[test]
+    fn push_caps_the_cookie_size_and_keeps_the_newest() {
+        let mut headers = empty_headers();
+        let mut set = String::new();
+        for i in 0..10 {
+            let body = format!("{i}-{}", "x".repeat(600));
+            set = push(SECRET, &headers, Level::Info, &body, "");
+            headers = headers_with(&cookie_from_set(&set));
+        }
+        assert!(
+            set.len() <= MAX_COOKIE_BYTES,
+            "cookie is {} bytes",
+            set.len()
+        );
+        let (msgs, _) = drain(SECRET, &headers);
+        assert!(!msgs.is_empty() && msgs.len() < 10);
+        assert!(msgs.last().unwrap().body.starts_with("9-"), "newest lost");
+    }
+
+    /// A single message over the size cap is truncated, never dropped.
+    #[test]
+    fn push_truncates_an_oversized_newest_message() {
+        let mut headers = empty_headers();
+        let first = push(SECRET, &headers, Level::Info, "older", "");
+        headers = headers_with(&cookie_from_set(&first));
+        let body = format!("newest-{}", "é".repeat(5000));
+        let set = push(SECRET, &headers, Level::Error, &body, "");
+        assert!(
+            set.len() <= MAX_COOKIE_BYTES,
+            "cookie is {} bytes",
+            set.len()
+        );
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie_from_set(&set)));
+        assert_eq!(msgs.len(), 1, "the newest must survive");
+        assert_eq!(msgs[0].level, Level::Error);
+        assert!(msgs[0].body.starts_with("newest-") && msgs[0].body.len() > 100);
+        assert!(body.starts_with(&msgs[0].body));
     }
 
     #[cfg(feature = "template_views")]
@@ -596,9 +642,8 @@ mod tests {
 
     // -------- redirect_with_message + sugar helpers --------
 
-    /// Pull the Set-Cookie's name=value first segment so we can fold
-    /// it back into the next request and confirm the message survives
-    /// the round-trip.
+    /// Pull `name=value` off a response's `Set-Cookie` so the next
+    /// request can send it back.
     fn set_cookie_value(res: &axum::response::Response) -> String {
         let v = res
             .headers()
@@ -624,9 +669,8 @@ mod tests {
 
     #[test]
     fn redirect_with_message_cookie_decodes_back_to_message() {
-        // Stage one, redirect, then read the cookie back via the
-        // public `drain` API — proves the helper produced a valid
-        // signed payload the framework's own reader accepts.
+        // Read the cookie back through `drain` to prove the helper
+        // signed a payload our own reader accepts.
         let res =
             redirect_with_message(SECRET, &empty_headers(), Level::Warning, "Heads up.", "/x");
         let cookie = set_cookie_value(&res);
@@ -671,8 +715,7 @@ mod tests {
 
     #[test]
     fn redirect_with_message_preserves_existing_staged_messages() {
-        // Push a message first, then build a redirect-with-message —
-        // the cookie attached to the redirect should carry BOTH.
+        // The redirect's cookie must carry both messages.
         let first_set = push(SECRET, &empty_headers(), Level::Info, "First.", "");
         let inbound = headers_with(&cookie_from_set(&first_set));
         let res = redirect_with_message(SECRET, &inbound, Level::Success, "Second.", "/x");
@@ -685,9 +728,8 @@ mod tests {
 
     #[test]
     fn redirect_with_message_drops_cookie_on_invalid_url_but_keeps_redirect_status() {
-        // CRLF in URL is rejected by HeaderValue::from_str — same
-        // anti-response-splitting posture as `shortcuts::redirect`.
-        // The cookie is independently valid and still attached.
+        // `HeaderValue::from_str` rejects CRLF in the URL, which
+        // blocks response splitting. The cookie is still valid.
         let res = redirect_with_message(
             SECRET,
             &empty_headers(),
@@ -700,7 +742,7 @@ mod tests {
             res.headers().get(axum::http::header::LOCATION).is_none(),
             "CRLF URL must be dropped",
         );
-        // The valid cookie still rides along so the message isn't lost.
+        // The cookie still rides along, so the message isn't lost.
         assert!(res.headers().get(axum::http::header::SET_COOKIE).is_some());
     }
 }

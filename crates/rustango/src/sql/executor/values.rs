@@ -1,22 +1,10 @@
-//! Pure projection — Django `.values()` / `.values_list()` (issue #22).
+//! `.values()` and `.values_list()`: fetch chosen columns as plain
+//! data instead of decoding whole models.
 //!
-//! Extracted from `executor/mod.rs` as part of #116 step 3. Contains:
-//!
-//! - Per-dialect `cell_to_sqlvalue` helpers (PG / MySQL / SQLite).
-//! - `fetch_values_dict` / `fetch_values_list` / `fetch_values_flat`
-//!   pool-level entry points.
-//! - `MaybePgScalar` / `MaybeMyScalar` / `MaybeSqliteScalar` trait
-//!   gates for `values_list_flat::<U>(...)`.
-//! - `impl ValuesQuerySet` / `impl ValuesListQuerySet` /
-//!   `impl ValuesFlatQuerySet` bridge methods that let callers chain
-//!   `.fetch(&pool)`.
+//! Each backend decodes a cell into a `SqlValue` its own way, then
+//! the `fetch_values_*` functions shape the rows into dicts, tuples
+//! or a flat list.
 
-#[cfg(feature = "postgres")]
-use super::bind_query_as;
-#[cfg(feature = "mysql")]
-use super::bind_query_as_my;
-#[cfg(feature = "sqlite")]
-use super::bind_query_as_sqlite;
 #[cfg(feature = "postgres")]
 use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
@@ -37,10 +25,9 @@ use super::bind_query_my;
 #[cfg(feature = "sqlite")]
 use super::bind_query_sqlite;
 
-/// Decode one per-dialect raw `SqlValue` from the i-th column of a row.
-/// Same probe order as the aggregate-row decoder so the two paths agree
-/// on how mixed types come back: scalars first, then jsonb / arrays
-/// (PG only). NULLs (or unrecognized types) fall through to
+/// Decode column `i` of a row into a `SqlValue`. It tries scalars
+/// first and JSON after, the same order the aggregate decoder uses,
+/// so both agree on mixed types. A NULL or an unknown type gives
 /// [`SqlValue::Null`].
 #[cfg(feature = "postgres")]
 fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
@@ -54,33 +41,58 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
     } else if let Ok(v) = row.try_get::<bool, _>(i) {
         SqlValue::Bool(v)
     } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
-        // #1035 — PG `NUMERIC` (e.g. `SUM(bigint)` / `SUM(...) OVER (...)`,
-        // which PG widens to numeric). The i64/f64 probes don't decode
-        // numeric, so without this the value silently decoded to `Null`.
+        // `NUMERIC`, which PG widens a `SUM` to. Neither the i64 nor
+        // the f64 probe decodes it, so it would come back as Null.
         SqlValue::Decimal(v)
+    } else if let Ok(v) = row.try_get::<uuid::Uuid, _>(i) {
+        SqlValue::Uuid(v)
+    } else if let Some(v) = chrono_cell(row, i) {
+        v
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
         SqlValue::Json(v)
+    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
+        SqlValue::Binary(v)
     } else {
         SqlValue::Null
     }
 }
 
+/// Per result column, whether `model` declares it a `Uuid`. MySQL and SQLite
+/// store a UUID as text or bytes, so only the model tells it apart.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn uuid_columns<R: sqlx::Row>(rows: &[R], model: &crate::core::ModelSchema) -> Vec<bool> {
+    use sqlx::Column as _;
+    rows.first().map_or_else(Vec::new, |row| {
+        row.columns()
+            .iter()
+            .map(|c| {
+                model.field_by_column(c.name()).map(|f| f.ty) == Some(crate::core::FieldType::Uuid)
+            })
+            .collect()
+    })
+}
+
 #[cfg(feature = "mysql")]
-fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
+fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize, is_uuid: bool) -> SqlValue {
     use sqlx::{Column as _, Row as _, TypeInfo as _};
-    // #1033 — MySQL window-ranking outputs (RANK/DENSE_RANK/NTILE) and
-    // COUNT(*) come back as BIGINT UNSIGNED, which the i64 probe below
-    // can't decode; sqlx's permissive bool decode would then swallow
-    // them as `SqlValue::Bool`, making the numeric rank unrecoverable.
-    // Branch on the column type FIRST so unsigned ints decode losslessly
-    // — real BOOLEAN / TINYINT(1) columns aren't UNSIGNED, so they still
-    // fall through to the bool probe below and decode as `Bool`.
+    if is_uuid {
+        if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
+            if let Ok(u) = uuid::Uuid::parse_str(&s) {
+                return SqlValue::Uuid(u);
+            }
+        }
+    }
+    // `COUNT(*)` and the window ranking functions return BIGINT
+    // UNSIGNED, which the i64 probe cannot decode. sqlx's permissive
+    // bool decode would then claim it and lose the number, so check
+    // the column type first. A real boolean column is not UNSIGNED,
+    // so it still reaches the bool probe below.
     if row.column(i).type_info().name().contains("UNSIGNED") {
         if let Ok(v) = row.try_get::<u64, _>(i) {
-            // Ranks are tiny; the String fallback keeps a (theoretical)
-            // value > i64::MAX lossless rather than saturating.
+            // A value above i64::MAX becomes a string rather than
+            // saturating, though no real rank gets that large.
             return i64::try_from(v)
                 .map_or_else(|_| SqlValue::String(v.to_string()), SqlValue::I64);
         }
@@ -97,50 +109,84 @@ fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
     } else if let Ok(v) = row.try_get::<bool, _>(i) {
         SqlValue::Bool(v)
     } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
-        // #1035 — MySQL `DECIMAL` (e.g. `SUM(...)` / `SUM(...) OVER (...)`
-        // over an integer column). Without this the i64/f64 probes fail
-        // and the value silently decoded to `Null`.
+        // `DECIMAL`, which a `SUM` over an integer column returns.
+        // Neither the i64 nor the f64 probe decodes it.
         SqlValue::Decimal(v)
+    } else if let Some(v) = chrono_cell(row, i) {
+        v
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
+    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
+        SqlValue::Binary(v)
     } else {
         SqlValue::Null
     }
 }
 
+/// A date or timestamp cell, which the other probes leave as `Null` (#2004).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn chrono_cell<'r, R>(row: &'r R, i: usize) -> Option<SqlValue>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveDateTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    if let Ok(v) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(i) {
+        Some(SqlValue::DateTime(v))
+    } else if let Ok(v) = row.try_get::<chrono::NaiveDateTime, _>(i) {
+        Some(SqlValue::DateTime(v.and_utc()))
+    } else {
+        row.try_get::<chrono::NaiveDate, _>(i)
+            .ok()
+            .map(SqlValue::Date)
+    }
+}
+
 #[cfg(feature = "sqlite")]
-fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue {
+fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize, is_uuid: bool) -> SqlValue {
     use sqlx::{Row as _, TypeInfo as _, ValueRef as _};
-    // SQLite is dynamically typed, and an untyped expression column (e.g.
-    // a scalar subquery, #1036) carries a value storage class but no
-    // useful *declared* column type. `try_get::<T>` checks the requested
-    // type against the DECLARED type: for such a column it reports
-    // INTEGER, so `try_get::<i64>` passes the check and silently coerces a
-    // TEXT value to `0`, while `try_get::<String>` fails the check
-    // outright. So when the value's runtime storage class is TEXT, decode
-    // it with `try_get_unchecked` (skips the declared-type check, reads
-    // the actual bytes). Every other case falls through to the probe
-    // below, which is correct and reliable — and we deliberately don't
-    // branch on the raw type for them, since `is_null()` / `type_info()`
-    // also misreport correlated aggregate columns like `(SELECT SUM(x) …)`
-    // on SQLite (the probe handles those right).
+    // SQLite is dynamically typed, and an expression column such as
+    // a scalar subquery has a storage class but no useful declared
+    // type. `try_get::<T>` checks against the declared type, which
+    // reads as INTEGER here, so `try_get::<i64>` would turn a text
+    // value into `0` while `try_get::<String>` would fail outright.
+    //
+    // So when the runtime storage class is TEXT, read the bytes with
+    // `try_get_unchecked`. Everything else goes to the probe below,
+    // which handles it correctly — including correlated aggregates,
+    // whose `type_info()` SQLite also misreports.
     if let Ok(raw) = row.try_get_raw(i) {
         let is_null = raw.is_null();
-        let is_text = raw.type_info().name() == "TEXT";
-        // Decode up front while `raw` is in scope — this borrow pattern
-        // decodes reliably, whereas evaluating `type_info()` inline
-        // immediately before the call can make it spuriously fail.
+        let (is_text, is_blob) = {
+            let storage = raw.type_info();
+            (storage.name() == "TEXT", storage.name() == "BLOB")
+        };
+        // Decode while `raw` is still in scope: calling `type_info()`
+        // inline just before this can make it fail for no reason.
         let as_text = row.try_get_unchecked::<String, _>(i);
+        // A NULL would decode as `0` below (#1766).
+        if is_null {
+            return SqlValue::Null;
+        }
         if is_text {
-            // A TEXT-class value must NOT fall through to the integer
-            // probe below: `try_get::<i64>` would coerce both a real
-            // string and a NULL to `0`. `try_get_unchecked::<String>`
-            // skips the (unreliable) declared-type check on these
-            // untyped expression columns.
-            return if is_null {
-                SqlValue::Null
-            } else {
-                as_text.map_or(SqlValue::Null, SqlValue::String)
+            return match as_text {
+                Ok(s) if is_uuid => {
+                    uuid::Uuid::parse_str(&s).map_or(SqlValue::String(s), SqlValue::Uuid)
+                }
+                Ok(s) => SqlValue::String(s),
+                Err(_) => SqlValue::Null,
+            };
+        }
+        // sqlx writes a Uuid as 16 raw bytes; no probe below reads a BLOB.
+        if is_blob {
+            return match row.try_get_unchecked::<Vec<u8>, _>(i) {
+                Ok(b) if is_uuid && b.len() == 16 => {
+                    uuid::Uuid::from_slice(&b).map_or(SqlValue::Binary(b), SqlValue::Uuid)
+                }
+                Ok(b) => SqlValue::Binary(b),
+                Err(_) => SqlValue::Null,
             };
         }
     }
@@ -159,9 +205,9 @@ fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue 
     }
 }
 
-/// Execute a [`SelectQuery`] (with `projection` set) and return each
-/// row as a `HashMap<String, SqlValue>` keyed by column name.
-/// Backs [`crate::query::ValuesQuerySet::fetch`]. Issue #22.
+/// Run a [`SelectQuery`] with a projection and return each row as a
+/// map from column name to value. Backs
+/// [`crate::query::ValuesQuerySet::fetch`].
 ///
 /// # Errors
 /// SQL compilation or driver failure.
@@ -198,13 +244,17 @@ pub async fn fetch_values_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), my_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        my_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -218,13 +268,17 @@ pub async fn fetch_values_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), sqlite_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -233,16 +287,13 @@ pub async fn fetch_values_dict(
     }
 }
 
-/// Execute an [`AggregateQuery`] and return each row as a
-/// `HashMap<String, SqlValue>` keyed by output-column (alias) name —
-/// the tri-dialect counterpart of [`fetch_values_dict`] for the
-/// aggregate / annotate path. Backs [`crate::query::AggregateBuilder::fetch`].
+/// [`fetch_values_dict`] for an [`AggregateQuery`]: each row comes
+/// back keyed by output-column alias. Backs
+/// [`crate::query::AggregateBuilder::fetch`].
 ///
-/// The PG-only [`super::fetch_aggregate_on`] does the same thing on a
-/// borrowed Postgres executor; this routes through the [`Pool`] enum so
-/// the relation eager-aggregates (`withCount` / `withSum` / …, issue
-/// #830) and every other `.annotate(...)` resolve on SQLite and MySQL
-/// too, not just Postgres.
+/// It goes through [`Pool`], so `.annotate(…)` works on every
+/// backend. [`super::fetch_aggregate_on`] does the same on a
+/// borrowed Postgres executor.
 ///
 /// # Errors
 /// SQL compilation or driver failure.
@@ -279,13 +330,17 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), my_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        my_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -299,13 +354,17 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
                 for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), sqlite_cell_to_sqlvalue(row, i));
+                    map.insert(
+                        col.name().to_owned(),
+                        sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]),
+                    );
                 }
                 out.push(map);
             }
@@ -314,10 +373,9 @@ pub async fn fetch_aggregate_dict(
     }
 }
 
-/// Execute a [`SelectQuery`] (with `projection` set) and return each
-/// row as a `Vec<SqlValue>` ordered to match the projection's column
-/// list. Backs [`crate::query::ValuesListQuerySet::fetch`].
-/// Issue #22.
+/// Run a [`SelectQuery`] with a projection and return each row as a
+/// `Vec<SqlValue>` in the projection's column order. Backs
+/// [`crate::query::ValuesListQuerySet::fetch`].
 ///
 /// # Errors
 /// SQL compilation or driver failure.
@@ -354,13 +412,14 @@ pub async fn fetch_values_list(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
                 let n = row.columns().len();
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
-                    v.push(my_cell_to_sqlvalue(row, i));
+                    v.push(my_cell_to_sqlvalue(row, i, uuid_cols[i]));
                 }
                 out.push(v);
             }
@@ -374,13 +433,14 @@ pub async fn fetch_values_list(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
+            let uuid_cols = uuid_columns(&rows, query.model);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
                 let n = row.columns().len();
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
-                    v.push(sqlite_cell_to_sqlvalue(row, i));
+                    v.push(sqlite_cell_to_sqlvalue(row, i, uuid_cols[i]));
                 }
                 out.push(v);
             }
@@ -389,10 +449,9 @@ pub async fn fetch_values_list(
     }
 }
 
-/// Trait gate for the `.values_list_flat::<U>(...)` typed-scalar path —
-/// PG arm. Same shape as [`super::MaybePgFromRow`]: when the `postgres`
-/// feature is on, this is `Decode + Type<Postgres>`; otherwise an
-/// empty blanket-impl so non-PG builds compile.
+/// The bound `.values_list_flat::<U>(…)` needs on Postgres. With the
+/// feature off it is an empty blanket impl, so such builds compile.
+/// See [`super::MaybePgFromRow`].
 #[cfg(feature = "postgres")]
 pub trait MaybePgScalar:
     for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>
@@ -432,139 +491,395 @@ pub trait MaybeSqliteScalar {}
 #[cfg(not(feature = "sqlite"))]
 impl<T> MaybeSqliteScalar for T {}
 
-/// Execute a single-column [`SelectQuery`] and decode each row's only
-/// cell into `U`. Backs [`crate::query::ValuesFlatQuerySet::fetch`].
-/// Issue #22 — Django's `.values_list('col', flat=True)`.
+mod flat_sealed {
+    pub trait Sealed {}
+}
+
+/// A type the flat `values_list` / `pluck` / `value` decode can return.
+/// Sealed; `Option<T>` reads NULL as `None`, a bare `T` errors on NULL.
+/// `u8`–`u64` need a build without `postgres`, `Decimal` one without `sqlite`.
+pub trait FlatScalar: flat_sealed::Sealed + Send + Unpin + Sized {
+    #[doc(hidden)]
+    type Cell: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin;
+    #[doc(hidden)]
+    fn from_cell(cell: Self::Cell) -> Self;
+    #[doc(hidden)]
+    fn from_null(column: &str) -> Result<Self, sqlx::Error>;
+}
+
+/// The error PG and MySQL raise themselves, so all three agree.
+fn unexpected_null(column: &str) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: format!("{column:?}"),
+        source: Box::new(sqlx::error::UnexpectedNullError),
+    }
+}
+
+macro_rules! flat_scalar {
+    ($($t:ty),* $(,)?) => {$(
+        impl flat_sealed::Sealed for $t {}
+        impl flat_sealed::Sealed for Option<$t> {}
+        impl FlatScalar for $t {
+            type Cell = $t;
+            fn from_cell(cell: $t) -> Self {
+                cell
+            }
+            fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+                Err(unexpected_null(column))
+            }
+        }
+        impl FlatScalar for Option<$t> {
+            type Cell = $t;
+            fn from_cell(cell: $t) -> Self {
+                Some(cell)
+            }
+            fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+                Ok(None)
+            }
+        }
+    )*};
+}
+
+flat_scalar!(
+    i8,
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+    bool,
+    String,
+    Vec<u8>,
+    serde_json::Value,
+    chrono::DateTime<chrono::Utc>,
+    chrono::NaiveDateTime,
+    chrono::NaiveDate,
+    chrono::NaiveTime,
+);
+// sqlx-sqlite has no `Decimal` decode, so only builds without SQLite get it.
+#[cfg(not(feature = "sqlite"))]
+flat_scalar!(rust_decimal::Decimal);
+// sqlx-postgres has no unsigned decode (MySQL reads them from UNSIGNED columns).
+#[cfg(not(feature = "postgres"))]
+flat_scalar!(u8, u16, u32, u64);
+
+/// The one place a UUID cell is decoded. MySQL keeps it as `CHAR(36)` text,
+/// and sqlx's `Uuid` there wants 16 raw bytes (#1733).
+#[doc(hidden)]
+pub struct UuidCell(uuid::Uuid);
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for UuidCell {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <uuid::Uuid as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <uuid::Uuid as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for UuidCell {
+    fn decode(v: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <uuid::Uuid as sqlx::Decode<sqlx::Postgres>>::decode(v).map(Self)
+    }
+}
+#[cfg(feature = "mysql")]
+impl sqlx::Type<sqlx::MySql> for UuidCell {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <uuid::fmt::Hyphenated as sqlx::Type<sqlx::MySql>>::type_info()
+    }
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        <uuid::fmt::Hyphenated as sqlx::Type<sqlx::MySql>>::compatible(ty)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::Decode<'r, sqlx::MySql> for UuidCell {
+    fn decode(v: sqlx::mysql::MySqlValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        <uuid::fmt::Hyphenated as sqlx::Decode<sqlx::MySql>>::decode(v).map(|h| Self(h.into_uuid()))
+    }
+}
+#[cfg(feature = "sqlite")]
+impl sqlx::Type<sqlx::Sqlite> for UuidCell {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <uuid::Uuid as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <uuid::Uuid as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for UuidCell {
+    fn decode(v: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        // sqlx binds 16 raw bytes, but a column default or raw SQL may store text.
+        let bytes = <&[u8] as sqlx::Decode<sqlx::Sqlite>>::decode(v)?;
+        let u = match std::str::from_utf8(bytes) {
+            Ok(text) if bytes.len() != 16 => uuid::Uuid::parse_str(text)?,
+            _ => uuid::Uuid::from_slice(bytes)?,
+        };
+        Ok(Self(u))
+    }
+}
+
+impl flat_sealed::Sealed for uuid::Uuid {}
+impl flat_sealed::Sealed for Option<uuid::Uuid> {}
+impl FlatScalar for uuid::Uuid {
+    type Cell = UuidCell;
+    fn from_cell(cell: UuidCell) -> Self {
+        cell.0
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl FlatScalar for Option<uuid::Uuid> {
+    type Cell = UuidCell;
+    fn from_cell(cell: UuidCell) -> Self {
+        Some(cell.0)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
+
+impl<T> flat_sealed::Sealed for sqlx::types::Json<T> {}
+impl<T> flat_sealed::Sealed for Option<sqlx::types::Json<T>> {}
+impl<T> FlatScalar for sqlx::types::Json<T>
+where
+    T: serde::de::DeserializeOwned + Send + Unpin + 'static,
+{
+    type Cell = Self;
+    fn from_cell(cell: Self) -> Self {
+        cell
+    }
+    fn from_null(column: &str) -> Result<Self, sqlx::Error> {
+        Err(unexpected_null(column))
+    }
+}
+impl<T> FlatScalar for Option<sqlx::types::Json<T>>
+where
+    T: serde::de::DeserializeOwned + Send + Unpin + 'static,
+{
+    type Cell = sqlx::types::Json<T>;
+    fn from_cell(cell: Self::Cell) -> Self {
+        Some(cell)
+    }
+    fn from_null(_: &str) -> Result<Self, sqlx::Error> {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod flat_scalar_tests {
+    fn is_flat<U: super::FlatScalar>() {}
+
+    /// The types `pluck_pairs` decoded before `FlatScalar` narrowed it.
+    #[test]
+    fn small_ints_and_json_are_flat_scalars() {
+        is_flat::<i8>();
+        is_flat::<Option<i8>>();
+        is_flat::<sqlx::types::Json<Vec<String>>>();
+        is_flat::<Option<sqlx::types::Json<Vec<String>>>>();
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[test]
+    fn unsigned_ints_are_flat_scalars_without_postgres() {
+        is_flat::<u8>();
+        is_flat::<u16>();
+        is_flat::<u32>();
+        is_flat::<Option<u64>>();
+    }
+
+    /// `pluck::<Decimal>` compiled before `FlatScalar`; keep it that way.
+    #[cfg(not(feature = "sqlite"))]
+    #[test]
+    fn decimal_is_a_flat_scalar() {
+        is_flat::<rust_decimal::Decimal>();
+        is_flat::<Option<rust_decimal::Decimal>>();
+    }
+}
+
+/// Decode column 0, checking NULL first: sqlx-sqlite reads NULL as `0` (#1773).
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_flat<R, U>(row: &R) -> Result<U, sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    U: FlatScalar,
+    U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    decode_cell(row, 0)
+}
+
+/// Decode column `index` the same NULL-checked way.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_cell<R, U>(row: &R, index: usize) -> Result<U, sqlx::Error>
+where
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    U: FlatScalar,
+    U::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    use sqlx::Column as _;
+    if super::row_to_json::cell_is_null(row, index) {
+        let name = row.columns().get(index).map(|c| c.name().to_owned());
+        return U::from_null(name.as_deref().unwrap_or("?"));
+    }
+    row.try_get::<U::Cell, _>(index).map(U::from_cell)
+}
+
+/// Decode the named column of a MySQL row through [`FlatScalar`], for
+/// macro-emitted code; a missing column is an error, not NULL.
 ///
 /// # Errors
-/// SQL compilation or driver failure, including a decode error if `U`
-/// doesn't match the column's SQL type on the live database.
-pub async fn fetch_values_flat<U>(pool: &Pool, query: &SelectQuery) -> Result<Vec<U>, ExecError>
+/// The driver's decode error, or NULL for a bare `U`.
+#[cfg(feature = "mysql")]
+#[doc(hidden)]
+pub fn try_get_flat_my<U: FlatScalar>(
+    row: &crate::sql::MyReturningRow,
+    name: &str,
+) -> Result<U, sqlx::Error> {
+    use sqlx::{Row as _, ValueRef as _};
+    if row.try_get_raw(name)?.is_null() {
+        return U::from_null(name);
+    }
+    row.try_get::<U::Cell, _>(name).map(U::from_cell)
+}
+
+#[cfg(not(feature = "mysql"))]
+#[doc(hidden)]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_flat_my<U>(row: &crate::sql::MyReturningRow, _name: &str) -> Result<U, sqlx::Error> {
+    match *row {}
+}
+
+/// Decode a `(K, V)` row, each cell NULL-checked (#1808).
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn decode_pair<R, K, V>(row: &R) -> Result<(K, V), sqlx::Error>
 where
-    U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+    R: sqlx::Row,
+    usize: sqlx::ColumnIndex<R>,
+    K: FlatScalar,
+    V: FlatScalar,
+    K::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    V::Cell: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
+    Ok((decode_cell(row, 0)?, decode_cell(row, 1)?))
+}
+
+/// Run a one-column [`SelectQuery`] and decode each row's only cell
+/// into `U` — the flat form of `.values_list()`.
+///
+/// # Errors
+/// SQL compilation or driver failure, including a decode error when
+/// `U` does not match the column's type or a bare `U` meets NULL.
+pub async fn fetch_values_flat<U: FlatScalar>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Vec<U>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
+    fetch_flat_raw(pool, &stmt.sql, stmt.params).await
+}
+
+/// [`fetch_values_flat`] for a one-column SQL string in the dialect's shape.
+///
+/// # Errors
+/// Driver failure, or a decode error as for [`fetch_values_flat`].
+pub(crate) async fn fetch_flat_raw<U: FlatScalar>(
+    pool: &Pool,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<Vec<U>, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments> =
-                sqlx::query_scalar(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_scalar_pg(q, v);
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in params {
+                q = bind_query(q, v);
             }
-            Ok(q.fetch_all(pg).await?)
+            let rows = q.fetch_all(pg).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments> =
-                sqlx::query_scalar(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_scalar_my(q, v);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in params {
+                q = bind_query_my(q, v);
             }
-            Ok(q.fetch_all(my).await?)
+            let rows = q.fetch_all(my).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryScalar<
-                '_,
-                sqlx::Sqlite,
-                U,
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_scalar(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_scalar_sqlite(q, v);
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(sql);
+            for v in params {
+                q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_all(sq).await?)
+            let rows = q.fetch_all(sq).await?;
+            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
         }
     }
 }
 
-/// Execute a two-column [`SelectQuery`] and decode each row into
-/// `(K, V)` via sqlx's tuple `FromRow` impl. Backs
-/// [`crate::query::QuerySet::pluck_pairs`].
+/// Run a two-column [`SelectQuery`] and decode each row into
+/// `(K, V)`. Backs [`crate::query::QuerySet::pluck_pairs`].
 ///
 /// # Errors
-/// SQL compilation or driver failure, including a decode error if
-/// either `K` or `V` doesn't match the column's SQL type on the live
-/// database.
+/// SQL compilation or driver failure, including a decode error when
+/// `K` or `V` does not match its column's type.
 pub async fn fetch_values_pairs<K, V>(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<(K, V)>, ExecError>
 where
-    K: Send + Unpin,
-    V: Send + Unpin,
-    (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    K: FlatScalar,
+    V: FlatScalar,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::Postgres, (K, V), PgArguments> =
-                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as(q, v);
+                q = bind_query(q, v);
             }
-            Ok(q.fetch_all(pg).await?)
+            let rows = q.fetch_all(pg).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, (K, V), sqlx::mysql::MySqlArguments> =
-                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as_my(q, v);
+                q = bind_query_my(q, v);
             }
-            Ok(q.fetch_all(my).await?)
+            let rows = q.fetch_all(my).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::Sqlite,
-                (K, V),
-                sqlx::sqlite::SqliteArguments<'_>,
-            > = sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
-                q = bind_query_as_sqlite(q, v);
+                q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_all(sq).await?)
+            let rows = q.fetch_all(sq).await?;
+            Ok(rows.iter().map(decode_pair).collect::<Result<_, _>>()?)
         }
     }
-}
-
-#[cfg(feature = "postgres")]
-fn bind_query_scalar_pg<U>(
-    q: sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments> {
-    bind_match!(q, value)
-}
-
-#[cfg(feature = "mysql")]
-fn bind_query_scalar_my<U>(
-    q: sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments> {
-    bind_match_mysql!(q, value)
-}
-
-#[cfg(feature = "sqlite")]
-fn bind_query_scalar_sqlite<'a, U>(
-    q: sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>>,
-    value: SqlValue,
-) -> sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match_sqlite!(q, value)
 }
 
 // Bridge methods on the values builders so callers chain `.fetch(&pool)`.
 
 impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
-    /// Execute the projection and return rows as `Vec<HashMap<String, SqlValue>>`.
+    /// Run the projection and return one map per row.
     ///
     /// # Errors
-    /// - [`ExecError::Query`] for SQL compilation failures (typo'd
-    ///   column, etc.).
-    /// - [`ExecError::Sqlx`] for driver / network / decode failures.
+    /// - [`ExecError::Query`] when the SQL fails to compile, for
+    ///   example on a misspelled column.
+    /// - [`ExecError::Driver`] for driver, network or decode failures.
     pub async fn fetch(
         self,
         pool: &Pool,
@@ -575,15 +890,10 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
 }
 
 impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
-    /// Like [`Self::fetch`] but runs on a borrowed executor rather than the
-    /// pool — the terminal a **tenant-scoped** connection needs.
-    ///
-    /// In schema-per-tenant Postgres the tenant is selected by `SET
-    /// search_path` on the checked-out connection, so resolving against the
-    /// pool silently reads `public` instead. `QuerySet` has had `fetch_on`
-    /// for this; the values/aggregate terminals did not, which left a tenant
-    /// app with no public way to run a projection against its own schema
-    /// (#1172).
+    /// [`Self::fetch`] on a borrowed executor instead of the pool.
+    /// Use it for a tenant-scoped query: a schema-mode tenant is
+    /// selected by `SET search_path` on one connection, so going
+    /// through the pool would read `public` instead.
     ///
     /// # Errors
     /// As [`Self::fetch`].
@@ -619,19 +929,18 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
 }
 
 impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
-    /// Execute the aggregate / annotate query and return rows as
-    /// `Vec<HashMap<String, SqlValue>>` keyed by output-column name.
+    /// Run the aggregate query and return one map per row, keyed by
+    /// output-column name.
     ///
-    /// This is the tri-dialect fetch path for every `.aggregate()` /
-    /// `.annotate(...)` chain, including the relation eager-aggregates
-    /// [`crate::query::QuerySet::annotate_count`] / `annotate_sum` / …
-    /// (issue #830) — each row carries the parent's scalar columns plus
-    /// the derived `<rel>_<agg>` column.
+    /// This backs every `.aggregate()` and `.annotate(…)` chain,
+    /// including [`crate::query::QuerySet::annotate_count`] and its
+    /// siblings, where each row carries the parent's own columns plus
+    /// the derived one.
     ///
     /// # Errors
-    /// - [`ExecError::Query`] for SQL compilation failures (unknown
-    ///   relation / column, bad GROUP BY, etc.).
-    /// - [`ExecError::Sqlx`] for driver / network / decode failures.
+    /// - [`ExecError::Query`] when the SQL fails to compile, for
+    ///   example on an unknown relation or a bad GROUP BY.
+    /// - [`ExecError::Driver`] for driver, network or decode failures.
     pub async fn fetch(
         self,
         pool: &Pool,
@@ -640,13 +949,9 @@ impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
         fetch_aggregate_dict(pool, &q).await
     }
 
-    /// Like [`Self::fetch`] but runs on a borrowed executor rather than the
-    /// pool — the terminal a **tenant-scoped** connection needs.
-    ///
-    /// Schema-per-tenant Postgres selects the tenant with `SET search_path`
-    /// on the checked-out connection, so a pool-resolved aggregate reads
-    /// `public` instead of the tenant's schema. Mirrors
-    /// [`crate::query::QuerySet::fetch_on`] (#1172).
+    /// [`Self::fetch`] on a borrowed executor instead of the pool,
+    /// for a tenant-scoped query. See
+    /// [`crate::query::QuerySet::fetch_on`].
     ///
     /// ```ignore
     /// SetLog::objects()
@@ -683,61 +988,42 @@ impl<T: crate::core::Model> crate::query::ValuesListQuerySet<T> {
 }
 
 impl<T: crate::core::Model> crate::query::QuerySet<T> {
-    /// Eloquent `Builder::pluck($col)` — single-column projection
-    /// on this queryset, decoded into `Vec<U>`. Sugar over
-    /// `self.values_list_flat(col).fetch::<U>(pool).await`.
+    /// Read one column from the matching rows into a `Vec<U>`.
     ///
     /// ```ignore
-    /// // Eloquent: Post::where('published', true)->pluck('title');
-    /// // rustango:
     /// let titles: Vec<String> = Post::objects()
     ///     .filter("published", true)
     ///     .pluck::<String>("title", &pool).await?;
     /// ```
     ///
-    /// `U` must be decodable from the column's SQL type on every
-    /// dialect the binary targets — common picks: `i64` / `i32` /
-    /// `String` / `bool` / `f64`.
-    ///
-    /// Differs from `Model::pluck(col, &pool)` (already shipped) in
-    /// that the static-method form scans every row of the table;
-    /// this method's queryset can carry filters / ordering / limits
-    /// so you can pluck a column from a narrowed result set.
+    /// `U` is a [`FlatScalar`]: `i64`, `String`, `bool`, `f64` and the
+    /// like, or `Option<_>` of one for a nullable column. Unlike `Model::pluck`, this respects the queryset's
+    /// filters, ordering and limits.
     ///
     /// # Errors
     /// As [`crate::query::ValuesFlatQuerySet::fetch`].
     pub async fn pluck<U>(self, col: &'static str, pool: &Pool) -> Result<Vec<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         self.values_list_flat(col).fetch::<U>(pool).await
     }
 
-    /// Eloquent `Collection::modelKeys()` / Laravel
-    /// `$query->pluck($model->getKeyName())` shortcut — pluck the
-    /// primary-key column on this (possibly-filtered) queryset and
-    /// decode into `Vec<K>`.
-    ///
-    /// Sugar over `self.pluck::<K>(pk_column, &pool)` where
-    /// `pk_column` is read from the model's schema, so the call site
-    /// doesn't need to spell the PK name.
+    /// [`Self::pluck`] of the primary key, whose name comes from the
+    /// model's schema so the call site need not repeat it.
     ///
     /// ```ignore
-    /// // Eloquent: Post::where('published', true)->pluck('id');
-    /// // rustango:
     /// let ids: Vec<i64> = Post::objects()
     ///     .filter("published", true)
     ///     .pks::<i64>(&pool).await?;
     /// ```
     ///
     /// # Errors
-    /// Returns
-    /// [`ExecError::Query(QueryError::UnknownField)`] (with field
-    /// `"<pk>"`) when the model carries no `#[rustango(primary_key)]`,
-    /// otherwise as [`Self::pluck`].
+    /// [`ExecError::Query(QueryError::UnknownField)`] when the model
+    /// has no primary key, otherwise as [`Self::pluck`].
     pub async fn pks<K>(self, pool: &Pool) -> Result<Vec<K>, ExecError>
     where
-        K: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        K: FlatScalar,
     {
         let pk_col = T::SCHEMA.primary_key().map(|f| f.column).ok_or_else(|| {
             ExecError::Query(crate::core::QueryError::UnknownField {
@@ -748,37 +1034,20 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         self.pluck::<K>(pk_col, pool).await
     }
 
-    /// Eloquent `Builder::pluck($value, $key)` — project two columns
-    /// from this (possibly-filtered) queryset and decode each row
-    /// into `(K, V)`.
-    ///
-    /// Returns `Vec<(K, V)>` — the universal carrier shape; collect
-    /// into a `BTreeMap` / `HashMap` at the call site when you want
-    /// lookup semantics. `(K, V)` is decoded via sqlx's tuple
-    /// `FromRow` impl, so both components only need the same
-    /// `Decode + Type` plumbing the [`Self::pluck`] / [`Self::value`]
-    /// scalars already require.
+    /// Read two columns from the matching rows into `Vec<(K, V)>`.
+    /// Collect it into a map at the call site if you want lookups.
+    /// The key column comes first, matching the tuple.
     ///
     /// ```ignore
-    /// // Eloquent: Post::where('published', true)->pluck('title', 'id');
-    /// // -> {1: "Hello", 2: "World"}
-    /// // rustango:
     /// let pairs: Vec<(i64, String)> = Post::objects()
     ///     .filter("published", true)
     ///     .pluck_pairs::<i64, String>("id", "title", &pool).await?;
-    /// // Lookup map:
     /// let map: std::collections::BTreeMap<_, _> = pairs.into_iter().collect();
     /// ```
     ///
-    /// `key_col` comes first (matches the tuple's element order) —
-    /// note Eloquent's argument order is `(value, key)`; this method
-    /// uses the natural `(key, value)` shape to keep call sites
-    /// readable left-to-right.
-    ///
     /// # Errors
-    /// As [`crate::sql::FetcherPool::fetch`], plus per-cell
-    /// type-mismatch errors when `K` / `V` don't match the columns'
-    /// SQL types.
+    /// As [`crate::sql::FetcherPool::fetch`], plus a decode error
+    /// when `K` or `V` does not match its column's type.
     pub async fn pluck_pairs<K, V>(
         self,
         key_col: &'static str,
@@ -786,53 +1055,40 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         pool: &Pool,
     ) -> Result<Vec<(K, V)>, ExecError>
     where
-        K: Send + Unpin,
-        V: Send + Unpin,
-        (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+        K: FlatScalar,
+        V: FlatScalar,
     {
         let q = self.values_list(&[key_col, value_col]).compile()?;
         fetch_values_pairs::<K, V>(pool, &q).await
     }
 
-    /// Eloquent `Builder::value($col)` — fetch a single column from
-    /// the first row of this (possibly-filtered) queryset, or
-    /// `None` when the queryset is empty.
-    ///
-    /// Sugar over `self.values_list_flat(col).first::<U>(pool)`. The
-    /// DB sees `LIMIT 1` so a large result set doesn't pay for rows
-    /// the caller won't read.
+    /// Read one column from the first matching row, or `None` when
+    /// nothing matches. The query carries `LIMIT 1`, so the database
+    /// does not build rows you will not read.
     ///
     /// ```ignore
-    /// // Eloquent: $email = User::where('id', 1)->value('email');
-    /// // rustango:
     /// let email: Option<String> = User::objects()
     ///     .filter("id", 1_i64)
     ///     .value::<String>("email", &pool).await?;
     /// ```
     ///
-    /// Differs from `Model::value(col, &pool)` (already shipped)
-    /// because the queryset's accumulated filters / ordering /
-    /// limits narrow which row's column is returned.
+    /// Unlike `Model::value`, this respects the queryset's filters
+    /// and ordering when picking the row.
     ///
     /// # Errors
     /// As [`crate::query::ValuesFlatQuerySet::first`].
     pub async fn value<U>(self, col: &'static str, pool: &Pool) -> Result<Option<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         self.values_list_flat(col).first::<U>(pool).await
     }
 
-    /// Eloquent `Builder::toSql()` — render this queryset to its SQL
-    /// string in the pool's dialect, without executing.
+    /// Render this queryset to SQL in the pool's dialect, without
+    /// running it. Handy for debugging, logging and snapshot tests.
     ///
-    /// Placeholders use the dialect-specific syntax (`$1` / `$2` on
-    /// PG, `?` on MySQL / SQLite). Bind values are NOT included in
-    /// the returned string — use [`Self::to_compiled`] if you need
-    /// the parameter list too.
-    ///
-    /// Useful for debugging, logging, snapshot tests, and copying
-    /// the SQL into a database client to run by hand.
+    /// The string holds placeholders, not the bound values. Use
+    /// [`Self::to_compiled`] when you need those too.
     ///
     /// ```ignore
     /// let sql = Post::objects()
@@ -844,8 +1100,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// ```
     ///
     /// # Errors
-    /// Returns [`ExecError::Query`] if the queryset compile step
-    /// fails (e.g. unknown field, type mismatch) and
+    /// [`ExecError::Query`] when the queryset fails to compile, and
     /// [`ExecError::Sql`] from the dialect's writer.
     pub fn to_sql(self, pool: &Pool) -> Result<String, ExecError> {
         let q = self.compile()?;
@@ -853,18 +1108,13 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         Ok(stmt.sql)
     }
 
-    /// Eloquent `Builder::sum($col)` on a filtered queryset —
-    /// `SELECT SUM(col) FROM <table> WHERE …`. Returns `Ok(None)`
-    /// when the filtered result set is empty.
-    ///
-    /// Differs from `Model::sum(col, &pool)` (already shipped)
-    /// which sums over every row of the table; this method respects
-    /// the queryset's accumulated filters.
+    /// `SELECT SUM(col)` over the matching rows, or `Ok(None)` when
+    /// none match. `Model::sum` is this over the default queryset.
     ///
     /// # Errors
-    /// As [`crate::sql::fetch_aggregate_pool`]; plus
-    /// [`ExecError::Query(QueryError::UnknownField)`] when `col`
-    /// isn't declared on the model.
+    /// As [`crate::sql::fetch_aggregate_pool`], plus
+    /// [`ExecError::Query(QueryError::UnknownField)`] when the model
+    /// has no such column.
     pub async fn sum<U>(self, col: &str, pool: &Pool) -> Result<Option<U>, ExecError>
     where
         (Option<U>,): crate::sql::MaybePgFromRow
@@ -877,24 +1127,16 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .await
     }
 
-    /// Eloquent `Builder::paginate($per_page, $page)` on a
-    /// **filtered** queryset — fetch one page of rows AND the
-    /// filtered total in a single call. Returns `(rows, total)`.
+    /// Fetch one page of rows and the matching total, as
+    /// `(rows, total)`. Unlike `Model::paginate`, the total counts
+    /// only rows the queryset's filters match.
     ///
-    /// Counterpart of the table-wide `Model::paginate`: this
-    /// version respects the queryset's accumulated filters so the
-    /// `total` reflects "matching rows" rather than "every row of
-    /// the table".
+    /// It runs two queries, a `COUNT(*)` and the page itself, both
+    /// with the same WHERE clause.
     ///
-    /// Two queries under the hood: `SELECT COUNT(*) FROM … WHERE …`
-    /// for the total, then `SELECT … FROM … WHERE … LIMIT N OFFSET
-    /// M` for the page. The queryset is cloned for the count step
-    /// so the page-fetch's filter chain stays intact — both halves
-    /// see the same WHERE.
-    ///
-    /// 1-indexed `page` so `paginate(1, 10)` returns rows 0..10,
-    /// `paginate(2, 10)` returns rows 10..20, etc. — matches
-    /// Eloquent and `Model::for_page`.
+    /// `page` starts at 1, so `paginate(1, 10)` gives the first ten
+    /// rows and `paginate(2, 10)` the next ten. An unordered queryset
+    /// pages in PK order.
     ///
     /// # Errors
     /// As [`crate::sql::CounterPool::count`] and
@@ -920,12 +1162,17 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         let total = <crate::query::QuerySet<T> as ::core::clone::Clone>::clone(&self)
             .count(pool)
             .await?;
-        let offset = if page > 1 { (page - 1) * per_page } else { 0 };
-        let rows = self.limit(per_page).offset(offset).fetch(pool).await?;
+        let offset = crate::list_params::page_offset(page, per_page);
+        let rows = self
+            .ordered_or_by_pk()
+            .limit(per_page)
+            .offset(offset)
+            .fetch(pool)
+            .await?;
         Ok((rows, total))
     }
 
-    /// Eloquent `Builder::avg($col)` on a filtered queryset.
+    /// [`Self::sum`] as an average.
     ///
     /// # Errors
     /// As [`Self::sum`].
@@ -941,7 +1188,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .await
     }
 
-    /// Eloquent `Builder::min($col)` on a filtered queryset.
+    /// [`Self::sum`] as a minimum.
     ///
     /// # Errors
     /// As [`Self::sum`].
@@ -957,7 +1204,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .await
     }
 
-    /// Eloquent `Builder::max($col)` on a filtered queryset.
+    /// [`Self::sum`] as a maximum.
     ///
     /// # Errors
     /// As [`Self::sum`].
@@ -973,11 +1220,9 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .await
     }
 
-    /// Internal: shared aggregate-on-queryset helper for `sum` /
-    /// `avg` / `min` / `max`. Validates the column against the
-    /// model schema, lifts the queryset's filters into the
-    /// aggregate's WHERE clause, then runs through
-    /// `fetch_aggregate_pool` and extracts the single column value.
+    /// Shared body of `sum`, `avg`, `min` and `max`. It checks the
+    /// column against the model, moves the queryset's filters into
+    /// the aggregate's WHERE clause, and returns the one value.
     async fn queryset_aggregate_one<U>(
         self,
         col: &str,
@@ -992,35 +1237,20 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             + Unpin,
     {
         let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
-        // Lower this queryset to a SELECT to grab its WHERE clause,
-        // then hand-build the AggregateQuery so the aggregate's
-        // projection is exactly `<build>(col)` (no extra columns) —
-        // matches the shape `aggregate_one_pool` uses table-wide so
-        // the `Vec<(Option<U>,)>` decode lines up.
-        let select_q = self.compile()?;
-        let aggregate_q = crate::core::AggregateQuery {
-            model: <T as crate::core::Model>::SCHEMA,
-            // Carry any ad-hoc JOINs from the queryset (#1040) so a scalar
-            // aggregate over a joined column still resolves.
-            joins: select_q.joins,
-            where_clause: select_q.where_clause,
-            group_by: Vec::new(),
-            aggregates: vec![("v".into(), build(col_static))],
-            aliases: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
+        let Some(select_q) = self.compile_unless_none()? else {
+            return Ok(None);
         };
+        // One aggregate column, so the tuple decode lines up.
+        let aggregate_q = crate::core::AggregateQuery::over_select(
+            select_q,
+            vec![("v".into(), build(col_static))],
+        );
         let rows: Vec<(Option<U>,)> = crate::sql::fetch_aggregate_pool(pool, &aggregate_q).await?;
         Ok(rows.into_iter().next().and_then(|t| t.0))
     }
 
-    /// Like [`Self::to_sql`] but returns the full
-    /// [`crate::sql::CompiledStatement`] (SQL + bound parameters).
-    /// Use this when you need the binds — e.g. logging both halves
-    /// of a parameterized query or building a snapshot test that
-    /// asserts on exact placeholder shape.
+    /// [`Self::to_sql`] plus the bound parameters, as a
+    /// [`crate::sql::CompiledStatement`].
     ///
     /// # Errors
     /// As [`Self::to_sql`].
@@ -1043,23 +1273,15 @@ where
         + MaybeMyLoadRelated
         + MaybeSqliteLoadRelated,
 {
-    /// Eloquent `Builder::increment($col, $by)` — bulk
-    /// `UPDATE … SET col = col + by WHERE <queryset filters>`.
-    /// Returns rows affected.
+    /// `UPDATE … SET col = col + by` over the matching rows.
+    /// Returns the number of rows affected. Unlike
+    /// `Model::increment_each`, this respects the queryset's
+    /// filters, so you can bump a counter on some rows only.
     ///
-    /// Sugar over
-    /// `self.update().set_expr(col, F(col) + Literal(by)).execute_pool(pool)`.
-    /// Negative `by` decrements; use [`Self::decrement`] for a
-    /// call-site that reads symmetrically.
-    ///
-    /// Differs from `Model::increment_each(col, by, &pool)` (already
-    /// shipped) in that the queryset's accumulated filters narrow
-    /// which rows get the bump — i.e. you can increment a counter
-    /// on a subset of rows rather than the whole table.
+    /// A negative `by` subtracts; [`Self::decrement`] reads better
+    /// at the call site.
     ///
     /// ```ignore
-    /// // Eloquent: Post::where('published', true)->increment('views');
-    /// // rustango:
     /// Post::objects()
     ///     .filter("published", true)
     ///     .increment("views", 1, &pool)
@@ -1067,9 +1289,9 @@ where
     /// ```
     ///
     /// # Errors
-    /// As [`UpdaterPool::execute_pool`], plus
-    /// [`ExecError::Query(QueryError::UnknownField)`] when `col`
-    /// is not a declared field on `T`.
+    /// As [`UpdaterPool::execute_pool`](crate::sql::UpdaterPool::execute_pool),
+    /// plus [`ExecError::Query`] with `QueryError::UnknownField` when
+    /// `col` is not a declared field on `T`.
     pub async fn increment(self, col: &str, by: i64, pool: &Pool) -> Result<u64, ExecError> {
         let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
         self.update()
@@ -1081,12 +1303,9 @@ where
             .await
     }
 
-    /// Sibling of [`Self::increment`] — bulk-decrement.
-    /// Equivalent to `self.increment(col, -by, &pool)`; the separate
-    /// name keeps call sites readable.
+    /// [`Self::increment`] the other way, subtracting `by`.
     ///
     /// ```ignore
-    /// // Eloquent: User::where('vip', true)->decrement('credits', 10);
     /// User::objects()
     ///     .filter("vip", true)
     ///     .decrement("credits", 10, &pool)
@@ -1101,48 +1320,38 @@ where
 }
 
 impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
-    /// Execute the single-column projection and decode each row's cell
-    /// into `U`.
+    /// Run the one-column projection and decode each cell into `U`.
     ///
     /// # Errors
-    /// As [`crate::query::ValuesQuerySet::fetch`], plus per-cell
-    /// type-mismatch errors if `U` doesn't match the column's SQL type.
+    /// As [`crate::query::ValuesQuerySet::fetch`], plus a decode
+    /// error when `U` does not match the column's type.
     pub async fn fetch<U>(self, pool: &Pool) -> Result<Vec<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
         let q = self.compile()?;
         fetch_values_flat::<U>(pool, &q).await
     }
 
-    /// Execute the projection and return the first row's cell, or
-    /// `None` when the queryset is empty. Eloquent `Builder::value()`
-    /// parity — the one-row-one-column shortcut.
+    /// Return the first row's cell, or `None` when nothing matches.
+    /// It adds `LIMIT 1`, so unlike [`Self::fetch`] the database
+    /// does not build rows you will not read.
     ///
     /// ```ignore
-    /// // Eloquent: $name = User::where('id', 1)->value('name');
-    /// // rustango:
     /// let name: Option<String> = User::query()
     ///     .filter("id", 1_i64)
     ///     .values_list_flat("name")
     ///     .first::<String>(&pool).await?;
     /// ```
     ///
-    /// Equivalent to `.fetch::<U>(pool).await?.into_iter().next()`.
-    /// The full-fetch path materializes every matching row; this
-    /// helper appends `LIMIT 1` to the underlying queryset so a
-    /// large result set doesn't pay for rows the caller won't read.
-    ///
     /// # Errors
     /// As [`Self::fetch`].
     pub async fn first<U>(self, pool: &Pool) -> Result<Option<U>, ExecError>
     where
-        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+        U: FlatScalar,
     {
-        // Re-build with a LIMIT 1 on the underlying queryset so the
-        // DB doesn't materialize rows past the first one. `compile()`
-        // consumes `self.qs`, so we need to take the limit detour
-        // through the builder.
+        // Rebuild with `LIMIT 1`. `compile()` consumes `self.qs`, so
+        // the limit has to go on through the builder.
         let col = self.col;
         let qs = self.qs.limit(1);
         let q = crate::query::ValuesFlatQuerySet { qs, col }.compile()?;

@@ -1,13 +1,13 @@
-//! axum router for serving the OpenAPI spec + Swagger UI / Redoc viewers.
+//! An axum router that serves the OpenAPI spec and two viewers.
 //!
-//! - `GET /openapi.json` — the spec serialized as JSON.
-//! - `GET /docs` — Swagger UI (loaded from a CDN).
-//! - `GET /redoc` — Redoc (also CDN-loaded).
+//! - `GET /openapi.json` returns the spec as JSON.
+//! - `GET /docs` serves Swagger UI.
+//! - `GET /redoc` serves Redoc.
 //!
-//! No JS files are bundled into rustango — the viewer pages are tiny
-//! HTML shells that pull the viewer from `unpkg.com`. If you need an
-//! offline build, write the spec out at startup and self-host the
-//! viewer assets in your own static dir.
+//! rustango bundles no JavaScript. The two viewer pages are small
+//! HTML shells that load the viewer from `unpkg.com`. To work
+//! offline, write the spec to a file at startup and host the viewer
+//! from your own static directory.
 
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ use axum::Router;
 
 use super::OpenApiSpec;
 
-/// Mount the spec + viewer routes under the given router.
+/// A router carrying the spec and viewer routes.
 #[must_use]
 pub fn openapi_router(spec: OpenApiSpec) -> Router {
     Router::new()

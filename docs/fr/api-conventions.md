@@ -29,9 +29,16 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
 
 ### Fonctions
 
-- **`save_on(executor)`, `delete_on(executor)`** — les méthodes d'écriture prennent un *executor* (un pool, une connexion ou une transaction — la chose qui dialogue avec la base de données). Le suffixe `_on` signifie « exécute ceci contre l'executor que je te fournis ».
-- **`fetch_on(executor)`, `count_on(executor)`** — même suffixe `_on`, pour les lectures.
-- **`save()`, `fetch()`, `count()`** sans `_on` — raccourci qui appelle la version `_on` avec un `&pool` par défaut. Ne fonctionne que là où le queryset ou le modèle détient déjà une référence de pool (rare dans le code applicatif).
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — le nom nu prend un `rustango::sql::Pool` et constitue le chemin ordinaire. Il fonctionne sur Postgres, MySQL et SQLite, en choisissant le dialecte en interne. C'est ce que veut la quasi-totalité du code applicatif.
+- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. **Les méthodes `_on` sont réservées à Postgres** (`#[cfg(feature = "postgres")]`).
+- **Les écritures inversent cette règle, et c'est le seul endroit où elle ne tient pas.** `save(&pool)`, `insert(&pool)` et `delete(&pool)` prennent un `sqlx::PgPool` spécifique au pilote ; sur un build sans la fonctionnalité `postgres`, elles **n'existent tout simplement pas** — choisir `sqlite` fait disparaître la méthode au lieu d'échouer avec un message qui en nomme la cause. Les versions multi-backends portent le suffixe `_pool` : `save_pool`, `insert_pool`, `delete_pool`, chacune prenant `rustango::sql::Pool`.
+
+  | | nom nu | version multi-backends |
+  |---|---|---|
+  | **Lectures** (`QuerySet`) | `fetch(&pool)` — déjà multi-backends | *est* le nom nu |
+  | **Écritures** (modèle) | `save(&pool)` — **Postgres uniquement** | `save_pool(&pool)` |
+
+  Le nom court est donc le plus étroit pour les écritures et le plus large pour les lectures. Cette inversion est une verrue, pas un choix de conception : elle est suivie dans [#1293](https://github.com/ujeenet/rustango/issues/1293) et sera résolue par un cycle de dépréciation plutôt que par un renommage. En attendant, **si vous n'êtes pas sur Postgres, écrivez `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — convertit DEPUIS une autre valeur (par ex. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — une méthode de builder qui définit une option et retourne l'objet, ce qui permet d'enchaîner les appels (par ex. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — le constructeur minimal. Les arguments qu'il prend sont des dépendances obligatoires (par ex. `RedisCache::new(url)` — vous ne pouvez pas construire le cache sans une URL).
@@ -122,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **Une seule exception :** les signaux ne prennent pas de pool, car ils ne touchent jamais la base de données. La règle tient : tout ce qui atteint la BDD prend le pool ; tout ce qui ne l'atteint pas, non.
 
-**Pourquoi le passer à chaque fois ?** Rust préfère les dépendances visibles à un état global caché. Django conserve la connexion dans un stockage thread-local, mais cela s'effondre dans le monde async de Rust, où une tâche peut sauter d'un thread à l'autre en plein milieu d'une requête. L'inconvénient, c'est plus de saisie ; l'avantage, c'est que vous pouvez faire un grep sur chaque endroit qui touche la base de données.
+**Pourquoi le passer à chaque fois ?** Rust préfère les dépendances visibles à un état global caché. L'alternative évidente — conserver la connexion dans un stockage thread-local — s'effondre dans le monde async de Rust, où une tâche peut sauter d'un thread à l'autre en plein milieu d'une requête. L'inconvénient, c'est plus de saisie ; l'avantage, c'est que vous pouvez faire un grep sur chaque endroit qui touche la base de données.
 
 Si vous vous retrouvez à faire transiter `&pool` à travers dix couches d'appels de fonctions, acceptez `impl Executor` une seule fois au point d'entrée public et laissez les helpers internes partager cette unique connexion.
 
@@ -145,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Syntaxe | À utiliser quand |
 |---|---|
-| Requête HTTP | Endpoints d'API publics — le ViewSet les analyse pour vous, comme les backends de filtre de DRF |
+| Requête HTTP | Endpoints d'API publics — le ViewSet les analyse pour vous depuis la chaîne de requête |
 | `.filter` par clé-chaîne | Code CRUD générique ou d'admin, où les noms de champs viennent de la config et ne sont pas connus à la compilation |
 | `.where_` typé | Le code de votre application — le choix par défaut recommandé. Le compilateur vérifie que le champ existe et que les types correspondent |
 
@@ -194,7 +201,9 @@ async fn handler() -> Result<Json<X>, ApiError> {
 }
 ```
 
-`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement la forme JSON d'erreur standard.
+`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
+
+Les erreurs JSON du framework lui-même utilisent la même forme : ViewSets, rejets de tenant et de `Principal`, media, endpoints JSON de l'admin, limites de corps, limites de débit et mode maintenance. Un `5xx` journalise sa cause et envoie un `message` générique. Voir [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur).
 
 ---
 
@@ -255,7 +264,7 @@ let l = AccessLogLayer {
 
 ## Feature flags
 
-Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — comparable à la découverte de paquets de Laravel ou aux `INSTALLED_APPS` de Django, mais résolu à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
+Une *feature* est un flag de build Cargo (le `[features]` de `Cargo.toml`) qui active ou désactive un pan du crate — la liste des briques installées de votre application, mais résolue à la compilation. Chaque module qui tire une dépendance supplémentaire se trouve derrière l'une d'elles. L'ensemble par défaut, c'est « vous en voulez presque certainement » :
 
 ```toml
 default = [
@@ -277,7 +286,7 @@ default = [
 Pour réduire un binaire qui n'a pas besoin de tout, désactivez les valeurs par défaut et ne listez que ce que vous utilisez :
 
 ```toml
-rustango = { version = "0.44", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.59", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

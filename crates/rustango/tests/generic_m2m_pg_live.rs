@@ -55,7 +55,10 @@ pub struct Video {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool: Pool = sqlx::PgPool::connect(&url).await.ok()?.into();
+    let pool: Pool = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"))
+        .into();
     contenttypes::ensure_seeded(&pool).await.ok()?;
     contenttypes::clear_cache();
     let pg = pool.as_postgres().unwrap();

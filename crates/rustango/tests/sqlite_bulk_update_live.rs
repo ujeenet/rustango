@@ -59,10 +59,10 @@ fn compile_bulk_update_emits_cte_correlated_subquery_shape() {
     // error`), so SQLite gets its own CTE + correlated-subquery
     // shape — supported on every SQLite that supports CTEs (3.8.3+).
     let model = <User as rustango::core::Model>::SCHEMA;
-    let q = BulkUpdateQuery {
+    let q = BulkUpdateQuery::new(
         model,
-        update_columns: vec!["name", "age"],
-        rows: vec![
+        vec!["name", "age"],
+        vec![
             vec![
                 SqlValue::I64(1),
                 SqlValue::String("Alice".into()),
@@ -74,7 +74,7 @@ fn compile_bulk_update_emits_cte_correlated_subquery_shape() {
                 SqlValue::I64(40),
             ],
         ],
-    };
+    );
     let stmt = Sqlite
         .compile_bulk_update(&q)
         .expect("sqlite bulk_update must compile post-#560");
@@ -107,10 +107,10 @@ fn compile_bulk_update_emits_cte_correlated_subquery_shape() {
 async fn bulk_update_round_trips_against_sqlite_live_pool() {
     let pool = fresh_pool().await;
     let model = <User as rustango::core::Model>::SCHEMA;
-    let q = BulkUpdateQuery {
+    let q = BulkUpdateQuery::new(
         model,
-        update_columns: vec!["name", "age"],
-        rows: vec![
+        vec!["name", "age"],
+        vec![
             vec![
                 SqlValue::I64(1),
                 SqlValue::String("ALICE".into()),
@@ -122,16 +122,14 @@ async fn bulk_update_round_trips_against_sqlite_live_pool() {
                 SqlValue::I64(33),
             ],
         ],
-    };
+    );
     let affected = bulk_update_pool(&pool, &q)
         .await
         .expect("bulk_update_pool must succeed on sqlite post-#560");
     assert_eq!(affected, 2, "two rows in the VALUES set, two updates");
 
     // Verify the round-trip — alice + carol got updated; bob untouched.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let mut rows: Vec<(i64, String, i64)> =
         sqlx::query_as("SELECT id, name, age FROM sbu_user ORDER BY id")
             .fetch_all(sq)

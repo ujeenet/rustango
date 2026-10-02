@@ -1,10 +1,9 @@
 //! Real-IP extraction middleware for apps behind a trusted reverse proxy.
 //!
-//! `axum::extract::ConnectInfo<SocketAddr>` always reports the
-//! immediate peer — useless when your app sits behind nginx /
-//! Cloudflare / ELB. This middleware parses one of the common
-//! forwarded-for headers and stuffs the resolved client IP into the
-//! request extensions as a [`RealIp`] value.
+//! `axum::extract::ConnectInfo<SocketAddr>` reports the immediate
+//! peer, which behind nginx, Cloudflare or an ELB is the proxy. This
+//! middleware reads a forwarded-for header instead and puts the
+//! result in the request extensions as a [`RealIp`].
 //!
 //! ## Quick start
 //!
@@ -12,8 +11,7 @@
 //! use rustango::real_ip::{RealIpLayer, RealIpRouterExt, RealIp};
 //! use axum::Extension;
 //!
-//! // Trust the immediate proxy; read the leftmost (= original client)
-//! // entry in X-Forwarded-For.
+//! // No proxies trusted: RealIp is the header's claim, for logs only.
 //! let app = axum::Router::new()
 //!     .route("/", axum::routing::get(home))
 //!     .real_ip(RealIpLayer::default());
@@ -23,12 +21,14 @@
 //! }
 //! ```
 //!
-//! ## Important security note
+//! ## Security note
 //!
-//! **Never trust forwarded-for headers from the open internet** — any
-//! client can set them. Apply this layer ONLY when a proxy you
-//! control terminates inbound requests and rewrites these headers,
-//! and configure that proxy to scrub them on the way in.
+//! **A forwarded-for header is only a claim.** Any client can send
+//! one. Use this layer only when a proxy you control receives every
+//! request and rewrites the header, and set that proxy to strip any
+//! header the client sent.
+//!
+//! [`RealIp`]: crate::real_ip::RealIp
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -46,31 +46,62 @@ pub struct RealIp(pub IpAddr);
 
 #[derive(Clone, Debug)]
 pub enum HeaderStrategy {
-    /// Standard `Forwarded: for=<ip>` (RFC 7239). Picks the leftmost
-    /// `for=` parameter.
+    /// Standard `Forwarded: for=<ip>` (RFC 7239). Leftmost `for=` for
+    /// the claim; walked from the right behind a trusted proxy.
     ForwardedRfc7239,
-    /// `X-Forwarded-For: client, proxy1, proxy2`. Picks the leftmost
-    /// IP (= original client). Almost universally what reverse proxies
-    /// emit.
+    /// `X-Forwarded-For: client, proxy1, proxy2`. Leftmost hop for the
+    /// claim; walked from the right behind a trusted proxy.
     XForwardedFor,
     /// `X-Real-IP: <ip>`. Single value; some proxies (nginx) set this
     /// rather than X-Forwarded-For.
     XRealIp,
     /// Cloudflare's `CF-Connecting-IP`.
     CfConnectingIp,
-    /// Try each strategy in order; first hit wins. Default.
+    /// Try each strategy in order; first hit wins. Default. Behind a
+    /// trusted proxy only `X-Forwarded-For` is read.
     Auto,
+}
+
+/// A client IP from a header sent by a **trusted** proxy: the
+/// connecting socket matched [`RealIpLayer::trust_proxies`].
+///
+/// A [`RealIp`] only means "a header claimed this", and any client can
+/// claim anything, so never base a security decision on it. This type
+/// adds the fact that the claim came over a hop the operator trusts,
+/// which is what makes it safe for [`crate::rate_limit`] to key on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustedRealIp(pub IpAddr);
+
+/// The first value of forwarding header `name`, only when the peer is a
+/// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
+#[cfg(any(
+    all(feature = "tenancy", feature = "sso"),
+    feature = "admin-sso",
+    feature = "mcp"
+))]
+pub(crate) fn trusted_forwarded<'a>(
+    headers: &'a axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    name: &str,
+) -> Option<&'a str> {
+    extensions.get::<TrustedRealIp>()?;
+    let v = headers.get(name)?.to_str().ok()?;
+    Some(v.split(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
 }
 
 #[derive(Clone, Debug)]
 pub struct RealIpLayer {
     pub strategy: HeaderStrategy,
+    /// Networks whose forwarding headers are believed. `None` (the
+    /// default) means none are, and only [`RealIp`] is inserted.
+    trusted_proxies: Option<Vec<crate::ip_filter::CidrRange>>,
 }
 
 impl Default for RealIpLayer {
     fn default() -> Self {
         Self {
             strategy: HeaderStrategy::Auto,
+            trusted_proxies: None,
         }
     }
 }
@@ -78,8 +109,95 @@ impl Default for RealIpLayer {
 impl RealIpLayer {
     #[must_use]
     pub fn new(strategy: HeaderStrategy) -> Self {
-        Self { strategy }
+        Self {
+            strategy,
+            trusted_proxies: None,
+        }
     }
+
+    /// Name the networks whose forwarding headers you believe, so the
+    /// resolved address can be used for security decisions.
+    ///
+    /// Without this, a forwarding header is only a claim and [`RealIp`]
+    /// is safe for logging alone. List the addresses your ingress
+    /// connects from: the load balancer, nginx, your CDN egress ranges.
+    /// A request from one of those also gets a [`TrustedRealIp`], which
+    /// [`crate::rate_limit::RateLimitLayer::per_ip`] keys on.
+    ///
+    /// The client is the rightmost hop not in these networks, since
+    /// proxies append; hops a client wrote further left are ignored.
+    /// `X-Real-IP` and `CF-Connecting-IP` are taken as sent, so pick
+    /// those only when your proxy overwrites them. Other peers get
+    /// `RealIp` but never `TrustedRealIp`.
+    ///
+    /// ```no_run
+    /// # use rustango::real_ip::RealIpLayer;
+    /// let layer = RealIpLayer::default()
+    ///     .trust_proxies(["10.0.0.0/8", "172.16.0.0/12"])
+    ///     .expect("valid CIDRs");
+    /// ```
+    ///
+    /// # Errors
+    /// [`crate::ip_filter::IpFilterError::InvalidCidr`] if an entry is
+    /// not an IP or CIDR block.
+    pub fn trust_proxies<I, S>(mut self, nets: I) -> Result<Self, crate::ip_filter::IpFilterError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.trusted_proxies = Some(crate::ip_filter::parse_all(nets)?);
+        Ok(self)
+    }
+
+    /// Whether `peer` is a proxy whose forwarding headers we believe.
+    fn trusts(&self, peer: IpAddr) -> bool {
+        self.trusted_proxies
+            .as_ref()
+            .is_some_and(|nets| nets.iter().any(|n| n.contains(peer)))
+    }
+
+    /// The client behind a trusted peer. A hop chain is read right to
+    /// left and the first untrusted hop wins, since proxies append.
+    fn resolve_trusted(&self, req: &Request<Body>) -> Option<IpAddr> {
+        let chain: Vec<Option<IpAddr>> = match self.strategy {
+            // Proxies append to XFF; other headers may be client-sent.
+            HeaderStrategy::XForwardedFor | HeaderStrategy::Auto => {
+                header_hops(req, "x-forwarded-for")?
+                    .map(|h| h.and_then(parse_ip_with_optional_port))
+                    .collect()
+            }
+            HeaderStrategy::ForwardedRfc7239 => header_hops(req, "forwarded")?
+                .map(|h| h.and_then(rfc7239_for))
+                .collect(),
+            HeaderStrategy::XRealIp | HeaderStrategy::CfConnectingIp => {
+                return extract(req, &self.strategy);
+            }
+        };
+        let mut rightmost = None;
+        for hop in chain.iter().rev() {
+            let ip = (*hop)?;
+            if !self.trusts(ip) {
+                return Some(ip);
+            }
+            rightmost = rightmost.or(Some(ip));
+        }
+        rightmost
+    }
+}
+
+/// Every comma-separated hop of every `name` line, in order. Each hop
+/// is decoded alone, so one bad hop does not void the others.
+fn header_hops<'a>(
+    req: &'a Request<Body>,
+    name: &str,
+) -> Option<impl Iterator<Item = Option<&'a str>>> {
+    let mut lines = req.headers().get_all(name).iter().peekable();
+    lines.peek()?;
+    Some(lines.flat_map(|v| {
+        v.as_bytes()
+            .split(|b| *b == b',')
+            .map(|hop| std::str::from_utf8(hop).ok())
+    }))
 }
 
 pub trait RealIpRouterExt {
@@ -94,7 +212,19 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
             move |mut req: Request<Body>, next: Next| {
                 let cfg = cfg.clone();
                 async move {
-                    if let Some(ip) = extract(&req, &cfg.strategy) {
+                    let peer = req
+                        .extensions()
+                        .get::<ConnectInfo<std::net::SocketAddr>>()
+                        .map(|ci| ci.ip());
+                    // Trusted form, only if the peer is a named proxy.
+                    let trusted = peer
+                        .filter(|p| cfg.trusts(*p))
+                        .and_then(|_| cfg.resolve_trusted(&req));
+                    if let Some(ip) = trusted {
+                        req.extensions_mut().insert(RealIp(ip));
+                        req.extensions_mut().insert(TrustedRealIp(ip));
+                    } else if let Some(ip) = extract(&req, &cfg.strategy) {
+                        // The bare claim: fine for logs, never trusted.
                         req.extensions_mut().insert(RealIp(ip));
                     }
                     next.run(req).await
@@ -116,11 +246,11 @@ fn extract(req: &Request<Body>, strategy: &HeaderStrategy) -> Option<IpAddr> {
         HeaderStrategy::XRealIp => h
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse().ok()),
+            .and_then(parse_ip_with_optional_port),
         HeaderStrategy::CfConnectingIp => h
             .get("cf-connecting-ip")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse().ok()),
+            .and_then(parse_ip_with_optional_port),
         HeaderStrategy::Auto => extract(req, &HeaderStrategy::CfConnectingIp)
             .or_else(|| extract(req, &HeaderStrategy::ForwardedRfc7239))
             .or_else(|| extract(req, &HeaderStrategy::XForwardedFor))
@@ -137,30 +267,43 @@ fn extract(req: &Request<Body>, strategy: &HeaderStrategy) -> Option<IpAddr> {
 /// header. Strips IPv6 brackets and `:port` suffixes. Returns `None`
 /// on any malformed value.
 fn parse_forwarded_rfc7239(s: &str) -> Option<IpAddr> {
-    // Comma-separated forwarded elements; pick the first one.
-    let first = s.split(',').next()?.trim();
+    rfc7239_chain(s).first().copied().flatten()
+}
+
+/// The `for=` address of each `Forwarded` element, `None` where absent
+/// or unparseable.
+fn rfc7239_chain(s: &str) -> Vec<Option<IpAddr>> {
+    s.split(',').map(rfc7239_for).collect()
+}
+
+fn rfc7239_for(element: &str) -> Option<IpAddr> {
     // Each element is semicolon-separated key=value pairs.
-    for kv in first.split(';') {
-        let kv = kv.trim();
-        let (k, v) = kv.split_once('=')?;
+    for kv in element.trim().split(';') {
+        let (k, v) = kv.trim().split_once('=')?;
         if k.eq_ignore_ascii_case("for") {
             // Strip surrounding quotes if any.
-            let v = v.trim().trim_matches('"');
-            return parse_ip_with_optional_port(v);
+            return parse_ip_with_optional_port(v.trim().trim_matches('"'));
         }
     }
     None
 }
 
 fn parse_x_forwarded_for(s: &str) -> Option<IpAddr> {
-    // Leftmost = original client. Proxies APPEND, never prepend.
-    let first = s.split(',').next()?.trim();
-    parse_ip_with_optional_port(first)
+    forwarded_for_chain(s).first().copied().flatten()
+}
+
+/// Each `X-Forwarded-For` hop, left to right; `None` where unparseable.
+fn forwarded_for_chain(s: &str) -> Vec<Option<IpAddr>> {
+    s.split(',').map(parse_ip_with_optional_port).collect()
 }
 
 /// Parse an IP that may be wrapped in brackets (`[::1]`) or carry a
 /// `:port` suffix. The brackets-without-port case is also handled.
 fn parse_ip_with_optional_port(s: &str) -> Option<IpAddr> {
+    parse_ip_raw(s).map(|ip| ip.to_canonical())
+}
+
+fn parse_ip_raw(s: &str) -> Option<IpAddr> {
     let s = s.trim();
     // [v6]:port
     if let Some(rest) = s.strip_prefix('[') {
@@ -274,6 +417,97 @@ mod tests {
     fn no_headers_returns_none_when_no_connect_info() {
         let r = Request::builder().body(Body::empty()).unwrap();
         assert!(extract(&r, &HeaderStrategy::Auto).is_none());
+    }
+
+    fn trusting(strategy: HeaderStrategy) -> RealIpLayer {
+        RealIpLayer::new(strategy)
+            .trust_proxies(["10.0.0.0/8"])
+            .unwrap()
+    }
+
+    #[test]
+    fn rfc7239_trusted_walks_from_the_right() {
+        let r = req_with_header("forwarded", "for=1.1.1.1, for=203.0.113.7, for=10.0.0.2");
+        let ip = trusting(HeaderStrategy::ForwardedRfc7239).resolve_trusted(&r);
+        assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn trusted_chain_stops_at_an_unparseable_hop() {
+        let r = req_with_header("x-forwarded-for", "203.0.113.7, unknown, 10.0.0.2");
+        assert!(trusting(HeaderStrategy::XForwardedFor)
+            .resolve_trusted(&r)
+            .is_none());
+    }
+
+    #[test]
+    fn all_trusted_chain_yields_rightmost_hop() {
+        let r = req_with_header("x-forwarded-for", "10.0.0.3, 10.0.0.2");
+        let ip = trusting(HeaderStrategy::XForwardedFor).resolve_trusted(&r);
+        assert_eq!(ip.unwrap().to_string(), "10.0.0.2");
+    }
+
+    #[test]
+    fn non_ascii_hop_does_not_drop_the_chain() {
+        let v = axum::http::HeaderValue::from_bytes(b"caf\xc3\xa9, 203.0.113.7, 10.0.0.2").unwrap();
+        let r = Request::builder()
+            .header("x-forwarded-for", v)
+            .body(Body::empty())
+            .unwrap();
+        let ip = trusting(HeaderStrategy::XForwardedFor).resolve_trusted(&r);
+        assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn non_ascii_hop_stops_the_walk() {
+        let v = axum::http::HeaderValue::from_bytes(b"203.0.113.7, \xff, 10.0.0.2").unwrap();
+        let r = Request::builder()
+            .header("x-forwarded-for", v)
+            .body(Body::empty())
+            .unwrap();
+        assert!(trusting(HeaderStrategy::XForwardedFor)
+            .resolve_trusted(&r)
+            .is_none());
+    }
+
+    #[test]
+    fn trusted_x_real_ip_strips_port_and_canonicalises() {
+        let t = trusting(HeaderStrategy::XRealIp);
+        let r = req_with_header("x-real-ip", "203.0.113.7:8080");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "203.0.113.7");
+        let r = req_with_header("x-real-ip", "::ffff:198.51.100.1");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "198.51.100.1");
+        let r = req_with_header("x-forwarded-for", "198.51.100.1");
+        assert!(t.resolve_trusted(&r).is_none());
+    }
+
+    #[test]
+    fn trusted_cf_connecting_ip_strips_port_and_canonicalises() {
+        let t = trusting(HeaderStrategy::CfConnectingIp);
+        let r = req_with_header("cf-connecting-ip", "[2001:db8::1]:443");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "2001:db8::1");
+        let r = req_with_header("cf-connecting-ip", "::ffff:198.51.100.1");
+        assert_eq!(t.resolve_trusted(&r).unwrap().to_string(), "198.51.100.1");
+        let r = req_with_header("x-real-ip", "198.51.100.1");
+        assert!(t.resolve_trusted(&r).is_none());
+    }
+
+    #[test]
+    fn auto_trusted_ignores_client_sent_cf_header() {
+        let r = Request::builder()
+            .header("cf-connecting-ip", "9.9.9.9")
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        let ip = trusting(HeaderStrategy::Auto).resolve_trusted(&r);
+        assert_eq!(ip.unwrap().to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn ipv4_mapped_hop_is_canonicalised() {
+        let r = req_with_header("x-forwarded-for", "::ffff:203.0.113.7");
+        let ip = extract(&r, &HeaderStrategy::XForwardedFor).unwrap();
+        assert_eq!(ip.to_string(), "203.0.113.7");
     }
 
     #[test]

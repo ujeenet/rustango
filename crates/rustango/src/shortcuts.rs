@@ -1,9 +1,6 @@
-//! Django-shape view shortcuts. Issue #10.
-//!
-//! Four helpers that show up on every Django page render — folded into
-//! a single rustango module so axum handlers don't reach into the
-//! low-level status-code / tera / redirect primitives for routine
-//! cases. Matches the Django [shortcuts module](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/).
+//! Handler shortcuts — the helpers every page render needs, so
+//! handlers do not reach for status codes, Tera and redirect builders by
+//! hand.
 //!
 //! ```ignore
 //! use rustango::shortcuts::{get_object_or_404, render, redirect, ShortcutError};
@@ -23,9 +20,7 @@
 //! }
 //! ```
 //!
-//! Gated behind the `template_views` feature (which pulls in axum +
-//! tera). Apps that wire axum themselves can import any of these
-//! helpers directly.
+//! Behind the `template_views` feature, which brings in axum and Tera.
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,19 +32,16 @@ use crate::sql::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, Pool,
 };
 
-/// Error returned by [`get_object_or_404`] / [`get_list_or_404`].
-/// Two-variant union so the `?` operator can propagate both the
-/// "no row matched" case (→ 404) and any underlying driver error
-/// (→ 500) without conflating them — a DB outage surfacing as a 404
-/// would silently degrade observability.
+/// Error returned by [`get_object_or_404`] and [`get_list_or_404`]. The
+/// two variants keep "no row matched" apart from a driver failure, so a
+/// database outage never shows up as a 404.
 ///
-/// Implements [`IntoResponse`] so handlers that return
-/// `Result<_, ShortcutError>` map automatically to the right status
-/// code:
+/// It implements [`IntoResponse`], so a handler returning
+/// `Result<_, ShortcutError>` gets the right status on its own:
 ///
-/// - [`Self::NotFound`] → `404 Not Found` with the `message` as body.
-/// - [`Self::Database`] → `500 Internal Server Error` with the
-///   underlying [`ExecError`] in the body.
+/// - [`Self::NotFound`] → `404 Not Found`, with `message` as the body.
+/// - [`Self::Database`] → `500 Internal Server Error`, with the
+///   [`ExecError`] in the body.
 #[derive(Debug)]
 pub enum ShortcutError {
     /// No row matched the queryset. Rendered as 404.
@@ -92,7 +84,7 @@ impl IntoResponse for ShortcutError {
             Self::NotFound { message } => (StatusCode::NOT_FOUND, message).into_response(),
             Self::Database(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("database error: {e}"),
+                crate::error::server_error_body("shortcuts::get_object", &e),
             )
                 .into_response(),
         }
@@ -100,22 +92,18 @@ impl IntoResponse for ShortcutError {
 }
 
 impl From<ExecError> for ShortcutError {
-    /// Driver errors route to the `Database` variant — `IntoResponse`
-    /// then renders them as `500`. The `?` operator in a handler
-    /// returning `Result<_, ShortcutError>` propagates DB failures
-    /// without quietly conflating them with 404s.
+    /// Driver errors become `Database`, which renders as `500`, so `?` in
+    /// a handler never turns a database failure into a 404.
     fn from(e: ExecError) -> Self {
         Self::Database(e)
     }
 }
 
-/// Fetch the first row matching `qs` against `pool`, or return
-/// [`ShortcutError::NotFound`] if none matched. Django's
-/// [`get_object_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-object-or-404).
+/// Fetch the first row matching `qs`, or return
+/// [`ShortcutError::NotFound`].
 ///
-/// Builds the queryset with whatever filters / ordering you want
-/// up-front; this helper just collapses the typical "fetch one or
-/// 404" branch:
+/// Add whatever filters and ordering you need to the queryset first; this
+/// only collapses the "fetch one or 404" branch.
 ///
 /// ```ignore
 /// let post = get_object_or_404(
@@ -123,10 +111,6 @@ impl From<ExecError> for ShortcutError {
 ///     &state.pool,
 /// ).await?;
 /// ```
-///
-/// Underlying [`ExecError`]s route to [`ShortcutError::Database`] and
-/// render as `500` — distinct from the `404` of `NotFound`, so a DB
-/// outage doesn't quietly show up as "not found" in user-facing logs.
 ///
 /// # Errors
 /// - [`ShortcutError::NotFound`] when no row matched the queryset.
@@ -152,9 +136,8 @@ where
     }
 }
 
-/// Fetch every row matching `qs`. If the result is empty, return
-/// [`ShortcutError::NotFound`]. Django's
-/// [`get_list_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-list-or-404).
+/// Fetch every row matching `qs`, or return [`ShortcutError::NotFound`]
+/// when there are none.
 ///
 /// ```ignore
 /// let comments = get_list_or_404(
@@ -189,14 +172,11 @@ where
     }
 }
 
-/// Render a Tera template and wrap the result in an HTML axum
-/// response. Django's
-/// [`render(request, template, context)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#render).
+/// Render a Tera template into an HTML response.
 ///
-/// On template-render failure, returns a `500 Internal Server Error`
-/// with the Tera error in the body. Apps that want a structured
-/// error page should render their own error template via the same
-/// helper.
+/// A render failure returns `500 Internal Server Error`; the Tera error
+/// is logged, not sent. For a nicer error page, render your own error
+/// template with this same helper.
 ///
 /// ```ignore
 /// let mut ctx = tera::Context::new();
@@ -207,25 +187,22 @@ where
 pub fn render(tera: &tera::Tera, name: &str, ctx: &tera::Context) -> Response {
     match tera.render(name, ctx) {
         Ok(body) => axum::response::Html(body).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("template `{name}` failed: {e}"),
-        )
-            .into_response(),
+        Err(e) => {
+            let e = format!("template `{name}` failed: {e:?}");
+            let body = crate::error::server_error_body("shortcuts::render", &e);
+            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        }
     }
 }
 
-/// Render a Tera template to a `String` (no Response wrapping).
-/// Django's
-/// [`render_to_string(template_name, context)`](https://docs.djangoproject.com/en/6.0/topics/templates/#django.template.loader.render_to_string).
+/// Render a Tera template to a `String`.
 ///
-/// Use when the rendered output isn't going straight back over HTTP —
-/// emails, generated reports, PDF source, snapshot tests, an
-/// inner-template-rendered string spliced into a parent context, etc.
+/// Use it when the output is not an HTTP body: emails, reports, PDF
+/// source, snapshot tests, or a string spliced into a parent context.
 ///
-/// Returns the underlying [`tera::Error`] on failure so the caller can
-/// distinguish a missing-template situation from a runtime render
-/// error (vs [`render`] which collapses both into a 500).
+/// Unlike [`render`], which turns every failure into a 500, this returns
+/// the [`tera::Error`] so you can tell a missing template from a render
+/// error.
 ///
 /// ```ignore
 /// let mut ctx = tera::Context::new();
@@ -235,9 +212,8 @@ pub fn render(tera: &tera::Tera, name: &str, ctx: &tera::Context) -> Response {
 /// ```
 ///
 /// # Errors
-/// Returns [`tera::Error`] when the named template is missing, the
-/// template fails to parse, or any filter/function inside it returns
-/// an error during render.
+/// Returns [`tera::Error`] when the template is missing, fails to parse,
+/// or a filter or function inside it fails.
 pub fn render_to_string(
     tera: &tera::Tera,
     name: &str,
@@ -246,38 +222,28 @@ pub fn render_to_string(
     tera.render(name, ctx)
 }
 
-/// Return a `302 Found` redirect to `url`. Django's
-/// [`redirect(to)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#redirect).
+/// Return a `302 Found` redirect to `url`.
 ///
-/// Pair with [`redirect_permanent`] for `301 Moved Permanently`,
-/// [`redirect_see_other`] for `303 See Other`, and
-/// [`redirect_to_view`] for the Django `redirect('post-detail', pk=1)`
-/// view-name shape that resolves through the URL conf.
+/// See [`redirect_permanent`] for 301, [`redirect_see_other`] for 303,
+/// and [`redirect_to_view`] to redirect to a registered route name.
 ///
-/// Matches Django's status codes exactly (302 / 301) — axum's built-in
-/// `Redirect::to` uses 303 See Other instead, which has subtly
-/// different semantics around method preservation.
+/// Note axum's own `Redirect::to` sends 303 instead, which treats the
+/// request method differently.
 #[must_use]
 pub fn redirect(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::FOUND, url.into())
 }
 
-/// Django-parity [`resolve_url(to, *args, **kwargs)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#resolve-url) —
-/// normalize either a raw URL or a registered route name into a
-/// concrete URL string.
+/// Turn either a raw URL or a registered route name into a URL string.
 ///
-/// Rules:
-/// 1. If `spec` starts with `/`, `http://`, `https://`, `./`, or
-///    `../`, return as-is (already a URL).
-/// 2. Otherwise treat `spec` as a registered route name and call
-///    [`crate::urls::reverse`] with `params` (already-stringified
-///    values). Namespaced names (`"polls:detail"`) round-trip the
-///    same way `urls::reverse` handles them.
+/// A `spec` starting with `/`, `http://`, `https://`, `./` or `../` is
+/// already a URL and comes back unchanged. Anything else is a route name
+/// passed to [`crate::urls::reverse`] with `params`, including namespaced
+/// names such as `"polls:detail"`.
 ///
 /// # Errors
 /// Forwards [`crate::urls::ReverseError`] when `spec` is a name and
-/// `params` doesn't satisfy the pattern (missing / extra / unknown
-/// name).
+/// `params` does not fit the pattern.
 ///
 /// ```ignore
 /// use std::collections::HashMap;
@@ -308,13 +274,12 @@ pub fn resolve_url(
     crate::urls::reverse(spec, params)
 }
 
-/// Django-parity `redirect('view-name', kwargs={'pk': 1})` shape —
-/// resolve a registered route name + params into a URL and return
-/// a `302 Found` redirect response. Pairs with [`resolve_url`].
+/// Resolve a route name and params into a URL and return a `302 Found`
+/// to it. See also [`resolve_url`].
 ///
 /// # Errors
-/// Forwards [`crate::urls::ReverseError`] when the name or params
-/// don't satisfy a registered route.
+/// Forwards [`crate::urls::ReverseError`] when the name or params do not
+/// match a registered route.
 ///
 /// ```ignore
 /// use std::collections::HashMap;
@@ -334,86 +299,49 @@ pub fn redirect_to_view(
     Ok(build_redirect(StatusCode::FOUND, url))
 }
 
-/// Return a `301 Moved Permanently` redirect to `url`. Use for
-/// canonical URL migrations (search engines treat 301 differently
-/// from the default 302).
+/// Return a `301 Moved Permanently` redirect to `url`. Use it when a URL
+/// has moved for good; search engines treat 301 and 302 differently.
 #[must_use]
 pub fn redirect_permanent(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::MOVED_PERMANENTLY, url.into())
 }
 
-/// Return a `303 See Other` redirect to `url`. The proper status
-/// code for the "after a successful POST" pattern: it forces the
-/// client to follow with `GET` regardless of the original request
-/// method, so the user can refresh the resulting page without
-/// re-submitting the form (the classic POST→303→GET flow).
+/// Return a `303 See Other` redirect to `url`. This is the right code
+/// after a successful POST: the client must follow with `GET`, so a page
+/// refresh does not re-submit the form.
 ///
-/// Distinct from [`redirect`] (302 Found), which historically had
-/// the same "force GET" behaviour but RFC 7231 leaves it
-/// implementation-defined for non-GET requests. 303 is the
-/// unambiguous choice for "form submit succeeded, look here for
-/// the result."
+/// [`redirect`] (302) usually behaves the same way, but the spec leaves
+/// that up to the client for non-GET requests. 303 is unambiguous.
 #[must_use]
 pub fn redirect_see_other(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::SEE_OTHER, url.into())
 }
 
-/// Return a `307 Temporary Redirect` to `url`. Unlike `302` and
-/// `303`, the client is required to use the SAME request method on
-/// the redirect target. Use when the resource has moved temporarily
-/// but the verb still applies — e.g. a load balancer 307-redirecting
-/// `POST /api/v1/...` to `POST /api/v1-new/...`.
+/// Return a `307 Temporary Redirect` to `url`. Unlike 302 and 303, the
+/// client must keep the same request method. Use it when a resource has
+/// moved for now but the verb still applies, such as sending
+/// `POST /api/v1/...` on to `POST /api/v1-new/...`.
 ///
-/// For "form submit succeeded" use [`redirect_see_other`] instead.
-/// For "this URL has moved permanently" use [`redirect_permanent`].
+/// After a form submit use [`redirect_see_other`]; for a permanent move
+/// use [`redirect_permanent`].
 #[must_use]
 pub fn redirect_temporary(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::TEMPORARY_REDIRECT, url.into())
 }
 
-/// Return a `308 Permanent Redirect` to `url`. The method-preserving
-/// counterpart of [`redirect_permanent`] (301): same long-term
-/// migration semantics, but clients must reuse the request method
-/// on the new URL. Useful for API endpoint canonicalization.
+/// Return a `308 Permanent Redirect` to `url`. Same meaning as
+/// [`redirect_permanent`] (301), but the client must keep the request
+/// method. Useful for moving API endpoints.
 #[must_use]
 pub fn redirect_permanent_preserve_method(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::PERMANENT_REDIRECT, url.into())
 }
 
-/// Redirect to a login page, preserving the current request URL as
-/// `?next=<path>` so the login handler can bounce the user back after
-/// authenticating. Django's
-/// [`redirect_to_login(next, login_url)`](https://docs.djangoproject.com/en/6.0/_modules/django/contrib/auth/views/#redirect_to_login).
-///
-/// The `next` value is URL-encoded before being appended. If
-/// `login_url` already carries a query string, `next=` is added with
-/// `&`; otherwise with `?`.
-///
-/// ```ignore
-/// // Inside a view that requires auth:
-/// if user.is_none() {
-///     return redirect_to_login(req.uri().path_and_query()
-///         .map(|p| p.as_str())
-///         .unwrap_or("/"), "/login");
-/// }
-/// ```
-///
-/// Returns a `302 Found` (matching [`redirect`]'s status), so the
-/// browser keeps the original method semantics consistent with the
-/// rest of the shortcuts module.
-#[must_use]
-pub fn redirect_to_login(next: &str, login_url: &str) -> Response {
-    let encoded = crate::url_codec::url_encode(next);
-    let separator = if login_url.contains('?') { '&' } else { '?' };
-    redirect(format!("{login_url}{separator}next={encoded}"))
-}
-
 fn build_redirect(status: StatusCode, url: String) -> Response {
-    // Hand-roll the Response so the status matches Django (302/301)
-    // rather than axum's modern default (303/308). Falls back to a
-    // header-less response if the URL contains invalid header
-    // characters — that's a programmer error so the bare status is
-    // still useful for debugging.
+    // Built by hand so the status is 302/301 instead of axum's default
+    // 303/308. A URL with characters a header cannot
+    // hold yields a response with no Location; that is a caller bug, and
+    // the bare status still helps debugging.
     let mut res = Response::builder()
         .status(status)
         .body(axum::body::Body::empty())
@@ -424,14 +352,8 @@ fn build_redirect(status: StatusCode, url: String) -> Response {
     res
 }
 
-/// Serialize `data` to JSON and wrap it in a Response with the given
-/// `status` and `Content-Type: application/json`. Django's
-/// [`JsonResponse(data, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#jsonresponse-objects).
-///
-/// Slightly more concise than the axum equivalent
-/// `(StatusCode::BAD_REQUEST, Json(data)).into_response()` at API
-/// error sites, and gives a single fall-through (`200 OK`,
-/// `application/json`) for the common success path:
+/// Serialize `data` to JSON and return it with the given `status` and
+/// `Content-Type: application/json`.
 ///
 /// ```ignore
 /// use rustango::shortcuts::{json_response, json_ok};
@@ -443,12 +365,8 @@ fn build_redirect(status: StatusCode, url: String) -> Response {
 /// json_response(&serde_json::json!({"error": "validation failed"}), 400)
 /// ```
 ///
-/// Failure modes:
-/// - Serialization failure → `500 Internal Server Error` with an
-///   empty body. Almost never happens with `serde_json::Value` /
-///   ordinary structs; would require a custom Serialize that fails.
-/// - Invalid `status` (outside u16 range or not a valid HTTP code)
-///   → falls back to `200 OK` so the response still parses.
+/// If serialization fails you get `500` with an empty body. An invalid
+/// `status` falls back to `200 OK`, so the response still parses.
 #[must_use]
 pub fn json_response<T: serde::Serialize>(data: &T, status: u16) -> Response {
     let body = match serde_json::to_vec(data) {
@@ -472,69 +390,56 @@ pub fn json_response<T: serde::Serialize>(data: &T, status: u16) -> Response {
     res
 }
 
-/// Sugar for [`json_response`] with status `200 OK` — the most
-/// common success-path shape.
+/// [`json_response`] with `200 OK`.
 #[must_use]
 pub fn json_ok<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 200)
 }
 
-/// Sugar for [`json_response`] with status `400 Bad Request` — the
-/// most common error-path shape for input validation failures.
+/// [`json_response`] with `400 Bad Request`, for input that failed
+/// validation.
 #[must_use]
 pub fn json_bad_request<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 400)
 }
 
-/// Sugar for [`json_response`] with status `401 Unauthorized`.
-/// Pair with [`crate::auth_decorators::login_required_or_401`] for
-/// hand-rolled auth checks: when the request lacks credentials,
-/// return a JSON error body so the API client can render it
-/// without parsing HTML.
+/// [`json_response`] with `401 Unauthorized`, for a request with no
+/// credentials. Pairs with
+/// [`crate::auth_decorators::login_required_or_401`].
 #[must_use]
 pub fn json_unauthorized<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 401)
 }
 
-/// Sugar for [`json_response`] with status `403 Forbidden`.
-/// Use when the caller IS authenticated but lacks the permission
-/// required for this endpoint — distinct from 401 so clients can
-/// distinguish "log in" from "you can't access this." Pair with
+/// [`json_response`] with `403 Forbidden`, for a caller who is logged in
+/// but lacks the permission. Pairs with
 /// [`crate::auth_decorators::user_passes_test_or_403`].
 #[must_use]
 pub fn json_forbidden<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 403)
 }
 
-/// Sugar for [`json_response`] with status `404 Not Found`. The
-/// API counterpart to [`ShortcutError::NotFound`], which renders a
-/// `text/plain` 404. Use this when the endpoint contract is JSON
-/// and a plain-text body would confuse the client parser.
+/// [`json_response`] with `404 Not Found`. Use it instead of
+/// [`ShortcutError::NotFound`], which sends `text/plain`, when the
+/// endpoint always answers in JSON.
 #[must_use]
 pub fn json_not_found<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 404)
 }
 
-/// Sugar for [`json_response`] with status `500 Internal Server
-/// Error`. Use when a handler catches an internal failure and
-/// wants to surface a JSON-shaped error to the client (with a
-/// stable error code the client can branch on) instead of a bare
-/// status line.
+/// [`json_response`] with `500 Internal Server Error`, so a caught
+/// failure still returns a JSON body the client can branch on.
 #[must_use]
 pub fn json_server_error<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 500)
 }
 
-/// Wrap a pre-rendered HTML string in a Response with the given
-/// status and `Content-Type: text/html; charset=utf-8`. Django's
-/// [`HttpResponse(html, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#httpresponse-objects)
-/// for plain-HTML responses.
+/// Return an HTML string with the given status and
+/// `Content-Type: text/html; charset=utf-8`.
 ///
-/// Use when you have HTML in hand (string-built, snipped from another
-/// source, hard-coded for a tiny error page) and don't want to spin
-/// up Tera just for the response. For Tera-rendered output, use
-/// [`render`] (returns a Response directly) or [`render_to_string`]
-/// (returns a String you can pass to this function).
+/// Use it when the HTML is already in hand and Tera is not worth
+/// starting. For Tera output, use [`render`], or [`render_to_string`]
+/// and pass the result here.
 ///
 /// ```ignore
 /// use rustango::shortcuts::html_response;
@@ -544,8 +449,7 @@ pub fn json_server_error<T: serde::Serialize>(data: &T) -> Response {
 /// }
 /// ```
 ///
-/// Invalid `status` (below 100) falls back to `200 OK` so a typoed
-/// status code doesn't panic the builder.
+/// An invalid `status` falls back to `200 OK` rather than panicking.
 #[must_use]
 pub fn html_response(content: impl Into<String>, status: u16) -> Response {
     let body = content.into();
@@ -561,10 +465,9 @@ pub fn html_response(content: impl Into<String>, status: u16) -> Response {
     res
 }
 
-/// Wrap a plain-text string in a Response with the given status and
-/// `Content-Type: text/plain; charset=utf-8`. Useful for tiny ops
-/// endpoints (`/health`, `/version`) and CLI-style HTTP that doesn't
-/// want HTML escaping.
+/// Return a plain-text string with the given status and
+/// `Content-Type: text/plain; charset=utf-8`. Handy for small ops
+/// endpoints such as `/health` or `/version`.
 ///
 /// ```ignore
 /// use rustango::shortcuts::text_response;
@@ -588,18 +491,12 @@ pub fn text_response(content: impl Into<String>, status: u16) -> Response {
     res
 }
 
-/// Django-parity
-/// [`HttpResponseNotModified()`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseNotModified) —
-/// `304 Not Modified` with no body. Used in conditional-GET flows
-/// (`If-Modified-Since` / `If-None-Match` returning 304 when the
-/// client's cached copy is still fresh).
+/// `304 Not Modified` with no body, for conditional GET when the
+/// client's cached copy is still fresh.
 ///
-/// The 304 response MUST NOT carry a body per RFC 7232 §4.1 — this
-/// helper enforces that by hard-coding `Body::empty()`. Callers
-/// should still copy any relevant `ETag` / `Last-Modified` /
-/// `Cache-Control` headers from the cached representation manually
-/// (Django's HttpResponseNotModified does NOT copy them either —
-/// the caller is responsible).
+/// A 304 must not carry a body, so the body is always empty. Copy any
+/// `ETag`, `Last-Modified` or `Cache-Control` headers yourself; a 304
+/// carries no body and no copied headers.
 ///
 /// ```ignore
 /// use rustango::shortcuts::not_modified;
@@ -616,16 +513,10 @@ pub fn not_modified() -> Response {
         .expect("304 + empty body is always valid")
 }
 
-/// Django-parity
-/// [`HttpResponseGone(content=b'')`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseGone) —
-/// `410 Gone` with optional message body. Use when a resource that
-/// previously existed has been intentionally and permanently
-/// removed (search engines + clients SHOULD purge it from caches
-/// + indexes; distinct from `404 Not Found` which says "I don't
-/// know if this ever existed").
-///
-/// Body content-type is `text/plain; charset=utf-8`. Pass an empty
-/// string for a bare-bones response.
+/// `410 Gone` with an optional `text/plain` message. Use it when a
+/// resource existed and was removed on purpose: clients and crawlers
+/// should drop it from caches and indexes. `404 Not Found` says
+/// something weaker — that the server does not know the URL at all.
 ///
 /// ```ignore
 /// use rustango::shortcuts::gone;
@@ -647,14 +538,9 @@ pub fn gone(message: impl Into<String>) -> Response {
     res
 }
 
-/// Django-shape `HttpResponse(status=204)` — `204 No Content` with
-/// empty body. Used when a write succeeded but there's nothing
-/// meaningful to return (DELETE handlers, PUT/PATCH that don't
-/// echo the resource).
-///
-/// RFC 7231 §6.3.5 requires the body be empty on 204; this helper
-/// hard-codes `Body::empty()` so callers can't accidentally send
-/// a payload.
+/// `204 No Content` with an empty body, for a write that succeeded and
+/// has nothing to return: DELETE handlers, or a PUT/PATCH that does not
+/// echo the resource. A 204 must have no body, so none can be sent.
 ///
 /// ```ignore
 /// use rustango::shortcuts::no_content;
@@ -671,14 +557,10 @@ pub fn no_content() -> Response {
         .expect("204 + empty body is always valid")
 }
 
-/// Django-shape `HttpResponse(status=202)` — `202 Accepted`. Used
-/// when a request has been validated and queued for async processing,
-/// but the actual work hasn't finished. Body typically carries the
-/// job ID or a status-poll URL.
-///
-/// Pair with a `Location:` header pointing at the status endpoint
-/// (RFC 7231 doesn't mandate it for 202, but it's the canonical
-/// shape for async-job APIs).
+/// `202 Accepted`, for a request that was queued but has not run yet.
+/// Put the job ID or a status URL in the body. Adding a `Location:`
+/// header pointing at the status endpoint is the usual shape for
+/// async-job APIs.
 ///
 /// ```ignore
 /// use rustango::shortcuts::accepted;
@@ -701,13 +583,9 @@ pub fn accepted(message: impl Into<String>) -> Response {
     res
 }
 
-/// Django-shape `HttpResponse(status=415)` — `415 Unsupported
-/// Media Type`. Use when the request body's `Content-Type` doesn't
-/// match what the handler can parse (e.g. handler expects JSON,
-/// client sent XML).
-///
-/// Body is a `text/plain` message describing the supported types.
-/// Use an empty string for a bare-bones response.
+/// `415 Unsupported Media Type`, for a request body whose
+/// `Content-Type` the handler cannot parse. Put the types you do accept
+/// in the `text/plain` message.
 #[must_use]
 pub fn unsupported_media_type(message: impl Into<String>) -> Response {
     let body = message.into();
@@ -722,10 +600,9 @@ pub fn unsupported_media_type(message: impl Into<String>) -> Response {
     res
 }
 
-/// Django-shape `HttpResponse(status=409)` — `409 Conflict`. Use
-/// when the request collides with current resource state — concurrent
-/// edit, unique-constraint violation surfaced before INSERT,
-/// stale write-token, etc.
+/// `409 Conflict`, for a request that clashes with the current state of
+/// the resource: a concurrent edit, a unique-constraint hit caught
+/// before INSERT, or a stale write token.
 #[must_use]
 pub fn conflict(message: impl Into<String>) -> Response {
     let body = message.into();
@@ -740,11 +617,9 @@ pub fn conflict(message: impl Into<String>) -> Response {
     res
 }
 
-/// Django-shape `HttpResponse(status=422)` — `422 Unprocessable
-/// Entity`. Use when a request is syntactically valid (parses fine)
-/// but semantically invalid (validation rule failed). Common in
-/// JSON APIs to distinguish a 400-shaped parse error from a
-/// validation-failure response.
+/// `422 Unprocessable Entity`, for a request that parsed fine but broke
+/// a validation rule. JSON APIs use it to keep parse errors (400) apart
+/// from validation errors.
 #[must_use]
 pub fn unprocessable_entity(message: impl Into<String>) -> Response {
     let body = message.into();
@@ -759,13 +634,10 @@ pub fn unprocessable_entity(message: impl Into<String>) -> Response {
     res
 }
 
-/// Build a download response — sets `Content-Type` plus
-/// `Content-Disposition: attachment; filename="..."` so browsers
-/// save the body to disk rather than rendering it inline. Django's
-/// [`FileResponse(as_attachment=True, filename=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#fileresponse-objects).
-///
-/// Use for CSV exports, generated PDFs, audit logs, anything the
-/// user is meant to download rather than view in the browser.
+/// Build a download response: sets `Content-Type` and
+/// `Content-Disposition: attachment; filename="..."`, so the browser
+/// saves the body instead of showing it. Use it for CSV exports,
+/// generated PDFs and the like.
 ///
 /// ```ignore
 /// use rustango::shortcuts::file_response;
@@ -776,12 +648,11 @@ pub fn unprocessable_entity(message: impl Into<String>) -> Response {
 /// }
 /// ```
 ///
-/// `filename` characters are sanitized so a forged filename can't
-/// inject extra `Content-Disposition` directives. Specifically: any
-/// `"` is replaced with `_`, and CR/LF are stripped (header-splitting
-/// guard). Non-ASCII filenames are *kept* in the value — modern
-/// browsers handle UTF-8 in `filename=` fine; if RFC 5987 `filename*`
-/// matters for you, build the header value yourself.
+/// `filename` is cleaned so it cannot inject extra
+/// `Content-Disposition` directives: `"`, `\` and control characters
+/// each become `_`. Non-ASCII characters are kept. If the header still
+/// cannot be built, a bare `attachment` is sent. If you need the
+/// RFC 5987 `filename*` form, build the header yourself.
 #[must_use]
 pub fn file_response(
     content: impl Into<axum::body::Bytes>,
@@ -797,24 +668,27 @@ pub fn file_response(
     let ct = HeaderValue::from_str(content_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     res.headers_mut().insert(header::CONTENT_TYPE, ct);
+    // Always set: without it a browser renders the body inline.
     let cd = format!(r#"attachment; filename="{safe_filename}""#);
-    if let Ok(v) = HeaderValue::from_str(&cd) {
-        res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-    }
+    let cd = HeaderValue::from_bytes(cd.as_bytes())
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, cd);
     res
 }
 
-/// Strip characters that would let an attacker forge extra
-/// directives in a `Content-Disposition` header value via a
-/// filename argument:
-/// - Double quotes break out of the `filename="..."` quoting.
-/// - CR/LF would split the header.
-///
-/// Replace these with `_` so the filename is still useful.
+/// Replace with `_` the characters that would let a filename forge extra
+/// `Content-Disposition` directives (`"`, `\\`), break the header (controls)
+/// or disguise the extension (bidi overrides such as U+202E).
 fn sanitize_attachment_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
-            '"' | '\r' | '\n' => '_',
+            '"' | '\\' => '_',
+            c if c.is_control() => '_',
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => '_',
             other => other,
         })
         .collect()
@@ -972,54 +846,6 @@ mod tests {
         // formatting varies; just check the name shows up somewhere.
         let s = format!("{err}");
         assert!(s.contains("absent") || s.contains("not found"), "got: {s}");
-    }
-
-    // ---------------- redirect_to_login ----------------
-
-    #[tokio::test]
-    async fn redirect_to_login_appends_next_with_question_mark() {
-        let res = redirect_to_login("/profile", "/login");
-        assert_eq!(res.status(), StatusCode::FOUND);
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(loc, "/login?next=%2Fprofile");
-    }
-
-    #[tokio::test]
-    async fn redirect_to_login_appends_next_with_ampersand_when_url_has_query() {
-        let res = redirect_to_login("/profile", "/login?lang=fr");
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(loc, "/login?lang=fr&next=%2Fprofile");
-    }
-
-    #[tokio::test]
-    async fn redirect_to_login_encodes_special_chars_in_next() {
-        // Path with spaces, ampersand, slashes — all must survive the
-        // round-trip back into the login handler as a clean ?next=.
-        let res = redirect_to_login("/posts/42?utm=ad&q=spaces here", "/login");
-        let loc = res
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(loc.starts_with("/login?next="), "got: {loc}");
-        // Spaces / ? / & all become percent-escaped.
-        assert!(!loc[12..].contains(' '), "next= must percent-escape spaces");
-        assert!(!loc[12..].contains('&'), "next= must percent-escape &");
-        assert!(!loc[12..].contains('?'), "next= must percent-escape ?");
     }
 
     // ---------------- json_response / json_ok / json_bad_request ----------------
@@ -1259,6 +1085,66 @@ mod tests {
         assert!(!cd.contains('\n'));
     }
 
+    /// Any filename still downloads: no control char or non-ASCII drops the header (#1955).
+    #[tokio::test]
+    async fn file_response_always_sends_attachment() {
+        for name in [
+            "a\u{1}b.html",
+            "tab\there.html",
+            "del\u{7f}.html",
+            "résumé.pdf",
+        ] {
+            let res = file_response(b"<script>".to_vec(), name, "text/html");
+            let cd = res
+                .headers()
+                .get(axum::http::header::CONTENT_DISPOSITION)
+                .unwrap_or_else(|| panic!("{name:?}: no Content-Disposition"));
+            assert!(cd.as_bytes().starts_with(b"attachment"), "{name:?}");
+            assert!(!cd.as_bytes().iter().any(u8::is_ascii_control), "{name:?}");
+        }
+    }
+
+    /// A bidi override cannot disguise the saved file's extension.
+    #[test]
+    fn attachment_filename_drops_bidi_overrides() {
+        for c in ['\u{202e}', '\u{2066}', '\u{200f}', '\u{061c}'] {
+            let name = format!("invoice{c}fdp.exe");
+            assert_eq!(sanitize_attachment_filename(&name), "invoice_fdp.exe");
+        }
+    }
+
+    /// 500 bodies withhold driver and template text (#1955).
+    #[tokio::test]
+    async fn server_errors_withhold_their_cause() {
+        let mut tera = tera::Tera::default();
+        tera.add_raw_template("t.html", "{{ secret_var_xyz | nofilter }}")
+            .unwrap();
+        let (db, tpl) = {
+            let _g = crate::error::test_env::lock();
+            let mut out = None;
+            crate::error::test_env::with(crate::error::DISCLOSE_ENV, None, || {
+                let exec = ExecError::Sql(crate::sql::SqlError::EmptyInList);
+                out = Some((
+                    ShortcutError::Database(exec).into_response(),
+                    render(&tera, "t.html", &tera::Context::new()),
+                ));
+            });
+            out.unwrap()
+        };
+        for (res, marker) in [(db, "`IN`"), (tpl, "t.html")] {
+            assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert!(!body.contains(marker), "{body}");
+            assert!(
+                !body.contains("nofilter") && !body.contains("database"),
+                "{body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn file_response_invalid_content_type_falls_back_to_octet_stream() {
         // A content-type value with a header-invalid byte (raw NUL)
@@ -1275,7 +1161,7 @@ mod tests {
         assert_eq!(ct, "application/octet-stream");
     }
 
-    // -------- resolve_url + redirect_to_view (Django parity) --------
+    // -------- resolve_url + redirect_to_view --------
 
     use std::collections::HashMap;
 
@@ -1356,7 +1242,7 @@ mod tests {
         assert!(redirect_to_view("no_such_route_xyz_for_redirect", &p).is_err());
     }
 
-    // -------- not_modified + gone (Django parity) --------
+    // -------- not_modified + gone --------
 
     #[tokio::test]
     async fn not_modified_is_304_with_empty_body() {

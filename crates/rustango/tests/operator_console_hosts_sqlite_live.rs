@@ -81,6 +81,7 @@ async fn boot() -> Booted {
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await.expect("seed operator");
 
@@ -122,6 +123,8 @@ async fn boot() -> Booted {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -178,6 +181,8 @@ impl Booted {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .uri(uri)
                     .header("cookie", &self.cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -524,6 +529,9 @@ async fn the_routes_require_a_session() {
                 Request::builder()
                     .method(method)
                     .uri(&uri)
+                    // A valid CSRF pair, so the session gate is what refuses.
+                    .header("cookie", "rustango_csrf=t")
+                    .header("x-csrf-token", "t")
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from("hostname=evil.example.com"))
                     .unwrap(),
@@ -583,4 +591,54 @@ async fn a_read_only_console_does_not_mount_the_routes() {
         StatusCode::NOT_FOUND,
         "a read-only console must not expose host management"
     );
+}
+
+/// #1931: the console edit form runs the same validators as the CLI, so
+/// a host, prefix or port the resolver can never match is not saved.
+#[tokio::test]
+async fn the_edit_form_refuses_routing_values_that_could_never_match() {
+    use rustango::core::Column as _;
+    use rustango::sql::FetcherPool as _;
+    let _g = cache_lock().lock().await;
+    let b = boot().await;
+    let base = format!("{}.example.com", b.slug);
+
+    for bad in [
+        "host_pattern=x.com%3A8443".to_owned(),
+        format!("host_pattern={base}&path_prefix=no-leading-slash"),
+        format!("host_pattern={base}&port=70000"),
+    ] {
+        let resp = b
+            .post(
+                &format!("/orgs/{}/edit", b.slug),
+                &format!("display_name=x&active=on&{bad}"),
+            )
+            .await;
+        let location = Booted::location(&resp);
+        assert!(
+            location.contains("error="),
+            "`{bad}` should be refused: {location}"
+        );
+    }
+
+    // Uppercase is normalized, as the CLI does.
+    let resp = b
+        .post(
+            &format!("/orgs/{}/edit", b.slug),
+            &format!("display_name=x&active=on&host_pattern=Shop.{base}"),
+        )
+        .await;
+    assert!(
+        Booted::location(&resp).contains("notice="),
+        "{}",
+        Booted::location(&resp)
+    );
+    let org = Org::objects()
+        .where_(Org::slug.eq(b.slug.clone()))
+        .fetch(&b.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(org.host_pattern, Some(format!("shop.{base}")));
+    assert!(org.port.is_none() && org.path_prefix.is_none(), "{org:?}");
 }

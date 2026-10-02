@@ -1,7 +1,7 @@
 # Die Administrationsoberfläche
 
-**Rustango** erzeugt eine vollständige Admin-Oberfläche aus deinen Modellen — dieselbe
-Idee wie das Admin von Django oder ein Nova/Filament-Panel von Laravel, aber mit
+**Rustango** erzeugt eine vollständige Admin-Oberfläche aus deinen Modellen — ein
+fertiges Backoffice zum Durchsuchen und Bearbeiten deiner Daten, aber mit
 **null Boilerplate pro Modell**. Füge `#[derive(Model)]` hinzu, binde das Admin einmal
 ein, und jedes Modell erhält eine Listenansicht mit Suche, Filtern, Sortierung,
 Paginierung und Massenaktionen; ein nach Feldgruppen gegliedertes Erstellen-/Bearbeiten-
@@ -235,8 +235,8 @@ Text im Formular statt als Eingaben.
 
 ## Inlines
 
-Inlines zeigen die Zeilen eines Kindmodells auf der Seite des Elternobjekts (Django-
-Inlines). Registriere eines auf Modulebene:
+Inlines zeigen die Zeilen eines Kindmodells direkt auf der Seite des Elternobjekts,
+sodass beides in einem Formular bearbeitet wird. Registriere eines auf Modulebene:
 
 ```rust
 rustango::register_admin_inline!(
@@ -365,7 +365,7 @@ rustango::register_admin_list_filter!(
 
 ## Benutzerdefinierte Views, Querysets und Berechtigungen
 
-Drei weitere Registrierungsmakros spiegeln die `ModelAdmin`-Hooks von Django wider:
+Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrierten Modells ein:
 
 - **Benutzerdefinierte Admin-Seiten** —
   `register_admin_view!("posts", "duplicate", Method::POST, "Duplicate", handler)`
@@ -513,7 +513,7 @@ Mit `register_admin_view!` registrierte benutzerdefinierte Routen binden unter
 
 ## Die Modellreferenz
 
-Jedes Admin liefert eine Live-Modellreferenz (Djangos admindocs) unter
+Jedes Admin liefert eine Live-Modellreferenz unter
 `<prefix>/__docs` — ein schreibgeschützter Katalog jedes registrierten Modells mit seinen
 Feldern, Spalten, Typen, Flags (PK, unique, …) und Beziehungen. Nichts zu konfigurieren;
 es wird aus deinen Modellen generiert, also weicht es nie vom Schema ab.

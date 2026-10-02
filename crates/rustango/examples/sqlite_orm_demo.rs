@@ -110,11 +110,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Utc.with_ymd_and_hms(2026, 5, 4, 10, 0, 0).unwrap(),
         ),
     ];
-    let bulk_query = BulkInsertQuery {
-        model: Post::SCHEMA,
-        // Auto<i64> PK column omitted — DEFAULT (sequence/AUTOINCREMENT) fires.
-        columns: vec!["title", "body", "author_id", "views", "published_at"],
-        rows: post_seed
+    // Auto<i64> PK column omitted — DEFAULT (sequence/AUTOINCREMENT) fires.
+    let bulk_query = BulkInsertQuery::new(
+        Post::SCHEMA,
+        vec!["title", "body", "author_id", "views", "published_at"],
+        post_seed
             .iter()
             .map(|(t, b, fk, v, ts)| {
                 vec![
@@ -126,9 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ]
             })
             .collect(),
-        returning: vec![],
-        on_conflict: None,
-    };
+    );
     rustango::sql::bulk_insert_pool(&pool, &bulk_query).await?;
     println!("bulk_insert_pool inserted {} rows", post_seed.len());
 
@@ -286,8 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n== 10. aggregate over Author — MIN / MAX / AVG age ==");
-    // `.values(&[])` = a table-wide *scalar* aggregate (Django's
-    // `.aggregate(Min("age"))`): no base columns, no GROUP BY, one row.
+    // `.values(&[])` = a table-wide *scalar* aggregate: no base columns,
+    // no GROUP BY, one row.
     // Without it, `.annotate(...)` alone groups by every model column.
     let agg_query = Author::objects()
         .values(&[])

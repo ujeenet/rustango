@@ -1,4 +1,5 @@
-//! File storage backends — upload, retrieve, delete files via a pluggable trait.
+//! File storage: save, read and delete files through one trait, with
+//! a backend you choose.
 //!
 //! ## Quick start
 //!
@@ -23,13 +24,17 @@
 //!
 //! | Backend | When to use |
 //! |---------|-------------|
-//! | [`LocalStorage`] | Single-server deployments — files on local disk |
-//! | [`InMemoryStorage`] | Tests — files in a `HashMap`, never touch disk |
-//! | [`s3::S3Storage`] | AWS S3, Cloudflare R2, Backblaze B2, MinIO — any S3-compatible API. Behind the `storage-s3` feature. |
-//! | GCS / Azure Blob | Plug your own — implement `Storage` for the SDK of your choice |
+//! | [`LocalStorage`] | One server: files on local disk |
+//! | [`InMemoryStorage`] | Tests: files in a `HashMap`, never on disk |
+//! | [`s3::S3Storage`] | S3, R2, B2, MinIO, or any S3-compatible API. Behind the `storage-s3` feature. |
+//! | Anything else | Implement `Storage` over the SDK you want |
 //!
-//! All backends share the same trait — swap them via configuration at
-//! startup, code stays identical.
+//! They all share one trait, so you can pick a backend at startup
+//! without changing the code that uses it.
+//!
+//! [`LocalStorage`]: crate::storage::LocalStorage
+//! [`InMemoryStorage`]: crate::storage::InMemoryStorage
+//! [`s3::S3Storage`]: crate::storage::s3::S3Storage
 
 #[cfg(feature = "storage-s3")]
 pub mod s3;
@@ -41,7 +46,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
+/// Re-exported so implementing [`Storage`] needs no `async-trait`
+/// entry in your own `Cargo.toml`, and cannot end up on a different
+/// version from the one the trait was declared with.
+pub use async_trait::async_trait;
 
 // ------------------------------------------------------------------ Errors
 
@@ -57,63 +65,150 @@ pub enum StorageError {
 
 // ------------------------------------------------------------------ Storage trait
 
-/// Pluggable async file storage backend.
+/// An async file storage backend.
 ///
-/// `key` is a logical path within the storage root (e.g. `"avatars/alice.png"`).
-/// Backends MUST reject keys containing `..`, leading `/`, or null bytes.
+/// A `key` is a path inside the storage root, such as
+/// `"avatars/alice.png"`. Every backend must reject a key with `..`,
+/// a leading `/`, or a null byte. [`validate_key`] does that.
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
-    /// Write `data` to `key`, overwriting any existing file at that path.
+    /// Write `data` to `key`, replacing any file already there.
     async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError>;
 
-    /// Read the bytes at `key`. Returns [`StorageError::NotFound`] if absent.
+    /// [`Self::save`] with a MIME type, for backends that store one (S3).
+    /// The default ignores it.
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        _content_type: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.save(key, data).await
+    }
+
+    /// Read the bytes at `key`, or [`StorageError::NotFound`].
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError>;
 
-    /// Remove the file at `key`. No-op if absent.
+    /// Delete the file at `key`. Does nothing if it is not there.
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
 
-    /// `true` if a file exists at `key`.
+    /// Whether a file exists at `key`.
     async fn exists(&self, key: &str) -> Result<bool, StorageError>;
 
-    /// Return a URL where the file at `key` can be served, if the backend
-    /// supports public URLs. Returns `None` for backends that don't (e.g. tests).
+    /// A public URL for `key`, or `None` on a backend that has none.
     fn url(&self, key: &str) -> Option<String>;
 
-    /// Return a time-limited GET URL for the file at `key` (for serving
-    /// private files without proxying through your handler). Returns
-    /// `None` when the backend can't sign — `LocalStorage`,
-    /// `InMemoryStorage`. `S3Storage` overrides with SigV4 query-string
-    /// signing.
+    /// A GET URL for `key` that expires, so a private file can be
+    /// served without going through your handler. `ttl` is how long
+    /// it stays valid; AWS caps that at 7 days, and shorter is safer.
     ///
-    /// `ttl` is how long the URL stays valid. AWS caps at 7 days
-    /// (604_800 s); shorter is safer.
+    /// `None` on a backend that cannot sign, such as `LocalStorage`.
+    /// `S3Storage` signs with SigV4.
     async fn presigned_get_url(&self, _key: &str, _ttl: std::time::Duration) -> Option<String> {
         None
     }
 
-    /// Return a time-limited PUT URL the browser can upload to
-    /// directly (no proxying through your handler). When
-    /// `content_type` is `Some`, the signature is bound to it — the
-    /// browser MUST send a matching `Content-Type` header.
+    /// A PUT URL that expires, so a browser can upload straight to
+    /// the backend. Everything in `put` is signed, so the browser must
+    /// send [`PutConditions::headers`] and a body of the signed length.
     ///
-    /// Returns `None` when the backend can't sign. `S3Storage`
-    /// overrides.
+    /// `None` on a backend that cannot sign.
     async fn presigned_put_url(
         &self,
         _key: &str,
         _ttl: std::time::Duration,
-        _content_type: Option<&str>,
+        _put: &PutConditions,
     ) -> Option<String> {
         None
     }
+
+    /// What the backend holds at `key`, or `None` when nothing is there.
+    ///
+    /// The default is an error, so a backend that cannot report this
+    /// never lets a direct upload be confirmed on trust (#1851).
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        Err(StorageError::Io(format!(
+            "this backend cannot report object metadata (key `{key}`)"
+        )))
+    }
 }
 
-/// `Arc<dyn Storage>` alias.
+/// Size and stored type of an object, as the backend reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObjectMeta {
+    pub size: u64,
+    /// `None` on a backend that stores no type, such as `LocalStorage`.
+    pub content_type: Option<String>,
+}
+
+impl ObjectMeta {
+    #[must_use]
+    pub fn new(size: u64, content_type: Option<String>) -> Self {
+        Self { size, content_type }
+    }
+}
+
+/// What a presigned PUT signs. Built with the chained setters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PutConditions {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    /// Sign `If-None-Match: *`: the URL creates the object, never replaces it.
+    pub create_only: bool,
+}
+
+impl PutConditions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn content_type(mut self, ct: impl Into<String>) -> Self {
+        self.content_type = Some(ct.into());
+        self
+    }
+
+    #[must_use]
+    pub fn content_length(mut self, len: u64) -> Self {
+        self.content_length = Some(len);
+        self
+    }
+
+    #[must_use]
+    pub fn create_only(mut self) -> Self {
+        self.create_only = true;
+        self
+    }
+
+    /// The headers the client must send. `Content-Length` is left out:
+    /// the client sets it from the body.
+    #[must_use]
+    pub fn headers(&self) -> std::collections::BTreeMap<String, String> {
+        let mut h = std::collections::BTreeMap::new();
+        if let Some(ct) = &self.content_type {
+            h.insert("content-type".to_owned(), ct.clone());
+        }
+        if self.create_only {
+            h.insert("if-none-match".to_owned(), "*".to_owned());
+        }
+        h
+    }
+}
+
+/// `Arc<dyn Storage>` — the standard way to share a backend.
 pub type BoxedStorage = Arc<dyn Storage>;
 
-/// Reject keys with `..`, leading `/`, or null bytes — defends against
-/// path traversal in `LocalStorage`. Backends that store keys verbatim
-/// (e.g. S3) should still call this to keep keys consistent.
+/// Reject a key that could escape the storage root: a `..` segment, a leading
+/// `/` or `\`, a Windows drive prefix, or a null byte. Empty and `.`
+/// segments are refused too. Backends that
+/// store keys as given, such as S3, should still call it so keys stay
+/// consistent.
+///
+/// # Errors
+/// [`StorageError::InvalidPath`] naming what was wrong with the key.
 pub fn validate_key(key: &str) -> Result<(), StorageError> {
     if key.is_empty() {
         return Err(StorageError::InvalidPath("empty key".into()));
@@ -123,7 +218,8 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
             "key must be relative: {key}"
         )));
     }
-    if key.contains("..") {
+    // A whole `..` segment only: `report..final.pdf` is a file name (#1903).
+    if key.split(['/', '\\']).any(|seg| seg == "..") {
         return Err(StorageError::InvalidPath(format!(
             "key contains `..`: {key}"
         )));
@@ -131,23 +227,56 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
     if key.contains('\0') {
         return Err(StorageError::InvalidPath(format!("key contains null byte")));
     }
+    // Windows-shaped absolute keys. `Path::join` drops the root when
+    // the argument is absolute, so `C:\secrets` or `\Windows` would
+    // land outside the storage directory.
+    //
+    // The check is structural, not `Path::is_absolute`, whose answer
+    // depends on the platform: on Unix it calls these relative, so a
+    // Unix-only guard would let a key through that escapes as soon as
+    // the same service runs on Windows.
+    if key.starts_with('\\') {
+        // `\dir\file`, and UNC `\\server\share`.
+        return Err(StorageError::InvalidPath(format!(
+            "key must be relative: {key}"
+        )));
+    }
+    let mut chars = key.chars();
+    if matches!(
+        (chars.next(), chars.next()),
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    ) {
+        // `C:\file` is absolute. Bare `C:file` resolves against that
+        // drive's working directory, which is not ours either.
+        return Err(StorageError::InvalidPath(format!(
+            "key names a drive: {key}"
+        )));
+    }
+    // `a//b`, `./a` and `a/` name another file on disk than on S3.
+    if key
+        .split(['/', '\\'])
+        .any(|seg| seg.is_empty() || seg == ".")
+    {
+        return Err(StorageError::InvalidPath(format!(
+            "key has an empty or `.` segment: {key}"
+        )));
+    }
     Ok(())
 }
 
 // ------------------------------------------------------------------ LocalStorage
 
-/// Filesystem-backed storage rooted at a directory.
+/// Storage on the local filesystem, under one directory.
 ///
-/// All keys are joined onto `root` as relative paths. The validator
-/// rejects path-traversal keys (`..`, leading `/`).
+/// Keys are joined onto `root` as relative paths, and
+/// [`validate_key`] rejects anything that would escape it.
 pub struct LocalStorage {
     root: PathBuf,
     base_url: Option<String>,
 }
 
 impl LocalStorage {
-    /// Create a local storage rooted at `root`. The directory is created
-    /// on first save if it doesn't exist.
+    /// Store files under `root`, which is created on the first save.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -156,8 +285,7 @@ impl LocalStorage {
         }
     }
 
-    /// Set the public URL prefix for files served from this storage. The
-    /// resulting URL for key `k` is `{base_url}/{k}`.
+    /// Set the public URL prefix, so key `k` gets `{base_url}/{k}`.
     #[must_use]
     pub fn with_base_url(mut self, base: impl Into<String>) -> Self {
         self.base_url = Some(base.into());
@@ -179,9 +307,35 @@ impl Storage for LocalStorage {
                 .await
                 .map_err(|e| StorageError::Io(e.to_string()))?;
         }
-        tokio::fs::write(&path, data)
+        // Temp file + rename: a reader never sees a torn file, a crash
+        // leaves the old one (#1905).
+        let tmp = path.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        let io = |e: std::io::Error| StorageError::Io(e.to_string());
+        // Armed before the open, so a cancel at any await removes it.
+        let guard = TmpFile(Some(tmp.clone()));
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
             .await
-            .map_err(|e| StorageError::Io(e.to_string()))
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                guard.keep();
+                return Err(io(e));
+            }
+            Err(e) => return Err(io(e)),
+        };
+        tokio::io::AsyncWriteExt::write_all(&mut file, data)
+            .await
+            .map_err(io)?;
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(io)?;
+        drop(file);
+        tokio::fs::rename(&tmp, &path).await.map_err(io)?;
+        guard.keep();
+        Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
@@ -213,15 +367,43 @@ impl Storage for LocalStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?)
     }
 
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        match tokio::fs::metadata(self.full_path(key)).await {
+            Ok(m) if m.is_file() => Ok(Some(ObjectMeta::new(m.len(), None))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e.to_string())),
+        }
+    }
+
     fn url(&self, key: &str) -> Option<String> {
         let base = self.base_url.as_ref()?;
         Some(format!("{}/{}", base.trim_end_matches('/'), key))
     }
 }
 
+/// Removes a temp file on drop, unless [`Self::keep`] ran: an error or a
+/// cancelled save leaves nothing behind.
+struct TmpFile(Option<PathBuf>);
+
+impl TmpFile {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ InMemoryStorage
 
-/// `HashMap<String, Vec<u8>>` storage — for tests. Never touches disk.
+/// Storage in a `HashMap`, for tests. It never touches disk.
 #[derive(Default)]
 pub struct InMemoryStorage {
     files: Mutex<HashMap<String, Vec<u8>>>,
@@ -275,6 +457,16 @@ impl Storage for InMemoryStorage {
             .contains_key(key))
     }
 
+    async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
+        validate_key(key)?;
+        Ok(self
+            .files
+            .lock()
+            .expect("storage mutex poisoned")
+            .get(key)
+            .map(|v| ObjectMeta::new(v.len() as u64, None)))
+    }
+
     fn url(&self, _key: &str) -> Option<String> {
         None
     }
@@ -290,6 +482,19 @@ mod tests {
             validate_key(""),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn validate_rejects_empty_and_dot_segments() {
+        for bad in ["a//b", "./a", "a/./b", "a/", "a\\\\b", "."] {
+            assert!(
+                matches!(validate_key(bad), Err(StorageError::InvalidPath(_))),
+                "accepted {bad:?}"
+            );
+        }
+        for ok in [".hidden", "a.b/c.d", "a/..b", "a/b."] {
+            assert!(validate_key(ok).is_ok(), "rejected {ok:?}");
+        }
     }
 
     #[test]
@@ -312,10 +517,57 @@ mod tests {
         ));
     }
 
+    /// #1903: dots inside a file name are not a path segment.
+    #[test]
+    fn validate_accepts_dots_inside_a_segment() {
+        for key in [
+            "report..final.pdf",
+            "a/..b/c",
+            "x/y../z",
+            "...",
+            "a/.hidden",
+        ] {
+            assert!(validate_key(key).is_ok(), "`{key}` must be accepted");
+        }
+        for key in ["..", "a/..", r"a\..\b", "a/../b"] {
+            assert!(validate_key(key).is_err(), "`{key}` must be rejected");
+        }
+    }
+
     #[test]
     fn validate_accepts_normal_keys() {
         assert!(validate_key("avatars/alice.png").is_ok());
         assert!(validate_key("file.txt").is_ok());
+    }
+
+    /// `Path::join` drops the root for an absolute key, so on Windows
+    /// these would land outside the storage directory.
+    ///
+    /// The test runs on every platform on purpose. `Path::is_absolute`
+    /// calls all of them relative on Unix, so a platform-gated guard
+    /// would pass here and still leave the hole on Windows.
+    #[test]
+    fn validate_rejects_windows_absolute_keys() {
+        for key in [
+            r"C:\Windows\System32\config\SAM",
+            r"c:\lower\drive",
+            r"C:relative-to-drive-cwd",
+            r"\Windows\System32",
+            r"\\server\share\file",
+        ] {
+            assert!(
+                matches!(validate_key(key), Err(StorageError::InvalidPath(_))),
+                "`{key}` escapes the storage root on Windows and must be rejected"
+            );
+        }
+    }
+
+    /// A colon or backslash elsewhere in the key is still fine. The
+    /// guard is about escaping the root, not about the characters.
+    #[test]
+    fn validate_still_accepts_keys_that_merely_contain_those_characters() {
+        assert!(validate_key("logs/2026-09-13T12:00:00Z.json").is_ok());
+        assert!(validate_key("odd/name\\with-backslash.txt").is_ok());
     }
 
     #[tokio::test]
@@ -372,6 +624,84 @@ mod tests {
         let s = LocalStorage::new(dir.clone());
         s.save("a/b/c/file.txt", b"deep").await.unwrap();
         assert_eq!(s.load("a/b/c/file.txt").await.unwrap(), b"deep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmp_file_guard_removes_unless_kept() {
+        let dir = tempdir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.tmp"), dir.join("b.tmp"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        drop(TmpFile(Some(a.clone())));
+        TmpFile(Some(b.clone())).keep();
+        assert!(!a.exists(), "a dropped guard left its file");
+        assert!(b.exists(), "a kept guard removed its file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save dropped mid-write leaves no temp file.
+    #[tokio::test]
+    async fn a_cancelled_local_save_leaves_no_temp_file() {
+        use std::future::Future as _;
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let data = vec![0u8; 64 << 20];
+        let tmp_seen = || {
+            std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        };
+        {
+            let mut fut = std::pin::pin!(s.save("big.bin", &data));
+            loop {
+                let polled =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(fut.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "save finished before it was cancelled");
+                if tmp_seen() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        // Let a write already in flight on the blocking pool finish.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!tmp_seen(), "a cancelled save left its temp file");
+        assert!(!dir.join("big.bin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1905: a load racing a save sees the old file or the new one,
+    /// never a torn one, and no temp file is left behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_storage_save_is_atomic() {
+        let dir = tempdir();
+        let s = Arc::new(LocalStorage::new(dir.clone()));
+        const N: usize = 4 << 20;
+        s.save("f.bin", &vec![b'a'; N]).await.unwrap();
+        let writer = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                for i in 0..20u8 {
+                    s.save("f.bin", &vec![b'b' + i % 2; N]).await.unwrap();
+                }
+            })
+        };
+        while !writer.is_finished() {
+            let got = s.load("f.bin").await.unwrap();
+            assert_eq!(got.len(), N, "torn read");
+        }
+        writer.await.unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("f.bin")]);
+        let meta = s.metadata("f.bin").await.unwrap().unwrap();
+        assert_eq!((meta.size, meta.content_type), (N as u64, None));
+        assert_eq!(s.metadata("nope").await.unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

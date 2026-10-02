@@ -33,6 +33,7 @@
   Every write is recorded in the audit log with
   <code>source = operator:{{ impersonated_by_operator_id }}:impersonating</code>.
   <form method="post" action="{{ admin_prefix }}/__end-impersonation" style="display:inline">
+    {{ csrf_input | safe }}
     <button type="submit" class="btn-end-impersonation">End impersonation</button>
   </form>
 </div>

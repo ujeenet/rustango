@@ -1,11 +1,11 @@
 //! Shared internals for the Eloquent-style shortcuts the
 //! `#[derive(Model)]` macro emits on every model
-//! (`Model::sum` / `Model::where_any` / `Model::increment_each` /
-//! …).
+//! (`Model::where_any` / `Model::increment_each` / …). Each one
+//! builds a `QuerySet`, so the model's global scopes apply.
 //!
 //! Why this exists: before this module, the macro emitted the
 //! bodies of `__resolve_col` / `__add_signed_expr` /
-//! `__aggregate_one_pool` / `__where_multi` / `__increment_one` /
+//! `__where_multi` / `__increment_one` /
 //! `__increment_all` per model. With N derived models in a crate
 //! that meant N near-identical copies in the macro's expansion
 //! and N copies of doc-comments to keep in sync. Generic
@@ -18,11 +18,11 @@
 //! `Model::*` methods are the user-facing surface. Callers should
 //! never import from this module directly.
 
-use crate::core::{AggregateExpr, AggregateQuery, Expr, Model, QueryError, SqlValue, WhereExpr, F};
+use crate::core::{Expr, Model, QueryError, SqlValue, UpdateQuery, F};
 use crate::query::{QuerySet, Q};
 use crate::sql::executor::{
-    fetch_aggregate_pool, FetcherPool as _, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated, UpdaterPool as _,
+    FetcherPool as _, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow,
+    MaybeSqliteLoadRelated, UpdaterPool as _,
 };
 use crate::sql::{ExecError, LoadRelated, Pool};
 
@@ -54,7 +54,7 @@ pub fn resolve_col<T: Model>(col: &str) -> Result<&'static str, ExecError> {
 
 /// Build a `<col_static> + signed_by` expression. Subtracts when
 /// `signed_by` is negative. Used by [`increment_one_pool`] /
-/// [`increment_all_pool`] to construct the SET clause without
+/// [`increment_all_query`] to construct the SET clause without
 /// re-doing the `F() + Literal()` boilerplate per-model.
 #[must_use]
 pub fn add_signed_expr(col_static: &'static str, signed_by: i64) -> Expr {
@@ -69,9 +69,9 @@ pub fn add_signed_expr(col_static: &'static str, signed_by: i64) -> Expr {
 /// str` so the macro can pass `stringify!(#pk_ident)`.
 ///
 /// # Errors
-/// As [`UpdaterPool::execute_pool`]; or
-/// [`ExecError::Query(QueryError::UnknownField)`] when `col` does
-/// not match any model field.
+/// As [`UpdaterPool::execute_pool`](crate::sql::UpdaterPool::execute_pool);
+/// or [`ExecError::Query`] with `QueryError::UnknownField` when `col`
+/// does not match any model field.
 pub async fn increment_one_pool<T>(
     pk_field: &'static str,
     this_pk: SqlValue,
@@ -99,69 +99,17 @@ where
         .await
 }
 
-/// Apply `col = col + by` (signed) on every row of the table.
-/// Backs the bulk `Model::increment_each` /
-/// `Model::decrement_each` static methods.
+/// `UPDATE … SET col = col + by` (signed) over the whole table. Backs
+/// `Model::increment_each` / `decrement_each`.
 ///
 /// # Errors
-/// As [`increment_one_pool`].
-pub async fn increment_all_pool<T>(col: &str, by: i64, pool: &Pool) -> Result<u64, ExecError>
-where
-    T: Model
-        + MaybePgFromRow
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + Send
-        + Unpin,
-{
+/// As [`resolve_col`], plus the update compile.
+pub fn increment_all_query<T: Model>(col: &str, by: i64) -> Result<UpdateQuery, ExecError> {
     let col_static = resolve_col::<T>(col)?;
-    QuerySet::<T>::default()
+    Ok(QuerySet::<T>::default()
         .update()
         .set_expr(col, add_signed_expr(col_static, by))
-        .execute_pool(pool)
-        .await
-}
-
-/// Run a single-aggregate query (`SELECT SUM(col)` / `AVG(col)` /
-/// `MIN(col)` / `MAX(col)` over every row of the table) and
-/// return the scalar. Returns `Ok(None)` when the table is empty
-/// (matches SQL's `SUM(empty)` shape).
-///
-/// `build` is a callback that takes the SCHEMA-resolved column
-/// name and returns the `AggregateExpr` to compile — chooses the
-/// kind. Used by `Model::sum` / `Model::avg` / `Model::min` /
-/// `Model::max` so each one is a single-line wrapper that picks
-/// its kind via the closure.
-///
-/// # Errors
-/// As [`fetch_aggregate_pool`].
-pub async fn aggregate_one_pool<T, U>(
-    col: &str,
-    build: fn(&'static str) -> AggregateExpr,
-    pool: &Pool,
-) -> Result<Option<U>, ExecError>
-where
-    T: Model,
-    (Option<U>,): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
-{
-    let col_static = resolve_col::<T>(col)?;
-    let q = AggregateQuery {
-        model: T::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(Vec::new()),
-        group_by: Vec::new(),
-        aggregates: vec![("v".into(), build(col_static))],
-        aliases: Vec::new(),
-        having: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-    };
-    let rows: Vec<(Option<U>,)> = fetch_aggregate_pool(pool, &q).await?;
-    Ok(rows.into_iter().next().and_then(|t| t.0))
+        .compile()?)
 }
 
 /// Compose `cols` into an OR (`all = false`) or AND (`all = true`)
@@ -173,8 +121,8 @@ where
 /// - `all = true`  → returns every row (vacuous AND is TRUE).
 ///
 /// # Errors
-/// As [`FetcherPool::fetch`]; or
-/// [`ExecError::Query(QueryError::UnknownField)`] when any
+/// As [`FetcherPool::fetch`](crate::sql::FetcherPool::fetch); or
+/// [`ExecError::Query`] with `QueryError::UnknownField` when any
 /// column is not declared on the model.
 pub async fn where_multi_pool<T>(
     cols: &[&str],

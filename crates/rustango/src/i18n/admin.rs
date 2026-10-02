@@ -239,7 +239,26 @@ pub fn export_json(rows: &[(String, String, String)]) -> String {
     serde_json::to_string_pretty(&by_locale).unwrap_or_else(|_| "{}".to_owned())
 }
 
-/// Upsert each parsed edit into the override layer. Returns the count
+/// The edits that change something: an empty cell is a gap that falls
+/// back to the file catalog, so it is never written as `""`.
+#[must_use]
+pub fn changed_edits<'a>(
+    current: &[(String, String, String)],
+    edits: &'a [(String, String, String)],
+) -> Vec<&'a (String, String, String)> {
+    let current: std::collections::HashMap<(&str, &str), &str> = current
+        .iter()
+        .map(|(l, k, v)| ((l.as_str(), k.as_str()), v.as_str()))
+        .collect();
+    edits
+        .iter()
+        .filter(|(l, k, v)| {
+            !v.is_empty() && current.get(&(l.as_str(), k.as_str())) != Some(&v.as_str())
+        })
+        .collect()
+}
+
+/// Upsert each edit that [`changed_edits`] keeps. Returns the count
 /// written. `updated_by` records the operator.
 ///
 /// # Errors
@@ -250,10 +269,12 @@ pub async fn apply_edits(
     edits: &[(String, String, String)],
     updated_by: &str,
 ) -> Result<usize, crate::sql::ExecError> {
-    for (locale, key, value) in edits {
+    let current = editor_rows(pool).await?;
+    let changed = changed_edits(&current, edits);
+    for (locale, key, value) in &changed {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
-    Ok(edits.len())
+    Ok(changed.len())
 }
 
 /// Delete each listed key (all locales) from the override layer. Returns
@@ -292,20 +313,7 @@ pub async fn editor_rows(
 // the app registers the `Translation` model with its admin Builder.
 
 #[cfg(feature = "admin")]
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+use crate::text::html_escape;
 
 #[cfg(feature = "admin")]
 async fn editor_get(
@@ -333,15 +341,11 @@ async fn editor_post(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Redirect};
-    // When session auth is configured (the default), writes require a
-    // superuser: the admin login gate inserts the live `AdminSession` into
-    // request extensions (see `admin::login_view`) — read it before
-    // consuming the body, 403 non-superusers, and attribute the edit to
-    // the operator. When the admin is mounted WITHOUT session auth (an
-    // open / externally-proxied admin), there's no superuser to check, so
-    // writes stay open — consistent with the rest of that admin's surface.
-    let updated_by = match req.extensions().get::<crate::admin::AdminSession>() {
-        Some(session) if session.is_superuser => session.username.clone(),
+    // With session auth on, writes need a superuser. Both admins put the
+    // session in extensions; the task-local is the fallback. No session
+    // at all means an admin mounted without auth, so writes stay open.
+    let updated_by = match crate::admin::session::from_extensions(req.extensions()) {
+        Some(session) if session.is_superuser => session.username,
         Some(_) => {
             return (
                 StatusCode::FORBIDDEN,
@@ -490,6 +494,19 @@ mod tests {
                 ("en".into(), "bye".into(), "Goodbye".into()),
             ]
         );
+    }
+
+    #[test]
+    fn changed_edits_skip_empty_and_unchanged_cells() {
+        let t = |l: &str, k: &str, v: &str| (l.to_owned(), k.to_owned(), v.to_owned());
+        let current = vec![t("en", "greet", "Hi"), t("fr", "bye", "Salut")];
+        let edits = vec![
+            t("en", "greet", "Hi"),      // unchanged
+            t("fr", "greet", ""),        // untouched gap
+            t("fr", "bye", "Au revoir"), // changed
+            t("de", "greet", "Hallo"),   // new
+        ];
+        assert_eq!(changed_edits(&current, &edits), vec![&edits[2], &edits[3]]);
     }
 
     #[test]

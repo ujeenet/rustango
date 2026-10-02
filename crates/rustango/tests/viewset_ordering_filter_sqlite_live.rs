@@ -1,10 +1,10 @@
 //! End-to-end live test for `ViewSet::ordering` + new
-//! `ordering_fields(...)` whitelist on SQLite (Django-parity #439 —
-//! DRF `OrderingFilter`).
+//! `ordering_fields(...)` whitelist on SQLite (issue #439 — the
+//! `?ordering=` query filter).
 //!
 //! The DSL (`ViewSet::ordering` for the default sort) + the `?ordering=`
 //! query-param parse have shipped since v0.30. This PR closed the
-//! remaining DRF gap: the `ordering_fields` whitelist that limits which
+//! remaining gap: the `ordering_fields` whitelist that limits which
 //! columns clients can sort by. Live tests cover both the new
 //! whitelist enforcement and the previously-untested asc/desc query
 //! parsing on a non-PG dialect.
@@ -16,7 +16,7 @@
 //! - `?ordering=-field` flips to DESC via the `-` prefix
 //! - comma-separated multi-field ordering chains correctly
 //! - `ordering_fields` whitelist silently drops off-list field names
-//!   (mirrors DRF's defensive default for unknown columns)
+//!   rather than erroring on them
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
@@ -236,13 +236,18 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 // `ordering_fields` was empty, so a ViewSet restricted to
 // `fields = "id, title, rating"` still honoured
 // `?ordering=secret_score` — a sort oracle over a column the API never
-// returns. DRF defaults to the serializer's readable fields.
+// returns. The default is now the serializer's readable fields.
 // ===================================================================
 
 /// Rows are seeded so that sorting by `secret_score` gives a *different*
 /// order from the default — if the unexposed sort were honoured, the ids
 /// would come back in secret order, which is exactly the leak.
-async fn seed_divergent(app: &axum::Router) {
+///
+/// Seeds through an unrestricted ViewSet: a `fields()` one cannot write
+/// `secret_score` (#1845).
+async fn seed_divergent(pool: &Pool) {
+    let app =
+        rustango::viewset::ViewSet::for_model(Post::SCHEMA).router_pool("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
             "title": title, "rating": rating, "secret_score": secret
@@ -271,9 +276,9 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
         .page_size(50)
         .fields(&["id", "title", "rating"]) // secret_score NOT exposed
         .ordering(&[("id", false)])
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     // secret_score ASC would be c(aaa), b(mmm), a(zzz) => [3, 2, 1].
     // It must be ignored, leaving the default id ASC => [1, 2, 3].
@@ -299,9 +304,9 @@ async fn ordering_on_an_exposed_field_still_works() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
         .page_size(50)
         .fields(&["id", "title", "rating"])
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     let resp = app
         .clone()
@@ -319,9 +324,9 @@ async fn ordering_stays_open_when_no_fields_restriction_is_set() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
         .page_size(50)
-        .router_pool("/posts", pool);
+        .router_pool("/posts", pool.clone());
 
-    seed_divergent(&app).await;
+    seed_divergent(&pool).await;
 
     let resp = app
         .clone()
@@ -334,4 +339,69 @@ async fn ordering_stays_open_when_no_fields_restriction_is_set() {
         vec![3, 2, 1],
         "with no `fields` restriction every column is exposed anyway"
     );
+}
+
+/// A hand-written serializer keeps the trait's empty
+/// `readable_source_fields`, so it names no sort key.
+#[derive(serde::Serialize)]
+struct HandPost {
+    id: i64,
+    title: String,
+}
+
+impl rustango::serializer::ModelSerializer for HandPost {
+    type Model = Post;
+    fn from_model(m: &Post) -> Self {
+        Self {
+            id: m.id.get().copied().unwrap_or_default(),
+            title: m.title.clone(),
+        }
+    }
+    fn writable_fields() -> &'static [&'static str] {
+        &[]
+    }
+}
+
+/// An empty readable set allows no `?ordering=`, not every column (#1996).
+#[tokio::test]
+async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .serializer::<HandPost>()
+        .router_pool("/posts", pool.clone());
+
+    seed_divergent(&pool).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get("/posts?ordering=secret_score"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(ids(&body), vec![1, 2, 3], "secret order leaked: {body}");
+}
+
+/// `.ordering_fields(&[])` makes nothing sortable, not every rendered field.
+#[tokio::test]
+async fn an_empty_ordering_fields_list_sorts_on_nothing() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .ordering(&[("id", false)])
+        .ordering_fields(&[])
+        .router_pool("/posts", pool.clone());
+
+    seed_divergent(&pool).await;
+
+    for q in ["secret_score", "-rating"] {
+        let resp = app
+            .clone()
+            .oneshot(get(&format!("/posts?ordering={q}")))
+            .await
+            .unwrap();
+        let body = body_json(resp).await;
+        assert_eq!(ids(&body), vec![1, 2, 3], "?ordering={q} was honoured");
+    }
 }

@@ -1,7 +1,5 @@
-//! Tenant-aware admin — wraps `rustango-admin` with per-request
+//! Tenant-aware admin: wraps `rustango-admin` with per-request
 //! resolver dispatch.
-//!
-//! The headline UX (after Slice 6 lands per-tenant auth):
 //!
 //! ```ignore
 //! let app = Router::new()
@@ -13,46 +11,33 @@
 //!     ).read_only(["audit_log"]).build());
 //! ```
 //!
-//! Per-request flow:
-//!
-//! 1. Resolver runs against `request.parts + registry`.
-//! 2. `Ok(None)` → 404.
-//! 3. `Ok(Some(org))` →
-//!    * **Database mode**: clones the tenant's cached `PgPool` and
-//!      builds a one-shot `rustango-admin` router with it.
-//!    * **Schema mode**: spins up a *short-lived* `PgPool` with an
-//!      `after_connect` hook setting `search_path` so admin queries
-//!      hit the tenant's schema. Dropped after the request.
-//! 4. The inner router's response is returned verbatim.
-//!
-//! ## Costs
-//!
 //! Per request:
-//! * 1 SQL lookup for resolver (`Org` row). v0.6+ will likely add a
-//!   small TTL cache — none in slice 4.
-//! * Database-mode: 0 extra connections; cached pool re-used.
-//! * Schema-mode: 1+ Postgres connections per request (the
-//!   short-lived pool's `after_connect` runs `SET search_path` on
-//!   every fresh connection it opens; sqlx may reuse them within
-//!   the request). Real cost; v0.6 may switch to a connection-level
-//!   model that avoids the per-request pool build.
-//! * 1 small allocator hit for the inner Router construction.
 //!
-//! ## Per-tenant auth (v0.6 step 7)
+//! 1. The resolver runs against the request parts and the registry.
+//! 2. No tenant means 404.
+//! 3. Otherwise `TenantPools::scoped_pool_dyn` gives a pool for that
+//!    tenant. Database-mode tenants reuse a cached pool. Schema-mode
+//!    Postgres tenants get a short-lived pool with `search_path`
+//!    already set, dropped when the request ends.
+//! 4. A one-shot `rustango-admin` router runs on that pool and its
+//!    response is returned as-is.
 //!
-//! Opt-in via `TenantAdminBuilder::with_session(SessionSecret)`:
+//! Resolution is cached (see [`super::resolver_cache`]), so the
+//! registry lookup is not per request.
 //!
-//! * Anon traffic redirected to `/__login` (303).
-//! * `POST /__login` calls `auth::authenticate_user` against the
-//!   resolved tenant's pool; on success issues a signed cookie.
-//! * `is_superuser = true` tenants get full read/write admin.
-//! * `is_superuser = false` tenants get a `read_only_all` admin —
-//!   list/detail render but every mutating route 403s and
-//!   write-buttons are hidden.
+//! ## Per-tenant auth
 //!
-//! Operator UI bypass at the apex remains the caller's
-//! responsibility — compose via host-based dispatch (see
-//! `multitenant_demo`).
+//! Opt in with `TenantAdminBuilder::with_session(SessionSecret)`:
+//!
+//! * Anonymous traffic is redirected to `/__login`.
+//! * `POST /__login` calls `auth::authenticate_user` on the resolved
+//!   tenant's pool and issues a signed cookie.
+//! * Superusers get the full read/write admin.
+//! * Everyone else gets a read-only admin: lists and detail pages
+//!   render, mutating routes 403, write buttons are hidden.
+//!
+//! Keeping the operator UI off the apex is still the caller's job;
+//! dispatch on host, as `multitenant_demo` does.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -77,15 +62,13 @@ use crate::storage::BoxedStorage;
 
 /// Builder for the tenant-aware admin router.
 ///
-/// Generic over the backend (`DB = DefaultTenantDb` so existing PG
-/// call sites continue to compile without a turbofish). v0.38 made
-/// the inner query layer tri-dialect — `TenantAdminBuilder<sqlx::Sqlite>`
-/// and `TenantAdminBuilder<sqlx::MySql>` build admin routers whose
-/// auth handlers + inner admin both run on the tenant's backend.
-/// Schema-mode tenants remain PG-only by language; non-PG instances
-/// silently never enter the schema-mode arm because
-/// `TenantPools<DB>::scoped_pool_dyn` rejects schema-mode for non-PG
-/// backends at runtime.
+/// Generic over the backend, defaulting to Postgres so existing call
+/// sites need no turbofish. `TenantAdminBuilder<sqlx::Sqlite>` and
+/// `TenantAdminBuilder<sqlx::MySql>` work too.
+///
+/// Schema mode is Postgres-only: on another backend
+/// `TenantPools::scoped_pool_dyn` rejects a schema-mode tenant, so
+/// that arm is never reached.
 pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
     pools: Arc<TenantPools<DB>>,
     registry_url: String,
@@ -97,16 +80,13 @@ pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
     title: Option<String>,
     subtitle: Option<String>,
     brand_storage: Option<BoxedStorage>,
-    /// v0.28.0 (#74) — configurable URL prefixes. Defaults to
-    /// `RouteConfig::default()` (legacy `__`-prefixed paths) so
-    /// upgrade is a no-op until apps set `routes(...)`.
+    /// URL prefixes. Defaults to `RouteConfig::default()`.
     routes: Arc<super::routes::RouteConfig>,
     _phantom: PhantomData<DB>,
 }
 
-/// One row in the action registry threaded through the tenant admin
-/// builder. Re-applied per request when the inner admin router is
-/// constructed for the resolved tenant.
+/// One registered admin action. Re-applied on every request, when the
+/// inner admin router is built for the resolved tenant.
 #[derive(Clone)]
 struct RegisteredAction {
     table: &'static str,
@@ -122,10 +102,9 @@ struct TenantSessionConfig {
 impl<DB: Database> TenantAdminBuilder<DB> {
     /// Build a tenant-aware admin handler.
     ///
-    /// `registry_url` is the connection string used to spin up
-    /// short-lived schema-mode admin pools. Database-mode tenants
-    /// don't need it (their pool comes from `TenantPools`); pass
-    /// any valid URL if you only have database-mode tenants.
+    /// `registry_url` is used to open short-lived schema-mode admin
+    /// pools. Database-mode tenants get their pool from `TenantPools`
+    /// instead, so any valid URL will do if you have only those.
     #[must_use]
     pub fn new(
         pools: Arc<TenantPools<DB>>,
@@ -148,10 +127,9 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         }
     }
 
-    /// Override the default URL prefixes (#74, v0.28.0). When
-    /// the operator console is also part of your app, pass the
-    /// same `RouteConfig` to `operator_console::router_*` so
-    /// both sides agree on `/login`, `/admin`, etc.
+    /// Override the default URL prefixes. If your app also mounts the
+    /// operator console, give it the same `RouteConfig` so both sides
+    /// agree on `/login`, `/admin` and the rest.
     #[must_use]
     pub fn routes(mut self, routes: super::routes::RouteConfig) -> Self {
         self.routes = Arc::new(routes);
@@ -172,42 +150,34 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         self
     }
 
-    /// Override the storage backend used for per-tenant brand assets
-    /// (logo / favicon). Accepts any [`BoxedStorage`] — `LocalStorage`,
-    /// `S3Storage` (AWS / R2 / B2 / MinIO), `InMemoryStorage` for
-    /// tests, or any user-supplied `Storage` impl. When the backend
-    /// exposes URLs via `Storage::url`, rendered `<img src>` tags
-    /// point straight at the origin/CDN — no proxy through this
-    /// process. When `None` is configured (the default), the
-    /// framework falls back to
-    /// [`super::branding::default_brand_storage`] (a `LocalStorage`
-    /// rooted at `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`).
+    /// Choose where per-tenant brand assets are stored: any
+    /// [`BoxedStorage`], such as `LocalStorage`, `S3Storage` or
+    /// `InMemoryStorage` for tests.
+    ///
+    /// If the backend returns a URL from `Storage::url`, `<img src>`
+    /// points straight at it and nothing proxies through this process.
+    /// The default is [`super::branding::default_brand_storage`].
     #[must_use]
     pub fn brand_storage(mut self, storage: BoxedStorage) -> Self {
         self.brand_storage = Some(storage);
         self
     }
 
-    /// Enable per-tenant auth. Anon traffic gets redirected to
-    /// `/__login`; `POST /__login` verifies credentials against
-    /// `rustango_users` in the resolved tenant; non-superusers see
-    /// a read-only admin (mutations 403). The same `SessionSecret`
-    /// can be shared with the operator console — different cookie
-    /// names keep the two domains isolated.
+    /// Turn on per-tenant auth. Anonymous traffic goes to `/__login`,
+    /// which checks credentials against `rustango_users` in the
+    /// resolved tenant. Non-superusers get a read-only admin.
     ///
-    /// Without this opt-in, the tenant admin remains unauthenticated
-    /// (the v0.5 behavior — useful for demos and trusted intranet
-    /// deployments).
+    /// You can share the `SessionSecret` with the operator console;
+    /// the two use different cookie names.
+    ///
+    /// Without this the tenant admin has no auth at all, which suits
+    /// demos and trusted intranets only.
     #[must_use]
     pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
-        let mut tera = Tera::default();
-        // v0.27.5 — `tenant_login.html` includes `_theme_tokens.html`
-        // (added in 0.27.3 #71 for the brand-on-login page). The
-        // include must be registered in the same Tera registry or
-        // Tera fails to resolve it and `render` returns an error,
-        // which `login_form` swallows via `unwrap_or_default()` —
-        // the operator sees a blank page. Adding the partial here
-        // is the minimal fix.
+        let mut tera = crate::template_extensions::html_tera();
+        // `tenant_login.html` includes `_theme_tokens.html`, so the
+        // partial must be in the same Tera registry or the render
+        // fails and the login page comes out blank.
         tera.add_raw_template(
             "_theme_tokens.html",
             include_str!("../styles/theme_tokens.html"),
@@ -309,7 +279,12 @@ where
             .unwrap_or_else(branding::default_brand_storage);
         let routes = self.routes;
 
-        Router::new().fallback(move |req: Request<Body>| {
+        // CSRF on every tenant admin write (#1713): tenant hosts are
+        // same-site, so `SameSite=Lax` lets `t02` post to `t01`. Same
+        // pair as the console: the layer checks token and Origin, and
+        // inside it `csrf_context` sets the token every form renders.
+        // `layer`, not `route_layer`: everything here is the fallback.
+        let router = Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
             let registry_url = registry_url.clone();
             let resolver = resolver.clone();
@@ -338,7 +313,12 @@ where
                 )
                 .await
             }
-        })
+        });
+        router
+            .layer(axum::middleware::from_fn(
+                crate::admin::csrf_context::csrf_context,
+            ))
+            .layer(crate::forms::csrf::layer())
     }
 }
 
@@ -381,73 +361,79 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "resolver error");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Logged, not sent: the resolver error can name the registry host.
+            let body = crate::error::server_error_body("tenancy::admin::resolve", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
-    // v0.38 — `scoped_pool_dyn` returns the unified `Pool` enum:
-    // for schema-mode PG tenants it builds a short-lived PgPool with
-    // `search_path` baked in (Schema → `Pool::Postgres`); for
-    // database-mode tenants it hands back a cheap Arc clone of the
-    // cached `sqlx::Pool<DB>` wrapped in the right `Pool::…`
-    // variant. Schema-mode on non-PG backends returns
-    // `TenancyError::Validation` (it's PG-only by language).
+    // A path-prefix tenant's admin lives under its prefix (#2059).
+    let prefixed;
+    let routes = match org
+        .path_prefix
+        .as_deref()
+        .filter(|p| super::routes::path_is_under(parts.uri.path(), p))
+    {
+        Some(p) => {
+            prefixed = routes.under_prefix(p);
+            &prefixed
+        }
+        None => routes,
+    };
+
+    // A schema-mode PG tenant gets a short-lived pool with
+    // `search_path` already set; a database-mode tenant gets a cheap
+    // clone of its cached pool. Schema mode on another backend errors.
     let pool = match pools.scoped_pool_dyn(&org).await {
         Ok(p) => p,
         Err(e) => {
-            warn!(
-                target: "rustango::tenancy::admin",
-                slug = %org.slug,
-                error = %e,
-                "tenant pool build failed",
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            // Before the session check, and the text can name the tenant DB host.
+            let body = crate::error::server_error_body("tenancy::admin::pool", &e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
         }
     };
 
-    // Per-tenant auth opt-in. Without `with_session`, the v0.5 path
-    // still applies — every request goes straight to the inner admin.
+    // Per-tenant auth is opt-in. Without `with_session`, every request
+    // goes straight to the inner admin.
     let mut user_perms: Option<std::collections::HashSet<String>> = None;
     let mut session_user_id: Option<i64> = None;
     // Chrome session info threaded into the inner admin so the sidebar
     // renders "Signed in as <username>" + the Logout button.
     let mut session_username: Option<String> = None;
     let mut session_is_superuser = false;
-    // v0.27.8 (#78) — populated when the session was minted by
-    // the operator console's impersonation flow. Threaded into
-    // the chrome context for the impersonation banner + into
-    // audit-log emit so writes record `operator:<id>:impersonating`.
+    // Set when the operator console minted this session. Drives the
+    // impersonation banner, and makes writes record
+    // `operator:<id>:impersonating` in the audit log.
     let mut impersonated_by: Option<i64> = None;
     if let Some(cfg) = session {
         let path = parts.uri.path().to_owned();
         let method = parts.method.clone();
 
-        // Public surface — login / logout / brand-static. v0.28.0
-        // (#74): paths come from `RouteConfig` so apps can map
-        // `/login` etc. without the `__` prefix.
+        // Public surface: login, logout, static assets. Paths come
+        // from `RouteConfig`, so an app can drop the `__` prefix.
         let static_rustango_url = format!("{}/rustango.png", routes.static_url);
         if path == static_rustango_url {
             return rustango_png_response();
         }
-        // v0.30.19 — favicon route. Square `icon.png` chosen over
-        // `.ico` because the .ico file the brand assets shipped
-        // wraps a non-square inner image and renders poorly across
-        // browsers.
+        // Favicon. A square `icon.png`, not `.ico`: the shipped .ico
+        // wraps a non-square image and renders poorly.
         let static_icon_png_url = format!("{}/icon.png", routes.static_url);
         if path == static_icon_png_url {
             return rustango_icon_png_response();
         }
-        // v0.29 (#88) — operator-as-superuser impersonation
-        // handoff. The operator console mints a signed
-        // `HandoffPayload` and 302s the browser here; we redeem
-        // the token, set a host-scoped impersonation cookie, and
-        // 302 onward to the admin index. Single-use enforced via
-        // `JtiBlacklist` so a leaked URL can't be replayed.
+        // Impersonation handoff. Redeem the console's signed token,
+        // set a host-scoped cookie, and redirect to the admin index.
+        // `JtiBlacklist` makes the token single use.
         if path == routes.impersonation_handoff_url && method == axum::http::Method::GET {
-            return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
-                .await
-                .into_response();
+            return redeem_impersonation_handoff(
+                &org,
+                cfg,
+                routes,
+                parts.uri.query(),
+                &pools.registry_pool(),
+            )
+            .await
+            .into_response();
         }
         // SSO (admin-sso) — multi-provider OpenID Connect / social OAuth.
         // `{login}/sso/{slug}` starts the handshake for one provider;
@@ -496,6 +482,7 @@ where
                             brand_storage,
                             routes,
                             parts.uri.query(),
+                            &parts.headers,
                             &pool,
                             &registry_pool,
                         )
@@ -503,25 +490,74 @@ where
                         .into_response()
                     };
                     #[cfg(not(feature = "admin-sso"))]
-                    let resp = login_form(&org, cfg, brand_storage, routes, parts.uri.query())
-                        .await
-                        .into_response();
+                    let resp = login_form(
+                        &org,
+                        cfg,
+                        brand_storage,
+                        routes,
+                        parts.uri.query(),
+                        &parts.headers,
+                    )
+                    .await
+                    .into_response();
                     resp
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, &pool, routes, parts.headers, body).await
+                    login_submit(
+                        &org,
+                        cfg,
+                        &pool,
+                        routes,
+                        &parts.extensions,
+                        parts.headers,
+                        body,
+                    )
+                    .await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
         }
         if path == routes.logout_url && method == axum::http::Method::POST {
             use crate::signals::auth::{
-                meta_from_headers, send_user_logged_out, UserLoggedOutContext,
+                meta_from_parts, send_user_logged_out, UserLoggedOutContext,
             };
             // Best-effort: decode the session cookie so the signal
             // carries user_id / username. Receivers tolerate `None`.
             let (uid, uname) = decode_session_user(&parts.headers, cfg, &org.slug);
-            let meta = meta_from_headers(&parts.headers, Some(routes.logout_url.as_str()));
+            let meta = meta_from_parts(
+                &parts.extensions,
+                &parts.headers,
+                Some(routes.logout_url.as_str()),
+            );
+            // End the user's sessions everywhere. An impersonation logout
+            // leaves the operator's console session alone.
+            let revoked =
+                match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
+                    .await
+                {
+                    SessionCheck::Authenticated {
+                        user_id,
+                        impersonated_by: None,
+                        sessions_revoked_at,
+                        iat,
+                        ..
+                    } => crate::session::revoke_sessions::<super::auth::User>(
+                        &pool,
+                        user_id,
+                        sessions_revoked_at,
+                        iat,
+                    )
+                    .await
+                    .map(drop)
+                    .map_err(|e| e.to_string()),
+                    // Never report a logout that did not happen.
+                    SessionCheck::Error(e) => Err(e),
+                    _ => Ok(()),
+                };
+            if let Err(e) = revoked {
+                warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "logout revoke failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "logout failed").into_response();
+            }
             send_user_logged_out(UserLoggedOutContext {
                 source: "tenant_admin",
                 user_id: uid,
@@ -550,6 +586,7 @@ where
                 user_id,
                 username,
                 impersonated_by: imp_by,
+                ..
             } => {
                 session_user_id = Some(user_id);
                 session_username = Some(username);
@@ -603,7 +640,11 @@ where
                         .into_response()
                 }
                 axum::http::Method::POST => {
-                    change_password_submit(&org, &pool, routes, user_id, body).await
+                    let ip = crate::login_throttle::ClientIp::from_parts(
+                        &parts.extensions,
+                        &parts.headers,
+                    );
+                    change_password_submit(&org, &pool, routes, user_id, &ip, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -628,12 +669,9 @@ where
         routes.static_url.as_str(),
     );
 
-    // Strip the configurable admin mount prefix from the request
-    // URI so the inner admin router sees plain `/{table}` paths.
-    // Requests routed via the explicit `<admin_url>/{*rest}`
-    // route in the builder carry the full URI; session-only
-    // paths (login / logout) go through the fallback and are
-    // NOT prefixed. (#74, v0.28.0)
+    // Strip the admin mount prefix so the inner router sees plain
+    // `/{table}` paths. Login and logout go through the fallback and
+    // carry no prefix.
     if let Some(stripped) = parts.uri.path().strip_prefix(routes.admin_url.as_str()) {
         let new_path = if stripped.is_empty() { "/" } else { stripped };
         let new_pq = if let Some(q) = parts.uri.query() {
@@ -646,12 +684,21 @@ where
         }
     }
 
+    // Same two places the bare admin's `require_session` puts it:
+    // request extensions (handlers, custom views) and the task-local
+    // (chrome).
+    let admin_session = session_user_id.map(|uid| crate::admin::session::AdminSession {
+        user_id: uid,
+        username: session_username.clone().unwrap_or_default(),
+        is_superuser: session_is_superuser,
+    });
+    if let Some(sess) = &admin_session {
+        parts.extensions.insert(sess.clone());
+    }
     let inner_req = Request::from_parts(parts, body);
-    // v0.12.1: wrap the inner-router dispatch in an `audit::with_source`
-    // scope so any audited Model write inside the request picks up
-    // the authenticated user automatically. Anonymous public surface
-    // and projects without `with_session` get `AuditSource::System`
-    // by default (no scope entered).
+    // Dispatch inside an `audit::with_source` scope so audited writes
+    // pick up the signed-in user. With no session the source stays
+    // `AuditSource::System`.
     let dispatch = async {
         match admin_router.oneshot(inner_req).await {
             Ok(r) => r,
@@ -671,18 +718,8 @@ where
             dispatch.await
         }
     };
-    // Install the request's session into the admin task-local the inner
-    // chrome reads (`admin::session::current()`), so the tenant admin
-    // sidebar renders "Signed in as <username>" + the Logout button —
-    // the bare admin gets this from its own `require_session` middleware,
-    // which the tenant admin path bypasses.
-    let response = match session_user_id {
-        Some(uid) => {
-            let sess = crate::admin::session::AdminSession {
-                user_id: uid,
-                username: session_username.clone().unwrap_or_default(),
-                is_superuser: session_is_superuser,
-            };
+    let response = match admin_session {
+        Some(sess) => {
             crate::admin::session::CURRENT_SESSION
                 .scope(sess, audited)
                 .await
@@ -707,8 +744,8 @@ enum SessionCheck {
         /// duration of the inner-router dispatch so any audited
         /// write picks up the user-attribution automatically.
         user_id: i64,
-        /// Username of the authenticated user (empty for an
-        /// operator-impersonation session, which has no tenant user).
+        /// Username of the authenticated user (`operator:<username>` for
+        /// an operator-impersonation session, which has no tenant user).
         /// Threaded into the inner admin's chrome session so the
         /// sidebar renders "Signed in as <username>" + Logout.
         username: String,
@@ -717,19 +754,21 @@ enum SessionCheck {
         /// flow (#78). Drives the impersonation banner +
         /// audit-log `source` shape.
         impersonated_by: Option<i64>,
+        /// The tenant user's cut-off, for logout (#1855). `None` when impersonating.
+        sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// The cookie's issued-at, so logout's cut-off covers it (#1855).
+        iat: i64,
     },
     Anonymous,
     Error(String),
 }
 
-/// Best-effort: extract `(user_id, username_unknown)` from a session
-/// cookie so the auth-logout signal can carry the user id even when no
-/// further DB lookup is feasible. Returns `(None, None)` on any decode
-/// error (missing cookie, bad signature, expired, wrong slug).
+/// Read the user id out of a session cookie, so the logout signal can
+/// name the user without a database query.
 ///
-/// Username is unrecoverable from the cookie payload alone (the tenant
-/// session payload only stores `uid`), so we return `None` for it and
-/// leave the receiver responsible for a username lookup if needed.
+/// The cookie holds only `uid`, so the username is always `None`; look
+/// it up separately if you need it. Any decode problem — missing
+/// cookie, bad signature, expired, wrong slug — gives `(None, None)`.
 fn decode_session_user(
     headers: &HeaderMap,
     cfg: &TenantSessionConfig,
@@ -761,15 +800,9 @@ async fn validate_session(
         Ok(p) => p,
         Err(_) => return SessionCheck::Anonymous,
     };
-    // v0.27.8 (#78) — impersonation cookies are minted by the operator
-    // console; they grant tenant-superuser.
-    //
-    // Audit P5 — re-check the impersonating operator is STILL live
-    // (exists + active) on every request, against the registry pool.
-    // Without this, an operator deactivated/deleted after minting the
-    // cookie keeps full tenant-superuser admin for the whole
-    // impersonation TTL (up to ~1h) — the same stale-authorization class
-    // the P1-P4 fixes closed for the four first-class principals.
+    // An impersonation cookie from the operator console grants tenant
+    // superuser. Re-check on every request that the operator still
+    // exists, is active and has the same password.
     if let Some(operator_id) = payload.imp {
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
@@ -788,13 +821,28 @@ async fn validate_session(
             }
         };
         return match ops.into_iter().next() {
-            Some(op) if op.active => SessionCheck::Authenticated {
-                is_superuser: true,
-                user_id: 0,
-                username: String::new(),
-                impersonated_by: Some(operator_id),
-            },
-            // Operator gone or deactivated → drop the impersonation.
+            Some(op)
+                if op.active
+                    && super::session::session_survives(
+                        &cfg.secret,
+                        &payload.pwf,
+                        payload.iat,
+                        &op.password_hash,
+                        op.password_changed_at,
+                        op.sessions_revoked_at,
+                    ) =>
+            {
+                SessionCheck::Authenticated {
+                    is_superuser: true,
+                    user_id: 0,
+                    // Names the operator in `updated_by` and the sidebar (#1939).
+                    username: format!("operator:{}", op.username),
+                    impersonated_by: Some(operator_id),
+                    sessions_revoked_at: None,
+                    iat: payload.iat,
+                }
+            }
+            // Operator gone, deactivated, changed password or logged out → drop it.
             _ => SessionCheck::Anonymous,
         };
     }
@@ -823,19 +871,24 @@ async fn validate_session(
     if !user.active {
         return SessionCheck::Anonymous;
     }
-    // v0.28.4 — invalidate sessions issued before the latest password
-    // rotation. `password_changed_at IS NULL` means the account
-    // predates v0.28.4 and never rotated; we don't enforce.
-    if let Some(ts) = user.password_changed_at {
-        if payload.iat < ts.timestamp() {
-            return SessionCheck::Anonymous;
-        }
+    // Invalidate sessions minted before the latest password change or logout.
+    if !super::session::session_survives(
+        &cfg.secret,
+        &payload.pwf,
+        payload.iat,
+        &user.password_hash,
+        user.password_changed_at,
+        user.sessions_revoked_at,
+    ) {
+        return SessionCheck::Anonymous;
     }
     SessionCheck::Authenticated {
         is_superuser: user.is_superuser,
         user_id: payload.uid,
         username: user.username.clone(),
         impersonated_by: None,
+        sessions_revoked_at: user.sessions_revoked_at,
+        iat: payload.iat,
     }
 }
 
@@ -856,9 +909,10 @@ async fn login_form(
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    headers: &HeaderMap,
     #[cfg(feature = "admin-sso")] tenant_pool: &crate::sql::Pool,
     #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
-) -> axum::response::Html<String> {
+) -> Response {
     let mut next: Option<String> = None;
     let mut error: Option<String> = None;
     if let Some(q) = query {
@@ -879,12 +933,8 @@ async fn login_form(
     ctx.insert("tenant_name", &org.display_name);
     ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &error);
-    // v0.27.3 (#71) — thread per-tenant brand context so the
-    // unauthenticated login page picks up the org's logo,
-    // favicon, brand color, theme, and display name. Pre-fix
-    // these fields were absent from the context and the template
-    // hardcoded `/__static__/rustango.png` + `--accent: #2c6fb0`,
-    // so uploaded brand assets never reached the login screen.
+    // Per-tenant brand, so even the login page shows the org's logo,
+    // favicon, color, theme and name.
     let brand_name = org
         .brand_name
         .as_deref()
@@ -918,10 +968,29 @@ async fn login_form(
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
     }
+    // Seed the double-submit CSRF token so the first GET already
+    // carries one; without it the first POST would always fail
+    // (#1607). The cookie rides on this response.
+    // Under `build()` the request's token (and its cookie) comes from
+    // `csrf_context`; minting a second one here would not match (#1713).
+    #[cfg(feature = "csrf")]
+    let set_cookie = match crate::admin::session::current_csrf_token() {
+        Some(token) => {
+            ctx.insert("csrf_token", &token);
+            None
+        }
+        None => {
+            let (token, cookie) =
+                crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
+            ctx.insert("csrf_token", &token);
+            cookie
+        }
+    };
+
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
-    axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
+    let html = axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
@@ -935,7 +1004,16 @@ async fn login_form(
              server logs for the underlying Tera error.</p></body></html>"
                 .to_owned()
         }
-    })
+    });
+
+    let mut resp = html.into_response();
+    #[cfg(feature = "csrf")]
+    if let Some(cookie) = set_cookie {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    resp
 }
 
 #[derive(serde::Deserialize)]
@@ -944,6 +1022,8 @@ struct LoginSubmitForm {
     password: String,
     #[serde(default)]
     next: Option<String>,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 async fn login_submit(
@@ -951,17 +1031,20 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    extensions: &axum::http::Extensions,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
+    use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
-        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
     use crate::sql::FetcherPool as _;
 
-    let meta = meta_from_headers(&headers, Some(routes.login_url.as_str()));
+    let ip = crate::login_throttle::ClientIp::from_parts(extensions, &headers);
+    let meta = meta_from_parts(extensions, &headers, Some(routes.login_url.as_str()));
 
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),
@@ -972,6 +1055,29 @@ async fn login_submit(
         Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
     };
     let next = sanitize_next(form.next.as_deref());
+
+    // Login CSRF (#1607): reject before the user lookup, so a forged
+    // POST costs nothing and cannot probe usernames by timing.
+    // `SameSite=Lax` does not cover this — login CSRF sets a *new*
+    // session rather than replaying an existing one, which is what
+    // makes "the victim is now inside the attacker's account" possible.
+    #[cfg(feature = "csrf")]
+    if !crate::forms::csrf::verify_form_token(&headers, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
+    }
+
+    // Rate limits and the account lock, before the lookup (#1609).
+    let mut attempt = match crate::login_throttle::shared()
+        .begin(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &ip,
+            &form.username,
+        )
+        .await
+    {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
 
     // v0.38 — auth check via the tri-dialect ORM. The query targets
     // the tenant's `rustango_users` table on the user-supplied pool;
@@ -1005,45 +1111,36 @@ async fn login_submit(
         };
         async move { send_user_login_failed(ctx).await }
     };
-    let Some(user) = users.into_iter().next() else {
+    let Some(mut user) = users.into_iter().next() else {
         // Audit H1 — this handler does its own lookup+verify (so it
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
         // doesn't reveal whether the username exists.
-        super::password::verify_dummy(&form.password);
+        if super::password::verify_dummy_async(&form.password)
+            .await
+            .is_err()
+        {
+            return LoginRefused::Busy.into_response();
+        }
+        attempt.failed().await;
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
-    let uid: i64 = user.id.get().copied().unwrap_or(0);
-
-    // Audit M1 (console) — per-account brute-force lockout, on by
-    // default, keyed by tenant slug + resolved user id (no
-    // arbitrary-name DoS, no cross-tenant id collision). A locked
-    // account is rejected before the password verify.
-    #[cfg(feature = "cache")]
-    let lock_key = format!("tenant:{}:{}", org.slug, uid);
-    #[cfg(feature = "cache")]
-    if uid != 0 && crate::account_lockout::shared().is_locked(&lock_key).await {
-        fire_failed(AuthFailureReason::InvalidCredentials).await;
-        return bad_creds();
+    if let Err(refused) = attempt.resolve(&user.username).await {
+        return refused.into_response();
     }
+    let uid: i64 = user.id.get().copied().unwrap_or(0);
 
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
-    let ok = matches!(
-        super::password::verify(&form.password, &user.password_hash),
-        Ok(true)
-    );
+    let ok = match super::password::verify_async(&form.password, &user.password_hash).await {
+        Ok(ok) => ok,
+        Err(super::TenancyError::Busy) => return LoginRefused::Busy.into_response(),
+        Err(_) => false,
+    };
 
     if !user.active || !ok || uid == 0 {
-        // Audit M1 — count the failure against the resolved id (existing
-        // accounts only).
-        #[cfg(feature = "cache")]
-        if uid != 0 {
-            let _ = crate::account_lockout::shared()
-                .record_failure(&lock_key)
-                .await;
-        }
+        attempt.failed().await;
         let reason = if !user.active {
             AuthFailureReason::Inactive
         } else {
@@ -1053,19 +1150,30 @@ async fn login_submit(
         return bad_creds();
     }
 
-    // Audit M1 — successful login clears the failure counter + any lock.
-    #[cfg(feature = "cache")]
-    crate::account_lockout::shared().clear(&lock_key).await;
+    attempt.succeeded().await;
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        tenant_pool,
+        <super::auth::User as crate::core::Model>::SCHEMA,
+        uid,
+        &form.password,
+        &user.password_hash,
+    )
+    .await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
+    let mut payload = TenantSessionPayload::new(
+        uid,
+        &org.slug,
+        ttl_secs,
+        super::session::PasswordFingerprint::of(&cfg.secret, &user.password_hash),
+    );
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        // Audit H2 — Secure on the prod tier (HTTPS); off in dev so the
-        // local plain-HTTP login + impersonation-handoff flow still work.
+        // Secure in production; off in dev so plain-HTTP login works.
         .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(ttl_secs))
         .build();
@@ -1090,8 +1198,8 @@ fn logout_response(routes: &super::routes::RouteConfig) -> Response {
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        // Match the Secure attribute used when set so the browser clears
-        // it reliably (audit H2).
+        // Match the Secure flag used when setting it, or the browser
+        // may not clear it.
         .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
@@ -1103,24 +1211,22 @@ fn logout_response(routes: &super::routes::RouteConfig) -> Response {
     resp
 }
 
-/// v0.29 (#88) — redeem an operator-console-minted impersonation
-/// handoff token. Validates signature + expiry + slug binding +
-/// single-use, then mints the host-scoped impersonation cookie
-/// and 302s onward to the admin index.
+/// Redeem an impersonation handoff token from the operator console.
+/// Checks the signature, expiry, slug and single use, then sets the
+/// host-scoped impersonation cookie and redirects to the admin index.
 ///
-/// All failure modes return a 401 with a generic body — the
-/// operator console emits descriptive logs on the mint side, and
-/// leaking detail here would help an attacker tune a brute-force
-/// against the token format.
-/// Async since v0.52 — marking the handoff jti single-use goes through the
-/// [`crate::jti_store::JtiStore`], which may be durable (#1191).
+/// Every failure returns a plain 401. Detail here would help an
+/// attacker probe the token format; the mint side logs the specifics.
 async fn redeem_impersonation_handoff(
     org: &super::Org,
     cfg: &TenantSessionConfig,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    registry: &crate::sql::Pool,
 ) -> Response {
     use super::impersonation_handoff::{decode, JtiBlacklist};
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
 
     let token = match query.and_then(extract_token_param) {
         Some(t) => t,
@@ -1138,6 +1244,31 @@ async fn redeem_impersonation_handoff(
             return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
         }
     };
+    // A token minted before the operator logged out or changed password is dead.
+    let op = match super::auth::Operator::objects()
+        .where_(super::auth::Operator::id.eq(payload.op))
+        .fetch(registry)
+        .await
+    {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => {
+            warn!(target: "rustango::tenancy::admin", slug = %org.slug, error = %e, "handoff operator lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "operator lookup failed").into_response();
+        }
+    };
+    if !op.is_some_and(|op| {
+        op.active
+            && super::session::session_survives(
+                &cfg.secret,
+                &payload.pwf,
+                payload.iat,
+                &op.password_hash,
+                op.password_changed_at,
+                op.sessions_revoked_at,
+            )
+    }) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
     if let Err(e) = JtiBlacklist::shared()
         .mark_used(&payload.jti, payload.exp)
         .await
@@ -1152,18 +1283,20 @@ async fn redeem_impersonation_handoff(
         return (StatusCode::UNAUTHORIZED, "token already used").into_response();
     }
 
-    // Valid token — mint the host-scoped impersonation cookie.
-    // No `Domain=` so Chromium accepts it on localhost.
+    // Token is good. Set the cookie host-scoped, with no `Domain=`,
+    // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs);
+    let mut session =
+        TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
+    // The session dates from the handoff's mint, on the console's clock.
+    session.iat = payload.iat;
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        // Audit H2 — Secure on the prod tier (HTTPS); off in dev so the
-        // local plain-HTTP login + impersonation-handoff flow still work.
+        // Secure in production; off in dev so plain-HTTP login works.
         .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(ttl_secs))
         .build();
@@ -1176,11 +1309,9 @@ async fn redeem_impersonation_handoff(
     if let Ok(v) = HeaderValue::from_str(&cookie.to_string()) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    // Belt-and-suspenders: prevent the destination page from
-    // leaking the still-fresh URL via Referer to anything it
-    // loads. The token is single-use anyway, but third-party
-    // scripts on the admin index would otherwise see the
-    // redeemed token in their access logs.
+    // Keep the still-fresh URL out of `Referer`. The token is single
+    // use, but a third-party script on the admin index would
+    // otherwise see it in its access logs.
     resp.headers_mut().insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
@@ -1195,9 +1326,9 @@ async fn redeem_impersonation_handoff(
     resp
 }
 
-/// Pull the `token` value out of a raw query string. Skips a
-/// dependency on `serde_urlencoded` — the only param we care
-/// about is `token`, and any extra params ride along harmlessly.
+/// Pull the `token` value out of a raw query string. `token` is the
+/// only parameter that matters here, so this avoids a parser
+/// dependency.
 fn extract_token_param(query: &str) -> Option<String> {
     for pair in query.split('&') {
         if let Some(value) = pair.strip_prefix("token=") {
@@ -1207,23 +1338,20 @@ fn extract_token_param(query: &str) -> Option<String> {
     None
 }
 
-/// v0.27.8 (#78) — clear the impersonation cookie and 302
-/// back to the operator console at the apex. The operator's
-/// own session cookie (`rustango_op_session`) on the apex
-/// hostname is unaffected so they don't have to re-login.
+/// Clear the impersonation cookie and send the browser back to the
+/// operator console. The operator's own apex session cookie is left
+/// alone, so they stay signed in there.
 ///
-/// Apex URL is read from `RUSTANGO_APEX_DOMAIN` /
-/// `RUSTANGO_TENANT_SCHEME` / `RUSTANGO_TENANT_PORT`. Falls
-/// back to `/` (relative) when the env vars aren't set, which
-/// at least clears the cookie cleanly even if it sends the
-/// browser somewhere unexpected.
+/// The apex URL comes from `RUSTANGO_APEX_DOMAIN`,
+/// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
+/// them set it falls back to `/`, which still clears the cookie.
 fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response {
     let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        // Match the Secure attribute used when set so the browser clears
-        // it reliably (audit H2).
+        // Match the Secure flag used when setting it, or the browser
+        // may not clear it.
         .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
@@ -1305,6 +1433,9 @@ fn change_password_form(
     ctx.insert("admin_url", &routes.admin_url);
     ctx.insert("logout_url", &routes.logout_url);
     ctx.insert("static_url", &routes.static_url);
+    if let Some(token) = crate::admin::session::current_csrf_token() {
+        ctx.insert("csrf_token", &token);
+    }
     axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -1323,10 +1454,11 @@ fn change_password_form(
 }
 
 async fn change_password_submit(
-    _org: &Org,
+    org: &Org,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     user_id: i64,
+    ip: &crate::login_throttle::ClientIp,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
@@ -1359,6 +1491,9 @@ async fn change_password_submit(
     if form.new_password == form.current_password {
         return redir_err("New password must differ from the current password.");
     }
+    if let Err(e) = crate::password_validators::check_builtin_form_password(&form.new_password) {
+        return redir_err(&e.message);
+    }
     if user_id <= 0 {
         return redir_err("Session is missing a user id; please log in again.");
     }
@@ -1380,14 +1515,37 @@ async fn change_password_submit(
     let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify(&form.current_password, &user.password_hash).unwrap_or(false);
+    let verify = async {
+        match super::password::verify_async(&form.current_password, &user.password_hash).await {
+            Ok(ok) => Ok(ok),
+            Err(super::TenancyError::Busy) => Err(crate::login_throttle::LoginRefused::Busy),
+            Err(_) => Ok(false),
+        }
+    };
+    let ok = match crate::login_throttle::shared()
+        .verify_current_password(
+            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            ip,
+            &user.username,
+            verify,
+        )
+        .await
+    {
+        Ok(ok) => ok,
+        Err(refused) => return refused.into_response(),
+    };
     if !ok {
         return redir_err("Current password did not match.");
     }
-    let new_hash = match super::password::hash(&form.new_password) {
+    let new_hash = match super::password::hash_async(&form.new_password).await {
         Ok(h) => h,
+        Err(super::TenancyError::Busy) => {
+            return crate::login_throttle::LoginRefused::Busy.into_response()
+        }
         Err(e) => {
-            return redir_err(&format!("hash failed: {e}"));
+            // The hasher's text stays in the log, not the redirect URL (#2021).
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password hash");
+            return redir_err("Could not update the password; please try again.");
         }
     };
     user.password_hash = new_hash;
@@ -1426,28 +1584,11 @@ fn rustango_icon_png_response() -> Response {
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for piece in raw.split(';') {
-        let piece = piece.trim();
-        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
-            return Some(value.to_owned());
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(headers, name).map(str::to_owned)
 }
 
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
+// The crate's one query-value encoder (#1663); it also escapes `/`.
+use crate::url_codec::url_encode as urlencoding_lite;
 
 // Percent-decoder consolidated into [`crate::url_codec`] — same
 // behavior the local `url_decode_lite` had (lossy UTF-8 conversion).
@@ -1458,18 +1599,19 @@ fn sanitize_next(next: Option<&str>) -> String {
 }
 
 fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteConfig) -> String {
-    match next {
-        Some(s)
-            if s.starts_with('/')
-                && !s.starts_with("//")
-                && !s.contains("://")
-                && !s.starts_with(&routes.login_url)
-                && !s.starts_with(&routes.logout_url) =>
-        {
-            s.to_owned()
-        }
-        _ => "/".to_owned(),
+    // `auth_decorators::safe_next` owns the shape check: it
+    // percent-decodes, requires both the raw and decoded form to look
+    // like a path, and rejects `/\`, which a browser rewrites into a
+    // protocol-relative URL. Do not hand-roll it here.
+    let Some(s) = next.and_then(crate::auth_decorators::safe_next) else {
+        return "/".to_owned();
+    };
+    // Bouncing back to login/logout would loop. Not a safety check —
+    // that is `safe_next`'s job — so it stays here.
+    if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
+        return "/".to_owned();
     }
+    s
 }
 
 fn build_inner_admin_router(
@@ -1496,6 +1638,8 @@ fn build_inner_admin_router(
     // directly) leave the flag off and see every model.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
+        // The tenancy session layer gates every route of this admin.
+        .gated_upstream()
         // v0.28.0 (#74) — pass the configurable admin prefix
         // through to the inner admin's chrome_context so
         // template hrefs resolve correctly under any mount.
@@ -1588,9 +1732,174 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             | branding::BrandError::InvalidSlug
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => {
-            warn!(target: "rustango::tenancy::admin", error = %e, "brand asset");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        // Unauthenticated route; a storage error can name the bucket or path.
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error::server_error_body("tenancy::admin::brand_asset", &e),
+        )
+            .into_response(),
+    }
+}
+
+/// #1526. Exercises `sanitize_next_with_routes` — the function
+/// `login_submit` actually calls at `:974`, whose result reaches
+/// `Location` — rather than `urls::url_has_allowed_host_and_scheme`,
+/// which nothing in this codebase calls and which is where the
+/// original fix landed.
+/// A resolver failure is a 500 whose body withholds the driver text (#1684).
+#[cfg(all(test, feature = "sqlite"))]
+mod resolver_error_tests {
+    use super::*;
+    use crate::tenancy::TenancyError;
+
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl OrgResolver for Failing {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::sql::Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            Err(TenancyError::Resolution(
+                "could not reach registry-db:5432".into(),
+            ))
         }
+    }
+
+    #[tokio::test]
+    async fn the_500_withholds_the_resolver_text() {
+        let _env = crate::error::test_env::lock();
+        let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pools = TenantPools::<sqlx::Sqlite>::new(registry);
+        let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = handle_request(
+            req,
+            &pools,
+            "",
+            &Failing,
+            &None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &storage,
+            &super::super::routes::RouteConfig::default(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("registry-db"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod sanitize_next_tests {
+    use super::sanitize_next_with_routes;
+    use crate::tenancy::routes::RouteConfig;
+
+    fn nxt(s: Option<&str>) -> String {
+        sanitize_next_with_routes(s, &RouteConfig::default())
+    }
+
+    #[test]
+    fn a_backslash_the_browser_rewrites_is_refused() {
+        // Each leaves as protocol-relative `//evil…` once the browser
+        // applies its `\` → `/` rewrite, while starting with `/` in
+        // the source text — which is what the old hand-rolled check
+        // accepted.
+        for hostile in [
+            "/\\evil.example/x",
+            "/\\\\evil.example/x",
+            "\\/evil.example/x",
+            "/%5Cevil.example/x",
+        ] {
+            assert_eq!(
+                nxt(Some(hostile)),
+                "/",
+                "`{hostile}` must not reach Location"
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_shapes_are_still_refused() {
+        for hostile in [
+            "//evil.example/x",
+            "https://evil.example",
+            "javascript:1",
+            // The browser strips TAB, CR and LF while parsing a URL
+            // (WHATWG URL 4.1), so each of these leaves as the
+            // protocol-relative `//evil.example` (#1604 security-001).
+            "/\x09/evil.example/x",
+            "/\x0d/evil.example/x",
+            "/\x0a/evil.example/x",
+        ] {
+            assert_eq!(nxt(Some(hostile)), "/", "{hostile}");
+        }
+        assert_eq!(nxt(None), "/");
+    }
+
+    #[test]
+    fn an_ordinary_path_still_survives() {
+        // The control. Without it, a sanitizer that returned "/" for
+        // everything would satisfy both assertions above and quietly
+        // break every post-login redirect.
+        for ok in ["/admin/posts", "/admin/posts?page=2"] {
+            assert_eq!(nxt(Some(ok)), ok, "{ok} should survive");
+        }
+    }
+
+    #[test]
+    fn the_login_loop_guard_still_applies() {
+        // Not a safety check — it stops a redirect loop — but it is
+        // the behaviour the old hand-rolled version also provided, so
+        // delegating must not drop it.
+        let routes = RouteConfig::default();
+        assert_eq!(
+            sanitize_next_with_routes(Some(&routes.login_url), &routes),
+            "/",
+        );
+    }
+}
+
+/// #1627 — the tenant admin is gated by the tenancy session layer, so
+/// building it must not raise `check --deploy`'s ungated warning.
+#[cfg(all(test, feature = "sqlite"))]
+mod ungated_flag_tests {
+    #[tokio::test]
+    async fn the_tenant_admin_is_not_flagged_ungated() {
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let storage: super::BoxedStorage =
+            std::sync::Arc::new(crate::storage::InMemoryStorage::new());
+        let _admin = super::build_inner_admin_router(
+            pool,
+            &None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &crate::testkit::org(),
+            &storage,
+            None,
+            "/admin",
+            "/change-password",
+            "/logout",
+            "/audit",
+            "/static",
+        );
+        let flagged = crate::admin::ungated_admin_built();
+        crate::admin::reset_ungated_admin_built();
+        assert!(!flagged, "the tenancy-gated admin was flagged ungated");
     }
 }

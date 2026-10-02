@@ -5,7 +5,7 @@ fragment, a third-party API call — so the next request gets it instantly inste
 of recomputing. **Rustango** gives you one `Cache` trait with swappable backends
 (in-memory, Redis, database), a compute-on-miss helper (`get_or_set`), and typed
 JSON helpers. Swap the backend without touching a single call site — like
-Django's cache framework or Laravel's `Cache` facade.
+Laravel's `Cache` facade.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
 
@@ -50,12 +50,18 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | Use for |
-|---|---|---|
-| `InMemoryCache` | `cache` | dev, tests, single process (per-process HashMap + TTL) |
-| `RedisCache` | `cache-redis` | production; shared across replicas |
-| `DbCache` | `cache` | production without Redis; a `rustango_cache` table |
-| `NullCache` | `cache` | disable caching (every read misses) — handy in tests |
+| Backend | Feature | `[cache] backend` | Use for |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(default)* | dev, tests, single process (per-process HashMap + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | production; shared across replicas |
+| `DatabaseCache` | `cache` | `db` / `database` | production without Redis; a `rustango_cache` table |
+| `FileCache` | `cache` | `file` | one file per key under `file_cache_dir`; shared only if the directory is |
+| `NullCache` | `cache` | `null` / `none` | disable caching (every read misses) — handy in tests |
+
+There is no `postgres` value — the DB backend is `db` or `database`. A
+`CacheSettings` doc comment claimed otherwise until
+[#1400](https://github.com/ujeenet/rustango/issues/1400), and an unrecognised
+value gets you an in-memory cache with a warning.
 
 ---
 
@@ -142,6 +148,28 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` sets a default TTL applied when you pass
 `None`.
 
+### A TTL is an upper bound, not a guarantee
+
+`InMemoryCache` is **size-bounded by default** — 256 MiB or 100 000 entries,
+whichever it hits first — with approximate-LRU eviction. A flood of unique keys
+cannot grow the process without limit, but it does mean **an entry can vanish
+before its TTL expires** if it is the least recently used when the budget is
+reached. Eviction drops already-expired entries first, then the least-recently
+used, until both budgets are met.
+
+So treat a cache read as "may be absent" even inside the TTL. That is true of
+every cache backend, but here it has a cause you can reason about and tune:
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // raise the budget
+    .with_max_entries(0)                 // 0 = unbounded (pre-bounding behaviour)
+```
+
+TTL itself is enforced lazily, on read — there is no background eviction
+thread, so an expired entry still occupies its slot until something asks for it
+or eviction reaches it.
+
 ---
 
 ## Swapping backends
@@ -151,8 +179,33 @@ one-line change at startup — usually driven by config so it differs per
 environment:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (sync) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **panics** — cannot be built synchronously | ✓ |
+| `db` | **panics** — needs a runtime `&Pool` | error; build it where the pool is |
+
+The sync resolver panics rather than substituting a backend
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). It used to warn and
+return an in-memory cache, which is not a degraded shared cache — it is a
+different one. A per-process cache multiplies `CacheRateLimitLayer`'s limit by
+the replica count, and stops `verify_single_use` failing closed, so the same
+reset link works once per replica. Both of those are documented as working
+*because* the cache is shared, and a warning at boot does not reach whoever
+debugs that a week later.
+
+`db` cannot come from `[cache]` at all, because `DatabaseCache` needs a pool
+that settings do not carry:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 In production, point it at Redis (shared across all your replicas):
@@ -195,17 +248,19 @@ than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
 
 **Atomic counters and locks.** `Cache::incr` backs [rate limiting](middleware.md)
 and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
-Both are atomic on `RedisCache` (native `INCRBY` / `SET NX`) and on
-`InMemoryCache` (which holds its lock across the read-modify-write);
-`DatabaseCache` leaves both at the non-atomic default — fine for one process,
-but reach for Redis when a counter or lock must be exact across replicas.
+`Cache::add` is atomic on all three — `RedisCache` (`SET NX`), `InMemoryCache`
+(which holds its lock across the read-modify-write) and `DatabaseCache`, which
+does the test-and-set under row locks so a race resolves to exactly one winner.
+`Cache::incr` is atomic on the first two but falls back to the non-atomic
+default on `DatabaseCache`. So a `DistributedLock` is safe on any of the three;
+a counter that must be exact across replicas wants Redis.
 
 Two things worth knowing:
 
 | | |
 |---|---|
 | **It is a namespace, not a boundary** | Everything still lives in one backend, and code holding the *unscoped* cache can read any key. The point is that the ergonomic path is the correct one. |
-| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`. `InMemoryCache` filters its map and `DatabaseCache` issues a `DELETE … LIKE 'prefix%'`. A backend that *cannot* enumerate — `FileCache` hashes keys into paths — falls back to clearing everything and logs a warning. That is deliberate: under-deleting would let another namespace read a stale entry, which is a correctness bug, while over-deleting only costs a cache miss. |
+| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`, and every built-in backend implements it: `InMemoryCache` filters its map, `DatabaseCache` issues `DELETE … LIKE 'prefix%'` with `%`, `_` and the escape character themselves escaped, `RedisCache` uses `SCAN`+`MATCH` with glob metacharacters escaped, and `FileCache` scans its directory and matches the key stored in each entry. A backend that does not implement it now gets an **error** rather than a fallback. `DatabaseCache` stores keys over 255 bytes hashed and matches a prefix over 190 bytes on its first 190 bytes, so it may delete extra keys, never fewer. |
 
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.

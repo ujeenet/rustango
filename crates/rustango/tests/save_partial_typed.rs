@@ -65,16 +65,15 @@ async fn single_field_tuple_narrows_update() {
     };
     // One-field tuple needs the trailing comma — standard Rust idiom.
     row.save_partial_typed((Post::title,), &pool).await.unwrap();
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spt_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "rewritten");
-        assert_eq!(status, "draft", "status not in tuple → DB value preserved");
-        assert_eq!(views, 0);
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spt_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "rewritten");
+    assert_eq!(status, "draft", "status not in tuple → DB value preserved");
+    assert_eq!(views, 0);
 }
 
 /// Two-field tuple `(Post::title, Post::views)` rewrites both, leaves
@@ -91,16 +90,15 @@ async fn multi_field_tuple_narrows_update() {
     row.save_partial_typed((Post::title, Post::views), &pool)
         .await
         .unwrap();
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spt_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "new-title");
-        assert_eq!(status, "draft", "status not in tuple → untouched");
-        assert_eq!(views, 50);
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spt_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "new-title");
+    assert_eq!(status, "draft", "status not in tuple → untouched");
+    assert_eq!(views, 50);
 }
 
 /// Sanity — the typed tuple's `rust_field_names()` returns the Rust-side

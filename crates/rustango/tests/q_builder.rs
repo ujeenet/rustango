@@ -128,8 +128,8 @@ fn unary_not_emits_not() {
 }
 
 #[test]
-fn complex_django_shape_lowers_correctly() {
-    // Django: Q(email__startswith='A') | (Q(age__gt=18) & ~Q(banned=True))
+fn complex_nested_tree_lowers_correctly() {
+    // startswith(email, "A") OR (age > 18 AND NOT banned)
     let q = Q::startswith("email", "A") | (Q::gt("age", 18_i64) & !Q::eq("banned", true));
     let sql = compile_pg(q);
     assert!(sql.contains(" OR "), "expected OR: {sql}");

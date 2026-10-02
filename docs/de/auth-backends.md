@@ -4,7 +4,7 @@ Ein **Auth-Backend** beantwortet eine einzige Frage: *wer ist der Benutzer bei
 einer eingehenden Anfrage?* **Rustango** lässt Sie mehrere davon stapeln — HTTP
 Basic, API-Schlüssel, JWT — zu einer Kette, die die Auth-Middleware der Reihe
 nach durchprobiert, sodass eine Anwendung Menschen und Maschinen auf denselben
-Routen akzeptieren kann. Das ist Djangos `AUTHENTICATION_BACKENDS`-Idee, an axum
+Routen akzeptieren kann. Die Kette ist eine reine Konfigurationsliste, an axum
 verdrahtet. Kombinieren Sie es mit `require_auth` / `require_perm`, um Routen
 abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 
@@ -82,6 +82,34 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+Auf einer Tenant-Route muss der `tenant`-Claim des Tokens zum aufgelösten Tenant passen,
+und MCP-Agent-Token (`kind`-Claim) werden abgewiesen. Prägen Sie mit dem `JwtAuth`-Login
+oder `JwtBackend::issue_for_tenant`; `issue`-Token gelten nur ohne aufgelösten Tenant.
+
+`JwtBackend` akzeptiert die Access-Token, die `JwtLifecycle` ausstellt, und
+weist dessen Refresh-Token zurück — beide sind bis auf `typ` auf der Leitung
+identisch, ein als Bearer vorgelegter Refresh-Token wäre also ein
+Zugangsnachweis mit Tagen statt Minuten Lebensdauer.
+
+**Widerruf ist optional und standardmäßig aus.** Ein einfaches `JwtBackend`
+konsultiert nie eine Sperrliste, ein von `/api/auth/logout` widerrufener Token
+authentifiziert sich über dieses Backend also weiter, bis er von selbst
+abläuft. Teilen Sie einen Speicher zwischen Lifecycle und Backend, damit Logout
+wirksam wird:
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // in Produktion Redis
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+Es muss *derselbe* Speicher sein. Zwei Instanzen zu verdrahten sieht
+konfiguriert aus und erzwingt nichts: Logout schreibt in den einen, die
+Verifikation liest den anderen. Siehe
+[Widerruf und der JTI-Speicher](auth-jwt-api.md#widerruf-und-der-jti-speicher).
+
 Schreiben Sie ein eigenes Backend, indem Sie den Trait implementieren (eine
 einzige async-Methode, die die `Parts` der Anfrage inspiziert und
 `Option<AuthUser>` zurückgibt):
@@ -118,7 +146,7 @@ use rustango::tenancy::RouterAuthExt;
 
 let app = Router::new()
     .route("/profile", get(profile))
-    .require_auth(backends, pool);     // 401 if no backend matches
+    .require_auth(backends);           // 401 if no backend matches
 ```
 
 Verifiziertes Verhalten:
@@ -165,12 +193,12 @@ an und `require_auth` auf den äußeren, sodass der Benutzer aufgelöst wird,
 ```rust
 let admin = Router::new()
     .route("/admin", get(admin_only))
-    .require_perm("post.add", pool.clone());   // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/profile", get(profile))
     .merge(admin)
-    .require_auth(backends, pool);             // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 ```rust
@@ -193,8 +221,8 @@ Berechtigungstabellen werden von `ensure_tables_pool` erstellt).
 Separat davon ist `rustango::auth_backends` (Achtung: Crate-Wurzel, **nicht**
 `tenancy`) eine kleine **framework-unabhängige** Registry — eine
 `Credentials` → `Principal`-Kette mit ihrem eigenen `AuthBackend`-Trait. Sie hat
-keinerlei HTTP/axum-Verklebung; verwenden Sie sie, wenn Sie Django-artige
-Backend-Steckbarkeit innerhalb Ihres eigenen Auth-Codes wünschen:
+keinerlei HTTP/axum-Verklebung; verwenden Sie sie, wenn Sie austauschbare
+Auth-Backends innerhalb Ihres eigenen Auth-Codes wünschen:
 
 ```rust
 use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};

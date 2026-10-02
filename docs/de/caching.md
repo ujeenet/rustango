@@ -5,8 +5,8 @@ gerendertes Fragment, einen Drittanbieter-API-Aufruf — sodass der nächste
 Request es sofort erhält, statt es neu zu berechnen. **Rustango** gibt dir einen
 `Cache`-Trait mit austauschbaren Backends (In-Memory, Redis, Datenbank), einen
 Compute-on-Miss-Helfer (`get_or_set`) und typisierte JSON-Helfer. Tausche das
-Backend, ohne eine einzige Aufrufstelle anzufassen — wie Djangos Cache-Framework
-oder Laravels `Cache`-Fassade.
+Backend, ohne eine einzige Aufrufstelle anzufassen: die Aufrufe bleiben gleich,
+nur die Konfiguration ändert sich.
 
 [![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](../img/caching.png)](../img/caching.png)
 
@@ -56,7 +56,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
 | `RedisCache` | `cache-redis` | Produktion; über Replicas geteilt |
-| `DbCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
+| `DatabaseCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
 | `NullCache` | `cache` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
 
 ---
@@ -148,6 +148,30 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` setzt ein Standard-TTL, das angewendet wird,
 wenn du `None` übergibst.
 
+### Ein TTL ist eine Obergrenze, keine Garantie
+
+`InMemoryCache` ist standardmäßig **größenbegrenzt** — 256 MiB oder 100 000
+Einträge, je nachdem, was zuerst erreicht wird — mit annähernder LRU-Verdrängung.
+Eine Flut eindeutiger Schlüssel kann den Prozess so nicht unbegrenzt wachsen
+lassen, bedeutet aber auch: **ein Eintrag kann vor Ablauf seines TTL
+verschwinden**, wenn er beim Erreichen des Budgets der am längsten unbenutzte
+ist. Die Verdrängung entfernt zuerst bereits abgelaufene Einträge, dann die am
+längsten unbenutzten, bis beide Budgets eingehalten sind.
+
+Behandle einen Cache-Read also auch innerhalb des TTL als „kann fehlen". Das gilt
+für jedes Cache-Backend, hier hat es aber eine Ursache, über die du nachdenken
+und an der du drehen kannst:
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // Budget anheben
+    .with_max_entries(0)                 // 0 = unbegrenzt (Verhalten vor der Begrenzung)
+```
+
+Das TTL selbst wird faul beim Lesen durchgesetzt — es gibt keinen
+Hintergrund-Thread zur Verdrängung, ein abgelaufener Eintrag belegt seinen Platz
+also weiter, bis etwas ihn abfragt oder die Verdrängung ihn erreicht.
+
 ---
 
 ## Backends tauschen
@@ -157,8 +181,34 @@ einzeilige Änderung beim Start — meist von der Konfiguration gesteuert, sodas
 sich pro Umgebung unterscheidet:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (sync) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **panik** — synchron nicht baubar | ✓ |
+| `db` | **panik** — braucht einen `&Pool` zur Laufzeit | Fehler; dort bauen, wo der Pool ist |
+
+Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). Früher warnte er und
+lieferte einen In-Memory-Cache — das ist kein abgeschwächter geteilter Cache,
+sondern ein anderer. Ein prozesslokaler Cache multipliziert das Limit von
+`CacheRateLimitLayer` mit der Anzahl der Replicas und lässt `verify_single_use`
+nicht mehr fail-closed laufen, sodass derselbe Reset-Link einmal pro Replica
+funktioniert. Beides ist dokumentiert als funktionierend, *weil* der Cache
+geteilt ist, und eine Warnung beim Start erreicht niemanden, der das eine Woche
+später debuggt.
+
+`db` lässt sich überhaupt nicht aus `[cache]` bauen, weil `DatabaseCache` einen
+Pool braucht, den die Settings nicht tragen:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 In der Produktion richtest du es auf Redis (über alle deine Replicas geteilt):
@@ -202,18 +252,20 @@ statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
 
 **Atomare Zähler und Sperren.** `Cache::incr` steckt hinter
 [Rate-Limiting](middleware.md) und Konto-Sperren; `Cache::add` (set-if-absent)
-steckt hinter `DistributedLock`. Beide sind atomar bei `RedisCache` (natives
-`INCRBY` / `SET NX`) und bei `InMemoryCache` (das seine Sperre über das
-Read-Modify-Write hält); `DatabaseCache` belässt beide beim nicht-atomaren
-Standard — für einen Prozess in Ordnung, aber greife zu Redis, wenn ein Zähler
-oder eine Sperre über Replikate hinweg exakt sein muss.
+steckt hinter `DistributedLock`. `Cache::add` ist bei allen dreien atomar — `RedisCache`
+(`SET NX`), `InMemoryCache` (das seine Sperre über das Read-Modify-Write hält)
+und `DatabaseCache`, das das Test-and-Set unter Zeilensperren ausführt, sodass
+ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist bei den ersten beiden
+atomar, fällt bei `DatabaseCache` aber auf den nicht-atomaren Standard zurück.
+Ein `DistributedLock` ist also auf allen dreien sicher; ein Zähler, der über
+Replikate hinweg exakt sein muss, will Redis.
 
 Zwei Dinge, die man wissen sollte:
 
 | | |
 |---|---|
 | **Ein Namespace, keine Sicherheitsgrenze** | Alles liegt weiter in einem Backend, und Code mit dem *ungescopeten* Cache kann jeden Key lesen. Der Punkt ist, dass der ergonomische Pfad der korrekte ist. |
-| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`. `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'`. Ein Backend, das *nicht* enumerieren kann — `FileCache` hasht Keys in Pfade — fällt darauf zurück, alles zu leeren, und loggt eine Warnung. Das ist Absicht: zu wenig zu löschen ließe einen anderen Namespace einen veralteten Eintrag lesen (ein Korrektheitsfehler), zu viel zu löschen kostet nur einen Cache-Miss. |
+| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`, und jedes eingebaute Backend implementiert das: `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'` mit escaptem `%`, `_` und Escape-Zeichen, `RedisCache` nutzt `SCAN`+`MATCH` mit escapten Glob-Metazeichen, und `FileCache` scannt sein Verzeichnis und vergleicht den in jedem Eintrag gespeicherten Key. Ein Backend, das es nicht implementiert, liefert jetzt einen **Fehler** statt eines Fallbacks. `DatabaseCache` speichert Keys über 255 Bytes gehasht und vergleicht ein Präfix über 190 Bytes nur auf seinen ersten 190 Bytes; es löscht also eventuell mehr Keys, nie weniger. |
 
 Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die

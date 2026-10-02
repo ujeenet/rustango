@@ -1,4 +1,4 @@
-//! Django-parity #415 — `setting_changed` signal fires from
+//! Issue #415 — `setting_changed` signal fires from
 //! [`rustango::test_settings::with_overridden`] on scope enter +
 //! exit.
 

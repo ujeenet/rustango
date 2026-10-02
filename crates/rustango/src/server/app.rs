@@ -1,6 +1,6 @@
 //! `rustango::server::AppBuilder` — single-pool bi-dialect bootstrap.
 //!
-//! The Django-style multi-tenant [`super::Builder`] is hardcoded to
+//! The multi-tenant [`super::Builder`] is hardcoded to
 //! `PgPool` (it owns a `TenantPools` registry whose connections are
 //! Postgres). For apps that don't need tenancy and want to run on
 //! SQLite (or MySQL), this is a parallel, simpler builder that takes
@@ -166,7 +166,11 @@ impl AppBuilder {
         let pool = Arc::new(self.pool);
         let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        crate::shutdown::serve_until_drained(
+            |stop| axum::serve(listener, app).with_graceful_shutdown(stop),
+            crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 }

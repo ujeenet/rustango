@@ -1,4 +1,8 @@
-//! Cookbook Chapter 9b — `ViewSet::serializer::<S>()` wiring.
+//! Cookbook Chapter 9 — `ViewSet::serializer::<S>()` wiring.
+//!
+//! Chapter 9b is Template views, backed by
+//! `cookbook_chapter09c_template_views.rs`; this file backs the
+//! serializer-marriage recipes in Chapter 9 and Chapter 7.
 //!
 //! When set, list / retrieve / create / update responses run every
 //! row through `S::from_model` + `to_value` instead of the default
@@ -39,7 +43,7 @@ async fn fresh_author_table(pool: &sqlx::PgPool) {
     ).execute(pool).await.unwrap();
 }
 
-/// Custom serializer with shape-shifting overrides — DRF parity hit list.
+/// Custom serializer exercising every field override at once.
 #[derive(Serializer, serde::Deserialize, Default, Debug)]
 #[serializer(model = Author)]
 pub struct AuthorPublic {
@@ -187,7 +191,8 @@ async fn create_response_uses_serializer_when_set() {
     let Some(pool) = pool().await else { return };
     fresh_author_table(&pool).await;
 
-    let payload = r#"{"name": "dave", "email": "dave@example.com"}"#;
+    // The serializer's name: the hidden `email` column is refused (#1994).
+    let payload = r#"{"name": "dave", "contact_email": "dave@example.com"}"#;
     let (status, body) = json_request(
         router_with_serializer(pool), Method::POST, "/api", Some(payload),
     ).await;
@@ -205,7 +210,7 @@ async fn create_response_uses_serializer_when_set() {
 #[allow(dead_code)]
 fn _smoke_serializer_writable_fields() {
     // Compile-only check that AuthorPublic exposes name + contact_email +
-    // admin_secret as writable (DRF parity smoke).
+    // admin_secret as writable.
     let writable = AuthorPublic::writable_fields();
     assert!(writable.contains(&"name"));
     assert!(writable.contains(&"contact_email"));

@@ -1,5 +1,5 @@
-//! Unit coverage for `HStore` PostgreSQL hstore columns — Django
-//! `HStoreField` (#342). No database required: asserts the derived
+//! Unit coverage for `HStore` PostgreSQL hstore columns
+//! (#342). No database required: asserts the derived
 //! schema's `FieldType::HStore` mapping, the per-dialect column-type
 //! emission (`hstore` on PG; degraded `TEXT` on MySQL / SQLite), and the
 //! `Into<SqlValue>` lowering.
@@ -62,16 +62,14 @@ fn hstore_column_is_bound_as_a_single_param() {
     // hstore binds natively (no text-literal cast gymnastics) — the
     // INSERT just emits a plain placeholder for the column.
     use rustango::core::InsertQuery;
-    let q = InsertQuery {
-        model: Product::SCHEMA,
-        columns: vec!["attrs"],
-        values: vec![SqlValue::HStore(vec![(
+    let q = InsertQuery::new(
+        Product::SCHEMA,
+        vec!["attrs"],
+        vec![SqlValue::HStore(vec![(
             "k".to_owned(),
             Some("v".to_owned()),
         )])],
-        returning: vec![],
-        on_conflict: None,
-    };
+    );
     let stmt = Postgres.compile_insert(&q).unwrap();
     assert!(stmt.sql.contains("VALUES ($1)"), "sql: {}", stmt.sql);
     assert!(matches!(&stmt.params[0], SqlValue::HStore(_)));

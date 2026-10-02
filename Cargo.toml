@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.58.0"
+version = "0.59.18"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -11,16 +11,16 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ujeenet/rustango"
 homepage = "https://github.com/ujeenet/rustango"
 documentation = "https://docs.rs/rustango"
-keywords = ["web-framework", "orm", "django", "sqlite", "async"]
+keywords = ["web-framework", "orm", "migrations", "sqlite", "async"]
 categories = ["web-programming::http-server", "database", "asynchronous"]
 
 [workspace.dependencies]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros     = { version = "0.58.0", path = "crates/rustango-macros" }
-rustango-orm-macros = { version = "0.58.0", path = "crates/rustango-orm-macros" }
-rustango            = { version = "0.58.0", path = "crates/rustango" }
+rustango-macros     = { version = "0.59.18", path = "crates/rustango-macros" }
+rustango-orm-macros = { version = "0.59.18", path = "crates/rustango-orm-macros" }
+rustango            = { version = "0.59.18", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signa
 # `rust_decimal` fans out `rust_decimal::Decimal ↔ NUMERIC/DECIMAL`
 # for every backend so the universal `FieldType::Decimal` round-
 # trips through bind/decode without per-dialect special-cases.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "json", "rust_decimal"] }
+sqlx = { version = "0.8.4", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "json", "rust_decimal"] }
 
 # Schema collection + collections
 inventory = "0.3"
@@ -83,6 +83,10 @@ password-hash = "0.5"
 hmac    = "0.12"
 sha1    = "0.10"   # TOTP / RFC 6238 default
 sha2    = "0.10"
+# Advisory file locks for FileCache (#1811); drop for std `File::lock` at MSRV 1.89.
+fs4     = { version = "1", default-features = false, features = ["sync"] }
+# `O_NOFOLLOW` for FileCache lock files (unix only).
+libc    = "0.2"
 subtle  = "2"      # constant-time eq for MAC verify
 cookie  = "0.18"
 rand    = "0.8"    # session-secret auto-gen fallback
@@ -104,6 +108,7 @@ rpassword = "7.5"
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query", "original-uri"] }
 tower = { version = "0.5", features = ["util"] }
+http-body = "1"
 http-body-util = "0.1"
 serde_urlencoded = "0.7"
 base64 = "0.22"

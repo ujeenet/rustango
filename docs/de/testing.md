@@ -5,8 +5,8 @@ einen Server zu booten oder das Netzwerk zu berühren. **Rustango**s `TestClient
 Router **in-process** aus: du rufst `client.get("/path")` auf, es routet die Anfrage
 durch den echten Stack (Extractors, Middleware, Handler) und gibt dir die
 Antwort zum Assertieren zurück. Füge Transaction-Rollback-Isolation für Datenbanktests und
-ein Set von Response-Assertions hinzu, und du hast Djangos Test-Client + `TestCase`, in
-Rust.
+ein Set von Response-Assertions hinzu, und du hast eine vollständige
+Integrationstest-Umgebung, ohne die Prozessgrenze zu verlassen.
 
 [![Testen in Rustango: TestClient umschließt deinen Router und sendet In-process-Anfragen durch den echten Handler-Stack; die TestResponse macht Status, Text und JSON zum Assertieren verfügbar — kein Socket, kein Server](../img/testing.png)](../img/testing.png)
 
@@ -30,6 +30,7 @@ Rust.
 - [JSON, Header und Bodies senden](#json-header-und-bodies-senden)
 - [Eine echte API testen](#eine-echte-api-testen)
 - [Datenbanktests mit Rollback](#datenbanktests-mit-rollback)
+- [Live-Suites, und warum ein grüner Lauf nichts beweisen muss](#live-suites-und-warum-ein-grüner-lauf-nichts-beweisen-muss)
 - [Response-Assertion-Helper](#response-assertion-helper)
 - [Siehe auch](#siehe-auch)
 
@@ -138,22 +139,81 @@ use rustango::test_db::with_rollback;
 
 #[tokio::test]
 async fn creating_a_post_persists_it() {
-    with_rollback(&pool, |tx| async move {
-        // ... insert + assert against `tx` ...
+    with_rollback(&pool, |tx| Box::pin(async move {
+        // ... insert + assert against `&mut *tx.lock().await?` ...
         // everything here is rolled back when the closure returns
-    }).await;
+        Ok(())
+    })).await.unwrap();
 }
 ```
+
+Die Closure bekommt ein `AtomicTx`; sperre es pro Anweisung mit `tx.lock().await?`. Ein `atomic()` auf demselben Pool darin ist ein Savepoint und wird mit zurückgerollt. Gib den Guard vor einem verschachtelten `atomic()` oder `bulk_insert_pool` frei, sonst schlagen sie mit `ExecError::NestedAtomic` fehl.
 
 Für SQLite verwenden die `*_sqlite_live.rs`-Tests überall in diesem Repo stattdessen eine In-Memory-
 Datenbank pro Test — ebenfalls vollständig isoliert, mit null externem Setup.
 
 ---
 
+## Live-Suites, und warum ein grüner Lauf nichts beweisen muss
+
+Tests mit dem Namen `*_live.rs` sprechen mit einer echten Datenbank. Die meisten
+brauchen nichts von dir; der Rest braucht eine Umgebungsvariable, und **wenn sie
+fehlt, schlagen sie nicht fehl. Sie machen ein `return`, und der Lauf meldet
+Erfolg.**
+
+Das ist Absicht — es hält `cargo test` auf einem Laptop ohne Server lauffähig —
+aber es bedeutet, dass ein bestandener Lauf kein Beleg dafür ist, dass die Suite
+gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
+
+### Welche Variable jede Suite will
+
+| Variable | Suites | Was sie brauchen |
+|---|---:|---|
+| *(keine)* | 223 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 131 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 63 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
+
+Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte
+summiert sich also nicht auf die Anzahl der Dateien.
+
+Die `*_tri.rs`-Suiten werden unter beiden Server-Variablen gezählt. Sie lesen
+selbst keine Variable — `Backend::pool()` übernimmt das — und ihr SQLite-Arm
+läuft auch ohne gesetzte Variablen. Sie als „braucht nichts“ zu zählen wäre
+deshalb formal haltbar und praktisch falsch: Die beiden Arme, die einen Server
+brauchen, sind der Grund für diese Suiten. Starte beide Server, sonst meldet
+eine Tri-Suite eine gesunde Trefferzahl und hat ein Backend von dreien geprüft.
+
+MySQL ist das, worüber Leute stolpern: es liest seine eigene Variable, also führt
+eine Shell, in der nur `DATABASE_URL` gesetzt ist, die Postgres-Suites aus und
+überspringt stillschweigend jede MySQL-Suite.
+
+### Einen Skip von einem Pass unterscheiden
+
+Die meisten Skips sind ein nacktes frühes `return` ganz ohne Ausgabe. Eine
+Minderheit gibt zuvor eine Zeile auf stderr aus, die `cargo test` versteckt,
+solange du nicht danach fragst:
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+Das verlässliche Signal ist die Anzahl. Eine Live-Suite, die `0 passed` meldet —
+oder weit weniger, als die Datei enthält —, hat übersprungen.
+`running 2 tests … 2 passed` ohne laufenden Server heißt, dass diese beiden Tests
+früh zurückgekehrt sind.
+
+Wenn du willst, dass eine Suite fehlschlägt statt zu überspringen, wenn ihr
+Server fehlt, setze die Variable auf eine absichtlich falsche URL: sie schlägt
+dann beim Verbinden fehl, was ein lauteres und ehrlicheres Signal ist als ein
+Skip.
+
+---
+
 ## Response-Assertion-Helper
 
-Für rohe `axum::Response`-Werte (z. B. aus `tower::oneshot`) liest sich `test_assertions`
-wie Djangos `assertContains` / `assertRedirects`:
+Für rohe `axum::Response`-Werte (z. B. aus `tower::oneshot`) liefert `test_assertions`
+lesbare Ein-Zeilen-Prüfungen für Status, Inhalt, Redirects und Cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

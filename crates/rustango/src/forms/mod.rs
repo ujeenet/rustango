@@ -6,7 +6,7 @@
 //! | Type | When to use |
 //! |---|---|
 //! | [`Form`] + `#[derive(Form)]` | Typed struct with declared fields and compile-time validators |
-//! | [`ModelForm`] | Any [`Model`] table — parse + validate + save without a dedicated struct |
+//! | [`ModelForm`] | Any [`Model`](crate::core::Model) table — parse + validate + save without a dedicated struct |
 //! | [`DynamicForm`] | Runtime JSON-schema forms (surveys, intake, admin-configurable) |
 //!
 //! ## `#[derive(Form)]` usage
@@ -61,9 +61,8 @@ use crate::core::{
 #[cfg(feature = "csrf")]
 pub mod csrf;
 
-/// Form sets — Django's `formset_factory` / `modelformset_factory`
-/// shape. Parse N copies of the same [`Form`] from a single
-/// HTTP request payload keyed `<prefix>-<N>-<field>`. Issue #49.
+/// Form sets — parse N copies of the same [`Form`] from a single
+/// HTTP request payload keyed `<prefix>-<N>-<field>`.
 pub mod formset;
 
 /// Reusable declarative field-constraint validators (`max_length` /
@@ -261,15 +260,16 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 ///
 /// Empty string + nullable field → `SqlValue::Null`.
 /// Empty string + required field → `FormError::Missing`.
-/// Bool fields treat absent key as `false` (unchecked checkbox).
+/// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
+/// and `NULL` for a nullable one.
 ///
 /// # Errors
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
 pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlValue, FormError> {
     let Some(raw) = raw else {
         return Ok(match field.ty {
-            FieldType::Bool => SqlValue::Bool(false),
             _ if field.nullable => SqlValue::Null,
+            FieldType::Bool => SqlValue::Bool(false),
             _ => {
                 return Err(FormError::Missing {
                     field: field.name.to_owned(),
@@ -281,8 +281,8 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         return Ok(SqlValue::Null);
     }
     // Non-nullable String field with empty raw is a *missing* value,
-    // not a valid empty string — matches Django/DRF where CharField
-    // rejects "" unless allow_blank=True. Without this guard, blank
+    // not a valid empty string: `""` is rejected unless the field
+    // is marked `blank`. Without this guard, blank
     // form submits silently land empty strings in NOT NULL columns
     // (surfaced playing with the cookbook /authors/new form).
     if matches!(field.ty, FieldType::String) && !field.nullable && raw.is_empty() {
@@ -356,8 +356,7 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         }
         // Decimal accepts standard `123.45` / `-0.001` / `1e3` forms via
         // `rust_decimal::Decimal::from_str_exact`; reject anything else
-        // rather than silently truncate. Django's DecimalField behaves
-        // the same way.
+        // rather than silently truncate.
         FieldType::Decimal => raw
             .parse::<rust_decimal::Decimal>()
             .map(SqlValue::Decimal)
@@ -458,12 +457,16 @@ pub fn collect_values(
     for field in model.scalar_fields() {
         // Server-assigned columns (`Auto<T>` PK with BIGSERIAL,
         // `auto_now_add` / `auto_now` mixins, `auto_uuid`) are never
-        // present in HTML forms — the macro skips them on INSERT and
-        // the DB DEFAULT supplies the value. Filtering them here
-        // keeps both code paths in lock-step. See cookbook chapter 7
+        // present in HTML forms. Filtering them here keeps both code
+        // paths in lock-step. See cookbook chapter 7
         // `modelform_parses_form_encoded_into_typed_values` for the
         // ModelFormFor analogue.
-        if field.auto || skip.contains(&field.name) {
+        //
+        // Dropping them is right for an UPDATE. For an INSERT, use
+        // [`collect_insert_values`] — the timestamps among them have to
+        // be supplied rather than left to the column default (#1464).
+        // A generated column is computed by the database; writing it fails.
+        if field.auto || field.generated_as.is_some() || skip.contains(&field.name) {
             continue;
         }
         let raw = form.get(field.name).map(String::as_str);
@@ -471,6 +474,88 @@ pub fn collect_values(
         out.push((field.column, value));
     }
     Ok(out)
+}
+
+/// [`collect_values`], plus the server-assigned timestamps an INSERT
+/// has to supply itself.
+///
+/// `auto_now_add` / `auto_now` columns are absent from every client
+/// payload, so a schema-driven writer omits them and the column default
+/// fires. That default cannot be trusted: on a SQLite database created
+/// before #1464 it is still `CURRENT_TIMESTAMP`, and `ALTER TABLE`
+/// there has no statement that can replace it. Its
+/// `YYYY-MM-DD HH:MM:SS` sorts below the canonical spelling, so a
+/// cursor keyed on such a column matches every row and serves page one
+/// forever — which is how this was found, in the commerce soak, after
+/// the derive macro's own INSERT path had already been fixed.
+///
+/// Separate from [`collect_values`] rather than a flag on it because
+/// the two differ on UPDATE: `auto_now` should be restamped there and
+/// `auto_now_add` must not, and [`crate::core::FieldSchema`] cannot
+/// tell them apart. UPDATE keeps the plain version, where the derive
+/// macro's `update_assignments` already handles both correctly.
+///
+/// # Errors
+/// As [`collect_values`].
+pub fn collect_insert_values(
+    model: &'static ModelSchema,
+    form: &HashMap<String, String>,
+    skip: &[&str],
+) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    let mut out = collect_values(model, form, skip)?;
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        // `skip` drops form input; a server-filled value is stamped even when skipped.
+        if out.iter().any(|(c, _)| *c == field.column) {
+            continue;
+        }
+        if let Some(v) = insert_stamp(field, now) {
+            out.push((field.column, v));
+        }
+    }
+    Ok(out)
+}
+
+/// The value a schema-driven INSERT supplies for a server-assigned
+/// column: the clock for `auto_now*`, a fresh v7 for `default_uuid_v7` (#1725).
+fn insert_stamp(field: &FieldSchema, now: chrono::DateTime<chrono::Utc>) -> Option<SqlValue> {
+    if field.is_auto_timestamp() {
+        Some(SqlValue::DateTime(now))
+    } else if field.is_rust_side_uuid() {
+        Some(SqlValue::Uuid(uuid::Uuid::now_v7()))
+    } else {
+        None
+    }
+}
+
+/// Add the server-assigned timestamps to a schema-driven INSERT's
+/// column list — the `(columns, values)` form, for the writers that
+/// build those directly rather than through [`collect_insert_values`].
+///
+/// **INSERT only.** `auto_now_add` is immutable after insert, and
+/// nothing here can tell it from `auto_now`; an UPDATE must leave both
+/// alone and let the derive macro's `update_assignments` handle them.
+///
+/// Idempotent — a column already in the list is left as the caller set
+/// it, so an explicit value always wins.
+///
+/// See [`collect_insert_values`] for why the database default is not
+/// good enough (#1464).
+pub fn stamp_auto_timestamps(
+    model: &'static ModelSchema,
+    columns: &mut Vec<&'static str>,
+    values: &mut Vec<SqlValue>,
+) {
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        if columns.contains(&field.column) {
+            continue;
+        }
+        if let Some(v) = insert_stamp(field, now) {
+            columns.push(field.column);
+            values.push(v);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ ModelForm
@@ -484,7 +569,8 @@ pub enum ModelFormError {
     Database(#[from] crate::sql::ExecError),
 }
 
-/// Schema-driven form that can insert or update any [`Model`] row.
+/// Schema-driven form that can insert or update any
+/// [`Model`](crate::core::Model) row.
 ///
 /// `ModelForm` reads the model's [`ModelSchema`] to know which fields
 /// to parse and validate — no separate struct required.
@@ -549,12 +635,12 @@ impl ModelForm {
         self
     }
 
-    /// Drop the named fields from the form. v0.49 — Django's
-    /// `Meta.exclude` analog. Applied AFTER `fields(...)` if both
+    /// Drop the named fields from the form.
+    /// Applied AFTER `fields(...)` if both
     /// are set, so `.fields(&["a", "b", "c"]).exclude(&["b"])`
     /// produces `["a", "c"]`. Excluding a field also drops it from
-    /// validation / INSERT / UPDATE; PK / auto fields are excluded
-    /// unconditionally regardless of this list.
+    /// validation / INSERT / UPDATE. `auto` and generated fields are always
+    /// excluded, and so is the PK on update (#1725).
     pub fn exclude(mut self, fields: &[&str]) -> Self {
         for f in fields {
             self.exclude_fields.push((*f).to_owned());
@@ -563,7 +649,12 @@ impl ModelForm {
     }
 
     fn should_include(&self, field: &FieldSchema) -> bool {
-        if field.primary_key || field.auto {
+        let kind = if self.pk_value.is_some() {
+            crate::core::WriteKind::Update
+        } else {
+            crate::core::WriteKind::Insert
+        };
+        if !field.accepts_input(kind) {
             return false;
         }
         if self.exclude_fields.iter().any(|n| n == field.name) {
@@ -577,7 +668,7 @@ impl ModelForm {
 
     /// v0.49 — test-only accessor returning the field NAMES the form
     /// currently includes (after applying `fields(...)` /
-    /// `exclude(...)` and skipping PK / auto). Useful for asserting
+    /// `exclude(...)` and `FieldSchema::accepts_input`). Useful for asserting
     /// the builder semantics without driving a full validate/save.
     #[cfg(test)]
     pub(crate) fn included_field_names(&self) -> Vec<&'static str> {
@@ -596,8 +687,15 @@ impl ModelForm {
                 continue;
             }
             let raw = self.data.get(field.name).map(String::as_str);
-            if let Err(e) = parse_form_value(field, raw) {
-                errors.add(field.name, e.to_string());
+            // The write re-checks these; a form reports them per field (#1893).
+            let checked = parse_form_value(field, raw)
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    crate::core::validate_value(self.schema.name, field, &v)
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = checked {
+                errors.add(field.name, e);
             }
         }
         errors
@@ -616,10 +714,8 @@ impl ModelForm {
     /// Validate and execute the INSERT or UPDATE. Returns the PK value
     /// (newly generated for inserts; the supplied value for updates).
     ///
-    /// v0.38 — fully tri-dialect via `&crate::sql::Pool`. Routes through
-    /// the backend-erasing `update_pool` / `insert_returning_pool`
-    /// helpers and decodes the returned PK per backend (PgRow on PG,
-    /// `LAST_INSERT_ID()` on MySQL, SqliteRow on SQLite).
+    /// Tri-dialect. Writes on audited models write their audit row in the
+    /// same transaction.
     ///
     /// # Errors
     /// [`ModelFormError::Validation`] if any field is invalid.
@@ -628,7 +724,7 @@ impl ModelForm {
         self.prepare_save()?.commit_pool(pool).await
     }
 
-    /// Django-shape `form.save(commit=False)` — issue #375. Validates
+    /// Validate without writing. Checks
     /// every included field and returns a mutable
     /// [`PreparedSave`] holding the parsed columns + values, without
     /// touching the DB. The caller can `.set(column, value)` to add
@@ -681,15 +777,13 @@ impl ModelForm {
     }
 }
 
-/// Result of `form.prepare_save()` — issue #375 / Django
-/// `form.save(commit=False)`. Holds the validated columns + values
-/// ready to INSERT or UPDATE; caller can mutate before
+/// Result of `form.prepare_save()`. Holds the validated columns +
+/// values ready to INSERT or UPDATE; the caller can mutate before
 /// [`Self::commit_pool`] to add session-derived fields the form
 /// didn't expose.
 ///
-/// `save_m2m()` — Django's deferred M2M companion — has no analog
-/// yet because rustango's `ModelForm` doesn't surface M2M form
-/// fields; once it does, the deferred-apply lives on this struct.
+/// There is no deferred M2M apply yet, because `ModelForm` does not
+/// surface M2M form fields. When it does, that lands here.
 #[derive(Debug, Clone)]
 pub struct PreparedSave {
     schema: &'static ModelSchema,
@@ -735,8 +829,8 @@ impl PreparedSave {
         self
     }
 
-    /// Drop a column from the prepared write. Mirrors Django's
-    /// `del obj.field` between `save(commit=False)` and `obj.save()`.
+    /// Drop a column from the prepared write, between
+    /// `prepare_save()` and the commit.
     /// Unknown field names are a no-op.
     pub fn unset(&mut self, field: &str) -> &mut Self {
         let Some(target_col) = self
@@ -799,54 +893,28 @@ impl PreparedSave {
                     value: pk_val.clone(),
                 }),
             };
-            crate::sql::update_pool(pool, &query).await?;
+            crate::audit::update(pool, &query).await?;
             return Ok(pk_val);
         }
 
+        // INSERT, not UPDATE — so the server-assigned timestamps are
+        // stamped here (#1464). `should_include` drops every `auto`
+        // field, which is right for the payload and wrong for the
+        // statement: nothing else supplies them and the column default
+        // cannot be trusted. The UPDATE branch above deliberately does
+        // not do this — `auto_now_add` is immutable after insert.
+        let mut columns = self.columns;
+        let mut values = self.values;
+        stamp_auto_timestamps(self.schema, &mut columns, &mut values);
         let query = InsertQuery {
             model: self.schema,
-            columns: self.columns,
-            values: self.values,
+            columns,
+            values,
             returning: vec![self.pk_field.column],
             on_conflict: None,
         };
-        let returning = crate::sql::insert_returning_pool(pool, &query).await?;
-        let pk_val: SqlValue = match returning {
-            #[cfg(feature = "postgres")]
-            crate::sql::InsertReturningPool::PgRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match self.pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::InsertReturningPool::MySqlAutoId(id) => match self.pk_field.ty {
-                FieldType::I64 => SqlValue::I64(id),
-                FieldType::I32 => SqlValue::I32(id as i32),
-                FieldType::I16 => SqlValue::I16(id as i16),
-                _ => SqlValue::I64(id),
-            },
-            #[cfg(feature = "sqlite")]
-            crate::sql::InsertReturningPool::SqliteRow(row) => {
-                use crate::sql::sqlx::Row as _;
-                match self.pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
-                    FieldType::String => {
-                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
-                    }
-                    _ => SqlValue::Null,
-                }
-            }
-        };
-        Ok(pk_val)
+        // Audited models write their `create` row in the insert's transaction (#1821).
+        Ok(crate::audit::insert(pool, &query, self.pk_field).await?)
     }
 }
 
@@ -871,14 +939,15 @@ pub enum DynamicFieldType {
 
 /// One field descriptor in a [`DynamicForm`].
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(from = "DynamicFieldRepr")]
 pub struct DynamicField {
     /// Field name — used as the form input name and the cleaned-data key.
     pub name: String,
     /// Human-readable label shown next to the input.
-    #[serde(default)]
     pub label: String,
     pub field_type: DynamicFieldType,
-    #[serde(default = "bool_true")]
+    /// Defaults to `true` in a JSON schema, except `boolean`: an unticked
+    /// box is a valid answer unless the schema says `"required": true`.
     pub required: bool,
     pub max_length: Option<usize>,
     pub min_length: Option<usize>,
@@ -886,15 +955,46 @@ pub struct DynamicField {
     pub max: Option<f64>,
     /// `[(value, display_label)]` pairs — required for `Select` /
     /// `MultiSelect` fields.
-    #[serde(default)]
     pub choices: Vec<(String, String)>,
     /// Help text shown below the input.
-    #[serde(default)]
     pub help_text: String,
 }
 
-fn bool_true() -> bool {
-    true
+#[derive(serde::Deserialize)]
+struct DynamicFieldRepr {
+    name: String,
+    #[serde(default)]
+    label: String,
+    field_type: DynamicFieldType,
+    required: Option<bool>,
+    max_length: Option<usize>,
+    min_length: Option<usize>,
+    min: Option<f64>,
+    max: Option<f64>,
+    #[serde(default)]
+    choices: Vec<(String, String)>,
+    #[serde(default)]
+    help_text: String,
+}
+
+impl From<DynamicFieldRepr> for DynamicField {
+    fn from(r: DynamicFieldRepr) -> Self {
+        let required = r
+            .required
+            .unwrap_or(r.field_type != DynamicFieldType::Boolean);
+        Self {
+            name: r.name,
+            label: r.label,
+            field_type: r.field_type,
+            required,
+            max_length: r.max_length,
+            min_length: r.min_length,
+            min: r.min,
+            max: r.max,
+            choices: r.choices,
+            help_text: r.help_text,
+        }
+    }
 }
 
 /// Runtime JSON-schema driven form.
@@ -928,7 +1028,8 @@ fn bool_true() -> bool {
 /// ```
 pub struct DynamicForm {
     fields: Vec<DynamicField>,
-    data: Option<HashMap<String, String>>,
+    /// Every submitted value per key; a `<select multiple>` repeats its key.
+    data: Option<HashMap<String, Vec<String>>>,
 }
 
 impl DynamicForm {
@@ -947,7 +1048,36 @@ impl DynamicForm {
     }
 
     /// Bind a form payload (typically from `axum::Form<HashMap<...>>`).
+    ///
+    /// A map holds one value per key, so a `MultiSelect` value here is
+    /// comma-separated. Use [`Self::bind_pairs`] for `<select multiple>`.
     pub fn bind(&mut self, data: HashMap<String, String>) {
+        let multi = |name: &str| {
+            self.fields
+                .iter()
+                .any(|f| f.name == name && f.field_type == DynamicFieldType::MultiSelect)
+        };
+        let data = data
+            .into_iter()
+            .map(|(k, v)| {
+                let values = if multi(&k) {
+                    v.split(',').map(|p| p.trim().to_owned()).collect()
+                } else {
+                    vec![v]
+                };
+                (k, values)
+            })
+            .collect();
+        self.data = Some(data);
+    }
+
+    /// Bind a payload that may repeat keys (`axum::Form<Vec<(String, String)>>`).
+    /// Each repeat is one `MultiSelect` value; other fields keep the last.
+    pub fn bind_pairs(&mut self, pairs: impl IntoIterator<Item = (String, String)>) {
+        let mut data: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in pairs {
+            data.entry(k).or_default().push(v);
+        }
         self.data = Some(data);
     }
 
@@ -966,19 +1096,18 @@ impl DynamicForm {
         };
 
         for field in &self.fields {
-            let raw = data.get(&field.name).map(String::as_str);
-
-            match raw {
-                None | Some("")
-                    if field.required && field.field_type != DynamicFieldType::Boolean =>
-                {
-                    errors.add(&field.name, "This field is required.");
-                    continue;
-                }
-                _ => {}
+            let values = data.get(&field.name).map_or(&[][..], Vec::as_slice);
+            let raw_str = values.last().map_or("", String::as_str);
+            // A required checkbox must be ticked.
+            let missing = match field.field_type {
+                DynamicFieldType::Boolean => !is_truthy(raw_str),
+                DynamicFieldType::MultiSelect => values.iter().all(String::is_empty),
+                _ => raw_str.is_empty(),
+            };
+            if field.required && missing {
+                errors.add(&field.name, "This field is required.");
+                continue;
             }
-
-            let raw_str = raw.unwrap_or("");
 
             match field.field_type {
                 DynamicFieldType::Integer => {
@@ -1008,8 +1137,9 @@ impl DynamicForm {
                 }
                 DynamicFieldType::Float => {
                     if !raw_str.is_empty() {
-                        match raw_str.parse::<f64>() {
-                            Ok(n) => {
+                        // NaN and inf pass every bound and serialize as null.
+                        match raw_str.parse::<f64>().ok().filter(|n| n.is_finite()) {
+                            Some(n) => {
                                 if let Some(min) = field.min {
                                     if n < min {
                                         errors.add(
@@ -1027,7 +1157,7 @@ impl DynamicForm {
                                     }
                                 }
                             }
-                            Err(_) => errors.add(&field.name, "Enter a number."),
+                            None => errors.add(&field.name, "Enter a number."),
                         }
                     }
                 }
@@ -1035,8 +1165,9 @@ impl DynamicForm {
                 | DynamicFieldType::Textarea
                 | DynamicFieldType::Email
                 | DynamicFieldType::Url => {
+                    let len = raw_str.chars().count();
                     if let Some(max) = field.max_length {
-                        if raw_str.len() > max {
+                        if len > max {
                             errors.add(
                                 &field.name,
                                 format!("Ensure this value has at most {max} characters."),
@@ -1044,7 +1175,7 @@ impl DynamicForm {
                         }
                     }
                     if let Some(min) = field.min_length {
-                        if !raw_str.is_empty() && raw_str.len() < min {
+                        if !raw_str.is_empty() && len < min {
                             errors.add(
                                 &field.name,
                                 format!("Ensure this value has at least {min} characters."),
@@ -1063,8 +1194,7 @@ impl DynamicForm {
                     }
                 }
                 DynamicFieldType::MultiSelect => {
-                    // multi-select values are comma-separated
-                    for part in raw_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    for part in values.iter().filter(|s| !s.is_empty()) {
                         if !field.choices.iter().any(|(v, _)| v == part) {
                             errors.add(&field.name, format!("'{part}' is not a valid choice."));
                         }
@@ -1115,10 +1245,12 @@ impl DynamicForm {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let data = self.data.as_ref().map_or_else(HashMap::new, Clone::clone);
+        let empty = HashMap::new();
+        let data = self.data.as_ref().unwrap_or(&empty);
         let mut out = HashMap::new();
         for field in &self.fields {
-            let raw = data.get(&field.name).map(String::as_str).unwrap_or("");
+            let values = data.get(&field.name).map_or(&[][..], Vec::as_slice);
+            let raw = values.last().map_or("", String::as_str);
             let value = match field.field_type {
                 DynamicFieldType::Integer => {
                     if raw.is_empty() {
@@ -1135,14 +1267,10 @@ impl DynamicForm {
                         serde_json::json!(raw.parse::<f64>().unwrap_or(0.0))
                     }
                 }
-                DynamicFieldType::Boolean => serde_json::Value::Bool(!matches!(
-                    raw.to_ascii_lowercase().as_str(),
-                    "" | "false" | "0" | "off" | "no"
-                )),
+                DynamicFieldType::Boolean => serde_json::Value::Bool(is_truthy(raw)),
                 DynamicFieldType::MultiSelect => {
-                    let parts: Vec<serde_json::Value> = raw
-                        .split(',')
-                        .map(str::trim)
+                    let parts: Vec<serde_json::Value> = values
+                        .iter()
                         .filter(|s| !s.is_empty())
                         .map(|s| serde_json::Value::String(s.to_owned()))
                         .collect();
@@ -1159,6 +1287,100 @@ impl DynamicForm {
             out.insert(field.name.clone(), value);
         }
         Ok(out)
+    }
+}
+
+/// A checkbox value that counts as ticked.
+fn is_truthy(raw: &str) -> bool {
+    !matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "" | "false" | "0" | "off" | "no"
+    )
+}
+
+#[cfg(test)]
+mod dynamic_form_tests {
+    use super::*;
+
+    fn form(schema: serde_json::Value) -> DynamicForm {
+        DynamicForm::from_json(schema).unwrap()
+    }
+
+    #[test]
+    fn multi_select_keeps_every_repeated_value() {
+        let mut f = form(
+            serde_json::json!([{"name": "tags", "field_type": "multi_select",
+            "choices": [["a", "A"], ["b", "B"], ["x,y", "XY"]]}]),
+        );
+        f.bind_pairs([("tags", "a"), ("tags", "x,y")].map(|(k, v)| (k.into(), v.into())));
+        assert_eq!(
+            f.cleaned_data().unwrap()["tags"],
+            serde_json::json!(["a", "x,y"])
+        );
+    }
+
+    #[test]
+    fn text_length_counts_characters() {
+        let mut f = form(serde_json::json!([{"name": "t", "field_type": "text", "max_length": 3}]));
+        f.bind(HashMap::from([("t".into(), "ééé".into())]));
+        assert!(f.is_valid(), "{:?}", f.errors());
+        // Two bytes, one character.
+        let mut f = form(serde_json::json!([{"name": "t", "field_type": "text", "min_length": 2}]));
+        f.bind(HashMap::from([("t".into(), "é".into())]));
+        assert!(!f.is_valid(), "min_length counted bytes");
+    }
+
+    #[test]
+    fn bind_splits_a_multi_select_on_commas() {
+        let mut f = form(
+            serde_json::json!([{"name": "tags", "field_type": "multi_select",
+            "choices": [["a", "A"], ["b", "B"]]}, {"name": "t", "field_type": "text"}]),
+        );
+        f.bind(HashMap::from([
+            ("tags".into(), "a, b".into()),
+            ("t".into(), "x,y".into()),
+        ]));
+        let data = f.cleaned_data().unwrap();
+        assert_eq!(data["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(
+            data["t"],
+            serde_json::json!("x,y"),
+            "only multi-select splits"
+        );
+    }
+
+    #[test]
+    fn non_finite_floats_are_refused() {
+        let mut f = form(serde_json::json!([{"name": "n", "field_type": "float", "max": 5.0}]));
+        for bad in ["NaN", "inf", "-inf"] {
+            f.bind(HashMap::from([("n".into(), bad.into())]));
+            assert!(!f.is_valid(), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn a_required_checkbox_must_be_ticked() {
+        let schema = serde_json::json!([{"name": "ok", "field_type": "boolean", "required": true}]);
+        let mut f = form(schema);
+        f.bind(HashMap::new());
+        assert!(!f.is_valid());
+        f.bind(HashMap::from([("ok".into(), "on".into())]));
+        assert!(f.is_valid());
+    }
+
+    #[test]
+    fn a_checkbox_is_optional_by_default() {
+        let mut f = form(serde_json::json!([
+            {"name": "ok", "field_type": "boolean"},
+            {"name": "t", "field_type": "text"},
+        ]));
+        f.bind(HashMap::from([("t".into(), "x".into())]));
+        assert!(f.is_valid(), "{:?}", f.errors());
+        f.bind(HashMap::new());
+        assert!(
+            !f.errors().get("t").is_empty(),
+            "text stays required by default"
+        );
     }
 }
 
@@ -1313,7 +1535,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
 
     // (helper for validate_unique_together below)
 
-    /// DRF-shape `UniqueTogetherValidator` — pre-checks every composite
+    /// Pre-check every composite
     /// UNIQUE index declared on `T::SCHEMA.indexes` (via
     /// `#[rustango(unique_together = "...")]`) by SELECT-ing the
     /// matching `(col1, col2, ...)` pair from the DB. Hits become
@@ -1322,8 +1544,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// `duplicate key value violates unique constraint "..."` error.
     ///
     /// Pass the optional `pk_value` when validating an UPDATE so the
-    /// row being edited isn't its own conflict (analog to DRF's
-    /// `instance` parameter on the validator).
+    /// row being edited isn't reported as its own conflict.
     ///
     /// v0.38 — tri-dialect via `&crate::sql::Pool`. Identifier quoting
     /// routes through `dialect.quote_ident` (double-quotes on PG/SQLite,
@@ -1569,6 +1790,39 @@ mod model_form_tests {
         assert!(matches!(body_value, Some(crate::core::SqlValue::Null)));
     }
 
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_flags")]
+    #[allow(dead_code)]
+    pub struct Flags {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        pub on: bool,
+        pub maybe: Option<bool>,
+    }
+
+    #[test]
+    fn absent_nullable_bool_is_null_not_false() {
+        let mf =
+            ModelFormFor::<Flags>::from_json(&serde_json::json!({ "maybe": null })).expect("valid");
+        let get = |col: &str| {
+            let i = mf.columns().iter().position(|c| *c == col).unwrap();
+            mf.values()[i].clone()
+        };
+        assert_eq!(get("on"), crate::core::SqlValue::Bool(false));
+        assert_eq!(get("maybe"), crate::core::SqlValue::Null);
+    }
+
+    #[test]
+    fn parse_absent_nullable_bool_is_null() {
+        let mf = ModelFormFor::<Flags>::parse(&HashMap::new()).expect("valid");
+        let get = |col: &str| {
+            let i = mf.columns().iter().position(|c| *c == col).unwrap();
+            mf.values()[i].clone()
+        };
+        assert_eq!(get("on"), crate::core::SqlValue::Bool(false));
+        assert_eq!(get("maybe"), crate::core::SqlValue::Null);
+    }
+
     #[test]
     fn into_update_query_filters_on_pk() {
         let mut p: HashMap<String, String> = HashMap::new();
@@ -1607,6 +1861,26 @@ mod model_form_tests {
         assert_eq!(included, vec!["title", "body"]);
     }
 
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_tag")]
+    #[allow(dead_code)]
+    pub struct Tag {
+        #[rustango(primary_key, max_length = 32)]
+        pub slug: String,
+        #[rustango(max_length = 64)]
+        pub name: String,
+    }
+
+    /// A natural PK is form input on insert, and pinned on update (#1725).
+    #[test]
+    fn modelform_keeps_a_natural_pk_on_insert_only() {
+        let schema = <Tag as crate::core::Model>::SCHEMA;
+        let insert = ModelForm::new(schema, HashMap::new());
+        assert_eq!(insert.included_field_names(), vec!["slug", "name"]);
+        let update = ModelForm::for_update(schema, HashMap::new(), SqlValue::String("go".into()));
+        assert_eq!(update.included_field_names(), vec!["name"]);
+    }
+
     #[test]
     fn modelform_fields_restricts_to_named_set() {
         let form = ModelForm::new(post_schema(), HashMap::new()).fields(&["title"]);
@@ -1622,7 +1896,7 @@ mod model_form_tests {
     #[test]
     fn modelform_exclude_and_fields_compose() {
         // `.fields()` whitelists, then `.exclude()` removes —
-        // Django's `Meta.fields` + `Meta.exclude` interaction.
+        // `fields(...)` first, then `exclude(...)` on top.
         let form = ModelForm::new(post_schema(), HashMap::new())
             .fields(&["title", "body"])
             .exclude(&["body"]);

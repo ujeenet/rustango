@@ -1,21 +1,25 @@
 //! Argon2id password hashing — used by the registry-scoped
 //! [`super::Operator`] and the per-tenant [`super::User`] models.
 //!
-//! Both identity domains share the same crypto: hashes are stored as
+//! Both identity domains share [`crate::passwords`]: hashes are stored as
 //! the standard PHC string (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`)
 //! so verification is self-describing — the parameters travel with the
-//! hash. Default parameters come from `argon2::Argon2::default()` —
-//! Argon2id with the OWASP-recommended cost (m=19456, t=2, p=1 as of
-//! 2026); good enough for hobby/demo deployments. Operators can opt
-//! into stronger parameters via [`hash_with`].
+//! hash. New hashes use [`crate::passwords::argon2_params`]: the
+//! OWASP cost (m=19456, t=2, p=1) unless `[auth] argon2_*` or
+//! [`crate::passwords::configure_argon2`] set another.
+//!
+//! From async code use the `*_async` variants; the sync calls block a
+//! runtime worker.
+
+// This module owns the sync calls the lint bans elsewhere.
+#![allow(clippy::disallowed_methods)]
 
 use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
 use super::error::TenancyError;
+use crate::passwords::PasswordError;
 
-/// Hash a plaintext password with default Argon2id parameters.
+/// Hash a plaintext password with the configured Argon2id parameters.
 ///
 /// Returns the PHC-format string suitable for storing in
 /// `Operator.password_hash` / `User.password_hash`.
@@ -30,12 +34,10 @@ pub fn hash(plaintext: &str) -> Result<String, TenancyError> {
             "password must not be empty".into(),
         ));
     }
-    let salt = SaltString::generate(&mut OsRng);
-    let hasher = Argon2::default();
-    let phc = hasher
-        .hash_password(plaintext.as_bytes(), &salt)
-        .map_err(|e| TenancyError::Validation(format!("argon2 hash failed: {e}")))?;
-    Ok(phc.to_string())
+    crate::passwords::hash(plaintext).map_err(|e| match e {
+        PasswordError::Hash(m) => TenancyError::Validation(format!("argon2 hash failed: {m}")),
+        other => TenancyError::Validation(other.to_string()),
+    })
 }
 
 /// Generate a random password of the requested length.
@@ -90,25 +92,91 @@ pub fn generate(length: usize) -> String {
 /// Returns [`TenancyError::Validation`] when `phc_hash` is malformed
 /// (not a valid PHC string).
 pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
-    let parsed = PasswordHash::new(phc_hash)
-        .map_err(|e| TenancyError::Validation(format!("malformed password hash: {e}")))?;
-    Ok(Argon2::default()
-        .verify_password(plaintext.as_bytes(), &parsed)
-        .is_ok())
+    crate::passwords::verify(plaintext, phc_hash).map_err(|e| match e {
+        PasswordError::Verify(m) => {
+            TenancyError::Validation(format!("malformed password hash: {m}"))
+        }
+        other => TenancyError::Validation(other.to_string()),
+    })
 }
 
 /// Spend a verification's worth of work against a fixed dummy hash and
 /// discard the result. Call on the user-not-found / inactive branch of
 /// a login flow so timing doesn't reveal whether an account exists
-/// (audit H1). Delegates to [`crate::passwords::verify_dummy`] — same
-/// `Argon2::default()` cost as [`verify`] above.
+/// (audit H1). Delegates to [`crate::passwords::verify_dummy`], at the
+/// cost new hashes get.
 pub fn verify_dummy(plaintext: &str) {
     crate::passwords::verify_dummy(plaintext);
+}
+
+/// [`hash`] on the blocking pool. Use this from async code.
+///
+/// # Errors
+/// As [`hash`], or [`TenancyError::Busy`] when no hashing slot frees up.
+pub async fn hash_async(plaintext: &str) -> Result<String, TenancyError> {
+    let plaintext = plaintext.to_owned();
+    crate::passwords::off_runtime(move || hash(&plaintext))
+        .await
+        .map_err(|_| TenancyError::Busy)?
+}
+
+/// [`verify`] on the blocking pool. Use this from async code.
+///
+/// # Errors
+/// As [`verify`], or [`TenancyError::Busy`].
+pub async fn verify_async(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
+    verify_async_in(HashLane::Login, plaintext, phc_hash).await
+}
+
+/// [`verify_dummy`] on the blocking pool. Use this from async code.
+///
+/// # Errors
+/// [`TenancyError::Busy`], exactly when [`verify_async`] would be busy.
+pub async fn verify_dummy_async(plaintext: &str) -> Result<(), TenancyError> {
+    verify_dummy_async_in(HashLane::Login, plaintext).await
+}
+
+pub(crate) use crate::passwords::HashLane;
+
+/// [`verify_async`] in `lane`.
+pub(crate) async fn verify_async_in(
+    lane: HashLane,
+    plaintext: &str,
+    phc_hash: &str,
+) -> Result<bool, TenancyError> {
+    let (plaintext, phc_hash) = (plaintext.to_owned(), phc_hash.to_owned());
+    crate::passwords::off_runtime_in(lane, move || verify(&plaintext, &phc_hash))
+        .await
+        .map_err(|_| TenancyError::Busy)?
+}
+
+/// [`verify_dummy_async`] in `lane`.
+pub(crate) async fn verify_dummy_async_in(
+    lane: HashLane,
+    plaintext: &str,
+) -> Result<(), TenancyError> {
+    let plaintext = plaintext.to_owned();
+    crate::passwords::off_runtime_in(lane, move || verify_dummy(&plaintext))
+        .await
+        .map_err(|_| TenancyError::Busy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::passwords::ticks_while;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_variants_do_not_block_the_runtime() {
+        let (h, n) = ticks_while(hash_async("hunter2")).await;
+        assert!(n >= 2, "hash_async stalled the runtime ({n} ticks)");
+        let (ok, n) = ticks_while(verify_async("hunter2", &h.unwrap())).await;
+        assert!(ok.unwrap());
+        assert!(n >= 2, "verify_async stalled the runtime ({n} ticks)");
+        let (r, n) = ticks_while(verify_dummy_async("hunter2")).await;
+        assert!(r.is_ok());
+        assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
 
     #[test]
     fn hash_and_verify_round_trip() {

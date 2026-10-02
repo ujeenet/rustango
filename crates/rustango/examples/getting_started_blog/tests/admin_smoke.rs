@@ -6,11 +6,12 @@
 //! (CI does this before `cargo test`).
 
 use getting_started_blog::urls;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use rustango::test_client::TestClient;
 
 async fn admin_app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+    let _ = dotenvy::dotenv();
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
     urls::api().nest("/admin", urls::admin_router(pool))

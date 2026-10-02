@@ -82,8 +82,8 @@ const AUTH_NAMESPACE: &str = "auth";
 
 // ------------------------------------------------------------------ Models
 
-/// A permission codename bound to a logical table — Django's
-/// `Permission` equivalent. Composite-unique on `(table_name, codename)`.
+/// A permission codename bound to a logical table.
+/// Composite-unique on `(table_name, codename)`.
 ///
 /// Historically this table was created by hand-written DDL
 /// (`ENSURE_SQL`) and had no model, so it was invisible to
@@ -120,7 +120,7 @@ pub struct Permission {
     pub name: String,
 }
 
-/// A named group of permissions (Django `Group` equivalent).
+/// A named group of permissions.
 ///
 /// Assign a user to a role via [`UserRole`]; grant codenames to a role
 /// via [`RolePermission`].
@@ -237,23 +237,7 @@ pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Err
         UserRole::SCHEMA,
         UserPermission::SCHEMA,
     ]);
-    let changes =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(sqlx::Error::Protocol)?;
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            });
-        }
-    }
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
     Ok(())
 }
 
@@ -277,11 +261,18 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
     has_perm_on(uid, codename, pool).await
 }
 
-/// v0.38 — tri-dialect counterpart of [`has_perm`]. Trades the single
-/// CTE round-trip for three ORM queries (user-info, explicit grant,
-/// role-via grant) — each an indexed lookup, total cost ≈ 3× the
-/// CTE in latency but portable across PG/MySQL/SQLite without
-/// dialect-specific `TRUE`/`FALSE` literals or array binding.
+/// v0.38 — tri-dialect counterpart of [`has_perm`]. **One round trip**:
+/// a single `SELECT` with four scalar subqueries (superuser, explicit
+/// denial, explicit grant, role-via grant), portable across
+/// PG/MySQL/SQLite without dialect-specific `TRUE`/`FALSE` literals or
+/// array binding.
+///
+/// This said "three ORM queries … ≈ 3× the CTE in latency" until 0.57.7.
+/// It was wrong in both halves, and it was load-bearing: `MediaPerms`
+/// costs one lookup per required codename, so anyone budgeting the gate
+/// from this docblock overstated it threefold. The backing tables carry
+/// `unique_together (user_id, codename)`, `(user_id, role_id)` and
+/// `(role_id, codename)`, so each subquery is an indexed lookup.
 ///
 /// Resolution order is identical to [`has_perm`]:
 /// 1. Superuser → true
@@ -724,7 +715,7 @@ pub async fn get_or_create_role(
 /// Routed through the ORM's [`InsertQuery`] IR with
 /// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
 /// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
-/// unique constraint declared in [`ENSURE_SQL`].
+/// unique constraint the ensure-table DDL declares.
 /// #562 — delegates to [`grant_role_perm_pool`].
 #[cfg(feature = "postgres")]
 pub async fn grant_role_perm(
@@ -863,7 +854,7 @@ pub async fn remove_role_pool(
 ///
 /// #562 — delegates to [`set_user_perm_pool`]. The
 /// `InsertQuery` IR (with `ConflictClause::DoUpdate` targeting the
-/// `(user_id, codename)` unique constraint from [`ENSURE_SQL`]) lives
+/// `(user_id, codename)` unique constraint from the ensure-table DDL) lives
 /// there; the `granted` column is the only one in `update_columns`
 /// so existing `data` JSONB (reason / granted-by / etc.) survives
 /// a re-grant.
@@ -1350,6 +1341,13 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         "Can access framework admin",
     )
     .await?;
+    for (codename, name) in [
+        (crate::audit::VIEW_CODENAME, "Can view the audit log"),
+        (crate::audit::DELETE_CODENAME, "Can clean up the audit log"),
+    ] {
+        // Listed under the audit table; `AuditLog` seeds no CRUD rows.
+        seed_reserved_codename_pool(pool, "rustango_audit_log", codename, name).await?;
+    }
 
     let action_names = [
         ("add", "Can add"),
@@ -1364,16 +1362,15 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         }
         let table = entry.schema.table;
         let model_name = entry.schema.name;
-        // Django Meta.default_permissions — operator-declared subset of
-        // the CRUD codename set. Empty slice (the default) means "all
-        // four" (matches Django's behavior when the attribute is
-        // omitted). When non-empty, the seeder only emits codenames
-        // whose action appears in the list. Issue #319 follow-up.
+        // `default_permissions` — the model's chosen subset of the CRUD
+        // codename set. An empty slice (the default) means all four.
+        // When non-empty, the seeder only emits codenames whose action
+        // appears in the list.
         let allowed_actions = entry.schema.default_permissions;
         let action_allowed = |action: &str| -> bool {
             allowed_actions.is_empty() || allowed_actions.contains(&action)
         };
-        // Django Meta.permissions — extra (codename, name) pairs seeded
+        // `permissions` — extra (codename, name) pairs seeded
         // alongside the auto CRUD codenames so apps can declare custom
         // authorization buckets (`("approve", "Can approve posts")`).
         // The codename is stored as `<table>.<codename>` for consistency

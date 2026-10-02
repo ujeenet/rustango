@@ -1,13 +1,9 @@
-//! HTTP → HTTPS redirect middleware — Django parity for
-//! `SECURE_SSL_REDIRECT = True` + `SECURE_REDIRECT_EXEMPT`.
+//! HTTP to HTTPS redirect middleware, with exempt path prefixes.
 //!
-//! When enabled, every HTTP request gets a `301 Moved Permanently`
-//! redirect to the same URL on the HTTPS scheme. Behind a reverse
-//! proxy that terminates TLS (the common case), this works only
-//! when the proxy forwards a header like `X-Forwarded-Proto: https`
-//! — otherwise the layer would redirect-loop. Configure the trusted
-//! header pair with [`SslRedirectLayer::proxy_ssl_header`] (Django
-//! `SECURE_PROXY_SSL_HEADER`).
+//! Every plain-HTTP request gets a `301` to the same URL on HTTPS.
+//! Behind a proxy that terminates TLS, set the trusted header with
+//! [`SslRedirectLayer::proxy_ssl_header`]. Without it the layer
+//! never sees the request as secure and redirects in a loop.
 //!
 //! ## Quick start
 //!
@@ -25,10 +21,12 @@
 //!
 //! ## Exempt paths
 //!
-//! [`SslRedirectLayer::exempt`] takes prefix patterns; a request
-//! whose path starts with any exempt entry skips the redirect.
-//! Useful for health checks behind a plain-HTTP LB. Empty exempt
-//! list (default) redirects every path.
+//! [`SslRedirectLayer::exempt`] takes path prefixes. A request whose
+//! path starts with one of them is not redirected. This suits health
+//! checks reached over plain HTTP. By default nothing is exempt.
+//!
+//! [`SslRedirectLayer::exempt`]: crate::ssl_redirect::SslRedirectLayer::exempt
+//! [`SslRedirectLayer::proxy_ssl_header`]: crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header
 
 use std::sync::Arc;
 
@@ -38,19 +36,15 @@ use axum::http::{HeaderName, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
-/// Tower-layer-equivalent configuration. Holds the proxy-header
-/// pair + exempt-path list; applied via
+/// Redirect settings. Apply them with
 /// [`SslRedirectRouterExt::ssl_redirect`].
 #[derive(Clone, Debug)]
 pub struct SslRedirectLayer {
-    /// `(header_name, expected_value)` that signals the request
-    /// arrived over HTTPS (Django `SECURE_PROXY_SSL_HEADER`). If
-    /// `None`, the layer inspects the URI scheme directly — which
-    /// only works when rustango is the TLS terminator (rare in
-    /// production; LB usually does).
+    /// Header name and value that mean "this request arrived over
+    /// HTTPS". With `None` the layer reads the URI scheme, which
+    /// only works when rustango terminates TLS itself.
     proxy_ssl_header: Option<(HeaderName, HeaderValue)>,
-    /// URL-path prefixes exempt from the redirect. Request path
-    /// starts-with check; entries should include leading `/`.
+    /// Path prefixes that skip the redirect. Include the leading `/`.
     exempt: Vec<String>,
 }
 
@@ -61,9 +55,9 @@ impl Default for SslRedirectLayer {
 }
 
 impl SslRedirectLayer {
-    /// Build a layer with no proxy header configured and an empty
-    /// exempt list. Add [`Self::proxy_ssl_header`] before deploying
-    /// behind a TLS-terminating proxy to avoid redirect loops.
+    /// No proxy header, nothing exempt. Behind a TLS-terminating
+    /// proxy, add [`Self::proxy_ssl_header`] or you get a redirect
+    /// loop.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -72,18 +66,18 @@ impl SslRedirectLayer {
         }
     }
 
-    /// Django `SECURE_PROXY_SSL_HEADER` parity — declare the
-    /// header/value pair the reverse proxy sets to indicate the
-    /// upstream request was HTTPS. The layer reads the header on
-    /// each request; matching value → skip redirect.
+    /// Declare the header your proxy sets when the original request
+    /// used HTTPS. A matching value skips the redirect.
+    ///
+    /// The layer trusts this header, so the proxy must strip any
+    /// copy the client sends.
     ///
     /// ```ignore
     /// SslRedirectLayer::new().proxy_ssl_header("X-Forwarded-Proto", "https")
     /// ```
     ///
-    /// Invalid header names / values are silently dropped (the
-    /// builder is infallible by design — bad input behaves as if
-    /// the operator never called this method).
+    /// An invalid header name or value is ignored, as if you never
+    /// called this method.
     #[must_use]
     pub fn proxy_ssl_header(mut self, header: impl AsRef<str>, value: impl AsRef<str>) -> Self {
         if let (Ok(h), Ok(v)) = (
@@ -95,9 +89,8 @@ impl SslRedirectLayer {
         self
     }
 
-    /// Append URL-path prefixes that bypass the redirect. Request
-    /// paths starting with any entry skip the layer. Useful for
-    /// behind-the-LB health checks that hit `http://internal-ip/`.
+    /// Add path prefixes that skip the redirect, such as health
+    /// checks reached over plain HTTP.
     #[must_use]
     pub fn exempt<I, S>(mut self, paths: I) -> Self
     where
@@ -108,15 +101,14 @@ impl SslRedirectLayer {
         self
     }
 
-    /// `true` when this request should pass through (no redirect).
-    /// Pure helper, exposed for testing without the full layer.
+    /// `true` when the request already arrived over HTTPS, so no
+    /// redirect is needed.
     #[must_use]
     pub fn is_secure(&self, req: &Request<Body>) -> bool {
-        // URI scheme (works when rustango terminates TLS itself).
+        // The scheme is set only when rustango terminates TLS.
         if req.uri().scheme_str() == Some("https") {
             return true;
         }
-        // Proxy header — operator-declared trusted indicator.
         if let Some((header, expected)) = &self.proxy_ssl_header {
             if let Some(got) = req.headers().get(header) {
                 if got == expected {
@@ -134,7 +126,7 @@ impl SslRedirectLayer {
     }
 }
 
-/// Router extension trait — `.ssl_redirect(layer)`.
+/// Adds `.ssl_redirect(layer)` to a router.
 pub trait SslRedirectRouterExt {
     #[must_use]
     fn ssl_redirect(self, layer: SslRedirectLayer) -> Self;
@@ -156,9 +148,7 @@ async fn handle(cfg: Arc<SslRedirectLayer>, req: Request<Body>, next: Next) -> R
     if cfg.is_secure(&req) || cfg.is_exempt(req.uri().path()) {
         return next.run(req).await;
     }
-    // Build the HTTPS URL using the Host header for the authority
-    // (proxy-aware: trusts what the LB advertises) + path + query
-    // from the incoming URI.
+    // Target URL: Host header, then path and query from the request.
     let host = req
         .headers()
         .get(axum::http::header::HOST)
@@ -238,8 +228,7 @@ mod tests {
     fn invalid_proxy_header_pair_silently_dropped() {
         let layer =
             SslRedirectLayer::new().proxy_ssl_header("Invalid Header Name\nwith CRLF", "https");
-        // No header configured → request without HTTPS scheme is
-        // insecure.
+        // Nothing configured, so a plain HTTP request stays insecure.
         let req = http_req("/", "example.com");
         assert!(!layer.is_secure(&req));
         assert!(layer.proxy_ssl_header.is_none());

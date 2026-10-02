@@ -1,7 +1,11 @@
 //! Core types for rustango.
 //!
-//! This crate is dependency-light on purpose: no async, no DB drivers, no proc-macros.
-//! Anything that needs to be referenced by both the macro output and the runtime lives here.
+//! Light on purpose: no async, no database drivers, no proc-macros.
+//! Anything the macro output and the runtime both name lives here.
+
+// A new public enum here must be `#[non_exhaustive]`, so it can grow
+// without a breaking release (#1661).
+#![deny(clippy::exhaustive_enums)]
 
 pub mod aggregates;
 pub mod case;
@@ -21,7 +25,7 @@ pub mod window;
 
 pub use case::{case, value, CaseBuilder};
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter};
-pub use error::QueryError;
+pub use error::{BoundedDmlReason, QueryError};
 pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, VectorMetric, F};
 pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{
@@ -36,13 +40,16 @@ pub use schema::{
     ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,
     GlobalScope, IndexMethod, IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry,
     ModelSchema, ModelScope, OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
+    WriteKind,
 };
+#[doc(hidden)]
+pub use schema::{AdminConfigParts, FieldSchemaParts, ModelSchemaParts};
 pub use validate::validate_value;
 pub use value::SqlValue;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};
 
-/// Re-exported so `#[derive(Model)]` output can name `inventory` without
-/// requiring downstream crates to add their own dependency on it.
+/// Re-exported so `#[derive(Model)]` output can name `inventory`
+/// without each downstream crate depending on it directly.
 #[doc(hidden)]
 pub use inventory;
 

@@ -1,6 +1,5 @@
 //! `ChunkedIter<T>` — async iterator that streams a `QuerySet`'s
-//! result set in fixed-size chunks (Django's `QuerySet.iterator()`,
-//! issue #23).
+//! result set in fixed-size chunks (issue #23).
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 2.
 
@@ -14,8 +13,7 @@ use super::{
 use crate::core::Model;
 use crate::sql::Pool;
 
-/// Chunked async iterator over a compiled query — Django's
-/// `QuerySet.iterator(chunk_size=...)`. Issue #23.
+/// Chunked async iterator over a compiled query. Issue #23.
 ///
 /// Constructed via [`crate::query::QuerySet::iterator`]. Internally
 /// re-runs the underlying `SELECT` with rotating `OFFSET` per chunk

@@ -1,7 +1,16 @@
-//! Multipart file upload helper — wraps axum's multipart extractor +
-//! the [`crate::storage::Storage`] trait so a file upload handler is
-//! a one-liner instead of buffering / size-checking / extension-
-//! validating glue.
+//! Multipart file uploads. Joins axum's multipart extractor to the
+//! [`crate::storage::Storage`] trait, and handles size limits,
+//! extension checks and filename sanitizing for you.
+//!
+//! ## Security
+//!
+//! Set `max_bytes` and `allowed_extensions` on every upload route. With
+//! no extension list any type is accepted except those a browser runs
+//! script in ([`ACTIVE_EXTENSIONS`]); list one to accept it. The
+//! client's `Content-Type` is never trusted: it is stored for reference
+//! only, so sniff or re-encode the bytes yourself if the type matters.
+//! Filenames are stripped to a basename, so a client-sent path such as
+//! `../../etc/passwd` cannot escape the prefix.
 //!
 //! ## Quick start
 //!
@@ -31,6 +40,7 @@ use axum::extract::Multipart;
 use crate::storage::{BoxedStorage, StorageError};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum UploadError {
     #[error("multipart parse error: {0}")]
     Parse(String),
@@ -40,6 +50,8 @@ pub enum UploadError {
     BadExtension(String),
     #[error("filename missing in multipart field")]
     MissingFilename,
+    #[error("too many files (max {max})")]
+    TooManyFiles { max: usize },
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 }
@@ -50,23 +62,30 @@ impl From<axum::extract::multipart::MultipartError> for UploadError {
     }
 }
 
+/// Extensions refused when `allowed_extensions` is empty: served from
+/// the app origin, they run script with the viewer's session (#1849).
+pub const ACTIVE_EXTENSIONS: &[&str] = &[
+    "html", "htm", "xhtml", "xht", "shtml", "svg", "svgz", "xml", "xsl", "xslt", "js", "mjs",
+];
+
 /// Per-upload configuration. Cheap to clone.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct UploadConfig {
     /// Storage prefix (e.g. `"avatars/"` or `"uploads/2026/05/"`).
     /// The original filename is appended after sanitization.
     pub prefix: String,
     /// Hard cap on a single file's size. Default: 10 MiB.
     pub max_bytes: usize,
-    /// Whitelist of allowed extensions (lowercase, no leading dot).
-    /// Empty set = allow any extension.
+    /// Extensions to accept (lowercase, no leading dot). An empty set
+    /// accepts anything but [`ACTIVE_EXTENSIONS`].
     pub allowed_extensions: HashSet<String>,
-    /// Number of multipart fields to skip when iterating. Useful when
-    /// you have non-file fields you've already read.
+    /// Most files one request may carry. Default: 20.
+    pub max_files: usize,
+    /// How many non-file fields to skip while iterating.
     pub skip_fields: usize,
-    /// If `true`, prepend a UUID-style timestamp to the saved key so
-    /// concurrent uploads of the same name don't clobber each other.
-    /// Default: true.
+    /// Prepend a timestamp to the key so two uploads with the same name
+    /// do not overwrite each other. Default: true.
     pub randomize_filename: bool,
 }
 
@@ -76,6 +95,7 @@ impl UploadConfig {
             prefix: ensure_trailing_slash(prefix.into()),
             max_bytes: 10 * 1024 * 1024,
             allowed_extensions: HashSet::new(),
+            max_files: 20,
             skip_fields: 0,
             randomize_filename: true,
         }
@@ -94,6 +114,12 @@ impl UploadConfig {
     }
 
     #[must_use]
+    pub fn max_files(mut self, n: usize) -> Self {
+        self.max_files = n;
+        self
+    }
+
+    #[must_use]
     pub fn randomize_filename(mut self, on: bool) -> Self {
         self.randomize_filename = on;
         self
@@ -103,46 +129,62 @@ impl UploadConfig {
 /// Result of saving one uploaded file.
 #[derive(Debug, Clone)]
 pub struct SavedUpload {
-    /// Logical key under [`crate::storage::Storage`] — pass to
-    /// `storage.url(&saved.key)` for a public URL when supported.
+    /// Storage key. Pass to `storage.url(&saved.key)` for a public URL.
     pub key: String,
     /// Original filename from the multipart field.
     pub original_filename: String,
-    /// Content-type sent by the client (best-effort; clients lie).
+    /// Content type the client claimed. Clients lie; do not trust it
+    /// for access or rendering decisions.
     pub content_type: Option<String>,
     pub size_bytes: usize,
 }
 
-/// Drain `mp`, save every file field to `storage`, and return one
-/// [`SavedUpload`] per file. Skips non-file fields (those without a
-/// `filename`). Errors short-circuit — anything saved before the
-/// error is left in storage (callers can clean up if they care).
+/// Save every file field in `mp` to `storage` and return one
+/// [`SavedUpload`] per file. Fields without a `filename` are skipped.
+///
+/// The first error stops the loop and deletes the files already saved,
+/// so a refused request leaves nothing behind (#1905).
 ///
 /// # Errors
 /// See [`UploadError`].
 pub async fn save_uploads(
-    mut mp: Multipart,
+    mp: Multipart,
     cfg: &UploadConfig,
     storage: &BoxedStorage,
 ) -> Result<Vec<SavedUpload>, UploadError> {
-    let mut out = Vec::new();
+    let mut out: Vec<SavedUpload> = Vec::new();
+    let result = save_each(mp, cfg, storage, &mut out).await;
+    if result.is_err() {
+        for saved in &out {
+            let _ = storage.delete(&saved.key).await;
+        }
+    }
+    result.map(|()| out)
+}
+
+async fn save_each(
+    mut mp: Multipart,
+    cfg: &UploadConfig,
+    storage: &BoxedStorage,
+    out: &mut Vec<SavedUpload>,
+) -> Result<(), UploadError> {
     let mut skipped = 0;
     while let Some(mut field) = mp.next_field().await? {
         let Some(filename) = field.file_name().map(str::to_owned) else {
-            // Non-file field — skip if requested or just ignore.
+            // Not a file field.
             if skipped < cfg.skip_fields {
                 skipped += 1;
             }
             continue;
         };
+        if out.len() >= cfg.max_files {
+            return Err(UploadError::TooManyFiles { max: cfg.max_files });
+        }
         let content_type = field.content_type().map(str::to_owned);
 
-        // #421 — stream chunk-by-chunk and short-circuit as soon as
-        // the accumulated size exceeds `cfg.max_bytes`. The previous
-        // `field.bytes().await?` form buffered the full upload before
-        // bound-checking, so a 100MB body with a 5MB cap still cost
-        // 100MB of memory. Now the second chunk that pushes us over
-        // the limit drops the connection.
+        // Read chunk by chunk and stop at the first chunk that crosses
+        // `max_bytes`. Buffering the whole field first would let a huge
+        // body eat memory even when the cap is small.
         let mut bytes: Vec<u8> = Vec::new();
         while let Some(chunk) = field.chunk().await? {
             if bytes.len().saturating_add(chunk.len()) > cfg.max_bytes {
@@ -155,16 +197,16 @@ pub async fn save_uploads(
         }
 
         let ext = lowercase_ext(&filename);
-        if !cfg.allowed_extensions.is_empty() {
-            let allowed = match &ext {
-                Some(e) => cfg.allowed_extensions.contains(e),
-                None => false,
-            };
-            if !allowed {
-                return Err(UploadError::BadExtension(
-                    ext.unwrap_or_else(|| "<none>".into()),
-                ));
-            }
+        let allowed = match (&ext, cfg.allowed_extensions.is_empty()) {
+            (Some(e), true) => !ACTIVE_EXTENSIONS.contains(&e.as_str()),
+            (None, true) => true,
+            (Some(e), false) => cfg.allowed_extensions.contains(e),
+            (None, false) => false,
+        };
+        if !allowed {
+            return Err(UploadError::BadExtension(
+                ext.unwrap_or_else(|| "<none>".into()),
+            ));
         }
 
         let safe_name = sanitize_filename(&filename);
@@ -184,12 +226,10 @@ pub async fn save_uploads(
             size_bytes: size,
         });
     }
-    Ok(out)
+    Ok(())
 }
 
-// =====================================================================
-// Pure helpers (filename sanitization, extension extraction)
-// =====================================================================
+// ---- pure helpers ----
 
 fn ensure_trailing_slash(mut s: String) -> String {
     if !s.is_empty() && !s.ends_with('/') {
@@ -198,13 +238,18 @@ fn ensure_trailing_slash(mut s: String) -> String {
     s
 }
 
-/// Strip directory components and replace anything outside `[a-zA-Z0-9._-]`
-/// with `_`. The result is safe to embed in any storage key.
+/// Drop directory parts and replace anything outside `[a-zA-Z0-9._-]`
+/// with `_`, so the result is safe to use as a storage key. This is
+/// what stops a client-supplied path from escaping the upload prefix.
 pub fn sanitize_filename(name: &str) -> String {
-    // Take the basename only — clients sometimes send full paths.
-    let base = Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
+    // Keep the basename only; clients sometimes send a full path.
+    // Split on both separators instead of `Path::file_name`, which
+    // treats `\` as a separator only on Windows. Otherwise the same
+    // upload gets a different name depending on the server's OS.
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
         .unwrap_or(name);
     let mut out = String::with_capacity(base.len());
     for c in base.chars() {
@@ -220,8 +265,7 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
-/// Extract the lowercase extension (no leading dot) or `None` when
-/// absent.
+/// The lowercase extension without its dot, or `None`.
 fn lowercase_ext(name: &str) -> Option<String> {
     Path::new(name)
         .extension()
@@ -229,13 +273,10 @@ fn lowercase_ext(name: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// Prepend a unix-nanos prefix to keep concurrent same-name uploads
-/// from overwriting each other. Output: `{nanos}-{name}`.
+/// Build `{uuid}-{name}` so two uploads with the same name do not
+/// overwrite each other. A clock prefix collided within a tick (#1905).
 fn randomize(name: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("{nanos}-{name}")
+    format!("{}-{name}", uuid::Uuid::new_v4().simple())
 }
 
 #[cfg(test)]
@@ -252,13 +293,19 @@ mod tests {
 
     #[test]
     fn sanitize_strips_directory_components() {
-        // Client sends a full path; we keep only the basename.
+        // A client-sent path must not escape the prefix.
         assert_eq!(sanitize_filename("/etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(
-            sanitize_filename("C:\\windows\\evil.exe"),
-            "C__windows_evil.exe"
-        );
+        // Windows separators too, on every platform.
+        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
+        assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
+    }
+
+    /// A path that is nothing but separators has no basename to keep.
+    #[test]
+    fn sanitize_handles_a_path_with_no_filename() {
+        assert_eq!(sanitize_filename("/"), "_");
+        assert_eq!(sanitize_filename("dir/"), "dir_");
     }
 
     #[test]
@@ -313,20 +360,18 @@ mod tests {
     // -------- randomize
 
     #[test]
-    fn randomize_preserves_name_and_prepends_nanos() {
+    fn randomize_preserves_name_and_prepends_a_hex_id() {
         let r = randomize("photo.jpg");
         assert!(r.ends_with("-photo.jpg"));
-        // Nanos prefix is purely digits before the dash.
         let dash = r.find('-').unwrap();
-        assert!(r[..dash].chars().all(|c| c.is_ascii_digit()));
+        assert!(r[..dash].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// #1905: back-to-back calls in one clock tick must not collide.
     #[test]
-    fn randomize_two_calls_produce_different_prefixes() {
-        let a = randomize("x");
-        std::thread::sleep(std::time::Duration::from_micros(1));
-        let b = randomize("x");
-        assert_ne!(a, b);
+    fn randomize_never_repeats_in_a_tight_loop() {
+        let keys: HashSet<String> = (0..10_000).map(|_| randomize("x")).collect();
+        assert_eq!(keys.len(), 10_000);
     }
 
     // -------- save_uploads end-to-end via a real multipart body
@@ -342,9 +387,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tower::ServiceExt;
 
-        // Build a minimal axum app that takes Multipart, uploads it,
-        // and returns the saved keys. Lets us exercise the real
-        // multipart parser without hand-building MultipartError stubs.
+        // A tiny app so the test runs the real multipart parser.
         let storage: BoxedStorage = StdArc::new(InMemoryStorage::new());
         let storage_for_handler = storage.clone();
         let app = Router::new().route(
@@ -390,7 +433,7 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert_eq!(body_str, "uploads/hello.txt");
 
-        // Confirm the file actually landed in storage.
+        // The file really landed in storage.
         let stored = storage.load("uploads/hello.txt").await.unwrap();
         assert_eq!(&stored, b"hello world");
     }
@@ -455,18 +498,9 @@ mod tests {
         assert!(body_str.contains("file too large"), "got: {body_str}");
     }
 
-    /// #421 — streaming early-abort. The save loop reads `field.chunk()`
-    /// in a loop and short-circuits as soon as the accumulated size
-    /// exceeds `max_bytes`. Previously the bound check ran AFTER the
-    /// full body buffered, so a 100MB upload with a 5MB cap still
-    /// allocated 100MB before erroring.
-    ///
-    /// Hard to observe "did we abort before reading the rest?" from the
-    /// outside without instrumentation, but we can verify two things:
-    ///   1. The error still surfaces with the actual size encoded.
-    ///   2. The `actual` byte count never significantly exceeds
-    ///      `max_bytes` — strictly, it's at most `max_bytes + chunk_size`
-    ///      where chunk_size is the multipart parser's read granularity.
+    /// An oversize body must error and write nothing. We cannot see the
+    /// early abort from outside, but we can check the error surfaces
+    /// and storage stays empty.
     #[tokio::test]
     async fn save_uploads_aborts_streaming_on_oversize() {
         use crate::storage::InMemoryStorage;
@@ -495,8 +529,7 @@ mod tests {
         );
 
         let boundary = "b";
-        // 50 KiB payload against a 1 KiB cap — early-abort SHOULD
-        // surface the error well before the full body is consumed.
+        // 50 KiB payload against a 1 KiB cap.
         let payload = "x".repeat(50 * 1024);
         let body = format!(
             "--{boundary}\r\n\
@@ -526,11 +559,97 @@ mod tests {
         .unwrap()
         .to_owned();
         assert!(body_str.contains("file too large"), "got: {body_str}");
-        // Storage MUST be empty — early-abort means we never wrote.
+        // Nothing was written.
         assert!(
             storage.load("u/big.bin").await.is_err(),
             "no file should have been saved"
         );
+    }
+
+    /// POST one multipart body with `names` as file fields through `cfg`.
+    async fn upload(cfg: UploadConfig, names: &[&str]) -> (u16, String, BoxedStorage) {
+        use crate::storage::InMemoryStorage;
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let storage: BoxedStorage = std::sync::Arc::new(InMemoryStorage::new());
+        let st = storage.clone();
+        let app = Router::new().route(
+            "/upload",
+            post(move |mp: Multipart| async move {
+                match save_uploads(mp, &cfg, &st).await {
+                    Ok(v) => (axum::http::StatusCode::OK, v.len().to_string()),
+                    Err(e) => (axum::http::StatusCode::BAD_REQUEST, e.to_string()),
+                }
+            }),
+        );
+        let mut body = String::new();
+        for n in names {
+            body.push_str(&format!(
+                "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"{n}\"\r\n\r\nx\r\n"
+            ));
+        }
+        body.push_str("--b--\r\n");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (
+            status,
+            String::from_utf8_lossy(&bytes).into_owned(),
+            storage,
+        )
+    }
+
+    /// With no allow-list, types that run script are still refused (#1849).
+    #[tokio::test]
+    async fn empty_allow_list_refuses_active_types() {
+        for name in ["x.html", "x.SVG", "x.xml", "x.js"] {
+            let (status, body, _) = upload(UploadConfig::new("u/"), &[name]).await;
+            assert_eq!(status, 400, "{name}: {body}");
+        }
+        let (status, _, _) = upload(UploadConfig::new("u/"), &["x.png", "notes"]).await;
+        assert_eq!(status, 200);
+        let cfg = UploadConfig::new("u/").allowed_extensions(&["svg"]);
+        assert_eq!(upload(cfg, &["x.svg"]).await.0, 200, "listed on purpose");
+    }
+
+    #[tokio::test]
+    async fn max_files_caps_one_request() {
+        let cfg = UploadConfig::new("u/").max_files(2);
+        let (status, body, storage) = upload(
+            cfg.clone().randomize_filename(false),
+            &["a.png", "b.png", "c.png"],
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("too many files"), "{body}");
+        for key in ["u/a.png", "u/b.png"] {
+            assert!(!storage.exists(key).await.unwrap(), "orphan {key}");
+        }
+        let (status, body, _) = upload(cfg, &["a.png", "b.png"]).await;
+        assert_eq!((status, body.as_str()), (200, "2"));
+    }
+
+    /// #1905: a later file's error removes the files saved before it.
+    #[tokio::test]
+    async fn a_refused_file_removes_the_ones_saved_before_it() {
+        let cfg = UploadConfig::new("u/")
+            .allowed_extensions(&["png"])
+            .randomize_filename(false);
+        let (status, body, storage) = upload(cfg, &["a.png", "b.exe"]).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(!storage.exists("u/a.png").await.unwrap(), "orphan u/a.png");
     }
 
     #[tokio::test]

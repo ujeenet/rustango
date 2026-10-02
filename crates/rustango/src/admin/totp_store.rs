@@ -1,23 +1,23 @@
-//! Persistence for admin TOTP (two-factor) devices — issue #367.
+//! Storage for admin TOTP (two-factor) devices.
 //!
-//! The RFC 6238 crypto lives in [`crate::totp`]; this module is the
-//! admin-side storage + lookup that the enrollment page and the login
-//! challenge share. One device per admin user, keyed by `user_id`.
+//! The RFC 6238 crypto lives in [`crate::totp`]. This module is the
+//! storage the enrollment page and the login challenge share: one
+//! device per admin user, keyed by `user_id`.
 //!
-//! The table is **operator-managed** (`#[rustango(managed = false)]`) and
-//! bootstrapped idempotently via [`ensure_table`] (the same pattern as
-//! the audit log), so it never enters the migration graph. Gated behind
-//! the `totp` feature; admin builds without `totp` are unchanged (no
-//! 2FA challenge).
+//! The table is `managed = false` and created by [`ensure_table`], the
+//! same pattern as the audit log, so it never joins the migration
+//! graph. Without the `totp` feature there is no 2FA challenge.
+//!
+//! [`ensure_table`]: crate::admin::totp_store::ensure_table
 
 use crate::sql::Pool;
 use crate::totp::TotpSecret;
 use crate::Model;
 
-/// One admin TOTP device. `confirmed = false` is a half-finished
-/// enrollment (secret generated + QR shown, code not yet verified);
-/// only a `confirmed` device gates login.
-#[derive(Model, Debug, Clone)]
+/// One admin TOTP device. `confirmed = false` means enrollment is
+/// half done: the secret exists but no code has been verified yet.
+/// Only a confirmed device gates login.
+#[derive(Model, Clone)]
 #[rustango(table = "rustango_admin_totp", managed = false)]
 #[allow(dead_code)]
 pub struct AdminTotp {
@@ -32,41 +32,182 @@ pub struct AdminTotp {
     pub confirmed: bool,
     #[rustango(default = "now()")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Time step of the last accepted code. A code is accepted only for
+    /// a later step, so each code works once.
+    pub last_used_step: Option<i64>,
+    /// A re-enrollment's new secret. The confirmed one above keeps
+    /// gating login until a code for this one promotes it (#1756).
+    #[rustango(max_length = 64)]
+    pub pending_secret_base32: Option<String>,
 }
 
-/// Idempotently create the `rustango_admin_totp` table for the active
-/// backend.
+/// The secrets are redacted (#1875).
+impl std::fmt::Debug for AdminTotp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminTotp")
+            .field("user_id", &self.user_id)
+            .field("secret_base32", &"<redacted>")
+            .field("confirmed", &self.confirmed)
+            .field("created_at", &self.created_at)
+            .field("last_used_step", &self.last_used_step)
+            .field(
+                "pending_secret_base32",
+                &self.pending_secret_base32.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl AdminTotp {
+    /// The secret an enrollment in progress would confirm: the pending
+    /// re-enroll secret, else the device's own secret while unconfirmed.
+    pub fn pending_secret(&self) -> Option<TotpSecret> {
+        match &self.pending_secret_base32 {
+            Some(s) => TotpSecret::from_base32(s),
+            None if !self.confirmed => TotpSecret::from_base32(&self.secret_base32),
+            None => None,
+        }
+    }
+}
+
+/// Authenticator-app defaults: 30s step, 6 digits, ±1 step of clock skew.
+const STEP_SECS: u64 = 30;
+const DIGITS: u32 = 6;
+const WINDOW: i64 = 1;
+
+/// Create the `rustango_admin_totp` table for the active backend. Safe
+/// to call repeatedly.
 ///
-/// Drift-free: rendered from [`AdminTotp::SCHEMA`] through the migration
-/// engine's dialect emitter — the same path `makemigrations`/`migrate`
-/// use — instead of hand-written per-dialect DDL. The model is
-/// `managed = false` (ensure-based, outside the migration set), so this
-/// helper is its only DDL path.
+/// The DDL is rendered from `AdminTotp::SCHEMA` by the migration
+/// engine's dialect emitter, the same path `migrate` uses, so it
+/// cannot drift. The model is `managed = false`, so this is its only
+/// DDL path.
 ///
 /// # Errors
-/// Driver / SQL failures (other than the duplicate-object errors this
-/// swallows to stay idempotent).
+/// Driver or SQL failures. Duplicate-object errors are ignored, so
+/// repeat calls succeed.
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
-    let changes =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(sqlx::Error::Protocol)?;
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            });
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
+    add_new_columns(pool).await
+}
+
+/// Columns newer than the table, added to one created by an older
+/// release. Never creates the table: an empty new one would read as
+/// "no second factor" (#1644).
+async fn add_new_columns(pool: &Pool) -> Result<(), sqlx::Error> {
+    use crate::core::Model as _;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
+    crate::migrate::add_columns_idempotent(
+        pool,
+        &snapshot,
+        &[
+            (AdminTotp::SCHEMA.table, "last_used_step"),
+            (AdminTotp::SCHEMA.table, "pending_secret_base32"),
+        ],
+    )
+    .await
+}
+
+/// Accept `code` for `user_id` at most once. Its time step must be later
+/// than the last accepted one, checked and recorded in one UPDATE.
+/// Success also drops an unfinished re-enroll, so a stale pending key
+/// does not outlive the next sign-in (#1756).
+///
+/// # Errors
+/// Driver or SQL failures.
+pub async fn redeem_code(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    redeem(pool, user_id, secret, code, false).await
+}
+
+/// Finish enrollment with `code` for the [`AdminTotp::pending_secret`]:
+/// confirms or promotes it and records the code's step in one UPDATE,
+/// so a failed write leaves the code unused.
+///
+/// # Errors
+/// Driver or SQL failures.
+pub async fn confirm_with_code(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    redeem(pool, user_id, secret, code, true).await
+}
+
+async fn redeem(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    code: &str,
+    confirm: bool,
+) -> Result<bool, crate::sql::ExecError> {
+    let Some(step) = crate::totp::matched_step(secret, code, STEP_SECS, DIGITS, WINDOW) else {
+        return Ok(false);
+    };
+    let step = i64::try_from(step).unwrap_or(i64::MAX);
+    let updated = match write_step(pool, user_id, secret, step, confirm).await {
+        Ok(n) => n,
+        // A table from before the newer columns: add them and try again.
+        Err(first) => match add_new_columns(pool).await {
+            Ok(()) => write_step(pool, user_id, secret, step, confirm).await?,
+            Err(_) => return Err(first),
+        },
+    };
+    Ok(updated == 1)
+}
+
+async fn write_step(
+    pool: &Pool,
+    user_id: i64,
+    secret: &TotpSecret,
+    step: i64,
+    confirm: bool,
+) -> Result<u64, crate::sql::ExecError> {
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    if confirm {
+        // A re-enroll: swap the pending secret in, in one write.
+        let promoted = AdminTotp::objects()
+            .filter("user_id", user_id)
+            .filter("pending_secret_base32", secret.to_base32())
+            .update()
+            .set("secret_base32", secret.to_base32())
+            .set("pending_secret_base32", None::<String>)
+            .set("confirmed", true)
+            .set("last_used_step", step)
+            .execute_pool(pool)
+            .await?;
+        if promoted == 1 {
+            return Ok(promoted);
         }
     }
-    Ok(())
+    // Pinned to the secret the code was checked against, so a
+    // re-enrollment in between cannot be confirmed by the old one.
+    let q = AdminTotp::objects()
+        .filter("user_id", user_id)
+        .filter("secret_base32", secret.to_base32());
+    let q = if confirm {
+        q.filter("confirmed", false)
+    } else {
+        q
+    };
+    let q = q
+        .where_(Q::is_null("last_used_step") | Q::lt("last_used_step", step))
+        .update()
+        .set("last_used_step", step);
+    let q = if confirm {
+        q.set("confirmed", true)
+    } else {
+        q.set("pending_secret_base32", None::<String>)
+    };
+    q.execute_pool(pool).await
 }
 
 /// Fetch the device row for `user_id`, if any.
@@ -80,30 +221,116 @@ pub async fn device(pool: &Pool, user_id: i64) -> Option<AdminTotp> {
         .and_then(|rows| rows.into_iter().next())
 }
 
-/// The user's **confirmed** TOTP secret, decoded — `None` when the user
-/// has no device or an unconfirmed (pending) one. This is the gate the
-/// login challenge checks.
+/// The user's **confirmed** TOTP secret, decoded. `None` when there is
+/// no device, or when the device is still pending.
+///
+/// A read failure also gives `None`, which is why an authentication
+/// gate must not use this — see [`confirmed_secret_checked`] (#1644).
+#[deprecated(
+    since = "0.59.17",
+    note = "a read error looks like no device; use confirmed_secret_checked"
+)]
 pub async fn confirmed_secret(pool: &Pool, user_id: i64) -> Option<TotpSecret> {
-    let d = device(pool, user_id).await?;
-    if !d.confirmed {
-        return None;
-    }
-    TotpSecret::from_base32(&d.secret_base32)
+    confirmed_secret_checked(pool, user_id).await.ok().flatten()
 }
 
-/// Start (or restart) enrollment: store a fresh, unconfirmed secret for
-/// `user_id`, replacing any existing device. Returns the stored secret.
+/// [`confirmed_secret`], but a read failure is an error rather than
+/// "this user has no second factor".
+///
+/// The distinction is the whole point. `device()` maps any error to
+/// `None`, the login gate read `None` as "no 2FA", and the password
+/// alone then granted the session — so a dropped table or a pool
+/// timeout silently downgraded every enrolled admin to one factor
+/// (#1644). `rustango_admin_totp` is `managed = false`, so "the table
+/// is not there" is a reachable state, not a hypothetical.
 ///
 /// # Errors
-/// Driver / SQL failures.
+/// The driver error, when the device row cannot be read at all.
+pub async fn confirmed_secret_checked(
+    pool: &Pool,
+    user_id: i64,
+) -> Result<Option<TotpSecret>, crate::sql::ExecError> {
+    // Only the secret, so a table from before `last_used_step` still reads.
+    let secrets: Vec<String> = AdminTotp::objects()
+        .filter("user_id", user_id)
+        .filter("confirmed", true)
+        .values_list_flat("secret_base32")
+        .fetch(pool)
+        .await?;
+    // A confirmed row that won't decode still gates: refuse, don't skip 2FA (#1875).
+    secrets
+        .first()
+        .map(|s| {
+            TotpSecret::from_base32(s).ok_or_else(|| {
+                crate::sql::ExecError::Driver(crate::sql::sqlx::Error::Decode(
+                    "rustango_admin_totp.secret_base32 is not valid base32".into(),
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// What [`start_reenrollment`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reenroll {
+    /// The current code was valid; the new secret is staged.
+    Verified,
+    /// The current code was refused; nothing changed.
+    Refused,
+    /// No confirmed device, so no code was checked; the secret is staged.
+    NoDevice,
+}
+
+/// Re-enroll with `secret`, but only for a fresh `current_code` of the
+/// confirmed device, so a stolen session cannot swap the factor (#1776).
+///
+/// # Errors
+/// Driver or SQL failures.
+pub async fn start_reenrollment(
+    pool: &Pool,
+    user_id: i64,
+    current_code: &str,
+    secret: &TotpSecret,
+) -> Result<Reenroll, crate::sql::ExecError> {
+    let outcome = match confirmed_secret_checked(pool, user_id).await? {
+        Some(current) if !redeem_code(pool, user_id, &current, current_code).await? => {
+            return Ok(Reenroll::Refused);
+        }
+        Some(_) => Reenroll::Verified,
+        None => Reenroll::NoDevice,
+    };
+    start_enrollment(pool, user_id, secret).await?;
+    Ok(outcome)
+}
+
+/// Start or restart enrollment with `secret`. A confirmed device keeps
+/// its secret and gates login; `secret` waits beside it until
+/// [`confirm_with_code`] promotes it (#1756).
+///
+/// # Errors
+/// Driver or SQL failures.
 pub async fn start_enrollment(
     pool: &Pool,
     user_id: i64,
     secret: &TotpSecret,
 ) -> Result<(), crate::sql::ExecError> {
-    // One device per user — clear any prior (pending or confirmed) row.
+    use crate::sql::UpdaterPool as _;
+    let staged = AdminTotp::objects()
+        .filter("user_id", user_id)
+        .filter("confirmed", true)
+        .update()
+        .set("pending_secret_base32", secret.to_base32())
+        .execute_pool(pool)
+        .await?;
+    if staged == 1 {
+        return Ok(());
+    }
+    // No confirmed device: replace a pending one. Never deletes a
+    // confirmed row, so a race cannot drop the factor either.
     let del = AdminTotp::objects()
         .filter("user_id", user_id)
+        .filter("confirmed", false)
         .compile_delete()?;
     crate::sql::delete_pool(pool, &del).await?;
     let row = AdminTotp {
@@ -111,23 +338,33 @@ pub async fn start_enrollment(
         secret_base32: secret.to_base32(),
         confirmed: false,
         created_at: chrono::Utc::now(),
+        last_used_step: None,
+        pending_secret_base32: None,
     };
     row.insert_pool(pool).await?;
     Ok(())
 }
 
-/// Mark the user's device confirmed (called once a code verifies during
-/// enrollment). No-op if there's no pending device.
+/// Confirm the user's enrollment without a code, promoting a pending
+/// re-enroll secret if there is one. Prefer [`confirm_with_code`].
 ///
 /// # Errors
-/// Driver / SQL failures.
+/// Driver or SQL failures.
 pub async fn confirm(pool: &Pool, user_id: i64) -> Result<(), crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
-    AdminTotp::objects()
-        .filter("user_id", user_id)
-        .update()
-        .set("confirmed", true)
-        .execute_pool(pool)
-        .await?;
+    let q = AdminTotp::objects().filter("user_id", user_id);
+    let pending = device(pool, user_id)
+        .await
+        .and_then(|d| d.pending_secret_base32);
+    // Pinned to the pending value read, so a newer re-enroll is not promoted.
+    let q = match pending {
+        Some(p) => q
+            .filter("pending_secret_base32", p.clone())
+            .update()
+            .set("secret_base32", p)
+            .set("pending_secret_base32", None::<String>),
+        None => q.update(),
+    };
+    q.set("confirmed", true).execute_pool(pool).await?;
     Ok(())
 }

@@ -2,13 +2,13 @@
 
 Coder en dur des URL (`/posts/42`) partout dans les handlers et les templates est
 fragile — changez une route et chaque littéral casse silencieusement.
-**Rustango** vous donne la réponse de Django : **nommez un motif d'URL une fois,
+**Rustango** vous donne la réponse à cela : **nommez un motif d'URL une fois,
 puis construisez l'URL par son nom partout** — en Rust avec `reverse(...)`, dans
 les templates avec `{{ url(...) }}`, et dans les redirections avec
-`redirect_to_view(...)`. La surface de l'API reflète les
-`reverse()` / `{% url %}` / `resolve_url()` / `redirect()` de Django.
+`redirect_to_view(...)` ; `resolve_url(...)` accepte indifféremment un nom ou un
+chemin déjà formé.
 
-[![URL reverse à la Django : register_url! nomme un motif, reverse() construit l'URL en Rust, et {{ url(...) }} construit l'URL dans un template](../img/urls.png)](../img/urls.png)
+[![URL reverse nommées : register_url! nomme un motif, reverse() construit l'URL en Rust, et {{ url(...) }} construit l'URL dans un template](../img/urls.png)](../img/urls.png)
 
 > **Source :** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) et `rustango::shortcuts`
@@ -81,7 +81,7 @@ voir [Erreurs](#erreurs).
 
 ## Reverse dans les templates
 
-Les templates reçoivent le `{% url %}` de Django comme fonction Tera.
+Les templates reçoivent une fonction `url` pour Tera.
 Enregistrez-la une fois sur votre instance `Tera` à l'initialisation (elle est
 derrière la feature `template_views`) :
 
@@ -98,8 +98,7 @@ nombres et booléens sont acceptés) :
 <a href="{{ url(name='user-posts', user_id=7, post_id=42) }}">…</a>
 ```
 
-C'est l'équivalent du `{% url 'post-detail' id=42 %}` de Django. Pour le motif de
-capture `{% url 'x' as var %}`, utilisez le `{% set %}` de Tera :
+Pour conserver le résultat dans une variable, utilisez le `{% set %}` de Tera :
 
 ```jinja
 {% set post_url = url(name='post-detail', id=post.id) %}
@@ -113,8 +112,8 @@ bruyamment plutôt que de produire silencieusement une URL cassée.
 
 ## Rediriger par nom
 
-`rustango::shortcuts` reflète les helpers de redirection par nom de vue de Django,
-de sorte que les handlers ne codent jamais en dur un `Location` :
+`rustango::shortcuts` fournit des helpers de redirection qui travaillent sur les
+noms de route, de sorte que les handlers ne codent jamais en dur un `Location` :
 
 ```rust
 use std::collections::HashMap;
@@ -126,7 +125,7 @@ params.insert("id", "42".to_string());
 let response = redirect_to_view("post-detail", &params)?;
 ```
 
-`resolve_url(spec, &params)` est le `resolve_url` de Django : si `spec` ressemble
+`resolve_url(spec, &params)` accepte les deux : si `spec` ressemble
 déjà à une URL (`/…`, `http://`, `https://`, `./`, `../`) elle est retournée
 telle quelle ; sinon elle est traitée comme un nom de route et résolue par
 reverse. Pratique pour un paramètre `?next=` ou un réglage pouvant contenir *soit*
@@ -146,8 +145,8 @@ retourne un simple `302`.)
 
 Il n'y a pas d'`include()` ni de namespace d'app auto-appliqué — chaque
 `register_url!` atterrit dans un unique registre global. Le namespacing est une
-**convention dans le nom lui-même** : préfixez avec `app:`, exactement comme vous
-appelleriez le `reverse("app:detail")` de Django.
+**convention dans le nom lui-même** : préfixez avec `app:` et passez le nom
+complet à `reverse("app:detail")`.
 
 ```rust
 register_url!("blog:post-detail", "/blog/posts/{id}");
@@ -222,7 +221,7 @@ Le routage *est* [axum](https://docs.rs/axum) 0.8, et axum matche les chemins av
 [`matchit`](https://docs.rs/matchit), un routeur à **arbre radix (radix-trie)**.
 Il parcourt l'URL un segment à la fois le long d'un arbre de préfixes, donc un
 match coûte O(longueur du chemin) et est indépendant du nombre de routes
-enregistrées. Un routeur regex fait l'inverse : Django évalue `urlpatterns` de
+enregistrées. Un routeur regex fait l'inverse : il évalue une liste de motifs de
 haut en bas, exécutant la regex de chaque entrée contre le chemin jusqu'à ce
 qu'une corresponde. Le trie achète un matching en temps constant et une préséance
 non ambiguë « le littéral le plus spécifique gagne » — au prix de ne pas exprimer
@@ -237,15 +236,15 @@ jamais été un moteur de regex au départ.
 La forme `{int:id}` n'est acceptée que comme **facilité de portage** pour
 `reverse()` : le constructeur découpe le placeholder sur `:` et ne garde que le
 nom, jetant le préfixe de type ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Cela
-permet à `reverse()` de fonctionner sur un motif copié verbatim d'un
-`path("<int:id>/", …)` de Django — mais rien ne valide que la valeur fournie est
-réellement un entier.
+permet à `reverse()` de fonctionner sur un motif copié verbatim d'une définition
+de route typée d'un autre framework — mais rien ne valide que la valeur fournie
+est réellement un entier.
 
 ### Comment exprimer une route contrainte
 
 Matchez le segment avec un simple `{placeholder}`, puis imposez sa forme là où la
-valeur est utilisée. Le `re_path(r'^articles/(?P<year>[0-9]{4})/$', …)` de Django
-devient :
+valeur est utilisée. Une route qui ne doit accepter que des années à quatre
+chiffres s'écrit ainsi :
 
 ```rust
 register_url!("article-by-year", "/articles/{year}");
@@ -261,8 +260,7 @@ async fn article_by_year(Path(year): Path<String>) -> impl IntoResponse {
 }
 ```
 
-Pour rejeter *avant* que le handler ne s'exécute (plus proche de la sémantique des
-convertisseurs de Django), placez le contrôle dans un extracteur axum personnalisé
+Pour rejeter *avant* que le handler ne s'exécute, placez le contrôle dans un extracteur axum personnalisé
 (`FromRequestParts`) et prenez ce type comme argument du handler au lieu de
 `Path<String>` — le framework n'en fournit pas, mais le trait d'extracteur d'axum
 est la couture prévue. Le crate `regex` est déjà une dépendance (l'ORM l'utilise
@@ -283,7 +281,7 @@ une fois et la réutiliser à travers les requêtes.
   qu'ils restent synchronisés.
 - **Les valeurs sont percent-encodées** par `reverse`, donc elles sont sûres à
   déposer dans un header `Location` ou un `href`.
-- **Pas de convertisseurs regex/typés** dans les motifs (le `<int:pk>` de Django) ;
+- **Pas de convertisseurs regex/typés** dans les motifs (du type `<int:pk>`) ;
   les placeholders sont de simples `{name}` et les valeurs sont substituées telles
   quelles (après encodage). Voir [Motifs regex & chemins typés](#motifs-regex--chemins-typés)
   pour le pourquoi, et comment contraindre une route à la place.

@@ -1,5 +1,5 @@
 #![cfg(feature = "postgres")]
-//! Live PG end-to-end sanity test for Django-shape `.filter("field__lookup", value)`
+//! Live PG end-to-end sanity test for `.filter("field__lookup", value)`
 //! (issue #71). Emission already covered by [`filter_lookup.rs`]; this file
 //! proves that each major suffix family actually round-trips against a real
 //! Postgres backend.
@@ -35,7 +35,11 @@ pub struct Post {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
@@ -241,7 +245,7 @@ async fn live_between_range_alias() {
     assert_eq!(rows.len(), 3, "views in [10,100] hits 3 rows");
     assert!(rows.iter().all(|r| (10..=100).contains(&r.views)));
 
-    // __range (Django alias)
+    // __range (alias for __between)
     let rows: Vec<Post> = Post::objects()
         .filter(
             "views__range",

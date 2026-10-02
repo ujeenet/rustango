@@ -1,5 +1,4 @@
-//! `Range<T>` — typed PostgreSQL range column wrapper (Django's
-//! `RangeField` family, issue #343).
+//! `Range<T>` — typed PostgreSQL range column wrapper (issue #343).
 //!
 //! Declare a native PG range column on a model:
 //!
@@ -28,13 +27,13 @@
 //! The element type drives the column type emitted by the migration
 //! writer:
 //!
-//! | Rust field                       | PG column   | Django field            |
-//! |----------------------------------|-------------|-------------------------|
-//! | `Range<i32>`                     | `int4range` | `IntegerRangeField`     |
-//! | `Range<i64>`                     | `int8range` | `BigIntegerRangeField`  |
-//! | `Range<rust_decimal::Decimal>`   | `numrange`  | `DecimalRangeField`     |
-//! | `Range<chrono::NaiveDate>`       | `daterange` | `DateRangeField`        |
-//! | `Range<chrono::DateTime<Utc>>`   | `tstzrange` | `DateTimeRangeField`    |
+//! | Rust field                       | PG column   |
+//! |----------------------------------|-------------|
+//! | `Range<i32>`                     | `int4range` |
+//! | `Range<i64>`                     | `int8range` |
+//! | `Range<rust_decimal::Decimal>`   | `numrange`  |
+//! | `Range<chrono::NaiveDate>`       | `daterange` |
+//! | `Range<chrono::DateTime<Utc>>`   | `tstzrange` |
 //!
 //! Pairs with the already-shipped range operators
 //! ([`crate::core::Op::RangeContains`] / `RangeContainedBy` /
@@ -86,7 +85,7 @@ impl<T> Range<T> {
 
     /// `[lower, upper)` — the canonical half-open range (lower inclusive,
     /// upper exclusive). Matches PostgreSQL's normalized discrete-range
-    /// form and Python's `range`/Django default.
+    /// form.
     #[must_use]
     pub fn closed_open(lower: T, upper: T) -> Self {
         Self {
@@ -150,7 +149,7 @@ fn pg_range_literal<T>(lower: &Bound<T>, upper: &Bound<T>, fmt: impl Fn(&T) -> S
 // ---- serde: a `{ "lower": ..., "upper": ... }` object with bound tags ----
 //
 // Derives delegate to `Bound<T>`'s serde (an enum). Good enough for
-// DRF/JSON round-trips and inspection; not the PG literal form.
+// JSON round-trips and inspection; not the PG literal form.
 
 impl<T: serde::Serialize> serde::Serialize for Range<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

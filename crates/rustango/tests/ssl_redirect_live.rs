@@ -1,5 +1,5 @@
-//! Integration test for the HTTP → HTTPS redirect middleware —
-//! Django `SECURE_SSL_REDIRECT` parity. Mounts the layer on an axum
+//! Integration test for the HTTP → HTTPS redirect middleware, driven
+//! by the `SECURE_SSL_REDIRECT` setting. Mounts the layer on an axum
 //! Router, sends requests via tower's oneshot, and asserts:
 //!
 //! * Plain HTTP request → 301 with `Location: https://...` set.

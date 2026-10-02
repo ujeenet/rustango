@@ -1,6 +1,6 @@
-//! Django-parity `BadHeaderError` — reject CR / LF in single-line
-//! header fields to defend against email header injection attacks.
-//! Django raises the same on `EmailMessage(subject='x\nBcc: evil@a')`.
+//! Reject CR / LF in single-line header fields, to defend against
+//! email header injection. A subject like `"x\nBcc: evil@a"` must be
+//! refused rather than smuggled through as a second header.
 
 #![cfg(feature = "email")]
 

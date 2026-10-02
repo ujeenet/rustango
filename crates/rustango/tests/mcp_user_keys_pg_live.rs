@@ -25,7 +25,10 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool: Pool = sqlx::PgPool::connect(&url).await.ok()?.into();
+    let pool: Pool = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"))
+        .into();
     let pg = pool.as_postgres().unwrap();
     // Clean slate for the agent tables (child-first). `migrate_framework`
     // recreates them from the models, so we get the current DDL each run.

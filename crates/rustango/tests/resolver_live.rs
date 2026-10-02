@@ -10,8 +10,8 @@ use http::{HeaderName, HeaderValue, Request};
 use rustango::migrate;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    ChainResolver, HeaderResolver, Org, OrgResolver, PathPrefixResolver, PortResolver, StorageMode,
-    SubdomainResolver,
+    ChainResolver, HeaderResolver, ListenerPort, Org, OrgResolver, PathPrefixResolver,
+    PortResolver, StorageMode, SubdomainResolver,
 };
 
 use tokio::sync::Mutex;
@@ -335,14 +335,26 @@ async fn port_resolver_matches_org_port() {
     seed_orgs(&pool).await;
 
     let r = PortResolver;
+    // #1856 — the port in an absolute-form request line is the client's choice.
     let parts = parts_with_uri("http://example.test:9001/x");
+    assert!(
+        r.resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+            .await
+            .unwrap()
+            .is_none(),
+        "the client-sent URI port picked a tenant"
+    );
+
+    let mut parts = parts_with_uri("http://example.test/x");
+    parts.extensions.insert(ListenerPort(9001));
     let org = r
         .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
         .await
         .unwrap();
     assert_eq!(org.unwrap().slug, "initech");
 
-    let parts = parts_with_uri("http://example.test:8080/x");
+    let mut parts = parts_with_uri("http://example.test:9001/x");
+    parts.extensions.insert(ListenerPort(8080));
     assert!(r
         .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
         .await
@@ -388,9 +400,20 @@ async fn chain_resolver_subdomain_first_then_header() {
         "subdomain should win over X-Org in the standard chain"
     );
 
-    // Header fallback when no subdomain matches.
+    // #1856 — no `X-Org` fallback on a host nobody registered.
     let parts = parts_with_header("x-org", "globex");
-    let org = chain
+    assert!(
+        chain
+            .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+            .await
+            .unwrap()
+            .is_none(),
+        "the standard chain trusted X-Org on an unmatched host"
+    );
+
+    // Opting in restores it.
+    let opted = ChainResolver::standard("app.test").push(HeaderResolver::default());
+    let org = opted
         .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
         .await
         .unwrap();

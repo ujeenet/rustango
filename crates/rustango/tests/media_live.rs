@@ -2,6 +2,16 @@
 //! Live integration tests for `MediaManager` against Postgres + an
 //! S3-compatible bucket.
 //!
+//! These had never executed: the `RUSTANGO_S3_TEST_*` vars were set
+//! nowhere in CI, so all six were counted green on every build without
+//! touching a database or a bucket (#1437). Pointed at a real Postgres
+//! and MinIO for the first time, all six failed — on #1450, the bug they
+//! were written to catch and had never had the chance to: `SqlValue::Null`
+//! bound as text, so a NULL `uploaded_by_id` would not go into a `bigint`
+//! column on Postgres.
+//!
+//! Both are fixed, and the `s3_live` job runs this file now.
+//!
 //! Both env-var contracts must be set or the tests skip silently:
 //!
 //! - `DATABASE_URL` — Postgres for the `rustango_media` table
@@ -105,6 +115,7 @@ async fn save_bytes_inserts_row_and_uploads_object() {
 #[tokio::test]
 async fn begin_then_finalize_upload_flips_pending_to_ready() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -113,7 +124,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
         key_prefix: "media-live/direct".into(),
         mime: "image/png".into(),
         original_filename: "direct.png".into(),
-        size_bytes: 100,
+        size_bytes: 23,
         uploaded_by_id: Some(7),
         collection_id: None,
         ttl: Duration::from_secs(60),
@@ -130,6 +141,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
     let resp = reqwest::Client::new()
         .put(&ticket.upload_url)
         .header("Content-Type", "image/png")
+        .header("If-None-Match", "*")
         .body(payload.to_vec())
         .send()
         .await
@@ -155,6 +167,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
 #[tokio::test]
 async fn finalize_marks_failed_when_object_never_uploaded() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -176,9 +189,104 @@ async fn finalize_marks_failed_when_object_never_uploaded() {
     manager.purge(&finalized).await.ok();
 }
 
+/// #2057 / #1851: an active MIME is signed as octet-stream, and a body
+/// of another size or type never reaches the bucket.
+#[tokio::test]
+async fn direct_upload_stores_a_safe_type_and_the_signed_size() {
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let payload = b"<script>alert(1)</script>";
+    let intent = UploadIntent::new(DISK_NAME, "text/html", "x.html", payload.len() as i64);
+    let ticket = manager.begin_upload(intent).await.expect("begin");
+    assert_eq!(ticket.content_type, "application/octet-stream");
+    let put = |ct: &'static str, body: Vec<u8>| {
+        reqwest::Client::new()
+            .put(&ticket.upload_url)
+            .header("Content-Type", ct)
+            .header("If-None-Match", "*")
+            .body(body)
+            .send()
+    };
+    let html = put("text/html", payload.to_vec()).await.expect("PUT");
+    assert!(!html.status().is_success(), "text/html PUT accepted");
+    let big = put("application/octet-stream", vec![b'x'; 4096])
+        .await
+        .expect("PUT");
+    assert!(!big.status().is_success(), "oversized PUT accepted");
+    let ok = put("application/octet-stream", payload.to_vec())
+        .await
+        .expect("PUT");
+    assert!(ok.status().is_success(), "PUT failed: {}", ok.status());
+    let m = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    manager.purge(&m).await.expect("purge");
+}
+
+/// A replayed upload URL cannot swap the object after finalize.
+#[tokio::test]
+async fn upload_url_is_create_only() {
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let intent = UploadIntent::new(DISK_NAME, "image/png", "a.png", 10);
+    let ticket = manager.begin_upload(intent).await.expect("begin");
+    assert_eq!(
+        ticket.headers.get("if-none-match").map(String::as_str),
+        Some("*")
+    );
+    let put = |body: &'static [u8], headers: bool| {
+        let mut req = reqwest::Client::new().put(&ticket.upload_url).body(body);
+        if headers {
+            for (k, v) in &ticket.headers {
+                req = req.header(k, v);
+            }
+        } else {
+            req = req.header("Content-Type", "image/png");
+        }
+        req.send()
+    };
+    let bare = put(b"ten-bytes!", false).await.expect("PUT");
+    assert!(
+        !bare.status().is_success(),
+        "PUT without If-None-Match accepted"
+    );
+    let first = put(b"ten-bytes!", true).await.expect("PUT");
+    assert!(
+        first.status().is_success(),
+        "PUT failed: {}",
+        first.status()
+    );
+    let m = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("finalize");
+    assert_eq!(m.status_enum(), Some(MediaStatus::Ready));
+    let replay = put(b"SWAPPED!!!", true).await.expect("PUT");
+    assert_eq!(
+        replay.status().as_u16(),
+        412,
+        "replayed PUT replaced the object"
+    );
+    assert_eq!(manager.load_bytes(&m).await.expect("load"), b"ten-bytes!");
+    let again = manager
+        .finalize_upload(ticket.media_id)
+        .await
+        .expect("refinalize");
+    assert_eq!(again.status_enum(), Some(MediaStatus::Ready));
+    assert_eq!(manager.load_bytes(&m).await.expect("load"), b"ten-bytes!");
+    manager.purge(&m).await.expect("purge");
+}
+
 #[tokio::test]
 async fn delete_soft_then_get_returns_none() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -231,6 +339,7 @@ async fn delete_soft_then_get_returns_none() {
 #[tokio::test]
 async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -293,6 +402,7 @@ async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
 #[tokio::test]
 async fn purge_pending_clears_abandoned_uploads() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 

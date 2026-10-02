@@ -32,7 +32,7 @@ async fn pool_with_tags() -> Pool {
     .await
     .unwrap();
     // 4 rows across 2 categories — duplicates intentional.
-    for cat in ["rust", "rust", "django", "django", "rust", "go"] {
+    for cat in ["rust", "rust", "elixir", "elixir", "rust", "go"] {
         rustango::sql::raw_execute_pool(
             &pool,
             "INSERT INTO v045_cd_tag(category) VALUES (?)",
@@ -49,34 +49,18 @@ async fn count_distinct_returns_unique_count_not_row_count() {
     let pool = pool_with_tags().await;
 
     // Total rows = 6
-    let total_q = AggregateQuery {
-        model: CdTag::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: vec![],
-        aggregates: vec![("total".into(), AggregateExpr::Count(None))],
-        aliases: vec![],
-        having: None,
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    };
+    let total_q = AggregateQuery::new(
+        CdTag::SCHEMA,
+        vec![("total".into(), AggregateExpr::Count(None))],
+    );
     let totals: Vec<(i64,)> = fetch_aggregate_pool(&pool, &total_q).await.expect("total");
     assert_eq!(totals[0].0, 6, "row count");
 
-    // Distinct categories = 3 (rust, django, go)
-    let distinct_q = AggregateQuery {
-        model: CdTag::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::And(vec![]),
-        group_by: vec![],
-        aggregates: vec![("uniq".into(), AggregateExpr::CountDistinct("category"))],
-        aliases: vec![],
-        having: None,
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    };
+    // Distinct categories = 3 (rust, elixir, go)
+    let distinct_q = AggregateQuery::new(
+        CdTag::SCHEMA,
+        vec![("uniq".into(), AggregateExpr::CountDistinct("category"))],
+    );
     let distincts: Vec<(i64,)> = fetch_aggregate_pool(&pool, &distinct_q)
         .await
         .expect("count distinct");
@@ -88,22 +72,15 @@ async fn count_distinct_respects_where_clause() {
     use rustango::core::{Filter, Op};
     let pool = pool_with_tags().await;
     // WHERE category = 'rust' → 3 matching rows, 1 distinct value.
-    let q = AggregateQuery {
-        model: CdTag::SCHEMA,
-        joins: Vec::new(),
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "category",
-            op: Op::Eq,
-            value: SqlValue::String("rust".to_owned()),
-        }),
-        group_by: vec![],
-        aggregates: vec![("uniq".into(), AggregateExpr::CountDistinct("category"))],
-        aliases: vec![],
-        having: None,
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    };
+    let mut q = AggregateQuery::new(
+        CdTag::SCHEMA,
+        vec![("uniq".into(), AggregateExpr::CountDistinct("category"))],
+    );
+    q.where_clause = WhereExpr::Predicate(Filter::new(
+        "category",
+        Op::Eq,
+        SqlValue::String("rust".to_owned()),
+    ));
     let rows: Vec<(i64,)> = fetch_aggregate_pool(&pool, &q)
         .await
         .expect("count distinct");

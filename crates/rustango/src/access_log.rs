@@ -13,10 +13,27 @@
 //! Emits one `tracing::info!` event per completed request:
 //!
 //! ```text
-//! INFO method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1
+//! INFO http.request.method=GET url.path=/api/posts url.query=page=2
+//!      http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 //! ```
 //!
+//! Field names follow the OpenTelemetry HTTP semantic conventions, the
+//! same ones [`crate::tracing_layer`] uses, so an app running both
+//! layers logs one request under one schema. `url.path` holds the path
+//! alone and `url.query` the query, kept apart so a collector grouping
+//! by `url.path` does not see one bucket per query string.
+//!
+//! Query values are redacted before they are logged. Never add a
+//! credential-bearing parameter to a log line by hand.
+//!
 //! Filter via tracing-subscriber's env-filter (e.g. `RUST_LOG=rustango::access_log=info`).
+//!
+//! `tenant` is the tenant the request resolved to, or `-` when none
+//! did: an apex or operator-console request, or a single-tenant app.
+//! [`TenantField`] switches it to the org id, or off. See
+//! [`crate::tenant_log`] for how the identity leaves the handler.
+//!
+//! [`TenantField`]: crate::access_log::TenantField
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,27 +47,44 @@ use axum::Router;
 /// Configuration for the access log middleware.
 #[derive(Clone)]
 pub struct AccessLogLayer {
-    /// Log all requests including 1xx/2xx/3xx (default true). When false,
-    /// only 4xx/5xx are logged — useful in production to keep volume down.
+    /// Log every request (default). When `false`, only 4xx and 5xx are
+    /// logged, which keeps production volume down.
     pub log_success: bool,
-    /// Include the client IP address in the event (requires
-    /// `into_make_service_with_connect_info::<SocketAddr>()`).
+    /// Include the client IP. Needs
+    /// `into_make_service_with_connect_info::<SocketAddr>()`.
     pub include_ip: bool,
-    /// Threshold (in ms) above which a request is logged at WARN instead
-    /// of INFO. Set to `u64::MAX` to disable. Default 1000ms.
+    /// Requests at or above this many ms are logged at WARN instead of
+    /// INFO. Default 1000. Use `u64::MAX` to turn it off.
     pub slow_threshold_ms: u64,
-    /// Query parameter names whose values get redacted in logs. Default
-    /// includes the common credential-bearing params: `password`, `token`,
-    /// `secret`, `api_key`, `access_token`, `refresh_token`, `signature`.
+    /// Query parameters whose values are replaced with `[redacted]`.
+    /// The default list covers the usual credential names such as
+    /// `password`, `token`, `secret`, `api_key` and `access_token`.
     pub redact_query_params: Vec<String>,
-    /// When `true`, prefer the first IP in `X-Forwarded-For` (or
-    /// `X-Real-IP` when XFF is absent) over the TCP peer address.
-    /// Default `false` — these headers are spoofable by any client
-    /// reaching the server directly. Only enable when the framework
-    /// is reverse-proxied behind a trusted hop (nginx, Cloudflare,
-    /// AWS ALB) that strips client-supplied values and rewrites them
-    /// with the real client IP. v0.30.16.
-    pub trust_proxy_headers: bool,
+    /// Log the `TrustedRealIp` that `RealIpLayer::trust_proxies`
+    /// resolved, over the TCP peer. Raw forwarding headers are never
+    /// read. Default `false`.
+    pub use_real_ip: bool,
+    /// Which tenant identifier goes on the line. Default
+    /// [`TenantField::Slug`], and `-` when no tenant resolved.
+    pub tenant_field: TenantField,
+}
+
+/// How the access log names the request's tenant.
+///
+/// The slug is readable, but an operator picks it, so it is often the
+/// customer's own name. [`TenantField::Id`] keeps tenant attribution
+/// without shipping that name to an aggregator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TenantField {
+    /// `tenant=acme`, the `Org.slug`. The default.
+    #[default]
+    Slug,
+    /// `tenant=42`, the `Org.id`.
+    Id,
+    /// `tenant=acme#42`, both, to follow a renamed slug.
+    Both,
+    /// Never look one up; the field is always `-`.
+    Off,
 }
 
 impl Default for AccessLogLayer {
@@ -60,8 +94,8 @@ impl Default for AccessLogLayer {
 }
 
 impl AccessLogLayer {
-    /// New layer with default config: log every request, include IP,
-    /// flag requests >1000ms as slow, redact known credential query params.
+    /// Default layer: log every request, include the IP, flag requests
+    /// over 1000ms as slow, redact the usual credential parameters.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -69,30 +103,44 @@ impl AccessLogLayer {
             include_ip: true,
             slow_threshold_ms: 1000,
             redact_query_params: default_redact_params(),
-            trust_proxy_headers: false,
+            use_real_ip: false,
+            tenant_field: TenantField::default(),
         }
     }
 
-    /// Honor `X-Forwarded-For` / `X-Real-IP` when resolving the
-    /// client IP. Off by default because the headers are spoofable
-    /// by direct clients. Enable ONLY when behind a trusted reverse
-    /// proxy (nginx, Cloudflare, AWS ALB) that overwrites them.
-    /// v0.30.16.
+    /// Pick the tenant identifier for the line, or [`TenantField::Off`]
+    /// to leave it out. Default [`TenantField::Slug`].
     #[must_use]
-    pub fn trust_proxy_headers(mut self, on: bool) -> Self {
-        self.trust_proxy_headers = on;
+    pub fn tenant_field(mut self, field: TenantField) -> Self {
+        self.tenant_field = field;
         self
     }
 
-    /// Replace the redacted-params list with `params`. Pass an empty list
-    /// to disable redaction.
+    /// Log the `TrustedRealIp` from `RealIpLayer` instead of the TCP
+    /// peer. Off by default. Raw forwarding headers are never read.
+    /// `RealIpLayer` must wrap this layer; see `server::Builder::real_ip`.
+    #[must_use]
+    pub fn use_real_ip(mut self, on: bool) -> Self {
+        self.use_real_ip = on;
+        self
+    }
+
+    /// Old name of [`Self::use_real_ip`]; it reads no headers (#1785).
+    #[deprecated(since = "0.59.5", note = "renamed to `use_real_ip`")]
+    #[must_use]
+    pub fn trust_proxy_headers(self, on: bool) -> Self {
+        self.use_real_ip(on)
+    }
+
+    /// Replace the redaction list with `params`. An empty list turns
+    /// redaction off, which will log credentials in plain text.
     #[must_use]
     pub fn redact(mut self, params: Vec<String>) -> Self {
         self.redact_query_params = params;
         self
     }
 
-    /// Add an additional query-param name to redact (extends defaults).
+    /// Add one more parameter name to redact, keeping the defaults.
     #[must_use]
     pub fn redact_additional(mut self, name: impl Into<String>) -> Self {
         self.redact_query_params.push(name.into());
@@ -106,29 +154,27 @@ impl AccessLogLayer {
         self
     }
 
-    /// Don't include the client IP in events.
+    /// Leave the client IP out of events.
     #[must_use]
     pub fn without_ip(mut self) -> Self {
         self.include_ip = false;
         self
     }
 
-    /// Set the threshold (in ms) above which requests are logged at WARN.
+    /// Set the slow-request threshold in ms; slower requests log at
+    /// WARN.
     #[must_use]
     pub fn slow_threshold_ms(mut self, ms: u64) -> Self {
         self.slow_threshold_ms = ms;
         self
     }
 
-    /// Apply values from a loaded
-    /// [`crate::config::AuditSettings`] section (#87 wiring,
-    /// v0.29). Currently honors `redact_query_params` — each name
-    /// in the list is appended to the layer's existing redaction
-    /// set (the framework's defaults aren't replaced; project
-    /// overrides extend them).
+    /// Apply a loaded [`crate::config::AuditSettings`] section. It
+    /// reads `redact_query_params` and appends each name to the
+    /// layer's list, so project settings extend the defaults instead
+    /// of replacing them.
     ///
-    /// Use [`AccessLogLayer::redact`] directly when you want to
-    /// REPLACE the default list rather than extend it.
+    /// Use [`AccessLogLayer::redact`] to replace the list instead.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -144,7 +190,64 @@ impl AccessLogLayer {
     }
 }
 
-/// Extension trait — `.access_log(layer)` on Router.
+/// Mount request observability on `router`: the span, the request id,
+/// and the access log when one is configured.
+///
+/// One definition on purpose. Two serving paths mount these three
+/// layers (`Cli::assemble_app` and `server::Builder`), and when each
+/// had its own copy the two drifted into opposite layer order. Both
+/// sites call this instead.
+///
+/// Order is the whole design. `.layer()` wraps, so the LAST call is
+/// outermost and runs FIRST on the way in:
+///
+/// ```text
+///   TracingLayer   outermost — opens the span
+///     access_log   inside it, so its line inherits the span
+///       request_id innermost — runs with the span current, so
+///                  `record` lands on it
+///       handler
+/// ```
+///
+/// `catch_panics` is not mounted here: it goes inside CORS and the
+/// security headers, so each caller mounts it under those (#1541).
+///
+/// `access_log: None` means `[logging] access_log = false`: the log
+/// line goes away, but **the span and request id stay**. That setting
+/// names the log only, and a service logging at the edge still wants
+/// trace context and `X-Request-Id`.
+///
+/// The span redacts with the access log's *configured* key list, not
+/// the defaults. Otherwise a project's own secret key would be hidden
+/// in the event and printed in clear text by the span on the same
+/// line.
+///
+/// The `cfg` gate matches the callers: `Cli::mount_observability`
+/// needs `manage`, `server::Builder` needs `tenancy`. A build with
+/// neither has no caller, and `-D warnings` turns the dead code into
+/// a build failure.
+#[cfg(any(feature = "manage", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn mount_observability(
+    router: Router,
+    access_log: Option<AccessLogLayer>,
+    redact: Vec<String>,
+) -> Router {
+    use crate::request_id::RequestIdRouterExt as _;
+    // One arm, not two. The span used to fall back to the default
+    // list whenever the access log was off, so `[logging]
+    // access_log = false` silently narrowed an `[audit]` setting
+    // and a configured param was logged in clear text (#1610).
+    let span = crate::tracing_layer::TracingLayer::new().redact(redact);
+    let router = router.request_id(crate::request_id::RequestIdLayer::default());
+    let router = match access_log {
+        Some(l) => router.access_log(l),
+        None => router,
+    };
+    router.layer(span)
+}
+
+/// Adds `.access_log(layer)` to a Router.
 pub trait AccessLogRouterExt {
     #[must_use]
     fn access_log(self, layer: AccessLogLayer) -> Self;
@@ -166,105 +269,137 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     let started = Instant::now();
     let method = req.method().clone();
     let raw_query = req.uri().query();
-    let path = match raw_query {
-        Some(q) => format!(
-            "{}?{}",
-            req.uri().path(),
-            redact_query(q, &cfg.redact_query_params),
-        ),
-        None => req.uri().path().to_owned(),
-    };
+    // Path and query stay separate fields: OpenTelemetry defines
+    // `url.path` as the path alone. Joining them would make a
+    // collector treat every query string as its own path.
+    let path = req.uri().path().to_owned();
+    let query = raw_query
+        .map(|q| redact_query(q, &cfg.redact_query_params))
+        .unwrap_or_default();
     let ip = if cfg.include_ip {
-        resolve_client_ip(&req, cfg.trust_proxy_headers)
+        resolve_client_ip(&req, cfg.use_real_ip)
     } else {
         None
     };
 
-    let response = next.run(req).await;
+    // The handler below resolves the tenant. Hold a slot open across
+    // it so the identity can come back out, and read it *inside* the
+    // scope: a read after the scope future resolves sees nothing.
+    // See `crate::tenant_log`.
+    let want_tenant = cfg.tenant_field != TenantField::Off;
+    let (response, tenant) = crate::tenant_log::scope(async {
+        let response = next.run(req).await;
+        let tenant = if want_tenant {
+            crate::tenant_log::current()
+        } else {
+            None
+        };
+        (response, tenant)
+    })
+    .await;
     let status = response.status().as_u16();
-    let duration_ms = started.elapsed().as_millis() as u64;
+    let elapsed = started.elapsed();
+    // `f64` with microsecond precision, matching `tracing_layer`'s
+    // field of the same name. One type per field name, or a collector
+    // like Elasticsearch rejects the document. It also keeps
+    // sub-millisecond requests from all reporting `0`.
+    let duration_ms = (elapsed.as_micros() as f64) / 1000.0;
+    // The threshold stays whole milliseconds: it is a setting, not a
+    // measurement.
+    let is_slow = elapsed.as_millis() as u64 >= cfg.slow_threshold_ms;
 
     let is_error = status >= 400;
     if !cfg.log_success && !is_error {
         return response;
     }
 
-    if duration_ms >= cfg.slow_threshold_ms {
-        tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
-            duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
-            "slow request",
-        );
+    let tenant = tenant_label(cfg.tenant_field, tenant);
+
+    // Field names are the OpenTelemetry HTTP conventions, same as
+    // `tracing_layer`. These lines go straight to a collector, so
+    // renaming at the edge would be work every deployment repeats.
+    let client_address = ip.as_deref().unwrap_or("-");
+
+    // `url.query` goes out only when the request had one. OTel says
+    // to omit it otherwise, `tracing_layer` does the same, and a
+    // collector may reject an empty keyword field.
+    //
+    // One event callsite cannot drop a field, so the branch has to
+    // wrap the whole macro call. The macro keeps that from turning
+    // into six copies that drift apart.
+    macro_rules! emit {
+        ($level:ident $(, $msg:literal)?) => {
+            if query.is_empty() {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            } else {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "url.query" = %query,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            }
+        };
+    }
+
+    if is_slow {
+        emit!(warn, "slow request");
     } else if is_error {
-        tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
-            duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
-        );
+        emit!(warn);
     } else {
-        tracing::info!(
-            method = %method,
-            path = %path,
-            status,
-            duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
-        );
+        emit!(info);
     }
 
     response
 }
 
-/// Resolve the client IP for an inbound request. v0.30.16.
-///
-/// Resolution order:
-///
-/// 1. When `trust_proxy_headers` is on AND the request carries
-///    `X-Forwarded-For`, return the first hop (the leftmost
-///    address — the original client per RFC 7239 conventions).
-///    The header is comma-separated; whitespace-trimmed.
-/// 2. When `trust_proxy_headers` is on AND `X-Real-IP` is set
-///    (no XFF), return its value.
-/// 3. Otherwise return the TCP peer from `ConnectInfo<SocketAddr>`.
-///    `axum::serve` only populates this when the app is mounted via
-///    `into_make_service_with_connect_info::<SocketAddr>()`; v0.30.16
-///    fixed the framework's serve sites to do that.
-/// 4. `None` when nothing matches — the access log renders `"-"`.
-fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
-    if trust_proxy {
-        if let Some(xff) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(first) = xff.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return Some(ip.to_owned());
-                }
-            }
-        }
-        if let Some(real) = req
-            .headers()
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(real.to_owned());
-        }
+/// Render the request's tenant for the log line, or `-` when none
+/// resolved. Never blank, so "no tenant" does not look like a field
+/// that went missing.
+fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabel>) -> String {
+    const NONE: &str = "-";
+    let Some(t) = tenant else {
+        return NONE.to_owned();
+    };
+    match field {
+        TenantField::Off => NONE.to_owned(), // `tenant` is None when Off
+        TenantField::Slug => t.slug,
+        TenantField::Id => t.id.map_or_else(|| NONE.to_owned(), |id| id.to_string()),
+        TenantField::Both => match t.id {
+            Some(id) => format!("{}#{id}", t.slug),
+            None => t.slug,
+        },
     }
-    req.extensions()
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.ip().to_string())
 }
 
-/// Default list of query-param names whose values get redacted.
-fn default_redact_params() -> Vec<String> {
+/// The client IP for the line. With `use_real_ip` on it is
+/// [`crate::rate_limit::client_ip`] (a `TrustedRealIp`, else the
+/// socket); off, the socket. Never a raw forwarding header (#1745).
+fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
+    let ip = if use_real_ip {
+        crate::rate_limit::client_ip(req.extensions(), req.headers())
+    } else {
+        req.extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.ip())
+    };
+    ip.map(|ip| ip.to_string())
+}
+
+/// Query parameters whose values are redacted by default.
+pub(crate) fn default_redact_params() -> Vec<String> {
     vec![
         "password".into(),
         "passwd".into(),
@@ -276,14 +411,36 @@ fn default_redact_params() -> Vec<String> {
         "refresh_token".into(),
         "signature".into(),
         "auth".into(),
+        // OAuth2 / OIDC. The framework's own `/sso/callback?code=…`
+        // URLs carry credentials that none of the names above match.
+        // Matching is exact, not substring, so `access_token` does
+        // not cover `id_token`.
+        "code".into(),
+        "client_secret".into(),
+        "id_token".into(),
+        "code_verifier".into(),
+        "state".into(),
+        "assertion".into(),
+        "session_state".into(),
     ]
 }
 
-/// Replace values of redacted params with `[redacted]` in a raw query string.
-fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+/// Replace the values of redacted params with `[redacted]` in a raw
+/// query string.
+///
+/// `pub(crate)` so [`crate::tracing_layer`] can redact the span's
+/// `url.query` the same way. The span renders next to the event
+/// fields, so a raw span value would put the secrets back on the line
+/// this function just cleaned.
+pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+    // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
+    let hidden = |k: &str| {
+        let key = crate::url_codec::url_decode(k);
+        redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+    };
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {
+            Some((k, _)) if hidden(k) => {
                 format!("{k}=[redacted]")
             }
             _ => pair.to_owned(),
@@ -316,67 +473,54 @@ mod tests {
         assert!(!l.include_ip);
     }
 
-    /// v0.30.16 — `trust_proxy_headers(on)` flips the flag; default
-    /// off so no project accidentally trusts spoofable headers.
+    /// The setter flips the flag, and the default is off so no
+    /// project trusts forgeable headers by accident.
     #[test]
-    fn trust_proxy_headers_defaults_off_and_setter_flips() {
+    fn use_real_ip_defaults_off_and_setter_flips() {
         let l = AccessLogLayer::default();
-        assert!(!l.trust_proxy_headers, "default is off (spoof-safe)");
-        let l = AccessLogLayer::new().trust_proxy_headers(true);
-        assert!(l.trust_proxy_headers);
+        assert!(!l.use_real_ip, "default is off (spoof-safe)");
+        let l = AccessLogLayer::new().use_real_ip(true);
+        assert!(l.use_real_ip);
     }
 
-    /// `resolve_client_ip` honors `X-Forwarded-For` only when
-    /// `trust_proxy_headers` is on. Default-off mode falls through
-    /// to ConnectInfo (None here since the test doesn't inject one).
+    /// The deprecated name still sets the flag (#1785).
     #[test]
-    fn resolve_client_ip_xff_only_when_proxy_trusted() {
+    #[allow(deprecated)]
+    fn trust_proxy_headers_is_an_alias_for_use_real_ip() {
+        assert!(AccessLogLayer::new().trust_proxy_headers(true).use_real_ip);
+        let on = AccessLogLayer::new().use_real_ip(true);
+        assert!(!on.trust_proxy_headers(false).use_real_ip);
+    }
+
+    /// A forged `X-Forwarded-For` / `X-Real-IP` never names the client,
+    /// trust on or off: only `TrustedRealIp` or the socket do (#1745).
+    #[test]
+    fn resolve_client_ip_ignores_raw_forwarding_headers() {
         use axum::body::Body;
+        use std::net::SocketAddr;
         let mut req = Request::builder()
             .uri("/")
-            .header("x-forwarded-for", "203.0.113.7, 198.51.100.1, 10.0.0.5")
+            .header("x-forwarded-for", "203.0.113.7, 198.51.100.1")
+            .header("x-real-ip", "192.0.2.99")
             .body(Body::empty())
             .unwrap();
-        // trust off → ignored, no ConnectInfo, returns None
-        assert_eq!(resolve_client_ip(&req, false), None);
-        // trust on → first hop wins (the original client per RFC 7239)
+        assert_eq!(resolve_client_ip(&req, true), None);
+        req.extensions_mut()
+            .insert(ConnectInfo("10.0.0.5:4000".parse::<SocketAddr>().unwrap()));
+        assert_eq!(resolve_client_ip(&req, false).as_deref(), Some("10.0.0.5"));
+        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("10.0.0.5"));
+        req.extensions_mut().insert(crate::real_ip::TrustedRealIp(
+            "198.51.100.1".parse().unwrap(),
+        ));
         assert_eq!(
             resolve_client_ip(&req, true).as_deref(),
-            Some("203.0.113.7")
+            Some("198.51.100.1")
         );
-        // remove XFF, set X-Real-IP — same trust gate applies.
-        req.headers_mut().remove("x-forwarded-for");
-        req.headers_mut()
-            .insert("x-real-ip", "192.0.2.99".parse().unwrap());
-        assert_eq!(resolve_client_ip(&req, false), None);
-        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("192.0.2.99"));
+        assert_eq!(resolve_client_ip(&req, false).as_deref(), Some("10.0.0.5"));
     }
 
-    /// `X-Forwarded-For` whitespace is trimmed; empty leading
-    /// commas don't crash the parse — we just fall through.
-    #[test]
-    fn resolve_client_ip_xff_handles_whitespace_and_empty() {
-        use axum::body::Body;
-        let req = Request::builder()
-            .uri("/")
-            .header("x-forwarded-for", "  192.0.2.1  ,  10.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(resolve_client_ip(&req, true).as_deref(), Some("192.0.2.1"));
-
-        let req = Request::builder()
-            .uri("/")
-            .header("x-forwarded-for", " ,10.0.0.1")
-            .body(Body::empty())
-            .unwrap();
-        // Empty first hop falls through (caller could decide to walk
-        // the rest; v1 just renders "-" via the access_log fallback).
-        assert_eq!(resolve_client_ip(&req, true), None);
-    }
-
-    /// ConnectInfo extension wins when no proxy headers + ConnectInfo
-    /// is present (the common single-host case after v0.30.16's
-    /// `with_connect_info` fix in `manage.rs` / `server/builder.rs`).
+    /// With no proxy headers, the ConnectInfo extension wins. This is
+    /// the usual single-host case.
     #[test]
     fn resolve_client_ip_falls_back_to_connect_info() {
         use axum::body::Body;
@@ -429,6 +573,12 @@ mod tests {
     }
 
     #[test]
+    fn redact_query_matches_percent_encoded_keys() {
+        let r = redact_query("pass%77ord=hunter2&x=1", &["password".to_owned()]);
+        assert_eq!(r, "pass%77ord=[redacted]&x=1");
+    }
+
+    #[test]
     fn redact_query_passes_through_when_no_match() {
         let r = redact_query("a=1&b=2", &["password".to_owned()]);
         assert_eq!(r, "a=1&b=2");
@@ -454,9 +604,8 @@ mod tests {
         assert_eq!(l.redact_query_params, vec!["only_this".to_owned()]);
     }
 
-    /// `with_audit_settings` extends the redaction list — does NOT
-    /// replace it. Defaults stay in place; per-project additions
-    /// from TOML pile on top.
+    /// `with_audit_settings` extends the redaction list and never
+    /// replaces it: TOML names pile on top of the defaults.
     #[cfg(feature = "config")]
     #[test]
     fn with_audit_settings_extends_redact_list() {
@@ -471,7 +620,7 @@ mod tests {
         assert!(l.redact_query_params.iter().any(|k| k == "token"));
     }
 
-    /// Empty TOML list is a no-op — same redaction set as default.
+    /// An empty TOML list changes nothing.
     #[cfg(feature = "config")]
     #[test]
     fn with_audit_settings_empty_list_is_noop() {
@@ -479,5 +628,194 @@ mod tests {
         let before = AccessLogLayer::new();
         let after = AccessLogLayer::new().with_audit_settings(&s);
         assert_eq!(before.redact_query_params, after.redact_query_params);
+    }
+}
+
+// `runtime` is needed too: these tests read rendered output through
+// `tracing_subscriber`, which only `runtime` pulls in. A build with
+// the layers but no subscriber would fail to compile.
+#[cfg(all(
+    test,
+    feature = "runtime",
+    any(feature = "manage", feature = "tenancy")
+))]
+mod observability_mount_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt as _;
+
+    /// Tracing's callsite cache is process-global, so two tests
+    /// installing subscribers at once would flake.
+    fn lock() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Drive one request through `mount_observability` and return what
+    /// a handler's own `tracing::info!` rendered.
+    async fn captured_handler_line(access_log: Option<AccessLogLayer>) -> (StatusCode, String) {
+        captured_handler_line_redacting(access_log, default_redact_params()).await
+    }
+
+    /// As above, with an explicit span redact list — the thing that
+    /// used to be unreachable when the access log was off (#1610).
+    async fn captured_handler_line_redacting(
+        access_log: Option<AccessLogLayer>,
+        redact: Vec<String>,
+    ) -> (StatusCode, String) {
+        captured_handler_line_for("/", access_log, redact).await
+    }
+
+    /// As above for a specific URI, so a test can put a secret in the
+    /// query string and assert it does not reach the span.
+    async fn captured_handler_line_for(
+        uri: &str,
+        access_log: Option<AccessLogLayer>,
+        redact: Vec<String>,
+    ) -> (StatusCode, String) {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let app = mount_observability(
+            Router::new().route(
+                "/",
+                get(|| async {
+                    tracing::info!("in handler");
+                    "ok"
+                }),
+            ),
+            access_log,
+            redact,
+        );
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        let status = resp.status();
+        (status, buf.contents())
+    }
+
+    /// Turning the access log off must not narrow the span's redact
+    /// list to the defaults (#1610).
+    ///
+    /// The two settings live in different config sections, so
+    /// `[logging] access_log = false` silently disarmed an `[audit]
+    /// redact_query_params` entry — a control that reads as on in the
+    /// configuration and is off in the process.
+    ///
+    /// Asserts on the rendered span, not on the list: the list being
+    /// right and the span not using it is the failure this exists for.
+    #[tokio::test]
+    async fn the_span_honours_configured_redaction_with_the_log_off() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line_for(
+            "/?invite_token=s3cr3t-invite",
+            // access log OFF — the path that used to fall back.
+            None,
+            vec!["invite_token".to_owned()],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("in handler"),
+            "the handler's own event never rendered, so this proves nothing:\n{out}"
+        );
+        assert!(
+            out.contains("invite_token"),
+            "the span did not record the query at all, so the redaction \
+             assertion below would pass for the wrong reason:\n{out}"
+        );
+        assert!(
+            !out.contains("s3cr3t-invite"),
+            "a configured redact param leaked in clear text on the span:\n{out}"
+        );
+    }
+
+    /// `[logging] access_log = false` must not take the **span** with
+    /// it. The span is the thing to assert here: a source scan or an
+    /// `X-Request-Id` check both pass while the span is missing.
+    #[tokio::test]
+    async fn turning_off_the_access_log_keeps_the_request_span() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line(None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("in handler"),
+            "the handler's own event never rendered, so this proves nothing:\n{out}"
+        );
+        assert!(
+            out.contains("http.request"),
+            "`access_log = false` stripped the request span: a handler event rendered \
+             with no span context, so it carries no method, path, tenant or request \
+             id. That setting names the log, not the trace context.\n{out}"
+        );
+    }
+
+    /// A panicking handler answers an opaque 500 carrying the request
+    /// id, and the panic is logged with that id (#1541).
+    #[tokio::test]
+    async fn a_panicking_handler_is_a_logged_500() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = mount_observability(
+            crate::panic_guard::catch_panics(Router::new().route(
+                "/",
+                get(|| async {
+                    if std::hint::black_box(true) {
+                        panic!("boom-1541");
+                    }
+                    "unreachable"
+                }),
+            )),
+            Some(AccessLogLayer::default()),
+            default_redact_params(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-request-id", "rid-1541")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["x-request-id"], "rid-1541");
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
+        let out = buf.contents();
+        assert!(
+            out.contains("handler panicked")
+                && out.contains("boom-1541")
+                && out.contains("rid-1541"),
+            "the panic was not logged with its request id:\n{out}"
+        );
+    }
+
+    /// The control: with a log configured, the span is there too.
+    #[tokio::test]
+    async fn the_normal_path_mounts_the_span_as_well() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line(Some(AccessLogLayer::default())).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("http.request"),
+            "no span context on the normal path either:\n{out}"
+        );
     }
 }

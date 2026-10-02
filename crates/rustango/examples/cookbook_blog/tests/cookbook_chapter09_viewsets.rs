@@ -1,4 +1,4 @@
-//! Cookbook Chapter 9 — ViewSet (DRF-shape API for any model).
+//! Cookbook Chapter 9 — ViewSet (a REST CRUD API for any model).
 //!
 //! Live in-process tests via `tower::ServiceExt::oneshot` against
 //! a `ViewSet::for_model(...).router(...)` mounted on a real PG pool.

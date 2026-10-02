@@ -1,6 +1,6 @@
 # Scaffolding
 
-**Rustango** has two layers of code generation, both modeled on the generators you know from Django and Laravel — so you rarely wire boilerplate by hand:
+**Rustango** has two layers of code generation, so you rarely wire boilerplate by hand:
 
 1. **The project generator** — `cargo rustango new` creates a whole new project from a template.
 2. **In-project generators** — `manage startapp` and the `manage make:*` family add apps, views, serializers, jobs, and more inside an existing project.
@@ -26,7 +26,21 @@
 cargo install cargo-rustango
 ```
 
-That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango` (the same way `django-admin` or the `laravel` installer give you a global command).
+That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango`, one global command you can run from anywhere.
+
+### The generator's own version is the one your project gets
+
+`cargo rustango new` writes `rustango = "MAJOR.MINOR"` into the generated `Cargo.toml`, taken from **the generator's version**, not from whatever is newest on crates.io. Whichever generator you install is the version your project pins.
+
+That is almost always what you want, and it is why the install command above is unpinned: the newest generator writes the newest pin, and the two cannot drift apart.
+
+It is worth knowing when you deliberately want an older release — to match a project already on it, or to reproduce a report. Pin the generator, not the project:
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Check which one you have with `cargo rustango --version`. Upgrading later is the same command with `--force`, and it only affects projects you generate afterwards — an existing project's pin is a line in its own `Cargo.toml`, which you edit yourself.
 
 ---
 
@@ -125,6 +139,8 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `sso` / `admin-sso` | OIDC single sign-on, for application users / for the admin site |
 | `passkey` | WebAuthn / passkey authentication |
 | `cache-redis` / `cache-page` | Redis cache backend / whole-page response caching |
+| `jobs` / `jobs-postgres` | Background job queue, in-process / database-backed so it survives restarts |
+| `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
 | `mcp` | Model Context Protocol server for AI agents |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
@@ -161,7 +177,7 @@ Every template writes a self-contained Cargo project:
 
 ### One binary for everything
 
-`src/main.rs` is the only entrypoint. It boots the HTTP server **and** dispatches every `manage` verb — there is no separate `manage.py` or `src/bin/manage.rs`:
+`src/main.rs` is the only entrypoint. It boots the HTTP server **and** dispatches every `manage` verb — there is no separate manage script or `src/bin/manage.rs`:
 
 ```rust
 mod models;
@@ -185,8 +201,8 @@ So `cargo run` starts the server, and `cargo run -- <verb>` runs migrations, gen
 How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
-- **fullstack** — `urls.rs` also exposes `admin_router(pool)` (built from `admin::Builder::new(pool).build()`) so the auto-admin mounts at `/admin`.
-- **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models (Django-style) on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
+- **fullstack** — same `urls.rs`, plus an `admin_router(pool)` helper that `main.rs` mounts with `Cli::nest_with("/admin", …)`, built from the server's pool. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username>` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
+- **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration
 
@@ -207,7 +223,7 @@ cargo run -- --help         # see every manage verb
 
 ## Add a feature module: `manage startapp`
 
-This is Django's `startapp` — scaffold a self-contained module of related models, views, and routes:
+Scaffold a self-contained module of related models, views, and routes:
 
 ```sh
 cargo run -- startapp blog
@@ -226,16 +242,16 @@ Options:
 
 Inside a project, the `make:*` verbs scaffold one file at a time. The full per-flag reference lives in the [manage CLI reference](manage.md); the common shapes are:
 
-| Command | Generates | Comparable to |
-|---|---|---|
-| `make:viewset <Name> [--model <M>]` | A DRF-style CRUD ViewSet | DRF `ViewSet` |
-| `make:serializer <Name> [--model <M>]` | A serializer for request/response shaping | DRF serializer |
-| `make:api_routes <app>` | An API route aggregator for an app | — |
-| `make:form <Name>` | An HTML form with validation | Django `Form` |
-| `make:job <Name>` | A background job handler | Laravel / Celery job |
-| `make:notification <Name>` | A multi-channel notification | Laravel notification |
-| `make:middleware <Name>` | A middleware skeleton | Django / Laravel middleware |
-| `make:test <Name>` | A test module using the in-process test client | — |
+| Command | Generates |
+|---|---|
+| `make:viewset <Name> [--model <M>]` | A CRUD ViewSet — the six REST routes over one model |
+| `make:serializer <Name> [--model <M>]` | A serializer for request/response shaping |
+| `make:api_routes <app>` | An API route aggregator for an app |
+| `make:form <Name>` | An HTML form with validation |
+| `make:job <Name>` | A background job handler |
+| `make:notification <Name>` | A multi-channel notification |
+| `make:middleware <Name>` | A middleware skeleton |
+| `make:test <Name>` | A test module using the in-process test client |
 
 ```sh
 cargo run -- make:viewset PostViewSet --model Post

@@ -141,6 +141,55 @@ impl<T, K: serde::Serialize> serde::Serialize for ForeignKey<T, K> {
     }
 }
 
+/// The mirror of [`ForeignKey`]'s `Serialize`: reads the PK and
+/// produces an `Unloaded` reference (#1454).
+///
+/// Together the two make a foreign-key column round-trip through JSON
+/// as its key, which is what a REST client sends.
+///
+/// Without this, `#[derive(Serializer)]` could not carry a foreign-key
+/// column **at all**: a serializer field must match its model field's
+/// type, the derive requires `DeserializeOwned` for the write path, and
+/// `ForeignKey` did not implement it. There was no spelling that
+/// compiled — `pub customer_id: i64` failed on the type mismatch and
+/// `pub customer_id: ForeignKey<Customer>` failed on the missing
+/// bounds. Any model with a relation had to give up serializers
+/// entirely for that column.
+impl<'de, T, K: serde::Deserialize<'de>> serde::Deserialize<'de> for ForeignKey<T, K> {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        K::deserialize(de).map(Self::Unloaded)
+    }
+}
+
+/// A placeholder, not a valid reference (#1454).
+///
+/// `#[derive(Serializer)]` derives `Default` on the serializer struct
+/// and uses it for `write_only` / `skip` fields and as the starting
+/// point for deserialization, so every field type needs it. The value
+/// this produces — an `Unloaded` holding `K::default()`, i.e. key 0 for
+/// the usual `i64` — points at nothing and is expected to be
+/// overwritten by `from_model` or by deserialization before it is used.
+///
+/// It is deliberately *not* a way to construct a reference: writing a
+/// row whose FK column is still the default would insert key 0 and
+/// violate the foreign-key constraint, which is the loud failure you
+/// want rather than a silent bad row.
+impl<T, K: Default> Default for ForeignKey<T, K> {
+    fn default() -> Self {
+        Self::Unloaded(K::default())
+    }
+}
+
+/// A foreign key is documented as its key's type (#1454) — an
+/// `integer`, not an object — which is what the endpoint accepts and
+/// returns.
+#[cfg(feature = "openapi")]
+impl<T, K: crate::openapi::OpenApiSchema> crate::openapi::OpenApiSchema for ForeignKey<T, K> {
+    fn openapi_schema() -> crate::openapi::Schema {
+        K::openapi_schema()
+    }
+}
+
 impl<T, K> From<K> for ForeignKey<T, K> {
     fn from(pk: K) -> Self {
         Self::Unloaded(pk)
@@ -191,32 +240,28 @@ where
     }
 }
 
-/// MySQL Decode mirror for the bi-dialect path.
+/// MySQL Decode mirror for the bi-dialect path. Goes through
+/// `FlatScalar`, which owns the MySQL cell rules (a `Uuid` key is
+/// `CHAR(36)` text there, #1733).
 #[cfg(feature = "mysql")]
-impl<'r, T, K> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T, K>
-where
-    K: sqlx::Decode<'r, sqlx::MySql>,
-{
+impl<'r, T, K: super::FlatScalar> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T, K> {
     fn decode(
         value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Ok(Self::Unloaded(<K as sqlx::Decode<sqlx::MySql>>::decode(
-            value,
-        )?))
+        Ok(Self::Unloaded(K::from_cell(<K::Cell as sqlx::Decode<
+            sqlx::MySql,
+        >>::decode(value)?)))
     }
 }
 
 #[cfg(feature = "mysql")]
-impl<T, K> sqlx::Type<sqlx::MySql> for ForeignKey<T, K>
-where
-    K: sqlx::Type<sqlx::MySql>,
-{
+impl<T, K: super::FlatScalar> sqlx::Type<sqlx::MySql> for ForeignKey<T, K> {
     fn type_info() -> sqlx::mysql::MySqlTypeInfo {
-        <K as sqlx::Type<sqlx::MySql>>::type_info()
+        <K::Cell as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
     fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
-        <K as sqlx::Type<sqlx::MySql>>::compatible(ty)
+        <K::Cell as sqlx::Type<sqlx::MySql>>::compatible(ty)
     }
 }
 
@@ -272,7 +317,8 @@ where
     ///   built with an out-of-band value.
     /// * [`ExecError::MissingPrimaryKey`] — the target model has no
     ///   `#[rustango(primary_key)]` field (programming error).
-    /// * Any [`ExecError`] produced by the underlying [`Fetcher`].
+    /// * Any [`ExecError`] produced by the underlying
+    ///   [`FetcherPool`](crate::sql::FetcherPool).
     pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
         self.get_on(pool).await
     }

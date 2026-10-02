@@ -65,6 +65,9 @@
 //! Each channel is independent — failing to send via mail does NOT abort
 //! database / log delivery. The returned [`NotificationResult`] reports
 //! per-channel outcomes.
+//!
+//! [`NotificationDispatch`]: crate::notifications::NotificationDispatch
+//! [`NotificationResult`]: crate::notifications::NotificationResult
 
 use std::sync::Arc;
 

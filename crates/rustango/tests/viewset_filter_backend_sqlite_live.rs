@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet::filter_backend(...)` on SQLite
-//! (DRF `filter_backends` parity, #1010). A registered backend
+//! (issue #1010). A registered backend
 //! contributes extra `WHERE` predicates on the list action, ANDed with
 //! the built-in `filter_fields`.
 
@@ -35,11 +35,11 @@ fn published_only(
         return Vec::new();
     }
     schema.field("status").map_or_else(Vec::new, |f| {
-        vec![WhereExpr::Predicate(Filter {
-            column: f.column,
-            op: Op::Eq,
-            value: SqlValue::from("published"),
-        })]
+        vec![WhereExpr::Predicate(Filter::new(
+            f.column,
+            Op::Eq,
+            SqlValue::from("published"),
+        ))]
     })
 }
 

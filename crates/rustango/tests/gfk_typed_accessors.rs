@@ -58,34 +58,33 @@ async fn fresh_pool() -> Pool {
     contenttypes::ensure_seeded(&pool)
         .await
         .expect("ensure_seeded");
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query(
-            "CREATE TABLE gfkt_post (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE gfkt_article (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                title TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE gfkt_comment (\
-                id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                content_type_id INTEGER NOT NULL, \
-                object_pk INTEGER NOT NULL, \
-                body TEXT NOT NULL)",
-        )
-        .execute(sq)
-        .await
-        .unwrap();
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE gfkt_post (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE gfkt_article (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE gfkt_comment (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            content_type_id INTEGER NOT NULL, \
+            object_pk INTEGER NOT NULL, \
+            body TEXT NOT NULL)",
+    )
+    .execute(sq)
+    .await
+    .unwrap();
     pool
 }
 
@@ -160,8 +159,7 @@ async fn typed_accessor_resolves_to_target_row_as_json() {
     comment.save_pool(&pool).await.unwrap();
 
     // The emitted accessor reads self.content_type_id + self.object_pk
-    // and resolves to the target row as a JSON map. Stand-in for
-    // Django's `comment.content_object`.
+    // and resolves to the target row as a JSON map.
     let target_json = comment
         .content_object_pool(&pool)
         .await

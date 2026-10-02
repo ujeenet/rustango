@@ -1,11 +1,7 @@
-//! Django-shape number formatter — mirrors
-//! `django.utils.numberformat.format`.
+//! Number formatting with explicit separators and grouping.
 //!
-//! Locale-aware number rendering with configurable decimal
-//! separator (`,` for de_DE / fr_FR; `.` for en_US), thousand
-//! separator (`.` / `,` / `' '` etc.), digit grouping (typically 3
-//! for Western numerals; some scripts use 4), and optional fixed
-//! decimal-place width.
+//! You choose the decimal separator, the thousand separator, the group
+//! size and how many decimal places to show.
 //!
 //! ```ignore
 //! use rustango::numberformat::format;
@@ -23,35 +19,28 @@
 //! assert_eq!(format(1234567.0, ",", Some(0), 3, "\u{00A0}"),
 //!            "1\u{00A0}234\u{00A0}567");
 //!
-//! // Indian numbering: groups of 3 then 2 isn't supported — we do
-//! // uniform `grouping=3` like Django's basic shape. Indian-numbering
-//! // apps reach for a custom grouping function.
+//! // Indian numbering — groups of 3 then 2 — is not supported;
+//! // grouping is uniform. Those apps need a custom grouping
+//! // function.
 //! ```
 //!
-//! ## Differences from Django
+//! ## Limits
 //!
-//! Django's full `format()` accepts a callable `force_grouping`
-//! arg + `use_l10n` toggle that pulls a `Decimal` shape. rustango's
-//! simpler version takes `f64` (or `i64` via `from_i64`) and a
-//! always-grouping flag implicit in `grouping > 0`. Apps that need
-//! true `Decimal` (rust_decimal) precision should format the
-//! integer + fractional parts themselves, then call this with the
-//! result.
+//! Values are `f64`, or `i64` through
+//! [`format_i64`](crate::numberformat::format_i64). If you need
+//! exact decimal maths, format the value yourself first and pass the
+//! parts in.
 
-/// Format a floating-point number per Django's `numberformat.format`
-/// shape.
+/// Format a float.
 ///
-/// `decimal_pos = None` keeps the natural precision (matching
-/// Python's `repr(x)`); `Some(n)` rounds to `n` fractional digits.
-/// `grouping = 0` disables thousand-separator insertion;
-/// `grouping > 0` inserts `thousand_sep` every N digits in the
-/// integer part counting from the right.
+/// `decimal_pos = None` keeps the number's natural precision;
+/// `Some(n)` rounds to `n` decimal places. `grouping = 0` turns off
+/// the thousand separator; a larger value inserts `thousand_sep`
+/// every N digits, counting from the right.
 ///
-/// Negative numbers preserve the leading `-` in front of any
-/// grouping. NaN / ±Infinity short-circuit to Rust's default
-/// `Display` (`"NaN"` / `"inf"` / `"-inf"`); Django raises
-/// `TypeError` for `Decimal('NaN')` — we choose the lenient path
-/// since handler code probably wants ANY string back to render.
+/// A minus sign stays in front. NaN and infinity come back as
+/// `"NaN"`, `"inf"` or `"-inf"` rather than an error, so a template
+/// always has something to render.
 #[must_use]
 pub fn format(
     value: f64,
@@ -63,19 +52,15 @@ pub fn format(
     if !value.is_finite() {
         return value.to_string();
     }
-    let negative = value < 0.0;
-    let abs = value.abs();
-    let formatted = match decimal_pos {
-        Some(p) => format!("{abs:.p$}"),
-        None => {
-            // Rust default `Display` for f64 picks a shortest round-trip
-            // representation. Matches Python `repr(x)` for typical inputs.
-            let s = format!("{abs}");
-            // Special case: "5" should not stay "5" — Django's natural
-            // representation keeps it as `"5"` too, so the default is fine.
-            s
-        }
+    let signed = match decimal_pos {
+        Some(p) => round_half_up(value, p),
+        // `Display` for f64 gives the shortest round-trip form, so
+        // "5" stays "5" and nothing is padded.
+        // `-0.0 == 0.0`, so this prints "0", never "-0".
+        None => format!("{}", if value == 0.0 { 0.0 } else { value }),
     };
+    let negative = signed.starts_with('-');
+    let formatted = signed.trim_start_matches('-').to_owned();
     let (int_part, frac_part) = match formatted.split_once('.') {
         Some((i, f)) => (i.to_owned(), Some(f.to_owned())),
         None => (formatted, None),
@@ -98,23 +83,15 @@ pub fn format(
     out
 }
 
-/// [`django.template.defaultfilters.floatformat`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat) —
-/// signed-precision float formatter with Django's
-/// drop-trailing-zeros-when-negative trick.
+/// The `floatformat` filter. The sign of `precision` decides whether
+/// trailing zeros are kept:
 ///
-/// Precision argument shape:
-/// * `precision == 0` or default (`-1`) → 1 decimal place, drop
-///   trailing zeros: `34.23234 → "34.2"`, `34.0 → "34"`.
-/// * `precision > 0` → exactly N decimal places, KEEP trailing
-///   zeros: `34.0 → "34.000"` at precision=3.
-/// * `precision < 0` → up to |N| decimal places, DROP trailing
-///   zeros: `34.0 → "34"`, `34.23234 → "34.232"` at precision=-3.
+/// * `precision > 0`: exactly that many decimals, zeros kept.
+/// * `precision < 0`: at most that many decimals, zeros dropped.
+/// * `precision == 0`: no decimals, rounded to a whole number.
 ///
-/// The negative-precision trick is the distinguishing Django
-/// behavior: `floatformat(price, -2)` reads as "two decimals max,
-/// hide them when the value is a round number." Useful for prices
-/// where `$5.00` should render as `$5` and `$5.50` should render
-/// as `$5.50`.
+/// A negative precision is handy for prices: `-2` shows `$5` for a
+/// round amount and `$5.50` otherwise.
 ///
 /// ```
 /// use rustango::numberformat::floatformat;
@@ -129,7 +106,7 @@ pub fn format(
 pub fn floatformat(value: f64, precision: i64) -> String {
     let abs = precision.unsigned_abs() as usize;
     let drop_trailing = precision <= 0;
-    let formatted = format!("{value:.abs$}");
+    let formatted = round_half_up(value, abs);
     if drop_trailing {
         if let Some((int_part, frac_part)) = formatted.split_once('.') {
             if frac_part.chars().all(|c| c == '0') {
@@ -140,14 +117,63 @@ pub fn floatformat(value: f64, precision: i64) -> String {
     formatted
 }
 
-/// Format an integer per the same shape — convenience wrapper for
-/// `i64` so callers don't have to think about float precision when
-/// the value is integral.
+/// `value` to `decimals` places, halves away from zero on its shortest
+/// decimal form (`0.125` → `0.13`, `2.5` → `3`), and never `-0`.
+pub(crate) fn round_half_up(value: f64, decimals: usize) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    // f64 `Display` never uses an exponent, so this is plain digits.
+    let shortest = format!("{}", value.abs());
+    let (int_part, frac_part) = shortest.split_once('.').unwrap_or((&shortest, ""));
+    let mut digits: Vec<u8> = int_part
+        .bytes()
+        .chain(
+            frac_part
+                .bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(decimals),
+        )
+        .collect();
+    if frac_part
+        .as_bytes()
+        .get(decimals)
+        .is_some_and(|d| *d >= b'5')
+    {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    let int_len = digits.len() - decimals;
+    let mut out = String::with_capacity(digits.len() + 2);
+    if value < 0.0 && digits.iter().any(|d| *d != b'0') {
+        out.push('-');
+    }
+    // Only ASCII digits went in.
+    out.push_str(std::str::from_utf8(&digits[..int_len]).unwrap_or("0"));
+    if decimals > 0 {
+        out.push('.');
+        out.push_str(std::str::from_utf8(&digits[int_len..]).unwrap_or(""));
+    }
+    out
+}
+
+/// Group an `i64`, with no float rounding to worry about.
 #[must_use]
 pub fn format_i64(value: i64, grouping: usize, thousand_sep: &str) -> String {
     let negative = value < 0;
-    // `i64::MIN.unsigned_abs()` is safe — wraps to `i64::MIN as u64`
-    // via the standard library; Display on u64 always succeeds.
+    // `unsigned_abs` handles `i64::MIN` without overflowing.
     let abs = value.unsigned_abs().to_string();
     let grouped = if grouping > 0 && !thousand_sep.is_empty() {
         group_digits(&abs, grouping, thousand_sep)
@@ -161,27 +187,22 @@ pub fn format_i64(value: i64, grouping: usize, thousand_sep: &str) -> String {
     }
 }
 
-/// Insert `sep` every `n` digits in `digits` counting from the
-/// right. Internal helper used by both `format` (float path) and
-/// `format_i64` (integer path).
+/// Insert `sep` every `n` digits, counting from the right.
 ///
-/// Assumes `digits` is digits-only (caller has already stripped sign
-/// and split off the fractional part). Empty input returns empty.
-fn group_digits(digits: &str, n: usize, sep: &str) -> String {
+/// `digits` must already be digits only: the caller strips the sign
+/// and the fractional part first.
+pub(crate) fn group_digits(digits: &str, n: usize, sep: &str) -> String {
     if digits.len() <= n {
         return digits.to_owned();
     }
-    let bytes = digits.as_bytes();
     let mut out = String::with_capacity(digits.len() + (digits.len() / n) * sep.len());
     let first_group_len = digits.len() % n;
     let mut i = 0;
     if first_group_len > 0 {
-        // SAFETY: digits is ASCII-only (digits 0-9); slicing on a byte
-        // boundary is safe.
+        // `digits` is ASCII, so byte slicing is fine.
         out.push_str(&digits[..first_group_len]);
         i = first_group_len;
     }
-    let _ = bytes; // unused beyond length math
     while i < digits.len() {
         if !out.is_empty() {
             out.push_str(sep);
@@ -196,17 +217,16 @@ fn group_digits(digits: &str, n: usize, sep: &str) -> String {
 mod tests {
     use super::*;
 
-    // -------- format (f64) — basic shapes --------
+    // -------- format (f64) --------
 
     #[test]
     fn format_simple_no_grouping_no_decimal_round() {
-        // Django: format(1234.567, '.', None, 0, '') == '1234.567'
         assert_eq!(format(1234.567, ".", None, 0, ""), "1234.567");
     }
 
     #[test]
     fn format_integer_value_no_decimal_part() {
-        // Float that's actually integer-valued — Rust's Display emits "100".
+        // An integral float prints without a decimal point.
         assert_eq!(format(100.0, ".", None, 0, ""), "100");
     }
 
@@ -218,16 +238,12 @@ mod tests {
 
     #[test]
     fn format_decimal_pos_rounds() {
-        // Rust's `format!("{:.2}")` uses the IEEE 754 nearest-even
-        // round mode AND f64's imprecise representation — `1.555` is
-        // actually stored as `1.5549...` so it rounds DOWN to `1.55`.
-        // Verify the call doesn't panic and produces SOME 2-decimal
-        // output; don't pin the exact value (caller-visible
-        // round-tripping artifacts of binary float).
+        // `1.555` is stored as `1.5549...`, so the exact result of a
+        // halfway case is not worth pinning. Just check the shape.
         let out = format(1.555, ".", Some(2), 0, "");
         assert!(out.starts_with("1.5"), "got: {out:?}");
         assert_eq!(out.chars().count(), 4, "got: {out:?}");
-        // A clean non-boundary case rounds predictably.
+        // Values away from the halfway point round as expected.
         assert_eq!(format(1.567, ".", Some(2), 0, ""), "1.57");
         assert_eq!(format(1.234, ".", Some(2), 0, ""), "1.23");
     }
@@ -252,7 +268,7 @@ mod tests {
 
     #[test]
     fn format_thousands_grouping_fr_fr_nbsp() {
-        // French: non-breaking space thousands, comma decimal, no frac.
+        // French: non-breaking space thousands, comma decimal.
         assert_eq!(
             format(1_234_567.0, ",", Some(0), 3, "\u{00A0}"),
             "1\u{00A0}234\u{00A0}567"
@@ -267,7 +283,7 @@ mod tests {
 
     #[test]
     fn format_exactly_at_grouping_threshold() {
-        // Exactly 1000 — one separator after the leading digit.
+        // Exactly 1000: one separator after the leading digit.
         assert_eq!(format(1000.0, ".", Some(0), 3, ","), "1,000");
     }
 
@@ -296,7 +312,7 @@ mod tests {
 
     #[test]
     fn format_empty_thousand_sep_disables_grouping() {
-        // Even with grouping=3, an empty separator is a no-op.
+        // An empty separator disables grouping even when grouping=3.
         assert_eq!(format(1234567.0, ".", Some(0), 3, ""), "1234567");
     }
 
@@ -326,7 +342,7 @@ mod tests {
 
     #[test]
     fn format_i64_min_does_not_panic() {
-        // i64::MIN.unsigned_abs() — the wrapping branch.
+        // The `i64::MIN` edge case.
         let s = format_i64(i64::MIN, 3, ",");
         assert!(s.starts_with('-'));
         assert!(s.contains(','));
@@ -371,8 +387,7 @@ mod tests {
 
     #[test]
     fn floatformat_negative_precision_drops_trailing_zeros() {
-        // Up to |N| decimals, drop trailing zeros (Django's price-
-        // formatting trick: $5.00 → "5", $5.50 → "5.50").
+        // Up to |N| decimals, trailing zeros dropped.
         assert_eq!(floatformat(34.23234, -3), "34.232");
         assert_eq!(floatformat(34.0, -3), "34");
         assert_eq!(floatformat(5.5, -2), "5.50");
@@ -381,9 +396,7 @@ mod tests {
 
     #[test]
     fn floatformat_zero_precision_no_decimals() {
-        // precision=0 → exactly 0 decimals. Rust's `{:.0}` uses
-        // banker's rounding (round-half-to-even), so 34.5 → "34"
-        // and 35.5 → "36"; non-halves round normally.
+        // precision=0 gives no decimals. Exact halves round to even.
         assert_eq!(floatformat(34.4, 0), "34");
         assert_eq!(floatformat(34.6, 0), "35");
         assert_eq!(floatformat(34.0, 0), "34");
@@ -391,7 +404,7 @@ mod tests {
 
     #[test]
     fn floatformat_rounds_to_nearest() {
-        // Standard f64 rounding (banker's on exact halves).
+        // Standard f64 rounding.
         assert_eq!(floatformat(1.234, 2), "1.23");
         assert_eq!(floatformat(1.236, 2), "1.24");
     }
@@ -401,5 +414,16 @@ mod tests {
         assert_eq!(floatformat(-34.5, -1), "-34.5");
         assert_eq!(floatformat(-34.0, -1), "-34");
         assert_eq!(floatformat(-1.2345, 2), "-1.23");
+    }
+
+    #[test]
+    fn floatformat_rounds_half_up_and_drops_negative_zero() {
+        assert_eq!(floatformat(0.125, 2), "0.13");
+        assert_eq!(floatformat(2.5, 0), "3");
+        assert_eq!(floatformat(-2.5, 0), "-3");
+        assert_eq!(floatformat(-0.4, 0), "0");
+        assert_eq!(floatformat(9.995, 2), "10.00");
+        assert_eq!(format(-0.001, ".", Some(2), 0, ""), "0.00");
+        assert_eq!(format(-0.0, ".", None, 0, ""), "0");
     }
 }

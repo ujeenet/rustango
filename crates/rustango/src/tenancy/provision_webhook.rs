@@ -50,6 +50,9 @@
 //! **The completion callback.** [`crate::webhook_delivery`] needs a job
 //! queue handle, and reaching into the caller's would be guessing at
 //! their setup. The run is pollable and streamable in the meantime.
+//!
+//! [`UrlPolicy::Template`]: crate::tenancy::provision_webhook::UrlPolicy::Template
+//! [`UrlPolicy::CallerSupplied`]: crate::tenancy::provision_webhook::UrlPolicy::CallerSupplied
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,6 +125,9 @@ pub struct WebhookConfig {
     pub timestamp_tolerance: Duration,
     pub storage_mode: StorageMode,
     pub backend: BackendKind,
+    /// A `running` run with no event for this long is taken as dead, so
+    /// a retry of its event starts over (#1883).
+    pub stale_run_after: Duration,
 }
 
 impl WebhookConfig {
@@ -137,6 +143,7 @@ impl WebhookConfig {
             timestamp_tolerance: Duration::from_secs(300),
             storage_mode: StorageMode::Database,
             backend: BackendKind::default(),
+            stale_run_after: store::STALE_RUN_AFTER,
         }
     }
 }
@@ -204,7 +211,7 @@ impl IntoResponse for Refusal {
             Self::Policy(m) => (StatusCode::FORBIDDEN, m),
             Self::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
-        (code, Json(serde_json::json!({ "error": message }))).into_response()
+        crate::api_errors::ApiError::logged(code, "provision_webhook", message).into_response()
     }
 }
 
@@ -273,12 +280,18 @@ async fn handle(
         .await
         .map_err(|e| Refusal::Internal(e.to_string()))?
     {
-        return Ok(Accepted {
-            run_id: existing.id.get().copied().unwrap_or_default(),
-            slug: existing.slug,
-            state: existing.state,
-            duplicate: true,
-        });
+        // A failed or interrupted run starts over under the same key (#1883).
+        let retry = store::release_for_retry(&registry, &existing, state.config.stale_run_after)
+            .await
+            .map_err(|e| Refusal::Internal(e.to_string()))?;
+        if !retry {
+            return Ok(Accepted {
+                run_id: existing.id.get().copied().unwrap_or_default(),
+                slug: existing.slug,
+                state: existing.state,
+                duplicate: true,
+            });
+        }
     }
 
     // ---- 5. Build the request under the URL policy ----
@@ -289,7 +302,7 @@ async fn handle(
     // The run is opened *synchronously* so the caller gets an id it
     // can poll, and so the idempotency constraint fires now rather
     // than inside a spawned task where nobody would see it.
-    let run = store::open_run(
+    let run = match store::open_run(
         &registry,
         &request.slug,
         request.mode.as_str(),
@@ -299,12 +312,28 @@ async fn handle(
         Some(&payload.event_id),
     )
     .await
-    .map_err(|e| {
-        // Almost certainly the unique constraint — the race above.
-        // Re-read rather than guess, so a genuine failure is not
-        // reported as a duplicate.
-        Refusal::Internal(format!("could not open a provisioning run: {e}"))
-    })?;
+    {
+        Ok(run) => run,
+        Err(e) => {
+            // Almost certainly the unique key: a twin delivery won the race.
+            // Re-read rather than guess, so a real failure stays a 500.
+            let existing = store::run_by_idempotency_key(&registry, &payload.event_id)
+                .await
+                .ok()
+                .flatten();
+            return match existing {
+                Some(existing) => Ok(Accepted {
+                    run_id: existing.id.get().copied().unwrap_or_default(),
+                    slug: existing.slug,
+                    state: existing.state,
+                    duplicate: true,
+                }),
+                None => Err(Refusal::Internal(format!(
+                    "could not open a provisioning run: {e}"
+                ))),
+            };
+        }
+    };
     let run_id = run.id.get().copied().unwrap_or_default();
 
     let provisioner = Arc::clone(&state.provisioner);

@@ -33,11 +33,12 @@ use rustango::health::health_router;
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
 use rustango::request_id::{RequestIdLayer, RequestIdRouterExt};
 use rustango::security_headers::{CspBuilder, SecurityHeadersLayer, SecurityHeadersRouterExt};
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use rustango::test_client::TestClient;
 
 async fn secure_app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+    let _ = dotenvy::dotenv();
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
 

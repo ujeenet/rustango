@@ -13,6 +13,7 @@ up as you go.
 - [Web API basics](#web-api-basics) — what an API is, in everyday terms
 - [Rustango building blocks](#rustango-building-blocks) — the pieces you assemble
 - [Data and the database](#data-and-the-database)
+- [Multi-tenancy](#multi-tenancy) — only if you serve several customers from one deployment
 - [A few Rust words](#a-few-rust-words) — so the code blocks aren't scary
 - [Frameworks we compare to](#frameworks-we-compare-to)
 
@@ -111,7 +112,7 @@ detail page, and create/edit/delete forms — rendered through Tera templates,
 instead of JSON. The *HTML view*. See [HTML views](html-views.md).
 
 **Template** — a file with placeholders (Rustango uses [Tera](https://keats.github.io/tera/),
-much like Django templates or Jinja) that the server fills with data to produce
+much like Jinja or Blade) that the server fills with data to produce
 an HTML page. `{{ post.title }}` drops in a value; `{% for … %}` loops.
 
 **Router / mount** — the router maps incoming URLs to the code that handles
@@ -123,10 +124,18 @@ handler and after it — for cross-cutting concerns like logging, rate limiting,
 security headers, or CSRF. "Layer" is Rustango's word for one piece of
 middleware. See the [Middleware guide](middleware.md).
 
-**Pool (or executor)** — the database connection your code uses to read and
-write. Rustango asks you to pass the pool into each database call explicitly
-(rather than hiding it in a global), so it's always clear what touches the
-database. You'll see `&pool` as the last argument to ORM calls.
+**Pool** — the database handle your code uses to read and write. Rustango asks
+you to pass it into each database call explicitly (rather than hiding it in a
+global), so it's always clear what touches the database. You'll see `&pool` as
+the last argument to ORM calls. `rustango::sql::Pool` is an enum over the three
+backends, and it is what the everyday methods take.
+
+**Executor** — *not* a synonym for pool. An executor is a single connection or
+an open transaction: the thing a statement actually runs on. Methods ending
+`_on` take one, which is how you put several statements inside one transaction —
+and they are Postgres-only (`#[cfg(feature = "postgres")]`). The distinction
+decides which methods exist on your build, so
+[api-conventions](api-conventions.md#functions) spells the rule out in full.
 
 **QuerySet** — a database query you build up step by step in Rust
 (`Post::objects().filter(...).order_by(...)`) before running it. It's lazy:
@@ -164,6 +173,41 @@ databases without changing your code.
 
 ---
 
+## Multi-tenancy
+
+Behind the `tenancy` feature. Skip this section if you are building an
+ordinary single-customer app — none of it applies.
+
+**Multi-tenancy** — running one deployment that serves several customers, each
+seeing only their own data. Rustango resolves which customer a request belongs
+to from its hostname, then routes it to that customer's data for the rest of
+the request.
+
+**Tenant (or org)** — one customer in such a deployment. A tenant has a slug
+(`acme`), a host pattern (`acme.example.com`) and its own users. `Org` is the
+registry row; "tenant" is the thing it describes.
+
+**Registry** — the small database that lists the tenants: who they are, where
+their data lives, whether they are active. Distinct from any tenant's own data,
+and the one database the framework always needs.
+
+**Storage mode** — how a tenant's data is kept apart from its neighbours':
+a separate database, or a separate schema inside a shared one. Chosen per
+tenant at provisioning time.
+
+**Operator** — an administrator of the *deployment* rather than of a tenant.
+Operators create tenants and bind hostnames; they are not users of any tenant
+and live in the registry. See [operator console](operator-console.md).
+
+**Operator console** — the web interface operators use: provisioning tenants,
+binding hostnames, managing other operators, reading the audit trail. Nearly
+every action in it is also a `manage` verb, so it can be scripted.
+
+**Provisioning** — creating a tenant: making its database or schema, running
+migrations into it, and recording it in the registry.
+
+---
+
 ## A few Rust words
 
 You don't need to know Rust to *read* most examples, but these four words show
@@ -194,13 +238,5 @@ return the error".
 These docs occasionally say "like X" to help readers coming from other
 ecosystems. The comparisons are a bonus — you never need them to follow a guide.
 
-**Django** — a popular Python web framework. Rustango borrows much of its shape
-(models, migrations, an admin UI, the `manage` commands).
-
-**DRF (Django REST Framework)** — Django's add-on for building REST APIs.
-Rustango's serializers and ViewSets are modelled on it, so "DRF-shape" means
-"laid out the way DRF does it" — e.g. validation errors returned as a JSON
-object keyed by field name.
-
-**Laravel / Rails** — popular PHP and Ruby web frameworks, mentioned for the same
+**Laravel / Rails** — popular PHP and Ruby web frameworks, mentioned for the
 "if you've used this, this will feel familiar" reason.

@@ -85,6 +85,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
 /// * `page_size = N` — default page size (default: 20, max: 1000).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `allow_anonymous` — flag; write actions without codenames are
+///   intended, so the mount warning is skipped.
 /// * `serializer = SomeSerializer` — render list / retrieve / create
 ///   responses through a `#[derive(Serializer)]` type instead of the
 ///   default field-level projection (`read_only` / `source` / `method`
@@ -147,10 +149,10 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(write_only)]` — `Default::default()` in `from_model`; excluded from JSON output; included in `writable_fields()`
 /// - `#[serializer(source = "field_name")]` — reads from `model.field_name` instead of `model.<field_ident>`
 /// - `#[serializer(skip)]` — `Default::default()` in `from_model`; included in JSON output; excluded from `writable_fields()` (user sets manually)
-/// - `#[serializer(method = "fn_name")]` — DRF `SerializerMethodField`: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
+/// - `#[serializer(method = "fn_name")]` — computed field: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
 /// - `#[serializer(nested)]` / `nested(strict)` — auto-resolves nested serializer from a loaded `ForeignKey`; excluded from `writable_fields()`
 /// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
-/// - `#[serializer(slug = "name")]` — DRF `SlugRelatedField`: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
+/// - `#[serializer(slug = "name")]` — render a relation as one of its fields: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
 /// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
 /// - `#[serializer(max_length = N)]` / `min_length` / `min` / `max` — declarative bounds checked on
 ///   write; auto-inherit from the model's `FieldSchema` (`max_length`/`min`/`max`/`choices`) when
@@ -188,7 +190,7 @@ pub fn derive_serializer(input: TokenStream) -> TokenStream {
 /// reference must point to another migration in the same directory,
 /// and the JSON must parse. A broken chain — orphan `prev`, missing
 /// predecessor, malformed file — fails at macro-expansion time with
-/// a clear `compile_error!`. *No other Django-shape Rust framework
+/// a clear `compile_error!`. *No other Rust web framework
 /// validates migration chains at compile time*: Cot's migrations are
 /// imperative Rust code (no static chain), Loco's are SeaORM
 /// up/down (same), Rwf's are raw SQL (no chain at all).
@@ -206,8 +208,8 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `Q!()` — Django-shape filter syntax compile-time-resolved against
-/// typed columns. Issue #269 / T1.7.
+/// `Q!()` — `Model.field__lookup = value` filter syntax, resolved at
+/// compile time against typed columns. Issue #269 / T1.7.
 ///
 /// Each invocation lowers to the equivalent typed-column method call:
 ///
@@ -219,7 +221,7 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
 ///
 /// Field-name typos fail the build (the macro emits `User::no_such_field`
 /// which doesn't exist) — the headline ergonomic win of this slice over
-/// Django's stringly-typed `__lookup` filters.
+/// filters keyed by a plain string.
 ///
 /// # Supported lookup suffixes
 ///
@@ -263,7 +265,7 @@ pub fn Q(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[rustango::main]` — the Django-shape runserver entrypoint. Wraps
+/// `#[rustango::main]` — the runserver entrypoint. Wraps
 /// `#[tokio::main]` and a default `tracing_subscriber` initialisation
 /// (env-filter, falling back to `info,sqlx=warn`) so user `main`
 /// functions are zero-boilerplate:
@@ -281,6 +283,23 @@ pub fn Q(input: TokenStream) -> TokenStream {
 ///
 /// Optional `flavor = "current_thread"` passes through to
 /// `#[tokio::main]`; default is the multi-threaded runtime.
+///
+/// `logging = false` suppresses the default subscriber, for apps
+/// that install their own. Needed whenever the body reaches
+/// `Cli::with_logging()` or `logging::Setup`: the subscriber this
+/// macro installs gets there first, and `tracing` keeps the first
+/// one, so the `[logging]` section would otherwise be read and
+/// discarded (#1465).
+///
+/// ```ignore
+/// #[rustango::main(logging = false)]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     rustango::manage::Cli::new()
+///         .with_settings_from_env()
+///         .with_logging()          // now the first installer
+///         .run().await
+/// }
+/// ```
 ///
 /// Pulls `tracing-subscriber` into the rustango crate behind the
 /// `runtime` sub-feature (implied by `tenancy`), so apps that opt
@@ -327,9 +346,35 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // builds the runtime and blocks on the async body.
     let user_body = input.block.clone();
     input.sig.asyncness = None;
-    input.block = syn::parse2(quote! {{
-        {
+
+    // `logging = false` drops the block entirely, so a later
+    // `Cli::with_logging()` is the first installer and its
+    // `[logging]` settings actually take effect (#1465).
+    let logging_prologue = if parse_logging(&args) {
+        quote! {
             use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
+            // Colour only when stdout is a terminal, and never under
+            // `NO_COLOR` — `Color::Auto`'s rule, called rather than
+            // copied.
+            //
+            // This was inlined at first, on a comment claiming
+            // `rustango::logging` is gated on `admin` + `tenancy`. It is
+            // not: `pub mod logging` is ungated and its contents are
+            // `runtime`-gated — the same feature that gates this macro
+            // (`pub use rustango_macros::main` is `#[cfg(feature =
+            // "runtime")]`). So wherever this expands, `Color` is
+            // reachable, and the copy was justified by a gate that does
+            // not exist. `should_colour` carries a deliberate
+            // `NO_COLOR`-set-but-empty subtlety that the inline happened
+            // to match today and nothing kept matching tomorrow.
+            //
+            // Without any of it the subscriber inherits
+            // tracing-subscriber's default, `cfg!(feature = "ansi")` —
+            // true since the framework turned that feature on — so
+            // `./app > app.log` and every container redirecting stdout
+            // collected escape codes. `Setup::install` has its own
+            // check; this is the default entrypoint and had none.
+            let __ansi = #root::logging::Color::Auto.should_colour();
             // `try_init` so duplicate installers (e.g. tests already
             // holding a subscriber) don't panic.
             let _ = tracing_subscriber::fmt()
@@ -337,8 +382,15 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
                     EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
                 )
+                .with_ansi(__ansi)
                 .try_init();
         }
+    } else {
+        quote! {}
+    };
+
+    input.block = syn::parse2(quote! {{
+        { #logging_prologue }
         let __rt = #builder_call
             .enable_all()
             .build()
@@ -366,6 +418,13 @@ fn parse_flavor(args: &TokenStream2) -> Flavor {
     } else {
         Flavor::MultiThread
     }
+}
+
+/// `false` when the attribute carries `logging = false` — the caller
+/// installs their own subscriber, usually via `Cli::with_logging`
+/// (#1465). Same cheap token match as `parse_flavor`.
+fn parse_logging(args: &TokenStream2) -> bool {
+    !args.to_string().replace(' ', "").contains("logging=false")
 }
 
 /// Parse form for `Q!()` — `<TypePath>.<Ident> = <Expr>`.
@@ -567,10 +626,10 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // EXPANSION time so a misshapen migration set never compiles.
     //
     // This is the v0.4 Slice 5 distinguisher: rustango's JSON
-    // migrations + a Rust proc-macro that reads them is the unique
-    // combo nothing else in the Django-shape Rust camp can match
-    // (Cot's are imperative Rust code, Loco's are SeaORM up/down,
-    // Rwf's are raw SQL — none have a static chain to validate).
+    // migrations + a Rust proc-macro that reads them is a combo no
+    // other Rust web framework matches (Cot's are imperative Rust
+    // code, Loco's are SeaORM up/down, Rwf's are raw SQL — none have
+    // a static chain to validate).
     let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
     let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
     for (stem, path) in &entries {
@@ -783,6 +842,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .unwrap_or_default()
     });
 
+    // The upsert conflict target: a container-level composite unique,
+    // never a field `index(unique)` or a partial index PG can't target.
+    let upsert_unique: Option<Vec<String>> = container
+        .indexes
+        .iter()
+        .find(|i| i.unique && i.where_clause.is_none() && !i.columns.is_empty())
+        .map(|i| i.columns.clone());
+
     // Merge field-level indexes into the container's index list.
     let mut all_indexes: Vec<IndexAttr> = container.indexes;
     for field in &named.named {
@@ -872,11 +939,15 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         collected.primary_key.as_ref(),
         &column_consts,
         audited_fields.as_deref(),
-        &all_indexes,
+        upsert_unique.as_deref(),
         &container.manager_fns,
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
-    let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
+    let from_row_impl = from_row_impl_tokens(
+        struct_name,
+        &collected.from_row_inits,
+        &collected.from_row_inits_my,
+    );
     let reverse_helpers = reverse_helper_tokens(
         struct_name,
         &collected.fk_relations,
@@ -927,14 +998,19 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #manager_trait
 
         #root::core::inventory::submit! {
-            #root::core::ModelEntry {
-                schema: <#struct_name as #root::core::Model>::SCHEMA,
-                // `module_path!()` evaluates at the registration site,
-                // so a Model declared in `crate::blog::models` records
-                // `"<crate>::blog::models"` and `resolved_app_label()`
-                // can infer "blog" without an explicit attribute.
-                module_path: ::core::module_path!(),
-            }
+            // `module_path!()` evaluates at the registration site,
+            // so a Model declared in `crate::blog::models` records
+            // `"<crate>::blog::models"` and `resolved_app_label()`
+            // can infer "blog" without an explicit attribute.
+            #root::core::ModelEntry::new(
+                <#struct_name as #root::core::Model>::SCHEMA,
+                ::core::module_path!(),
+            )
+            .with_audited(
+                <#struct_name as #root::core::Model>::__rustango_audited_update,
+                <#struct_name as #root::core::Model>::__rustango_audited_delete,
+            )
+            .with_audited_create(<#struct_name as #root::core::Model>::__rustango_audited_create)
         }
     })
 }
@@ -953,10 +1029,9 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        // FK field's Rust ident matches its SQL column name in v0.8
-        // (no `column = "..."` rename ships on FK fields).
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1058,8 +1133,9 @@ fn load_related_impl_my_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1126,8 +1202,9 @@ fn load_related_impl_sqlite_tokens(
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let assign = if rel.nullable {
             quote! {
@@ -1188,8 +1265,9 @@ fn load_related_impl_sqlite_tokens(
 fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.pk_kind == DetectedKind::I64 {
             // i64 FK — return the stored PK so prefetch_related can
             // group children by it. Nullable variant unwraps via
@@ -1226,8 +1304,9 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     // opt OUT of the legacy i64 method (it returns None) but opt IN
     // here.
     let value_arms = fk_relations.iter().map(|rel| {
-        let fk_col = rel.fk_column.as_str();
-        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let field_ident = &rel.field_ident;
+        let fk_name = field_ident.to_string();
+        let fk_col = fk_name.as_str();
         if rel.nullable {
             quote! {
                 #fk_col => self.#field_ident
@@ -1293,14 +1372,13 @@ fn reverse_helper_tokens(
     }
     // Method-name resolution per FK (issue #816 + follow-up):
     //   1. Field-level `#[rustango(related_name = "...")]` on the FK
-    //      itself — wins over everything else. Django's
-    //      `ForeignKey(related_name="...")`.
+    //      itself — wins over everything else.
     //   2. Container-level `default_related_name = "..."` on the
-    //      child — Django's `class Meta: default_related_name`.
-    //      Applies to every FK on this model that didn't override.
-    //   3. Fallback: `<child_snake>_set` — Django's `<child>_set`
-    //      convention. `Post` → `post_set`, `BlogComment` →
-    //      `blog_comment_set`. Avoids English-plural edge cases.
+    //      child. Applies to every FK on this model that didn't
+    //      override.
+    //   3. Fallback: `<child_snake>_set`. `Post` → `post_set`,
+    //      `BlogComment` → `blog_comment_set`. Avoids English-plural
+    //      edge cases.
     //
     // The PG-on-executor variant keeps the resolved name; the
     // tri-dialect `_pool` variant appends `_pool` to it (matches the
@@ -1317,7 +1395,8 @@ fn reverse_helper_tokens(
         let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
         let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
         let parent_ty = &rel.parent_type;
-        let fk_col = rel.fk_column.as_str();
+        let fk_name = rel.field_ident.to_string();
+        let fk_col = fk_name.as_str();
         let doc = format!(
             "Fetch every `{child_ident}` whose `{fk_col}` foreign key points at this row. \
              Single SQL query — `SELECT … FROM <{child_ident} table> WHERE {fk_col} = $1` — \
@@ -1392,7 +1471,7 @@ fn reverse_helper_tokens(
 /// Emit `{name}_pool` accessor + `set_{name}_for` setter for every
 /// `#[rustango(generic_fk(name, ct_column, pk_column))]` declaration.
 ///
-/// Closes #239 + #240 — the Django-shape `comment.content_object` /
+/// Closes #239 + #240 — `comment.content_object` /
 /// `comment.content_object = post` ergonomics on top of the existing
 /// `GenericForeignKey { content_type_id, object_pk }` primitive.
 ///
@@ -1692,11 +1771,7 @@ fn reverse_has_accessor_tokens(
                 #root::sql::ExecError,
             >
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 self.#accessor_ident()
                     .values_list_flat(col)
@@ -1709,14 +1784,11 @@ fn reverse_has_accessor_tokens(
                 use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
                 let child_schema =
                     <#child as #root::core::Model>::SCHEMA;
-                let inner = SelectQuery {
-                    where_clause: WhereExpr::ExprCompare {
-                        lhs: Expr::Column(#child_fk_column),
-                        op: Op::Eq,
-                        rhs: Expr::OuterRef(#self_pk_column),
-                    },
-                    ..SelectQuery::new(child_schema)
-                };
+                let inner = SelectQuery::new(child_schema).where_clause(WhereExpr::ExprCompare {
+                    lhs: Expr::Column(#child_fk_column),
+                    op: Op::Eq,
+                    rhs: Expr::OuterRef(#self_pk_column),
+                });
                 WhereExpr::Exists(::std::boxed::Box::new(inner))
             }
 
@@ -1725,14 +1797,11 @@ fn reverse_has_accessor_tokens(
                 use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
                 let child_schema =
                     <#child as #root::core::Model>::SCHEMA;
-                let inner = SelectQuery {
-                    where_clause: WhereExpr::ExprCompare {
-                        lhs: Expr::Column(#child_fk_column),
-                        op: Op::Eq,
-                        rhs: Expr::OuterRef(#self_pk_column),
-                    },
-                    ..SelectQuery::new(child_schema)
-                };
+                let inner = SelectQuery::new(child_schema).where_clause(WhereExpr::ExprCompare {
+                    lhs: Expr::Column(#child_fk_column),
+                    op: Op::Eq,
+                    rhs: Expr::OuterRef(#self_pk_column),
+                });
                 WhereExpr::NotExists(::std::boxed::Box::new(inner))
             }
 
@@ -1826,17 +1895,13 @@ fn through_accessor_tokens(
                 use #root::core::{Filter, Model as _, Op, SelectQuery, WhereExpr};
                 let intermediate_schema =
                     <#intermediate as #root::core::Model>::SCHEMA;
-                let sub = SelectQuery {
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: #intermediate_fk_column,
-                        op: Op::Eq,
-                        value: self.__rustango_pk_value(),
-                    }),
-                    projection: ::core::option::Option::Some(
-                        ::std::vec![#intermediate_pk_column],
-                    ),
-                    ..SelectQuery::new(intermediate_schema)
-                };
+                let sub = SelectQuery::new(intermediate_schema)
+                    .where_clause(WhereExpr::Predicate(Filter::new(
+                        #intermediate_fk_column,
+                        Op::Eq,
+                        self.__rustango_pk_value(),
+                    )))
+                    .projection(::std::vec![#intermediate_pk_column]);
                 #root::query::QuerySet::<#far>::new().where_raw(
                     WhereExpr::InSubquery {
                         column: #far_fk_column,
@@ -1904,11 +1969,7 @@ fn through_accessor_tokens(
                 #root::sql::ExecError,
             >
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 self.#method_ident()
                     .values_list_flat(col)
@@ -1936,6 +1997,8 @@ struct ColumnEntry {
     column: String,
     /// `#root::core::FieldType::I64` etc.
     field_type_tokens: TokenStream2,
+    /// A bare or optional `Uuid` field; MySQL decodes it from text.
+    uuid_column: bool,
 }
 
 struct CollectedFields {
@@ -1945,6 +2008,9 @@ struct CollectedFields {
     /// `format!("{prefix}__{col}")` aliases so a Model can be
     /// decoded from a JOINed row's projected target columns.
     from_aliased_row_inits: Vec<TokenStream2>,
+    /// MySQL twins of `from_row_inits` / `from_aliased_row_inits`.
+    from_row_inits_my: Vec<TokenStream2>,
+    from_aliased_row_inits_my: Vec<TokenStream2>,
     /// Static column-name list — used by the simple insert path
     /// (no `Auto<T>` fields). Aligned with `insert_values`.
     insert_columns: Vec<TokenStream2>,
@@ -1969,11 +2035,11 @@ struct CollectedFields {
     /// #1028 — `(ident, column)` for each `generated_as` field. Drives
     /// the PG/SQLite RETURNING refresh that decodes the DB-computed value
     /// back into the struct after insert (MySQL has no RETURNING → the
-    /// field stays at its placeholder, deferred, matching Django 6.0).
+    /// field stays at its placeholder until the next read).
     generated_field_idents: Vec<(syn::Ident, String)>,
-    /// Inner `T` of the first `Auto<T>` field, for the MySQL
-    /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
-    first_auto_value_ty: Option<Type>,
+    /// First `Auto<T>` field the database fills, with its inner `T`: the
+    /// MySQL `LAST_INSERT_ID()` target. Rust-filled ones never are (#1934).
+    first_db_auto: Option<(syn::Ident, Type)>,
     /// Bulk-insert per-row pushes for **non-Auto fields only**. Used
     /// by the all-Auto-Unset bulk path (Auto cols dropped from
     /// `columns`).
@@ -1988,6 +2054,9 @@ struct CollectedFields {
     /// Column-name literals for every field including Auto (paired
     /// with `bulk_pushes_all`).
     bulk_columns_all: Vec<TokenStream2>,
+    /// Fills each `default_uuid_v7` field of `_row` in place, so a
+    /// mutable bulk insert hands the PKs back (#1934).
+    bulk_fill_in_place: Vec<TokenStream2>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2033,9 +2102,9 @@ struct FkRelation {
     /// Inner type of `ForeignKey<T, K>` — the parent model. The reverse
     /// helper is emitted as `impl <ParentType> { … }`.
     parent_type: Type,
-    /// SQL column name on the child table for this FK (e.g. `"author"`).
-    /// Used in the generated `WHERE <fk_column> = $1` clause.
-    fk_column: String,
+    /// Rust field ident of the FK. Its name is the key for select_related,
+    /// prefetch and filters; the SQL column may differ (#1936).
+    field_ident: syn::Ident,
     /// `K`'s underlying scalar kind — drives the `match SqlValue { … }`
     /// arm emitted by [`load_related_impl_tokens`]. `I64` for the
     /// default `ForeignKey<T>` (no explicit K); other kinds when the
@@ -2060,6 +2129,8 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         field_schemas: Vec::with_capacity(cap),
         from_row_inits: Vec::with_capacity(cap),
         from_aliased_row_inits: Vec::with_capacity(cap),
+        from_row_inits_my: Vec::with_capacity(cap),
+        from_aliased_row_inits_my: Vec::with_capacity(cap),
         insert_columns: Vec::with_capacity(cap),
         insert_values: Vec::with_capacity(cap),
         insert_pushes: Vec::with_capacity(cap),
@@ -2067,11 +2138,12 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         auto_assigns: Vec::new(),
         auto_field_idents: Vec::new(),
         generated_field_idents: Vec::new(),
-        first_auto_value_ty: None,
+        first_db_auto: None,
         bulk_pushes_no_auto: Vec::with_capacity(cap),
         bulk_pushes_all: Vec::with_capacity(cap),
         bulk_columns_no_auto: Vec::with_capacity(cap),
         bulk_columns_all: Vec::with_capacity(cap),
+        bulk_fill_in_place: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2092,10 +2164,13 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
         out.from_aliased_row_inits.push(info.from_aliased_row_init);
+        out.from_row_inits_my.push(info.from_row_init_my);
+        out.from_aliased_row_inits_my
+            .push(info.from_aliased_row_init_my);
         if let Some(parent_ty) = info.fk_inner.clone() {
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
-                fk_column: info.column.clone(),
+                field_ident: info.ident.clone(),
                 pk_kind: info.fk_pk_kind,
                 nullable: info.nullable,
                 related_name: info.related_name.clone(),
@@ -2128,13 +2203,14 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 name: ident.to_string(),
                 column: info.column.clone(),
                 field_type_tokens: info.field_type_tokens,
+                uuid_column: info.uuid_column,
             });
             // #1028 — refresh the DB-computed value after insert on
             // RETURNING-capable backends. The column joins `returning_cols`
             // (so PG/SQLite `INSERT … RETURNING` includes it) and the
             // ident is recorded so the `AssignAutoPkPool` impl decodes it
             // back into the struct. MySQL has no `INSERT … RETURNING`, so
-            // it keeps the placeholder (deferred refresh, matching Django).
+            // it keeps the placeholder until the next read.
             out.returning_cols.push(quote!(#column));
             out.generated_field_idents
                 .push((ident.clone(), info.column.clone()));
@@ -2150,7 +2226,6 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.has_auto = true;
             if out.first_auto_ident.is_none() {
                 out.first_auto_ident = Some(ident.clone());
-                out.first_auto_value_ty = auto_inner_type(info.value_ty).cloned();
             }
             // `default_uuid_v7` (issue #823) generates the PK Rust-side
             // before binding, so the value is already in
@@ -2160,7 +2235,16 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // unnecessary RETURNING column on every dialect, and (b)
             // the MySQL `LAST_INSERT_ID()` path that can only fill an
             // integer PK.
-            if !info.default_uuid_v7 {
+            // `auto_now_add` / `auto_now` join `default_uuid_v7` here
+            // for the same reason: they are filled Rust-side below and
+            // bound, so the value is already in `self` and RETURNING
+            // would be a redundant column on every dialect.
+            if !info.default_uuid_v7 && !info.auto_now_add && !info.auto_now {
+                if out.first_db_auto.is_none() {
+                    out.first_db_auto = auto_inner_type(info.value_ty)
+                        .cloned()
+                        .map(|ty| (ident.clone(), ty));
+                }
                 out.returning_cols.push(quote!(#column));
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
@@ -2187,6 +2271,41 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                         ));
                     }
                 });
+            } else if info.auto_now_add || info.auto_now {
+                // Rust-side write timestamp (#1464), mirroring
+                // `default_uuid_v7` above. `auto_now` has always bound
+                // `Utc::now()` on UPDATE but not on INSERT, so the
+                // first write of an `updated_at` took the DB default
+                // while every later one took the clock — the same
+                // column, filled two different ways.
+                //
+                // The default is the problem. `CREATE TABLE IF NOT
+                // EXISTS` leaves an upgraded table's
+                // `DEFAULT CURRENT_TIMESTAMP` in place, and SQLite's
+                // ALTER TABLE grammar (RENAME/ADD/DROP) has no
+                // statement that changes it — so every insert relying
+                // on that default wrote the legacy shape forever, while
+                // the migrate sweep converted the rows around it. The
+                // column went permanently mixed and `ORDER BY` inverted
+                // the admin audit log (#1616 rework review,
+                // correctness-001 / dialects-005 / security-002).
+                //
+                // Binding it here makes the stale default unreachable
+                // rather than trying to migrate it: the timestamp comes
+                // from the application, not the database.
+                out.insert_pushes.push(quote! {
+                    if matches!(&self.#ident, #root::sql::Auto::Unset) {
+                        self.#ident = #root::sql::Auto::Set(
+                            #root::__chrono::Utc::now(),
+                        );
+                    }
+                    if let #root::sql::Auto::Set(_v) = &self.#ident {
+                        _columns.push(#column);
+                        _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(_v)
+                        ));
+                    }
+                });
             } else {
                 out.insert_pushes.push(quote! {
                     if let #root::sql::Auto::Set(_v) = &self.#ident {
@@ -2197,29 +2316,72 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     }
                 });
             }
-            // Bulk: Auto fields appear only in the all-Set path,
-            // never in the Unset path (we drop them from `columns`).
+            // …except the timestamp columns, which must appear in BOTH
+            // paths (#1464). The path is chosen by the *first* Auto
+            // field — in practice the PK — so a bulk insert of rows
+            // with an unset PK took the no-auto branch and dropped the
+            // timestamp column, falling back to the DB default that
+            // this change exists to stop depending on.
+            //
+            // `rows` is borrowed immutably here, so this fills per row
+            // at push time rather than writing back into the struct. An
+            // explicitly-Set value is still honoured; only `Unset`
+            // takes the clock.
+            // `default_uuid_v7` likewise: its column has no DB default (#1934).
+            let rust_fill = if info.default_uuid_v7 {
+                Some(quote!(#root::__uuid::Uuid::now_v7()))
+            } else if info.auto_now_add || info.auto_now {
+                Some(quote!(#root::__chrono::Utc::now()))
+            } else {
+                None
+            };
+            // Bulk: Auto fields appear in the all-Set path. An unset filled
+            // field takes its fill there too, not NULL (#1950).
             out.bulk_columns_all.push(quote!(#column));
-            out.bulk_pushes_all.push(quote! {
-                _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
-                    ::core::clone::Clone::clone(&_row.#ident)
-                ));
-            });
+            if let Some(fill) = &rust_fill {
+                let push = quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        match &_row.#ident {
+                            #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
+                            #root::sql::Auto::Unset => #fill,
+                        }
+                    ));
+                };
+                out.bulk_columns_no_auto.push(quote!(#column));
+                out.bulk_pushes_no_auto.push(push.clone());
+                out.bulk_pushes_all.push(push);
+            } else {
+                out.bulk_pushes_all.push(quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&_row.#ident)
+                    ));
+                });
+            }
+            if info.default_uuid_v7 {
+                out.bulk_fill_in_place.push(quote! {
+                    if matches!(&_row.#ident, #root::sql::Auto::Unset) {
+                        _row.#ident = #root::sql::Auto::Set(#root::__uuid::Uuid::now_v7());
+                    }
+                });
+            }
             // Uniformity check: every row's Auto state must match the
             // first row's. Mixed Set/Unset within one bulk_insert is
             // rejected here so the column list stays consistent.
+            // A filled field may be unset on any row, so it is exempt.
             let ident_clone = ident.clone();
-            out.bulk_auto_uniformity.push(quote! {
-                for _r in rows.iter().skip(1) {
-                    if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
-                        return ::core::result::Result::Err(
-                            #root::sql::ExecError::Sql(
-                                #root::sql::SqlError::BulkAutoMixed
-                            )
-                        );
+            if rust_fill.is_none() {
+                out.bulk_auto_uniformity.push(quote! {
+                    for _r in rows.iter().skip(1) {
+                        if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
+                            return ::core::result::Result::Err(
+                                #root::sql::ExecError::Sql(
+                                    #root::sql::SqlError::BulkAutoMixed
+                                )
+                            );
+                        }
                     }
-                }
-            });
+                });
+            }
         } else {
             out.insert_pushes.push(quote! {
                 _columns.push(#column);
@@ -2257,26 +2419,22 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // wall-clock at write time, regardless of what value the
             // user left in the struct field.
             out.update_assignments.push(quote! {
-                #root::core::Assignment {
-                    column: #column,
-                    value: ::core::convert::Into::<#root::core::Expr>::into(
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            #root::__chrono::Utc::now()
-                        )
+                #root::core::Assignment::new(
+                    #column,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        #root::__chrono::Utc::now()
                     ),
-                }
+                )
             });
             out.upsert_update_columns.push(quote!(#column));
         } else {
             out.update_assignments.push(quote! {
-                #root::core::Assignment {
-                    column: #column,
-                    value: ::core::convert::Into::<#root::core::Expr>::into(
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#ident)
-                        )
+                #root::core::Assignment::new(
+                    #column,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#ident)
                     ),
-                }
+                )
             });
             out.upsert_update_columns.push(quote!(#column));
         }
@@ -2286,6 +2444,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             name: ident.to_string(),
             column: info.column.clone(),
             field_type_tokens: info.field_type_tokens,
+            uuid_column: info.uuid_column,
         });
     }
     Ok(out)
@@ -2384,8 +2543,8 @@ fn model_impl_tokens(
         .collect();
     let indexes_tokens = indexes.iter().map(|idx| {
         // When no explicit `name = "..."` was given, derive a stable,
-        // collision-free name from the table + columns (Django-shape
-        // `<table>_<col>_<col>_idx`) instead of a shared literal that
+        // collision-free name from the table + columns
+        // (`<table>_<col>_<col>_idx`) instead of a shared literal that
         // would clash the moment a model declares two unnamed indexes.
         // Capped at Postgres's 63-char identifier limit.
         let derived_name = idx.name.clone().unwrap_or_else(|| {
@@ -2415,26 +2574,19 @@ fn model_impl_tokens(
             None => quote!(::core::option::Option::None),
         };
         let include_lits: Vec<&str> = idx.include.iter().map(String::as_str).collect();
-        quote! {
-            #root::core::IndexSchema {
-                name: #name,
-                columns: &[ #(#cols),* ],
-                unique: #unique,
-                method: #method_variant,
-                where_clause: #where_clause,
-                include: &[ #(#include_lits),* ],
-            }
-        }
+        quote! {{
+            let mut i = #root::core::IndexSchema::new(#name, &[ #(#cols),* ]);
+            i.unique = #unique;
+            i.method = #method_variant;
+            i.where_clause = #where_clause;
+            i.include = &[ #(#include_lits),* ];
+            i
+        }}
     });
     let checks_tokens = checks.iter().map(|c| {
         let name = c.name.as_str();
         let expr = c.expr.as_str();
-        quote! {
-            #root::core::CheckConstraint {
-                name: #name,
-                expr: #expr,
-            }
-        }
+        quote!(#root::core::CheckConstraint::new(#name, #expr))
     });
     let excludes_tokens = excludes.iter().map(|e| {
         let name = e.name.as_str();
@@ -2448,14 +2600,15 @@ fn model_impl_tokens(
             Some(w) => quote!(::core::option::Option::Some(#w)),
             None => quote!(::core::option::Option::None),
         };
-        quote! {
-            #root::core::ExclusionConstraint {
-                name: #name,
-                using: #using,
-                elements: &[ #(#element_tokens),* ],
-                where_clause: #where_tokens,
-            }
-        }
+        quote! {{
+            let mut e = #root::core::ExclusionConstraint::new(
+                #name,
+                #using,
+                &[ #(#element_tokens),* ],
+            );
+            e.where_clause = #where_tokens;
+            e
+        }}
     });
     let composite_fk_tokens = composite_fks.iter().map(|rel| {
         let name = rel.name.as_str();
@@ -2463,25 +2616,19 @@ fn model_impl_tokens(
         let from_cols: Vec<&str> = rel.from.iter().map(String::as_str).collect();
         let on_cols: Vec<&str> = rel.on.iter().map(String::as_str).collect();
         quote! {
-            #root::core::CompositeFkRelation {
-                name: #name,
-                to: #to,
-                from: &[ #(#from_cols),* ],
-                on: &[ #(#on_cols),* ],
-            }
+            #root::core::CompositeFkRelation::new(
+                #name,
+                #to,
+                &[ #(#from_cols),* ],
+                &[ #(#on_cols),* ],
+            )
         }
     });
     let generic_fk_tokens = generic_fks.iter().map(|rel| {
         let name = rel.name.as_str();
         let ct_col = rel.ct_column.as_str();
         let pk_col = rel.pk_column.as_str();
-        quote! {
-            #root::core::GenericRelation {
-                name: #name,
-                ct_column: #ct_col,
-                pk_column: #pk_col,
-            }
-        }
+        quote!(#root::core::GenericRelation::new(#name, #ct_col, #pk_col))
     });
     // Issue #291 / T2.5 — `default_order` slice literal. Empty when
     // no `#[rustango(default_order = "...")]` attribute was supplied.
@@ -2496,13 +2643,14 @@ fn model_impl_tokens(
     // consumer's scope; the name is stored as a string literal.
     let global_scope_tokens = global_scopes.iter().map(|s| {
         let name = s.name.as_str();
-        let apply = &s.apply;
-        quote! {
-            #root::core::GlobalScope {
-                name: #name,
-                apply: #apply,
+        // The slice sits in a nested `const`, where `Self` does not resolve.
+        let mut apply = s.apply.clone();
+        if let Some(first) = apply.segments.first_mut() {
+            if first.ident == "Self" {
+                first.ident = struct_name.clone();
             }
         }
+        quote!(#root::core::GlobalScope::new(#name, #apply))
     });
 
     let m2m_tokens = m2m_relations.iter().map(|rel| {
@@ -2512,16 +2660,11 @@ fn model_impl_tokens(
         let src = rel.src.as_str();
         let dst = rel.dst.as_str();
         let auto_create = rel.auto_create;
-        quote! {
-            #root::core::M2MRelation {
-                name: #name,
-                to: #to,
-                through: #through,
-                src_col: #src,
-                dst_col: #dst,
-                auto_create: #auto_create,
-            }
-        }
+        quote! {{
+            let mut m = #root::core::M2MRelation::new(#name, #to, #through, #src, #dst);
+            m.auto_create = #auto_create;
+            m
+        }}
     });
     // Issue #830 sub-piece: emit `Model::reverse_relations()` override
     // when the model declares `#[rustango(reverse_has(...))]`. Each
@@ -2537,12 +2680,12 @@ fn model_impl_tokens(
             let child_fk_column = rel.child_fk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::ReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    child_fk_column: #child_fk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::ReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #child_fk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2564,13 +2707,13 @@ fn model_impl_tokens(
             let pk_column = rel.pk_column.as_str();
             let self_pk_column = rel.self_pk_column.as_str();
             quote! {
-                #root::core::GenericReverseRelation {
-                    name: #name,
-                    child_schema: <#child as #root::core::Model>::SCHEMA,
-                    ct_column: #ct_column,
-                    pk_column: #pk_column,
-                    self_pk_column: #self_pk_column,
-                }
+                #root::core::GenericReverseRelation::new(
+                    #name,
+                    <#child as #root::core::Model>::SCHEMA,
+                    #ct_column,
+                    #pk_column,
+                    #self_pk_column,
+                )
             }
         });
         quote! {
@@ -2580,45 +2723,77 @@ fn model_impl_tokens(
             }
         }
     };
+    let fields_slice = const_slice(
+        &quote!(#root::core::FieldSchema),
+        field_schemas.iter().cloned(),
+    );
+    let m2m_slice = const_slice(&quote!(#root::core::M2MRelation), m2m_tokens);
+    let indexes_slice = const_slice(&quote!(#root::core::IndexSchema), indexes_tokens);
+    let checks_slice = const_slice(&quote!(#root::core::CheckConstraint), checks_tokens);
+    let excludes_slice = const_slice(&quote!(#root::core::ExclusionConstraint), excludes_tokens);
+    let composite_fk_slice = const_slice(
+        &quote!(#root::core::CompositeFkRelation),
+        composite_fk_tokens,
+    );
+    let generic_fk_slice = const_slice(&quote!(#root::core::GenericRelation), generic_fk_tokens);
+    let audited_update_override = if audit_track.is_some() {
+        quote! {
+            fn __rustango_audited_update() -> ::core::option::Option<#root::audit::AuditedUpdate> {
+                ::core::option::Option::Some(Self::__rustango_update_audited)
+            }
+            fn __rustango_audited_delete() -> ::core::option::Option<#root::audit::AuditedDelete> {
+                ::core::option::Option::Some(Self::__rustango_delete_audited)
+            }
+            fn __rustango_audited_create() -> ::core::option::Option<#root::audit::AuditedCreate> {
+                ::core::option::Option::Some(Self::__rustango_create_audited)
+            }
+        }
+    } else {
+        quote!()
+    };
+    let global_scope_slice = const_slice(&quote!(#root::core::GlobalScope), global_scope_tokens);
     quote! {
         impl #root::core::Model for #struct_name {
-            const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
-                name: #model_name,
-                table: #table,
-                fields: &[ #(#field_schemas),* ],
-                display: #display_tokens,
-                app_label: #app_label_tokens,
-                admin: #admin_tokens,
-                soft_delete_column: #soft_delete_tokens,
-                permissions: #permissions,
-                audit_track: #audit_track_tokens,
-                m2m: &[ #(#m2m_tokens),* ],
-                indexes: &[ #(#indexes_tokens),* ],
-                check_constraints: &[ #(#checks_tokens),* ],
-                exclusion_constraints: &[ #(#excludes_tokens),* ],
-                composite_relations: &[ #(#composite_fk_tokens),* ],
-                generic_relations: &[ #(#generic_fk_tokens),* ],
-                scope: #scope_tokens,
-                default_order: &[ #(#default_order_tokens),* ],
-                is_view: #is_view,
-                verbose_name: #verbose_name_tokens,
-                verbose_name_plural: #verbose_name_plural_tokens,
-                managed: #managed,
-                base_manager_name: #base_manager_name_tokens,
-                order_with_respect_to: #order_with_respect_to_tokens,
-                proxy: #proxy,
-                required_db_features: &[ #(#required_db_features_lits),* ],
-                required_db_vendor: #required_db_vendor_tokens,
-                default_related_name: #default_related_name_tokens,
-                db_table_comment: #db_table_comment_tokens,
-                get_latest_by: #get_latest_by_tokens,
-                extra_permissions: &[ #(#extra_permission_tokens),* ],
-                default_permissions: &[ #(#default_permission_tokens),* ],
-                global_scopes: &[ #(#global_scope_tokens),* ],
+            const SCHEMA: &'static #root::core::ModelSchema = &{
+                #root::core::ModelSchema::from_parts(#root::core::ModelSchemaParts {
+                    name: #model_name,
+                    table: #table,
+                    fields: #fields_slice,
+                    display: #display_tokens,
+                    app_label: #app_label_tokens,
+                    admin: #admin_tokens,
+                    soft_delete_column: #soft_delete_tokens,
+                    permissions: #permissions,
+                    audit_track: #audit_track_tokens,
+                    m2m: #m2m_slice,
+                    indexes: #indexes_slice,
+                    check_constraints: #checks_slice,
+                    exclusion_constraints: #excludes_slice,
+                    composite_relations: #composite_fk_slice,
+                    generic_relations: #generic_fk_slice,
+                    scope: #scope_tokens,
+                    default_order: &[ #(#default_order_tokens),* ],
+                    is_view: #is_view,
+                    verbose_name: #verbose_name_tokens,
+                    verbose_name_plural: #verbose_name_plural_tokens,
+                    managed: #managed,
+                    base_manager_name: #base_manager_name_tokens,
+                    order_with_respect_to: #order_with_respect_to_tokens,
+                    proxy: #proxy,
+                    required_db_features: &[ #(#required_db_features_lits),* ],
+                    required_db_vendor: #required_db_vendor_tokens,
+                    default_related_name: #default_related_name_tokens,
+                    db_table_comment: #db_table_comment_tokens,
+                    get_latest_by: #get_latest_by_tokens,
+                    extra_permissions: &[ #(#extra_permission_tokens),* ],
+                    default_permissions: &[ #(#default_permission_tokens),* ],
+                    global_scopes: #global_scope_slice,
+                })
             };
 
             #reverse_relations_override
             #generic_reverse_relations_override
+            #audited_update_override
         }
     }
 }
@@ -2672,14 +2847,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let fieldset_tokens = fieldsets.iter().map(|(title, fields)| {
-        let title = title.as_str();
-        let field_lits = fields.iter().map(|s| s.as_str());
-        quote!(#root::core::Fieldset {
-            title: #title,
-            fields: &[ #( #field_lits ),* ],
-        })
-    });
+    let fieldset_tokens = const_slice(
+        &quote!(#root::core::Fieldset),
+        fieldsets.iter().map(|(title, fields)| {
+            let title = title.as_str();
+            let field_lits = fields.iter().map(String::as_str);
+            quote!(#root::core::Fieldset::new(#title, &[ #( #field_lits ),* ]))
+        }),
+    );
 
     let list_display_links = admin
         .list_display_links
@@ -2698,14 +2873,14 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .as_ref()
         .map(|(v, _)| v.as_slice())
         .unwrap_or(&[]);
-    let prepopulated_tokens = prepopulated.iter().map(|(target, sources)| {
-        let target = target.as_str();
-        let source_lits = sources.iter().map(|s| s.as_str());
-        quote!(#root::core::PrepopulatedField {
-            target: #target,
-            sources: &[ #( #source_lits ),* ],
-        })
-    });
+    let prepopulated_tokens = const_slice(
+        &quote!(#root::core::PrepopulatedField),
+        prepopulated.iter().map(|(target, sources)| {
+            let target = target.as_str();
+            let source_lits = sources.iter().map(String::as_str);
+            quote!(#root::core::PrepopulatedField::new(#target, &[ #( #source_lits ),* ]))
+        }),
+    );
 
     let raw_id_fields = admin
         .raw_id_fields
@@ -2762,25 +2937,30 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     });
 
     quote! {
-        ::core::option::Option::Some(&#root::core::AdminConfig {
-            list_display: &[ #( #list_display_lits ),* ],
-            search_fields: &[ #( #search_fields_lits ),* ],
-            list_per_page: #list_per_page,
-            ordering: &[ #( #ordering_tokens ),* ],
-            readonly_fields: &[ #( #readonly_fields_lits ),* ],
-            list_filter: &[ #( #list_filter_lits ),* ],
-            actions: &[ #( #actions_lits ),* ],
-            fieldsets: &[ #( #fieldset_tokens ),* ],
-            list_display_links: &[ #( #list_display_links_lits ),* ],
-            search_help_text: #search_help_text,
-            actions_on_top: #actions_on_top,
-            actions_on_bottom: #actions_on_bottom,
-            date_hierarchy: #date_hierarchy,
-            prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
-            raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
-            autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
-            list_select_related: #list_select_related_tokens,
-            formfield_overrides: &[ #( #formfield_tokens ),* ],
+        ::core::option::Option::Some({
+            const ADMIN: &#root::core::AdminConfig = &{
+                #root::core::AdminConfig::from_parts(#root::core::AdminConfigParts {
+                    list_display: &[ #( #list_display_lits ),* ],
+                    search_fields: &[ #( #search_fields_lits ),* ],
+                    list_per_page: #list_per_page,
+                    ordering: &[ #( #ordering_tokens ),* ],
+                    readonly_fields: &[ #( #readonly_fields_lits ),* ],
+                    list_filter: &[ #( #list_filter_lits ),* ],
+                    actions: &[ #( #actions_lits ),* ],
+                    fieldsets: #fieldset_tokens,
+                    list_display_links: &[ #( #list_display_links_lits ),* ],
+                    search_help_text: #search_help_text,
+                    actions_on_top: #actions_on_top,
+                    actions_on_bottom: #actions_on_bottom,
+                    date_hierarchy: #date_hierarchy,
+                    prepopulated_fields: #prepopulated_tokens,
+                    raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
+                    autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
+                    list_select_related: #list_select_related_tokens,
+                    formfield_overrides: &[ #( #formfield_tokens ),* ],
+                })
+            };
+            ADMIN
         })
     }
 }
@@ -2791,7 +2971,7 @@ fn inherent_impl_tokens(
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
     audited_fields: Option<&[&ColumnEntry]>,
-    indexes: &[IndexAttr],
+    upsert_unique: Option<&[String]>,
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
     let root = rustango_root();
@@ -2853,8 +3033,10 @@ fn inherent_impl_tokens(
     };
     let pool_to_bulk_insert_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            Self::bulk_insert_on(rows, &mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            Self::bulk_insert_on(rows, &mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
         }
     } else {
         quote!(Self::bulk_insert_on(rows, pool).await)
@@ -2867,8 +3049,10 @@ fn inherent_impl_tokens(
     // compiling.
     let pool_to_upsert_on = if audited_fields.is_some() {
         quote! {
-            let mut _conn = pool.acquire().await?;
-            self.upsert_on(&mut *_conn).await
+            let mut _tx = pool.begin().await?;
+            self.upsert_on(&mut *_tx).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
         }
     } else {
         quote!(self.upsert_on(pool).await)
@@ -2932,13 +3116,11 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::None,
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    );
                     #root::sql::insert_pool(pool, &_query).await
                 }
 
@@ -2958,21 +3140,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::Some(
-                            #root::core::ConflictClause::DoNothing,
-                        ),
-                    };
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         } else {
@@ -2991,13 +3164,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec![ #( #returning_cols ),* ],
-                        on_conflict: ::core::option::Option::None,
-                    };
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
                     let _result = #root::sql::insert_returning_pool(
                         pool, &_query,
                     ).await?;
@@ -3029,21 +3201,12 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec::Vec::new(),
-                        on_conflict: ::core::option::Option::Some(
-                            #root::core::ConflictClause::DoNothing,
-                        ),
-                    };
-                    let dialect = pool.dialect();
-                    let stmt = dialect.compile_insert(&_query)?;
-                    let rows = #root::sql::raw_execute_pool(
-                        pool, &stmt.sql, stmt.params,
-                    ).await?;
-                    ::core::result::Result::Ok(rows > 0)
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    );
+                    #root::sql::insert_or_ignore(pool, &_query).await
                 }
             }
         }
@@ -3061,13 +3224,11 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::insert_pool(pool, &_query).await
             }
 
@@ -3075,8 +3236,8 @@ fn inherent_impl_tokens(
             /// or silently skip on unique-constraint violation. Maps
             /// to per-dialect "INSERT ... DO NOTHING on conflict":
             /// PG `INSERT … ON CONFLICT DO NOTHING`, SQLite
-            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL
-            /// `INSERT IGNORE INTO …`.
+            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL an
+            /// `ON DUPLICATE KEY UPDATE` that leaves the row as is.
             ///
             /// Returns `Ok(true)` when a row was inserted,
             /// `Ok(false)` when a conflict caused the INSERT to
@@ -3094,19 +3255,12 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<bool, #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoNothing,
-                    ),
-                };
-                let dialect = pool.dialect();
-                let stmt = dialect.compile_insert(&_query)?;
-                let rows = #root::sql::raw_execute_pool(pool, &stmt.sql, stmt.params).await?;
-                ::core::result::Result::Ok(rows > 0)
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
+                #root::sql::insert_or_ignore(pool, &_query).await
             }
         }
     };
@@ -3150,30 +3304,173 @@ fn inherent_impl_tokens(
     } else {
         quote!(::std::string::String::new())
     };
-    let make_op_emit = |op_path: TokenStream2| -> TokenStream2 {
-        if audited_fields.is_some() {
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
-            quote! {
-                let _audit_entry = #root::audit::PendingEntry {
+    // `__rustango_audit_entry`: the one place a snapshot `PendingEntry`
+    // is built, so every audited write path records the same shape.
+    let delete_audited_body = if primary_key.is_some() {
+        quote! {
+            ::std::boxed::Box::pin(#root::audit::delete_many_with_audit::<Self>(
+                pool,
+                query,
+                |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Delete),
+            ))
+        }
+    } else {
+        quote! {
+            let _ = (pool, query);
+            ::std::boxed::Box::pin(async {
+                ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                })
+            })
+        }
+    };
+    let update_audited_body = if primary_key.is_some() {
+        quote! {
+            ::std::boxed::Box::pin(#root::audit::update_many_with_audit::<Self>(
+                pool,
+                query,
+                move |_r: &Self| _r.__rustango_audit_entry(op),
+            ))
+        }
+    } else {
+        quote! {
+            let _ = (pool, query, op);
+            ::std::boxed::Box::pin(async {
+                ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                })
+            })
+        }
+    };
+    let audit_entry_method = if audited_fields.is_some() {
+        let pairs = audit_pair_tokens.iter();
+        let pk_str = audit_pk_to_string.clone();
+        quote! {
+            /// Snapshot audit entry for `operation` on this row.
+            #[doc(hidden)]
+            pub fn __rustango_audit_entry(
+                &self,
+                operation: #root::audit::AuditOp,
+            ) -> #root::audit::PendingEntry {
+                #root::audit::PendingEntry {
                     entity_table: <Self as #root::core::Model>::SCHEMA.table,
                     entity_pk: #pk_str,
-                    operation: #op_path,
+                    operation,
                     source: #root::audit::current_source(),
                     changes: #root::audit::snapshot_changes(&[
                         #( #pairs ),*
                     ]),
-                };
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                }
+            }
+
+            /// Audited bulk `UPDATE`, behind `Model::__rustango_audited_update`.
+            #[doc(hidden)]
+            pub fn __rustango_update_audited<'a>(
+                pool: &'a #root::sql::Pool,
+                query: &'a #root::core::UpdateQuery,
+                op: #root::audit::AuditOp,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<u64, #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                #update_audited_body
+            }
+
+            /// Audited `create` entry for a new row, behind `Model::__rustango_audited_create`.
+            #[doc(hidden)]
+            pub fn __rustango_create_audited<'a, 't>(
+                tx: &'a mut #root::sql::PoolTx<'t>,
+                pk: #root::core::SqlValue,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                ::std::boxed::Box::pin(#root::audit::record_create::<Self>(
+                    tx,
+                    <Self as #root::core::Model>::SCHEMA,
+                    pk,
+                    |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Create),
+                ))
+            }
+
+            /// Audited bulk `DELETE`, behind `Model::__rustango_audited_delete`.
+            #[doc(hidden)]
+            pub fn __rustango_delete_audited<'a>(
+                pool: &'a #root::sql::Pool,
+                query: &'a #root::core::DeleteQuery,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<u64, #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                #delete_audited_body
+            }
+        }
+    } else {
+        quote!()
+    };
+    // Builds `_audit_entry`; `written` is the soft-delete column's new
+    // value, recorded in place of the stale `self` field.
+    let make_entry = |op_path: TokenStream2, written: Option<TokenStream2>| -> TokenStream2 {
+        if let (Some(v), Some(col)) = (written, fields.soft_delete_column.as_deref()) {
+            quote! {
+                let mut _audit_entry = self.__rustango_audit_entry(#op_path);
+                _audit_entry.set_tracked(#col, #v);
             }
         } else {
-            quote!()
+            quote!(let _audit_entry = self.__rustango_audit_entry(#op_path);)
         }
     };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create));
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete));
-    let audit_softdelete_emit = make_op_emit(quote!(#root::audit::AuditOp::SoftDelete));
-    let audit_restore_emit = make_op_emit(quote!(#root::audit::AuditOp::Restore));
+    let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
+        .unwrap_or(#root::__serde_json::Value::Null));
+    let restored_json = quote!(#root::__serde_json::Value::Null);
+    // `_on` emit; `affected` paths skip the row when nothing changed.
+    let make_op_emit =
+        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
+            if audited_fields.is_none() {
+                return quote!();
+            }
+            let entry = make_entry(op_path, written);
+            let emit = quote! {
+                #entry
+                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+            };
+            if affected {
+                quote!(if _affected > 0 { #emit })
+            } else {
+                emit
+            }
+        };
+    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
+    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
+    let audit_softdelete_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::SoftDelete),
+        Some(soft_deleted_json.clone()),
+        true,
+    );
+    let audit_restore_emit = make_op_emit(
+        quote!(#root::audit::AuditOp::Restore),
+        Some(restored_json.clone()),
+        true,
+    );
+    // `&Pool` update runner for soft_delete / restore: one tx with the
+    // audit row when audited, a plain UPDATE otherwise.
+    let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() {
+            let entry = make_entry(op_path, Some(written));
+            quote! {
+                #entry
+                #root::audit::save_one_with_audit(pool, &_query, &_audit_entry).await
+            }
+        } else {
+            quote!(#root::sql::update_pool(pool, &_query).await)
+        }
+    };
+    let pool_softdelete_run =
+        make_pool_update(quote!(#root::audit::AuditOp::SoftDelete), soft_deleted_json);
+    let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore), restored_json);
 
     // `save_pool(&Pool)` — emitted for every model with a PK.
     // Audited Auto-PK models are deferred (the Auto::Unset →
@@ -3222,19 +3519,17 @@ fn inherent_impl_tokens(
                         &mut self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::UpdateQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            set: ::std::vec![ #( #assignments ),* ],
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
-                            ),
-                        };
+                        let _query = #root::core::UpdateQuery::new(
+                            <Self as #root::core::Model>::SCHEMA,
+                            ::std::vec![ #( #assignments ),* ],
+                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                                #pk_column_lit,
+                                #root::core::Op::Eq,
+                                ::core::convert::Into::<#root::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            )),
+                        );
                         let _audit_entry = #root::audit::PendingEntry {
                             entity_table: <Self as #root::core::Model>::SCHEMA.table,
                             entity_pk: #pk_str,
@@ -3250,8 +3545,7 @@ fn inherent_impl_tokens(
                         ::core::result::Result::Ok(_affected)
                     }
 
-                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66
-                    /// (Django `Model.save(update_fields=[...])`).
+                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66.
                     /// Audit emission shrinks to the same column set so
                     /// the audit log reflects exactly what was written.
                     ///
@@ -3306,19 +3600,17 @@ fn inherent_impl_tokens(
                             );
                             return ::core::result::Result::Ok(0);
                         }
-                        let _query = #root::core::UpdateQuery {
-                            model: _schema,
-                            set: _filtered,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
-                            ),
-                        };
+                        let _query = #root::core::UpdateQuery::new(
+                            _schema,
+                            _filtered,
+                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                                #pk_column_lit,
+                                #root::core::Op::Eq,
+                                ::core::convert::Into::<#root::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            )),
+                        );
                         // Narrow the audit snapshot to the same column set.
                         let _all_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                             ::std::vec![ #( #pairs2 ),* ];
@@ -3394,33 +3686,29 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #dispatch_unset
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
                 }
 
                 /// Save (UPDATE) only the listed Rust-side fields,
-                /// leaving every other column untouched. Issue #66 —
-                /// Django's `Model.save(update_fields=[...])` shape.
+                /// leaving every other column untouched. Issue #66.
                 ///
                 /// `fields` are Rust-side struct field names; the macro
                 /// resolves each to its SQL column. Unknown field
                 /// names return [`#root::core::QueryError::UnknownField`]
                 /// wrapped in `ExecError::Query`. An empty list is a
-                /// no-op (returns `Ok(())` and logs a `tracing::warn!`),
-                /// matching Django's "nothing to do" semantic.
+                /// no-op (returns `Ok(())` and logs a `tracing::warn!`).
                 ///
                 /// Use this when:
                 /// * you only mutated a couple of fields on a wide row
@@ -3485,7 +3773,7 @@ fn inherent_impl_tokens(
                         // All field names valid, but they all map to
                         // non-assignable slots (PK column, computed/
                         // virtual fields, relations without an
-                        // assignment). Same no-op semantic as Django.
+                        // assignment). Same no-op as an empty list.
                         #root::__tracing::warn!(
                             target: "rustango::save_partial",
                             model = _schema.name,
@@ -3493,19 +3781,17 @@ fn inherent_impl_tokens(
                         );
                         return ::core::result::Result::Ok(0);
                     }
-                    let _query = #root::core::UpdateQuery {
-                        model: _schema,
-                        set: _filtered,
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        _schema,
+                        _filtered,
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _affected = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(_affected)
                 }
@@ -3574,7 +3860,9 @@ fn inherent_impl_tokens(
                     })
                     .collect()
             };
-            let returning_cols: Vec<proc_macro2::TokenStream> = if fields.has_auto {
+            // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
+            let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
+            {
                 fields.returning_cols.clone()
             } else {
                 // Non-Auto-PK: still need RETURNING something for the
@@ -3590,8 +3878,6 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
-            let pairs = audit_pair_tokens.iter();
-            let pk_str = audit_pk_to_string.clone();
             quote! {
                 /// Insert this row against either backend with audit
                 /// emission inside the same transaction. Bi-dialect
@@ -3610,26 +3896,16 @@ fn inherent_impl_tokens(
                     let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = #root::core::InsertQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        columns: _columns,
-                        values: _values,
-                        returning: ::std::vec![ #( #returning_cols ),* ],
-                        on_conflict: ::core::option::Option::None,
-                    };
-                    let _audit_entry = #root::audit::PendingEntry {
-                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: #root::audit::AuditOp::Create,
-                        source: #root::audit::current_source(),
-                        changes: #root::audit::snapshot_changes(&[
-                            #( #pairs ),*
-                        ]),
-                    };
-                    let _result = #root::audit::insert_one_with_audit(
-                        pool, &_query, &_audit_entry,
-                    ).await?;
-                    #root::sql::apply_auto_pk(_result, self)
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
+                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    })
+                    .await
                 }
             }
         } else {
@@ -3673,10 +3949,11 @@ fn inherent_impl_tokens(
             // The Row alias resolves to PgRow / MySqlRow per call site,
             // so the same template generates both the PG and MySQL bodies.
             let mk_before_pairs =
-                |getter: proc_macro2::TokenStream| -> Vec<proc_macro2::TokenStream> {
+                |getter: &dyn Fn(&ColumnEntry) -> TokenStream2| -> Vec<TokenStream2> {
                     tracked
                         .iter()
                         .map(|c| {
+                            let getter = getter(c);
                             let column_lit = c.column.as_str();
                             let value_ty = &c.value_ty;
                             quote! {
@@ -3696,12 +3973,16 @@ fn inherent_impl_tokens(
                         })
                         .collect()
                 };
-            let before_pairs_pg: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning));
-            let before_pairs_my: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning_my));
-            let before_pairs_sqlite: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(#root::sql::try_get_returning_sqlite));
+            let before_pairs_pg = mk_before_pairs(&|_| quote!(#root::sql::try_get_returning));
+            let before_pairs_my = mk_before_pairs(&|c| {
+                if c.uuid_column {
+                    quote!(#root::sql::try_get_flat_my)
+                } else {
+                    quote!(#root::sql::try_get_returning_my)
+                }
+            });
+            let before_pairs_sqlite =
+                mk_before_pairs(&|_| quote!(#root::sql::try_get_returning_sqlite));
             let pg_select_cols: String = tracked
                 .iter()
                 .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
@@ -3750,19 +4031,17 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #unset_dispatch
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
+                    let _query = #root::core::UpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #assignments ),* ],
+                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                            #pk_column_lit,
+                            #root::core::Op::Eq,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        )),
+                    );
                     let _after_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs_pg ),* ];
                     #root::audit::save_one_with_diff(
@@ -3802,8 +4081,6 @@ fn inherent_impl_tokens(
         let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
-                let pairs = audit_pair_tokens.iter();
-                let pk_str = audit_pk_to_string.clone();
                 quote! {
                     /// Delete this row against either backend with audit
                     /// emission inside the same transaction. Bi-dialect
@@ -3815,27 +4092,15 @@ fn inherent_impl_tokens(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
+                        let _query = #root::core::DeleteQuery::by_pk(
+                            <Self as #root::core::Model>::SCHEMA,
+                            #pk_column_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
-                        };
-                        let _audit_entry = #root::audit::PendingEntry {
-                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                            entity_pk: #pk_str,
-                            operation: #root::audit::AuditOp::Delete,
-                            source: #root::audit::current_source(),
-                            changes: #root::audit::snapshot_changes(&[
-                                #( #pairs ),*
-                            ]),
-                        };
+                        );
+                        let _audit_entry =
+                            self.__rustango_audit_entry(#root::audit::AuditOp::Delete);
                         #root::audit::delete_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await
@@ -3853,18 +4118,13 @@ fn inherent_impl_tokens(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery {
-                            model: <Self as #root::core::Model>::SCHEMA,
-                            where_clause: #root::core::WhereExpr::Predicate(
-                                #root::core::Filter {
-                                    column: #pk_column_lit,
-                                    op: #root::core::Op::Eq,
-                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::core::clone::Clone::clone(&self.#pk_ident)
-                                    ),
-                                }
+                        let _query = #root::core::DeleteQuery::by_pk(
+                            <Self as #root::core::Model>::SCHEMA,
+                            #pk_column_lit,
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
-                        };
+                        );
                         #root::sql::delete_pool(pool, &_query).await
                     }
                 }
@@ -3874,9 +4134,31 @@ fn inherent_impl_tokens(
         }
     };
 
+    // Bulk writers on audited models write one audit row per affected
+    // row, in the write's transaction (#1747).
+    let (bulk_delete_run, bulk_update_run, truncate_run) = if audited_fields.is_some() {
+        (
+            quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
+            })
+            .await),
+            quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
+            })
+            .await),
+            quote!(#root::audit::truncate_with_audit(pool, _table, &_sql).await),
+        )
+    } else {
+        (
+            quote!(#root::sql::delete_pool(pool, &_query).await),
+            quote!(#root::sql::update_pool(pool, &_query).await),
+            quote!(#root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await),
+        )
+    };
+
     // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
     // matching this instance's PK and overwrite the in-memory state
-    // with the freshly-fetched columns. Django's `refresh_from_db`.
+    // with the freshly-fetched columns.
     // Issue #825. Only emitted when the model declares a PK; non-PK
     // models can't address a specific row.
     //
@@ -3995,11 +4277,7 @@ fn inherent_impl_tokens(
                     #root::sql::ExecError,
                 >
                 where
-                    U: #root::sql::MaybePgScalar
-                        + #root::sql::MaybeMyScalar
-                        + #root::sql::MaybeSqliteScalar
-                        + ::core::marker::Send
-                        + ::core::marker::Unpin,
+                    U: #root::sql::FlatScalar,
                 {
                     let _col_static: &'static str = Self::__resolve_col(col)?;
                     #root::query::QuerySet::<Self>::default()
@@ -4032,12 +4310,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Sum(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .sum::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4063,12 +4338,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Avg(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .avg::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4094,12 +4366,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Min(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .min::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4125,12 +4394,9 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    Self::__aggregate_one_pool::<U>(
-                        col,
-                        |c| #root::core::AggregateExpr::Max(c),
-                        pool,
-                    )
-                    .await
+                    #root::query::QuerySet::<Self>::default()
+                        .max::<U>(col, pool)
+                        .await
                 }
             },
         );
@@ -4185,7 +4451,7 @@ fn inherent_impl_tokens(
         quote! {
             /// Re-SELECT this row by its primary key and overwrite
             /// every in-memory field with the freshly-fetched value.
-            /// Django's [`Model.refresh_from_db`]. Issue #825.
+            /// Issue #825.
             ///
             /// Use this when the row may have been modified by another
             /// process / connection / job since you read it — e.g. after
@@ -4200,7 +4466,6 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch`]; also `RowNotFound` when
             /// the PK no longer exists.
             ///
-            /// [`Model.refresh_from_db`]: https://docs.djangoproject.com/en/5.1/ref/models/instances/#django.db.models.Model.refresh_from_db
             /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn refresh_from_db(
                 &mut self,
@@ -4232,20 +4497,17 @@ fn inherent_impl_tokens(
             /// Atomically increment the integer column `col` by
             /// `by` for this row. Equivalent to
             /// `UPDATE <table> SET <col> = <col> + $1 WHERE <pk> = $2`.
-            /// Eloquent `Model::increment($col, $by)` / Django
-            /// `Model.objects.filter(pk=…).update(col=F('col')+$by)`
-            /// parity.
             ///
             /// **Doesn't mutate `self`** — the in-memory copy is now
-            /// stale; call [`Self::refresh_from_db_pool`] /
-            /// [`Self::fresh_pool`] to re-sync. Returns the rows-
+            /// stale; call [`Self::refresh_from_db`] /
+            /// [`Self::fresh`] to re-sync. Returns the rows-
             /// affected count (0 when the PK doesn't match any row,
             /// 1 on success).
             ///
             /// `col` is the Rust field name as a string; unknown
             /// fields surface as `UnknownField` at runtime. Negative
             /// `by` values atomically decrement (see also
-            /// [`Self::decrement_pool`]).
+            /// [`Self::decrement`]).
             ///
             /// # Errors
             /// As [`UpdaterPool::execute_pool`].
@@ -4331,15 +4593,17 @@ fn inherent_impl_tokens(
                 .await
             }
 
-            /// Internal: forward to
-            /// [`#root::sql::model_shortcuts::increment_all_pool`].
+            /// Internal: run
+            /// [`#root::sql::model_shortcuts::increment_all_query`].
             #[doc(hidden)]
             pub async fn __increment_all(
                 col: &str,
                 by: i64,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #root::sql::model_shortcuts::increment_all_pool::<Self>(col, by, pool).await
+                let _query =
+                    #root::sql::model_shortcuts::increment_all_query::<Self>(col, by)?;
+                #bulk_update_run
             }
 
             /// Internal: forward to
@@ -4365,10 +4629,10 @@ fn inherent_impl_tokens(
             /// Re-SELECT this row by its primary key and return a
             /// **new** instance with the freshly-fetched fields.
             /// Eloquent `Model::fresh()` parity — non-mutating
-            /// counterpart of [`Self::refresh_from_db_pool`].
+            /// counterpart of [`Self::refresh_from_db`].
             ///
             /// Returns `Ok(None)` when the row was deleted
-            /// concurrently — vs [`Self::refresh_from_db_pool`]
+            /// concurrently — vs [`Self::refresh_from_db`]
             /// which surfaces that as `RowNotFound` because
             /// in-place mutation has nothing to write to.
             ///
@@ -4414,12 +4678,12 @@ fn inherent_impl_tokens(
 
             #last_method
 
-            /// Throwing counterpart of [`Self::first_pool`] —
+            /// Throwing counterpart of [`Self::first`] —
             /// errors with `RowNotFound` when the table is empty.
             /// Eloquent `Model::firstOrFail()` parity.
             ///
             /// # Errors
-            /// As [`Self::first_pool`]; additionally
+            /// As [`Self::first`]; additionally
             /// [`sqlx::Error::RowNotFound`] on empty tables.
             ///
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
@@ -4442,14 +4706,11 @@ fn inherent_impl_tokens(
             /// Single-column projection — `SELECT <col> FROM
             /// <table>`. Returns `Vec<U>` where each element is the
             /// decoded value of the column. Eloquent
-            /// `Model::pluck($column)` / Django
-            /// `Model.objects.values_list('col', flat=True)` parity.
+            /// `Model::pluck($column)` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .values_list_flat(col).fetch::<U>(pool)`. `U` must
-            /// be decodable from the column's SQL type on every
-            /// dialect the binary targets (common picks: `i64` /
-            /// `i32` / `String` / `bool` / `f64`).
+            /// .values_list_flat(col).fetch::<U>(pool)`. `U` is a
+            /// `FlatScalar`; use `Option<_>` for a nullable column.
             ///
             /// # Errors
             /// As `ValuesFlatQuerySet::fetch`.
@@ -4458,11 +4719,7 @@ fn inherent_impl_tokens(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<::std::vec::Vec<U>, #root::sql::ExecError>
             where
-                U: #root::sql::MaybePgScalar
-                    + #root::sql::MaybeMyScalar
-                    + #root::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
+                U: #root::sql::FlatScalar,
             {
                 #root::query::QuerySet::<Self>::default()
                     .values_list_flat(col)
@@ -4686,13 +4943,13 @@ fn inherent_impl_tokens(
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't
             /// support `TRUNCATE` inside foreign-key constraints
             /// or — for SQLite — at all). Eloquent `Model::truncate()`
-            /// / Django `Model.objects.all().delete()` parity.
+            /// parity.
             ///
             /// **Use only in tests / fixture-reset flows.** Production
             /// writes through this would silently bypass the
             /// `pre_delete` / `post_delete` signals (no per-row hooks
-            /// fire on a TRUNCATE / bulk DELETE FROM) and lose every
-            /// row's audit-log entry.
+            /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
+            /// gets one bulk audit entry, not one per row.
             ///
             /// # Errors
             /// As [`raw_execute_pool`].
@@ -4709,15 +4966,14 @@ fn inherent_impl_tokens(
                 } else {
                     ::std::format!("DELETE FROM {}", _quoted)
                 };
-                #root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await
+                #truncate_run
             }
 
             /// Bulk-delete every row whose primary key is in
             /// `pks` — `DELETE FROM <table> WHERE <pk> IN (...)`.
             /// Returns the affected row count.
             ///
-            /// Eloquent `Model::destroy([1, 2, 3])` / Django
-            /// `Model.objects.filter(pk__in=[...]).delete()` parity.
+            /// Eloquent `Model::destroy([1, 2, 3])` parity.
             /// Empty `pks` is a no-op (returns 0).
             ///
             /// Accepts any iterable whose elements are
@@ -4738,33 +4994,27 @@ fn inherent_impl_tokens(
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(0);
                 }
-                let _query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: <Self as #root::core::Model>::SCHEMA
-                                .primary_key()
-                                .ok_or_else(|| {
-                                    #root::sql::ExecError::Sql(
-                                        #root::sql::SqlError::MissingPrimaryKey,
-                                    )
-                                })?
-                                .column,
-                            op: #root::core::Op::In,
-                            value: #root::core::SqlValue::List(_values),
-                        },
-                    ),
-                };
-                #root::sql::delete_pool(pool, &_query).await
+                let _pk = <Self as #root::core::Model>::SCHEMA
+                    .primary_key()
+                    .ok_or_else(|| {
+                        #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
+                    })?;
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(
+                        _pk.name,
+                        #root::core::Op::In,
+                        #root::core::SqlValue::List(_values),
+                    )
+                    .compile_delete()?;
+                #bulk_delete_run
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
-            /// `Model::where($col, $val)->get()` / Django
-            /// `Model.objects.filter(col=val).all()` parity.
+            /// `Model::where($col, $val)->get()` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter(col, val).fetch(pool)`. For one row,
-            /// use [`Self::first_where_pool`]; for a chain that
+            /// use [`Self::first_where`]; for a chain that
             /// needs further `.filter()` / `.order_by()` /
             /// `.limit()`, drop down to `Self::query().filter(...)`
             /// directly.
@@ -4936,7 +5186,7 @@ fn inherent_impl_tokens(
 
             /// Fetch one row in random order. Eloquent
             /// `Model::inRandomOrder()->first()` parity. Same
-            /// performance caveat as [`Self::random_n_pool`].
+            /// performance caveat as [`Self::random_n`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -4955,7 +5205,7 @@ fn inherent_impl_tokens(
 
             /// Fetch every row ordered ASC by `field`. Eloquent
             /// `Model::oldest($field)->get()` parity — the multi-row
-            /// counterpart of [`Self::earliest_pool`].
+            /// counterpart of [`Self::earliest`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -4977,7 +5227,7 @@ fn inherent_impl_tokens(
 
             /// Fetch every row ordered DESC by `field`. Eloquent
             /// `Model::latest($field)->get()` parity — the multi-row
-            /// counterpart of [`Self::latest_pool`].
+            /// counterpart of [`Self::latest`].
             ///
             /// # Errors
             /// As [`FetcherPool::fetch`].
@@ -5174,7 +5424,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` starts with `prefix`
-            /// (auto-appends `%`). Django `__startswith` / Eloquent
+            /// (auto-appends `%`). Eloquent
             /// `whereLike("col", "$prefix%")` parity.
             ///
             /// # Errors
@@ -5201,7 +5451,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` ends with `suffix`
-            /// (auto-prepends `%`). Django `__endswith` / Eloquent
+            /// (auto-prepends `%`). Eloquent
             /// `whereLike("col", "%$suffix")` parity.
             ///
             /// # Errors
@@ -5228,7 +5478,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch every row where `<col>` contains `substr`
-            /// (auto-wraps with `%`). Django `__contains` /
+            /// (auto-wraps with `%`).
             /// Eloquent `whereLike("col", "%$substr%")` parity.
             ///
             /// # Errors
@@ -5428,7 +5678,7 @@ fn inherent_impl_tokens(
             }
 
             /// Fetch up to `n` rows. Eloquent `Model::take($n)->get()`
-            /// parity / Django `Model.objects.all()[:n]`. PK-ordered
+            /// parity. PK-ordered
             /// is NOT guaranteed without an explicit `order_by` —
             /// drop into `Self::query()` for that.
             ///
@@ -5470,7 +5720,7 @@ fn inherent_impl_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::FetcherPool as _;
-                let _offset = if page > 1 { (page - 1) * per_page } else { 0 };
+                let _offset = #root::list_params::page_offset(page, per_page);
                 #root::query::QuerySet::<Self>::default()
                     .limit(per_page)
                     .offset(_offset)
@@ -5536,22 +5786,18 @@ fn inherent_impl_tokens(
                 set_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                use #root::sql::UpdaterPool as _;
-                #root::query::QuerySet::<Self>::default()
+                let _query = #root::query::QuerySet::<Self>::default()
                     .filter(where_col, where_val)
                     .update()
                     .set(set_col, set_val)
-                    .execute_pool(pool)
-                    .await
+                    .compile()?;
+                #bulk_update_run
             }
 
             /// Bulk-delete — remove every row matching
             /// `where_col = where_val`. Returns affected row count.
             /// Eloquent
             /// `Model::where($where_col, $where_val)->delete()` parity.
-            ///
-            /// For more complex filters drop into the queryset
-            /// builder + `Self::query().filter(...).delete().execute_pool(&pool)`.
             ///
             /// # Errors
             /// As [`#root::sql::delete_pool`].
@@ -5560,27 +5806,10 @@ fn inherent_impl_tokens(
                 where_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                let _query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: <Self as #root::core::Model>::SCHEMA
-                                .field(where_col)
-                                .ok_or_else(|| {
-                                    #root::sql::ExecError::Query(
-                                        #root::core::QueryError::UnknownField {
-                                            model: <Self as #root::core::Model>::SCHEMA.name,
-                                            field: ::std::string::ToString::to_string(where_col),
-                                        },
-                                    )
-                                })?
-                                .column,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::into(where_val),
-                        },
-                    ),
-                };
-                #root::sql::delete_pool(pool, &_query).await
+                let _query = #root::query::QuerySet::<Self>::default()
+                    .filter_op(where_col, #root::core::Op::Eq, where_val)
+                    .compile_delete()?;
+                #bulk_delete_run
             }
 
             /// Bulk-update — set `set_col = set_val` on EVERY row of
@@ -5600,12 +5829,11 @@ fn inherent_impl_tokens(
                 set_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                use #root::sql::UpdaterPool as _;
-                #root::query::QuerySet::<Self>::default()
+                let _query = #root::query::QuerySet::<Self>::default()
                     .update()
                     .set(set_col, set_val)
-                    .execute_pool(pool)
-                    .await
+                    .compile()?;
+                #bulk_update_run
             }
 
             /// Fetch every row where `<col> NOT LIKE <pattern>`.
@@ -5740,8 +5968,7 @@ fn inherent_impl_tokens(
 
             /// Fetch the first row where `<col> = <val>`. Returns
             /// `Ok(None)` when no row matches. Eloquent
-            /// `Model::firstWhere($col, $val)` / Django
-            /// `Model.objects.filter(col=val).first()` parity.
+            /// `Model::firstWhere($col, $val)` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter(col, val).first(pool)`. Use this when you
@@ -5772,15 +5999,15 @@ fn inherent_impl_tokens(
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
             /// `Ok(None)` for an empty table. Eloquent
-            /// `Model::latest($field)->first()` / Django
-            /// `Model.objects.latest(field)` (non-throwing) parity.
+            /// `Model::latest($field)->first()` parity.
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .latest(field, pool)`.
             ///
             /// **Field name** is the Rust field ident as a string
-            /// (not the SQL column). Unknown fields surface as
-            /// `ExecError::Query(QueryError::UnknownField)` at
-            /// compile time.
+            /// (not the SQL column). It is a runtime `&str`, so an
+            /// unknown one compiles and surfaces as
+            /// `ExecError::Query(QueryError::UnknownField)` when the
+            /// query runs.
             ///
             /// # Errors
             /// As `QuerySet::latest`.
@@ -5796,14 +6023,13 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Sibling of [`Self::latest_pool`] — fetches the row
+            /// Sibling of [`Self::latest`] — fetches the row
             /// with the smallest `field` value (`ORDER BY <field>
             /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
-            /// ->first()` / Django `Model.objects.earliest(field)`
-            /// parity.
+            /// ->first()` parity.
             ///
             /// # Errors
-            /// As [`Self::latest_pool`].
+            /// As [`Self::latest`].
             pub async fn earliest(
                 field: &str,
                 pool: &#root::sql::Pool,
@@ -5819,9 +6045,8 @@ fn inherent_impl_tokens(
             #count_method
 
             /// `true` when the table contains at least one row.
-            /// Eloquent `Model::query()->exists()` / Django
-            /// `Model.objects.exists()` parity. Thin wrapper over
-            /// `QuerySet::<Self>::default().exists(pool)`.
+            /// Eloquent `Model::query()->exists()` parity. Thin wrapper
+            /// over `QuerySet::<Self>::default().exists(pool)`.
             ///
             /// # Errors
             /// As [`ExistsPool::exists`].
@@ -5876,29 +6101,6 @@ fn inherent_impl_tokens(
             #min_method
             #max_method
 
-            /// Internal: forward to
-            /// [`#root::sql::model_shortcuts::aggregate_one_pool`].
-            /// Backs `sum` / `avg` / `min` / `max`.
-            #[doc(hidden)]
-            pub async fn __aggregate_one_pool<U>(
-                col: &str,
-                build: fn(&'static str) -> #root::core::AggregateExpr,
-                pool: &#root::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                #root::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): #root::sql::MaybePgFromRow
-                    + #root::sql::MaybeMyFromRow
-                    + #root::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                #root::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
-                    .await
-            }
-
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
             /// `QuerySet::<Self>::default().fetch(pool)`.
@@ -5928,8 +6130,7 @@ fn inherent_impl_tokens(
             /// Returns the matching rows in **inventory** order — NOT
             /// the order of `pks`. Empty `pks` returns an empty
             /// `Vec`. Eloquent `Model::find([1, 2, 3])` (when called
-            /// with a list) / Django `Model.objects.filter(pk__in=[...])`
-            /// parity.
+            /// with a list) parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
             /// .filter("<pk>__in", SqlValue::List([...])).fetch(pool)`.
@@ -5971,9 +6172,8 @@ fn inherent_impl_tokens(
             }
 
             /// Look up the row whose primary key equals `pk`. Returns
-            /// `Ok(None)` when no row matches; this is the
-            /// non-throwing counterpart of Django's `.get(pk=…)`
-            /// (which raises `DoesNotExist`). Eloquent `Model::find`
+            /// `Ok(None)` when no row matches, rather than erroring.
+            /// Eloquent `Model::find`
             /// shape — accepts any value `Into<SqlValue>`.
             ///
             /// One-liner shortcut for the common
@@ -6003,9 +6203,8 @@ fn inherent_impl_tokens(
 
             /// Look up the row whose primary key equals `pk`. Errors
             /// when no row matches — the throwing counterpart of
-            /// [`Self::find_pool`]. Eloquent `Model::findOrFail` /
-            /// Django `Model.objects.get(pk=…)` (which raises
-            /// `DoesNotExist`) parity.
+            /// [`Self::find`]. Eloquent `Model::findOrFail`
+            /// parity.
             ///
             /// Translates the miss into
             /// [`ExecError::Driver`]\([`sqlx::Error::RowNotFound`])\)
@@ -6013,7 +6212,7 @@ fn inherent_impl_tokens(
             /// `ExecError` error chain.
             ///
             /// # Errors
-            /// As [`Self::find_pool`]; additionally
+            /// As [`Self::find`]; additionally
             /// [`sqlx::Error::RowNotFound`] when no row matches.
             ///
             /// [`ExecError::Driver`]: rustango::sql::ExecError::Driver
@@ -6092,7 +6291,7 @@ fn inherent_impl_tokens(
             /// default row to return. Eloquent
             /// `Model::findOr($pk, fn() => …)` parity.
             ///
-            /// Unlike [`Self::find_or_fail_pool`] (which raises on
+            /// Unlike [`Self::find_or_fail`] (which raises on
             /// miss), this is the "give me something sensible"
             /// branch: typical use is "fetch the user's row, else
             /// fall back to an anonymous/guest stub".
@@ -6101,7 +6300,7 @@ fn inherent_impl_tokens(
             /// round-trip happens unconditionally.
             ///
             /// # Errors
-            /// As [`Self::find_pool`].
+            /// As [`Self::find`].
             pub async fn find_or<F>(
                 pk: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
@@ -6188,7 +6387,7 @@ fn inherent_impl_tokens(
             /// `Model::firstOr(fn() => …)` parity.
             ///
             /// # Errors
-            /// As [`Self::first_pool`].
+            /// As [`Self::first`].
             pub async fn first_or<F>(
                 pool: &#root::sql::Pool,
                 fallback: F,
@@ -6214,7 +6413,7 @@ fn inherent_impl_tokens(
             /// Eloquent `Model::sole($col, $val)` parity.
             ///
             /// # Errors
-            /// As [`Self::where_pool`] plus the explicit
+            /// As [`Self::where_`] plus the explicit
             /// `RowNotFound` / `MultipleRowsReturned` cases above.
             pub async fn sole(
                 col: &str,
@@ -6267,13 +6466,12 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
                 #root::sql::apply_auto_pk(_result, self)
             }
@@ -6290,13 +6488,11 @@ fn inherent_impl_tokens(
                 &self,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::insert_tx(tx, &_query).await
             }
         }
@@ -6326,19 +6522,17 @@ fn inherent_impl_tokens(
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #dispatch_unset
-                let _query = #root::core::UpdateQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
-                    ),
-                };
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
                 let _affected = #root::sql::update_tx(tx, &_query).await?;
                 ::core::result::Result::Ok(_affected)
             }
@@ -6362,18 +6556,13 @@ fn inherent_impl_tokens(
                     &self,
                     tx: &mut #root::sql::PoolTx<'_>,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::DeleteQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _query = #root::core::DeleteQuery::by_pk(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
+                    );
                     #root::sql::delete_tx(tx, &_query).await
                 }
             }
@@ -6461,7 +6650,11 @@ fn inherent_impl_tokens(
                         ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
                             ::core::option::Option::Some(::std::vec![ #( #before_pairs ),* ])
                         }
-                        _ => ::core::option::Option::None,
+                        ::core::result::Result::Ok(::core::option::Option::None) => ::core::option::Option::None,
+                        // A failed pre-read must not let the UPDATE run unaudited (#1907).
+                        ::core::result::Result::Err(e) => {
+                            return ::core::result::Result::Err(::core::convert::From::from(e));
+                        }
                     };
             };
             let post = quote! {
@@ -6469,17 +6662,16 @@ fn inherent_impl_tokens(
                     let _audit_after:
                         ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs ),* ];
-                    let _audit_entry = #root::audit::PendingEntry {
-                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: #root::audit::AuditOp::Update,
-                        source: #root::audit::current_source(),
-                        changes: #root::audit::diff_changes(
+                    if let ::core::option::Option::Some(_audit_entry) =
+                        #root::audit::PendingEntry::update_diff(
+                            <Self as #root::core::Model>::SCHEMA.table,
+                            #pk_str,
                             &_audit_before,
                             &_audit_after,
-                        ),
-                    };
-                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                        )
+                    {
+                        #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                    }
                 }
             };
             (pre, post)
@@ -6488,46 +6680,14 @@ fn inherent_impl_tokens(
         (quote!(), quote!())
     };
 
-    // Bulk-insert audit: capture every row's tracked fields after the
-    // RETURNING populates each PK, then push one batched INSERT INTO
-    // audit_log via `emit_many`. One round-trip regardless of N rows.
+    // Bulk-insert audit: one `Create` entry per row once RETURNING has
+    // set its PK, written in one batched INSERT.
     let audit_bulk_insert_emit: TokenStream2 = if audited_fields.is_some() {
-        let row_pk_str = if let Some((pk_ident, _)) = primary_key {
-            if fields.pk_is_auto {
-                quote!(_row.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
-            } else {
-                quote!(::std::format!("{}", &_row.#pk_ident))
-            }
-        } else {
-            quote!(::std::string::String::new())
-        };
-        let row_pairs = audited_fields.unwrap_or(&[]).iter().map(|c| {
-            let column_lit = c.column.as_str();
-            let ident = &c.ident;
-            quote! {
-                (
-                    #column_lit,
-                    #root::__serde_json::to_value(&_row.#ident)
-                        .unwrap_or(#root::__serde_json::Value::Null),
-                )
-            }
-        });
         quote! {
-            let _audit_source = #root::audit::current_source();
-            let mut _audit_entries:
-                ::std::vec::Vec<#root::audit::PendingEntry> =
-                    ::std::vec::Vec::with_capacity(rows.len());
-            for _row in rows.iter() {
-                _audit_entries.push(#root::audit::PendingEntry {
-                    entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                    entity_pk: #row_pk_str,
-                    operation: #root::audit::AuditOp::Create,
-                    source: _audit_source.clone(),
-                    changes: #root::audit::snapshot_changes(&[
-                        #( #row_pairs ),*
-                    ]),
-                });
-            }
+            let _audit_entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
+                .iter()
+                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
+                .collect();
             #root::audit::emit_many(&mut *_executor, &_audit_entries).await?;
         }
     } else {
@@ -6550,11 +6710,8 @@ fn inherent_impl_tokens(
         // `RolePermission` / `UserRole` / `UserPermission` in the
         // tenancy permission engine. When no `unique_together` is
         // declared we keep the PK target (the original behaviour).
-        let upsert_target_columns: Vec<String> = indexes
-            .iter()
-            .find(|i| i.unique && !i.columns.is_empty())
-            .map(|i| i.columns.clone())
-            .unwrap_or_else(|| vec![pk_column.clone()]);
+        let upsert_target_columns: Vec<String> =
+            upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
         let upsert_target_lits = upsert_target_columns
             .iter()
             .map(String::as_str)
@@ -6567,11 +6724,34 @@ fn inherent_impl_tokens(
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
         };
+        // An upsert that may hit a conflict is recorded as `Update`; only
+        // an unset PK with a PK-only target is surely a `Create`.
+        let (audit_upsert_pre, audit_upsert_emit) = if audited_fields.is_some() {
+            (
+                if upsert_target_columns == [pk_column.clone()] {
+                    quote! {
+                        let _audit_op = if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
+                            #root::audit::AuditOp::Create
+                        } else {
+                            #root::audit::AuditOp::Update
+                        };
+                    }
+                } else {
+                    quote!(let _audit_op = #root::audit::AuditOp::Update;)
+                },
+                quote! {
+                    let _audit_entry = self.__rustango_audit_entry(_audit_op);
+                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                },
+            )
+        } else {
+            (quote!(), quote!())
+        };
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
             /// `Unset`, otherwise update the existing row matching the
-            /// PK. Mirrors Django's `save()` — caller doesn't need to
-            /// pick `insert` vs the bulk-update path manually.
+            /// PK. The caller doesn't need to pick `insert` vs the
+            /// bulk-update path manually.
             ///
             /// On the insert branch, populates the PK from `RETURNING`
             /// (same behavior as `insert`). On the update branch,
@@ -6581,6 +6761,16 @@ fn inherent_impl_tokens(
             /// Only generated when the primary key is declared as
             /// `Auto<T>`. Models with a manually-managed PK must use
             /// `insert` or the QuerySet update builder.
+            ///
+            /// **Postgres only — prefer [`Self::save_pool`].** This takes a
+            /// driver-specific `PgPool`, so it does not exist at all on a
+            /// build without the `postgres` feature: selecting `sqlite`
+            /// makes the method vanish rather than fail with anything that
+            /// names the cause.
+            ///
+            /// [`Self::save_pool`] takes `rustango::sql::Pool` and works on
+            /// all three backends. The naming is inverted — the short name
+            /// is the narrow one — and that is tracked in #1293.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing
@@ -6611,25 +6801,22 @@ fn inherent_impl_tokens(
             #executor_where
             {
                 // #1029 — INSERT writes exactly one row → 1; UPDATE returns
-                // the rows-affected count (0 when the PK no longer exists,
-                // the Django 6.0 `Model.NotUpdated` signal).
+                // the rows-affected count (0 when the PK no longer exists).
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
                 #audit_update_pre
-                let _query = #root::core::UpdateQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
-                    ),
-                };
+                let _query = #root::core::UpdateQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #assignments ),* ],
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
                 let _affected = #root::sql::__macro_internals::update_on(
                     #executor_passes_to_data_write,
                     &_query,
@@ -6693,19 +6880,21 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #upsert_pushes )*
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #upsert_returning ),* ],
-                    on_conflict: ::core::option::Option::Some(#conflict_clause),
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #upsert_returning ),* ])
+                .on_conflict(#conflict_clause);
+                #audit_upsert_pre
                 let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
                 let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
+                #audit_upsert_emit
                 ::core::result::Result::Ok(())
             }
         })
@@ -6730,8 +6919,7 @@ fn inherent_impl_tokens(
             quote! {
                 /// Soft-delete this row by setting its
                 /// `#[rustango(soft_delete)]` column to `NOW()`.
-                /// Mirrors Django's `SoftDeleteModel.delete()` shape:
-                /// the row stays in the table; query helpers can
+                /// The row stays in the table; query helpers can
                 /// filter it out by checking the column for `IS NOT
                 /// NULL`.
                 ///
@@ -6744,28 +6932,16 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        #root::__chrono::Utc::now()
-                                    )
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _now = #root::__chrono::Utc::now();
+                    let _query = #root::soft_delete::__mark_query(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #col_lit,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
+                        ::core::option::Option::Some(_now),
+                    );
                     let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
@@ -6787,26 +6963,15 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    #root::core::SqlValue::Null
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _query = #root::soft_delete::__mark_query(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #col_lit,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
+                        ::core::option::Option::None,
+                    );
                     let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
@@ -6833,29 +6998,17 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        #root::__chrono::Utc::now()
-                                    )
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _now = #root::__chrono::Utc::now();
+                    let _query = #root::soft_delete::__mark_query(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #col_lit,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
-                    #root::sql::update_pool(pool, &_query).await
+                        ::core::option::Option::Some(_now),
+                    );
+                    #pool_softdelete_run
                 }
 
                 /// Tri-dialect counterpart of [`Self::restore_on`].
@@ -6869,27 +7022,16 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::UpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        set: ::std::vec![
-                            #root::core::Assignment {
-                                column: #col_lit,
-                                value: ::core::convert::Into::<#root::core::Expr>::into(
-                                    #root::core::SqlValue::Null
-                                ),
-                            },
-                        ],
-                        where_clause: #root::core::WhereExpr::Predicate(
-                            #root::core::Filter {
-                                column: #pk_column_lit,
-                                op: #root::core::Op::Eq,
-                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
+                    let _query = #root::soft_delete::__mark_query(
+                        <Self as #root::core::Model>::SCHEMA,
+                        #col_lit,
+                        #pk_column_lit,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                    };
-                    #root::sql::update_pool(pool, &_query).await
+                        ::core::option::Option::None,
+                    );
+                    #pool_restore_run
                 }
 
                 /// Hard-delete this row, ignoring the soft-delete
@@ -6979,7 +7121,7 @@ fn inherent_impl_tokens(
                 /// Today every queryset already includes trashed rows
                 /// (rustango has no global-scope tracking yet — issue
                 /// #820), so this is functionally equivalent to
-                /// [`Self::all_pool`]. Exposed as a named shortcut so
+                /// [`Self::all`]. Exposed as a named shortcut so
                 /// soft-delete-aware code reads `Model::with_trashed_pool`
                 /// rather than `Model::all_pool` — keeps intent visible
                 /// in callers and stays correct when auto-scoping lands.
@@ -7010,6 +7152,12 @@ fn inherent_impl_tokens(
             ///
             /// Returns the number of rows affected (0 or 1).
             ///
+            /// **Postgres only — prefer [`Self::delete_pool`].** This takes
+            /// a driver-specific `PgPool`, so it does not exist on a build
+            /// without the `postgres` feature. [`Self::delete_pool`] takes
+            /// `rustango::sql::Pool` and works on all three. The naming is
+            /// inverted; tracked in #1293.
+            ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
@@ -7034,18 +7182,13 @@ fn inherent_impl_tokens(
             ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
-                let query = #root::core::DeleteQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    where_clause: #root::core::WhereExpr::Predicate(
-                        #root::core::Filter {
-                            column: #pk_column_lit,
-                            op: #root::core::Op::Eq,
-                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
+                let query = #root::core::DeleteQuery::by_pk(
+                    <Self as #root::core::Model>::SCHEMA,
+                    #pk_column_lit,
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#pk_ident)
                     ),
-                };
+                );
                 let _affected = #root::sql::__macro_internals::delete_on(
                     #executor_passes_to_data_write,
                     &query,
@@ -7071,6 +7214,7 @@ fn inherent_impl_tokens(
             }
             #pool_delete_method
             #pool_insert_method
+            #audit_entry_method
             #pool_save_method
             #refresh_replicate_methods
             #tx_delete_method
@@ -7121,6 +7265,12 @@ fn inherent_impl_tokens(
             /// sequence fills them in, then reads each `Auto` column
             /// back via `RETURNING` and stores it on `self`.
             ///
+            /// **Postgres only — prefer [`Self::insert_pool`].** This takes
+            /// a driver-specific `PgPool`, so it does not exist on a build
+            /// without the `postgres` feature. [`Self::insert_pool`] takes
+            /// `rustango::sql::Pool` and works on all three. The naming is
+            /// inverted; tracked in #1293.
+            ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
@@ -7149,13 +7299,12 @@ fn inherent_impl_tokens(
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _values,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
@@ -7212,13 +7361,11 @@ fn inherent_impl_tokens(
             where
                 _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
             {
-                let query = #root::core::InsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #insert_columns ),* ],
-                    values: ::std::vec![ #( #insert_values ),* ],
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
+                let query = #root::core::InsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #insert_columns ),* ],
+                    ::std::vec![ #( #insert_values ),* ],
+                );
                 #root::sql::__macro_internals::insert_on(_executor, &query).await
             }
         }
@@ -7232,9 +7379,33 @@ fn inherent_impl_tokens(
         let returning_cols = &fields.returning_cols;
         let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
         let uniformity = &fields.bulk_auto_uniformity;
+        let fill_in_place = &fields.bulk_fill_in_place;
+        // Nothing to read back when every Auto field is filled Rust-side (#1934).
+        let read_back = if fields.returning_cols.is_empty() {
+            quote!()
+        } else {
+            quote! {
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(
+                        #root::sql::ExecError::Sql(
+                            #root::sql::SqlError::BulkInsertReturningMismatch {
+                                expected: rows.len(),
+                                actual: _returned.len(),
+                            }
+                        )
+                    );
+                }
+                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
+                    #auto_assigns_for_row
+                }
+            }
+        };
+        // The DB-filled `Auto` picks the path; Rust-filled ones fill per row (#1950).
         let first_auto_ident = fields
-            .first_auto_ident
+            .first_db_auto
             .as_ref()
+            .map(|(ident, _)| ident)
+            .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
             /// Bulk-insert `rows` in a single round-trip. Every row's
@@ -7278,6 +7449,9 @@ fn inherent_impl_tokens(
                     #root::sql::Auto::Unset
                 );
                 #( #uniformity )*
+                for _row in rows.iter_mut() {
+                    #( #fill_in_place )*
+                }
 
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
@@ -7300,30 +7474,17 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ]
                 };
 
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: _columns,
-                    rows: _all_rows,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _all_rows,
+                )
+                .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returned = #root::sql::__macro_internals::bulk_insert_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
-                if _returned.len() != rows.len() {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Sql(
-                            #root::sql::SqlError::BulkInsertReturningMismatch {
-                                expected: rows.len(),
-                                actual: _returned.len(),
-                            }
-                        )
-                    );
-                }
-                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
-                    #auto_assigns_for_row
-                }
+                #read_back
                 #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
@@ -7346,7 +7507,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                Self::bulk_insert_on(rows, pool).await
+                #pool_to_bulk_insert_on
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -7355,12 +7516,11 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::bulk_insert`].
             #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on<'_c, _E>(
+            pub async fn bulk_insert_on #executor_generics (
                 rows: &[Self],
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
+            #executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -7374,14 +7534,16 @@ fn inherent_impl_tokens(
                     #( #pushes_all )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #cols_all ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::None,
-                };
-                let _ = #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #cols_all ),* ],
+                    _all_rows,
+                );
+                let _ = #root::sql::__macro_internals::bulk_insert_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
+                #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
         }
@@ -7394,6 +7556,16 @@ fn inherent_impl_tokens(
     // Auto<T> PKs are required to be `Auto::Unset` for every row so the
     // sequence picks the PK for fresh inserts; the UPDATE branch never
     // touches the Auto column.
+    // No RETURNING on MySQL, so which rows landed is unknown: refuse on
+    // audited models rather than write unaudited (#1747).
+    let refuse_unaudited_bulk_insert = quote! {
+        if <Self as #root::core::Model>::SCHEMA.audit_track.is_some() {
+            return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+                table: <Self as #root::core::Model>::SCHEMA.table,
+                reason: "conflict-handling bulk inserts cannot tell which rows landed",
+            });
+        }
+    };
     let bulk_upsert_pool_method = {
         // Pick the "no Auto" columns when the model has Auto fields,
         // else every column.
@@ -7409,9 +7581,8 @@ fn inherent_impl_tokens(
             )
         };
         quote! {
-            /// Tri-dialect `bulk_create(update_conflicts=True)` — Django's
-            /// canonical "import a batch idempotently" shape. Issue #267
-            /// / T1.5.
+            /// Tri-dialect bulk insert that updates on conflict — the
+            /// "import a batch idempotently" shape. Issue #267 / T1.5.
             ///
             /// Per-row values are extracted and lowered into a
             /// [`#root::core::BulkInsertQuery`] with
@@ -7441,6 +7612,7 @@ fn inherent_impl_tokens(
                 update_cols: &[&'static str],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7453,18 +7625,12 @@ fn inherent_impl_tokens(
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #upsert_cols ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoUpdate {
-                            target: target.to_vec(),
-                            update_columns: update_cols.to_vec(),
-                        }
-                    ),
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #upsert_cols ),* ],
+                    _all_rows,
+                )
+                .on_conflict_do_update(target, update_cols);
                 #root::sql::bulk_insert_pool(pool, &_query).await
             }
 
@@ -7481,6 +7647,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7493,28 +7660,33 @@ fn inherent_impl_tokens(
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery {
-                    model: <Self as #root::core::Model>::SCHEMA,
-                    columns: ::std::vec![ #( #upsert_cols ),* ],
-                    rows: _all_rows,
-                    returning: ::std::vec::Vec::new(),
-                    on_conflict: ::core::option::Option::Some(
-                        #root::core::ConflictClause::DoNothing
-                    ),
-                };
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    ::std::vec![ #( #upsert_cols ),* ],
+                    _all_rows,
+                )
+                .on_conflict_do_nothing();
                 #root::sql::bulk_insert_pool(pool, &_query).await
             }
         }
     };
 
-    // Ergonomic `Model::bulk_update(objs, fields)` — Django's
-    // `QuerySet.bulk_update`. The SQL/IR/executor stack
+    // Ergonomic `Model::bulk_update(objs, fields)`.
+    // The SQL/IR/executor stack
     // (`BulkUpdateQuery` + `bulk_update_pool` + the per-dialect
     // `write_bulk_update_*` writers) already existed; what was missing
     // was the per-model constructor that maps `&[Self]` + a runtime
     // column list into rows of `[pk, col_vals…]` so callers don't
     // hand-build the IR. Emitted only when the model has a primary key
     // (the PK is the join key and can't itself be updated).
+    let bulk_update_rows_run = if audited_fields.is_some() {
+        quote!(#root::audit::bulk_update_with_audit::<Self>(pool, &_query, |_r: &Self| {
+            _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
+        })
+        .await)
+    } else {
+        quote!(#root::sql::bulk_update_pool(pool, &_query).await)
+    };
     let bulk_update_method = match &fields.primary_key {
         None => quote! {},
         Some((pk_ident, pk_col)) => {
@@ -7539,10 +7711,9 @@ fn inherent_impl_tokens(
                 });
             }
             quote! {
-                /// Django's `QuerySet.bulk_update(objs, fields)` — write
-                /// per-row-different values for the named `fields` across
-                /// every object in `objs` in a single statement, matched
-                /// by primary key.
+                /// Write per-row-different values for the named `fields`
+                /// across every object in `objs` in a single statement,
+                /// matched by primary key.
                 ///
                 /// `fields` names the **columns** to update. The primary
                 /// key identifies each row and cannot itself be updated
@@ -7632,12 +7803,12 @@ fn inherent_impl_tokens(
                         }
                         _rows.push(_row_vals);
                     }
-                    let _query = #root::core::BulkUpdateQuery {
-                        model: <Self as #root::core::Model>::SCHEMA,
-                        update_columns: _update_columns,
-                        rows: _rows,
-                    };
-                    #root::sql::bulk_update_pool(pool, &_query).await
+                    let _query = #root::core::BulkUpdateQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _update_columns,
+                        _rows,
+                    );
+                    #bulk_update_rows_run
                 }
             }
         }
@@ -7718,7 +7889,7 @@ fn inherent_impl_tokens(
                 }
             })
             .collect();
-        let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
+        let mysql_body = if let Some((first, value_ty)) = fields.first_db_auto.as_ref() {
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
             // Auto<Uuid>/etc. fail to link against MySQL (intended —
@@ -7736,10 +7907,6 @@ fn inherent_impl_tokens(
             // need the DB-defaulted timestamp / UUID can re-fetch the
             // row by PK after `save_pool`. Fixes the cookbook chapter
             // 12 dialect divergence.
-            let value_ty = fields
-                .first_auto_value_ty
-                .as_ref()
-                .expect("first_auto_value_ty set whenever first_auto_ident is");
             quote! {
                 let _converted = <#value_ty as #root::sql::MysqlAutoIdSet>
                     ::rustango_from_mysql_auto_id(_id)?;
@@ -7800,9 +7967,10 @@ fn inherent_impl_tokens(
     };
     // v0.23.0-batch8 — MySQL counterpart, gated through the
     // cfg-aware macro_rules so PG-only builds expand to nothing.
+    let from_aliased_row_inits_my = &fields.from_aliased_row_inits_my;
     let aliased_row_helper_my = quote! {
         #root::__impl_my_aliased_row_decoder!(#struct_name, |row, prefix| {
-            #( #from_aliased_row_inits ),*
+            #( #from_aliased_row_inits_my ),*
         });
     };
 
@@ -7848,7 +8016,7 @@ fn inherent_impl_tokens(
 
     quote! {
         impl #struct_name {
-            /// Start a new `QuerySet` over this model. Django shape.
+            /// Start a new `QuerySet` over this model.
             #[must_use]
             pub fn objects() -> #root::query::QuerySet<#struct_name> {
                 #root::query::QuerySet::new()
@@ -7860,7 +8028,6 @@ fn inherent_impl_tokens(
             ///
             /// ```ignore
             /// // Eloquent:    Post::query()->where('published', true)
-            /// // Django:      Post.objects.filter(published=True)
             /// // rustango:    Post::query().filter("published", true)
             /// //         or:  Post::objects().filter("published", true)
             /// ```
@@ -7994,7 +8161,11 @@ fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
     )
 }
 
-fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
+fn from_row_impl_tokens(
+    struct_name: &syn::Ident,
+    from_row_inits: &[TokenStream2],
+    from_row_inits_my: &[TokenStream2],
+) -> TokenStream2 {
     let root = rustango_root();
     // The Postgres impl is always emitted — every rustango build pulls in
     // sqlx-postgres via the default `postgres` feature. The MySQL impl is
@@ -8021,7 +8192,7 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
         }
 
         #root::__impl_my_from_row!(#struct_name, |row| {
-            #( #from_row_inits ),*
+            #( #from_row_inits_my ),*
         });
 
         #root::__impl_sqlite_from_row!(#struct_name, |row| {
@@ -8033,14 +8204,14 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
 struct ContainerAttrs {
     table: Option<String>,
     display: Option<(String, proc_macro2::Span)>,
-    /// Explicit Django-style app label from `#[rustango(app = "blog")]`.
+    /// Explicit app label from `#[rustango(app = "blog")]`.
     /// Recorded on the emitted `ModelSchema.app_label`. When unset,
     /// `ModelEntry::resolved_app_label()` infers from `module_path!()`
     /// at runtime — this attribute is the override for cases where
     /// the inference is wrong (e.g. a model that conceptually belongs
     /// to one app but is physically in another module).
     app: Option<String>,
-    /// Django ModelAdmin-shape per-model knobs from
+    /// Per-model admin knobs from
     /// `#[rustango(admin(...))]`. `None` when the user didn't write the
     /// attribute — the emitted `ModelSchema.admin` becomes `None` and
     /// admin code falls back to `AdminConfig::DEFAULT`.
@@ -8116,75 +8287,68 @@ struct ContainerAttrs {
     /// snapshot skips this model (its underlying SQL view is operator-
     /// managed, not rustango-managed).
     is_view: bool,
-    /// Django-shape `Meta.managed` from `#[rustango(managed = false)]`.
+    /// `#[rustango(managed = false)]` — who owns the table.
     /// Issue #321. Defaults to `true`; when explicitly set to `false`,
     /// the migration snapshot skips this model so `makemigrations` /
     /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
     /// TABLE` against it (operator-managed schema).
     managed: bool,
-    /// Django-shape `Meta.base_manager_name` from
+    /// Name of the model's base manager, from
     /// `#[rustango(base_manager_name = "...")]`. Threaded into
     /// `ModelSchema::base_manager_name`. Declarative-only today.
     base_manager_name: Option<String>,
-    /// Django-shape `Meta.order_with_respect_to = "parent_fk"` from
     /// `#[rustango(order_with_respect_to = "...")]`. Names the FK
     /// field this model's instances are ordered relative to.
     /// Declarative-only today; threaded onto
     /// `ModelSchema::order_with_respect_to`.
     order_with_respect_to: Option<String>,
-    /// Django-shape `Meta.proxy = True` from `#[rustango(proxy)]` /
-    /// `#[rustango(proxy = true)]`. Marks the model as a proxy that
+    /// `#[rustango(proxy)]` / `#[rustango(proxy = true)]`.
+    /// Marks the model as a proxy that
     /// shares its DB table with another struct. Threaded into
     /// `ModelSchema::proxy` so future codegen can skip table-owning
     /// behavior for proxies.
     proxy: bool,
-    /// Django-shape `Meta.required_db_features` from
     /// `#[rustango(required_db_features = "json_extract,window_functions")]`.
     /// Each comma-separated capability token surfaces on
     /// `ModelSchema::required_db_features` so `manage check --deploy`
     /// can warn when the active dialect lacks one.
     required_db_features: Vec<String>,
-    /// Django-shape `Meta.required_db_vendor` from
     /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
     /// Normalized to the dialect name `manage check --deploy`
     /// compares against `Settings.database.backend`. Aliases
     /// (`postgresql` / `pg` / `mariadb` / `sqlite3`) accepted but
     /// stored under the canonical name.
     required_db_vendor: Option<String>,
-    /// Django-shape `Meta.default_related_name` from
     /// `#[rustango(default_related_name = "...")]`. Threaded into
     /// `ModelSchema::default_related_name`. Reverse-relation accessor
     /// name to use when an FK / M2M field doesn't override it.
     /// Today rustango doesn't auto-emit reverse managers; the
     /// metadata is the foundation for that work.
     default_related_name: Option<String>,
-    /// Django-shape `Meta.db_table_comment` (4.2+) from
     /// `#[rustango(db_table_comment = "...")]`. Threaded into
     /// `ModelSchema::db_table_comment` so the DDL writer attaches the
     /// comment to the underlying table (PG: `COMMENT ON TABLE`, MySQL:
     /// inline `COMMENT='...'`, SQLite: no-op).
     db_table_comment: Option<String>,
-    /// Django-shape `Meta.get_latest_by` from
     /// `#[rustango(get_latest_by = "created_at")]` /
     /// `#[rustango(get_latest_by = "-priority")]`. Parsed into
     /// `(column, descending)` where `descending = true` when the
     /// attribute value starts with `-`. Threaded into
     /// `ModelSchema::get_latest_by`.
     get_latest_by: Option<(String, bool)>,
-    /// Django-shape `Meta.permissions = [(codename, name), ...]`
+    /// Extra `(codename, label)` permissions
     /// from `#[rustango(extra_permissions = "approve:Can approve,
     /// archive:Can archive")]`. Comma-separated `codename:label`
     /// pairs. Threaded into `ModelSchema::extra_permissions`.
     extra_permissions: Vec<(String, String)>,
-    /// Django-shape `Meta.default_permissions` — which CRUD codenames
-    /// (`"add"` / `"change"` / `"delete"` / `"view"`) the framework
-    /// auto-creates. Empty `Vec` (default) means **all four** — matches
-    /// Django's behavior when the operator omits the option. Set via
+    /// Which CRUD codenames (`"add"` / `"change"` / `"delete"` /
+    /// `"view"`) the framework
+    /// auto-creates. Empty `Vec` (default) means **all four**. Set via
     /// `#[rustango(default_permissions = "view,change")]` to opt out.
     /// Validated at parse time; unknown actions fail with a span-pointing
     /// error.
     default_permissions: Vec<String>,
-    /// `#[rustango(verbose_name = "blog post")]` — Django-shape
+    /// `#[rustango(verbose_name = "blog post")]` — the
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
     /// breadcrumbs / "Add X" buttons can prefer the friendly caption
@@ -8388,9 +8552,8 @@ struct IndexAttr {
     /// T1.3. Set via `#[rustango(unique_when(columns = "...",
     /// condition = "...", name = "..."))]`. `None` for plain indexes.
     where_clause: Option<String>,
-    /// Django `Index(fields=..., include=[...])` covering-index
-    /// columns (PG 11+ `INCLUDE (...)` clause). Empty `Vec` (the
-    /// default) means "no covering columns".
+    /// Covering-index columns (PG 11+ `INCLUDE (...)` clause).
+    /// Empty `Vec` (the default) means "no covering columns".
     include: Vec<String>,
 }
 
@@ -8491,7 +8654,7 @@ struct GenericM2MAttr {
 struct AuditAttrs {
     /// Field names to capture in the `changes` JSONB. Validated
     /// against declared scalar fields at compile time. Empty means
-    /// "track every scalar field" — Django's audit-everything default.
+    /// "track every scalar field".
     track: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
@@ -8514,48 +8677,48 @@ struct AdminAttrs {
     /// sections, comma-separated fields per section, optional
     /// `Title:` prefix. Empty title omits the `<legend>`.
     fieldsets: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
-    /// `admin(list_display_links = "title")` — Django-shape. Names
+    /// `admin(list_display_links = "title")`. Names
     /// from `list_display` whose cells should link to detail/edit.
     /// Issue #350.
     list_display_links: Option<(Vec<String>, proc_macro2::Span)>,
-    /// `admin(search_help_text = "...")` — Django-shape. Short
+    /// `admin(search_help_text = "...")`. Short
     /// caption rendered beside the admin list view's search box.
     /// Issue #353.
     search_help_text: Option<String>,
-    /// `admin(actions_on_top = false)` — Django-shape. Hides the
+    /// `admin(actions_on_top = false)`. Hides the
     /// action-bar above the table. Default `true`. Issue #354.
     actions_on_top: Option<bool>,
-    /// `admin(actions_on_bottom = true)` — Django-shape. Renders an
+    /// `admin(actions_on_bottom = true)`. Renders an
     /// additional action-bar below the table. Default `false`.
     /// Issue #354.
     actions_on_bottom: Option<bool>,
-    /// `admin(date_hierarchy = "created_at")` — Django-shape. Name of
+    /// `admin(date_hierarchy = "created_at")`. Name of
     /// a date / datetime field whose values render as a clickable
     /// year / month / day drill-down strip above the list table.
     /// Empty / unset disables the strip. Issue #355.
     date_hierarchy: Option<String>,
-    /// `admin(prepopulated_fields = "slug:title")` — Django-shape.
+    /// `admin(prepopulated_fields = "slug:title")`.
     /// Each entry is `target:source[+source2]`; multiple entries are
     /// comma-separated, e.g. `"slug:title,short_code:section+title"`.
     /// The admin change-form emits JS that slugifies the source values
     /// into the target field on every keystroke. Issue #356.
     prepopulated_fields: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
-    /// `admin(raw_id_fields = "parent, owner")` — Django-shape. Names
+    /// `admin(raw_id_fields = "parent, owner")`. Names
     /// of FK fields whose change-form widget renders a lookup link
     /// next to the input. Issue #357.
     raw_id_fields: Option<(Vec<String>, proc_macro2::Span)>,
-    /// `admin(autocomplete_fields = "author_id")` — Django-shape.
+    /// `admin(autocomplete_fields = "author_id")`.
     /// Names of FK fields whose change-form widget renders an
     /// Ajax-driven typeahead populated from a `__autocomplete`
     /// endpoint on the target model. Issue #358.
     autocomplete_fields: Option<(Vec<String>, proc_macro2::Span)>,
     /// `admin(list_select_related = "all" | "none" | "author, …")`
-    /// — Django-shape. Tunes the admin list view's FK auto-JOIN
+    /// — tunes the admin list view's FK auto-JOIN
     /// policy. Default `"all"` matches rustango's join-everything
     /// behavior; `"none"` opts out; CSV restricts. Issue #352.
     list_select_related: Option<String>,
-    /// `admin(formfield_overrides = "field:widget, field2:widget2")` —
-    /// Django-shape. Each entry is `field_name:widget_name`; multiple
+    /// `admin(formfield_overrides = "field:widget, field2:widget2")`.
+    /// Each entry is `field_name:widget_name`; multiple
     /// entries comma-separated. Empty / unset → no overrides. The
     /// list of widget names supported is documented on
     /// `AdminConfig::formfield_overrides`. Issue #359.
@@ -8778,9 +8941,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             }
             if meta.path.is_ident("manager") {
                 // `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-                // Stretch `from_queryset = "..."` (Django Manager.from_queryset
-                // shape) is left as a follow-up — the issue's primary
-                // acceptance is the `ext = ...` trait emission.
+                // Stretch `from_queryset = "..."` is left as a
+                // follow-up — the issue's primary acceptance is the
+                // `ext = ...` trait emission.
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("ext") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9325,7 +9488,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("managed") {
-                // Django-shape Meta.managed. Issue #321.
+                // Who owns the table. Issue #321.
                 //   #[rustango(managed = false)]  — operator-managed table
                 //   #[rustango(managed = true)]   — rustango-managed (the default)
                 // Bare-flag form is intentionally not accepted: writing
@@ -9348,14 +9511,14 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("db_table_comment") {
-                // Django-shape `Meta.db_table_comment` (4.2+) — free-form
-                // table-level comment attached to the DB catalog.
+                // Free-form table-level comment attached to the DB
+                // catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("proxy") {
-                // Django-shape `Meta.proxy = True` — declarative flag
+                // Declarative flag
                 // marking the struct as a proxy of another model that
                 // shares its DB table. Stored on `ModelSchema::proxy`
                 // so future codegen can skip `CreateTable` emission
@@ -9372,10 +9535,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("order_with_respect_to") {
-                // Django-shape `Meta.order_with_respect_to = "parent_fk"` —
-                // the model's instances are intrinsically ordered
-                // relative to their parent FK. Django auto-generates
-                // a `_order` integer column + admin reordering UI.
+                // `order_with_respect_to = "parent_fk"` — the model's
+                // instances are intrinsically ordered relative to
+                // their parent FK.
                 //
                 // rustango stores the FK field name on
                 // `ModelSchema::order_with_respect_to`. Declarative-only
@@ -9412,9 +9574,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("required_db_features") {
-                // Django-shape `Meta.required_db_features` — capability
-                // tokens the model needs (e.g. `"json_extract"`,
-                // `"window_functions"`, `"row_security"`). Comma-separated.
+                // Capability tokens the model needs (e.g.
+                // `"json_extract"`, `"window_functions"`,
+                // `"row_security"`). Comma-separated.
                 // `manage check --deploy` walks every model and warns
                 // when the active backend doesn't advertise the
                 // capability.
@@ -9445,15 +9607,13 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("required_db_vendor") {
-                // Django-shape `Meta.required_db_vendor` — the model
-                // is only meant to run against the named DB backend.
-                // `manage check --deploy` flags a mismatch so
+                // The model is only meant to run against the named DB
+                // backend. `manage check --deploy` flags a mismatch so
                 // ops catches "I forgot to switch DATABASE_URL" at
                 // deploy time rather than runtime.
                 //
-                // Django spells it as a free-form string; rustango
-                // restricts to the three backends it ships dialects
-                // for so the check verb can compare reliably.
+                // Restricted to the three backends rustango ships
+                // dialects for so the check verb can compare reliably.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value().to_ascii_lowercase();
                 match raw.as_str() {
@@ -9481,12 +9641,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("base_manager_name") {
-                // Django-shape `Meta.base_manager_name` — name of the
-                // Manager subclass that `<instance>.<relation>_set`
+                // Name of the manager that `<instance>.<relation>_set`
                 // uses when resolving reverse-relation managers.
                 // Distinct from `default_manager_name` (what
-                // `Model.objects` returns at the class level).
-                // Stored on `ModelSchema::base_manager_name`.
+                // `Self::objects()` returns). Stored on
+                // `ModelSchema::base_manager_name`.
                 //
                 // Validated as a Rust identifier so it stays safe to
                 // re-emit as code in future reverse-manager codegen.
@@ -9516,17 +9675,15 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_related_name") {
-                // Django-shape `Meta.default_related_name` — the name
-                // reverse-relation accessors use when callers don't
-                // override `related_name=...` on the FK / M2M field.
-                // Stored on `ModelSchema::default_related_name` so
-                // future reverse-manager codegen / DRF schema emit /
+                // The name reverse-relation accessors use when callers
+                // don't override `related_name = "..."` on the FK / M2M
+                // field. Stored on `ModelSchema::default_related_name`
+                // so future reverse-manager codegen / schema emit /
                 // admin templates can pick the right accessor name
                 // (today rustango doesn't auto-emit reverse managers;
                 // the metadata is the foundation for that work).
                 //
-                // Django requires snake_case + no `+` suffix; we
-                // enforce non-empty + ASCII identifier-shape so the
+                // Enforced non-empty + ASCII identifier-shape so the
                 // string is safe to use as a Rust ident later.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
@@ -9554,7 +9711,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("extra_permissions") {
-                // Django-shape `Meta.permissions = [(codename, name), ...]`.
                 // Comma-separated `codename:label` pairs.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
@@ -9583,11 +9739,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_permissions") {
-                // Django-shape `Meta.default_permissions = ('view',
-                // 'change')`. Comma-separated subset of the CRUD
-                // action set. Empty means all four (the framework
-                // default — matches Django when the option is
-                // omitted).
+                // Comma-separated subset of the CRUD action set.
+                // Empty means all four (the framework default).
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
                 let mut actions: Vec<String> = Vec::new();
@@ -9624,8 +9777,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("get_latest_by") {
-                // Django-shape `Meta.get_latest_by`. The `-` prefix
-                // selects descending order (Django muscle memory).
+                // The `-` prefix selects descending order.
                 let s: LitStr = meta.value()?.parse()?;
                 let raw = s.value();
                 let trimmed = raw.trim();
@@ -9646,7 +9798,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {
-                // Django-shape composite UNIQUE index. Two syntaxes:
+                // Composite UNIQUE index. Two syntaxes:
                 //
                 //   #[rustango(unique_together = "org_id, user_id")]                       — auto-derived name
                 //   #[rustango(unique_together(columns = "org_id, user_id", name = "x"))]  — explicit name
@@ -9666,7 +9818,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index_together") {
-                // Django-shape composite (non-unique) index. Two syntaxes
+                // Composite (non-unique) index. Two syntaxes
                 // mirroring `unique_together`.
                 //
                 //   #[rustango(index_together = "created_at, status")]
@@ -9683,8 +9835,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("unique_when") {
-                // Django 4.0+ `UniqueConstraint(condition=Q(...))` —
-                // partial unique index. Issue #265 / T1.3.
+                // Partial unique index. Issue #265 / T1.3.
                 //
                 //   #[rustango(unique_when(
                 //       columns   = "email",
@@ -9718,8 +9869,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         return Ok(());
                     }
                     if inner.path.is_ident("include") {
-                        // Django `UniqueConstraint(include=[...])` — PG
-                        // 11+ covering-index columns. Non-key columns
+                        // PG 11+ covering-index columns. Non-key columns
                         // travel with the index leaf for index-only
                         // scans. Dropped on MySQL/SQLite by the writer.
                         let s: LitStr = inner.value()?.parse()?;
@@ -9752,8 +9902,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index_when") {
-                // Django `Index(fields=..., condition=Q(...))` parity —
-                // non-unique partial index. Sibling of `unique_when`
+                // Non-unique partial index. Sibling of `unique_when`
                 // (which emits `CREATE UNIQUE INDEX ... WHERE ...`).
                 //
                 //   #[rustango(index_when(
@@ -9796,10 +9945,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         return Ok(());
                     }
                     if inner.path.is_ident("include") {
-                        // Django `Index(include=[...])` — PG 11+
-                        // covering-index columns; non-key columns
-                        // travel with the index leaf. Dropped on
-                        // MySQL/SQLite.
+                        // PG 11+ covering-index columns; non-key
+                        // columns travel with the index leaf. Dropped
+                        // on MySQL/SQLite.
                         let s: LitStr = inner.value()?.parse()?;
                         include = split_field_list(&s.value());
                         return Ok(());
@@ -9838,8 +9986,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // literal, then optional `unique` / `name = "..."` /
                 // `method = "..."` flags (a leading literal can't compose
                 // under `parse_nested_meta`, so the paren body is parsed by
-                // hand). `unique_together` / `index_together` remain the
-                // Django-shape aliases for the same feature.
+                // hand). `unique_together` / `index_together` remain
+                // aliases for the same feature.
                 let cols_lit: LitStr;
                 let mut unique = false;
                 let mut name: Option<String> = None;
@@ -10350,7 +10498,7 @@ fn parse_prepopulated_list(raw: &str) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// Parse Django-shape `formfield_overrides` — `"field:widget,field2:widget2"`
+/// Parse `formfield_overrides` — `"field:widget,field2:widget2"`
 /// into `(field_name, widget_name)` pairs. Empty entries, missing `:`,
 /// and empty halves drop silently — the macro layer only enforces shape,
 /// not field-name vs. widget-name validity (those checks happen at
@@ -10371,7 +10519,7 @@ fn parse_formfield_overrides(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parse Django-shape ordering — `"name"` is ASC, `"-name"` is DESC.
+/// Parse an ordering list — `"name"` is ASC, `"-name"` is DESC.
 /// Returns `(field_name, desc)` pairs in the same order as the input.
 fn parse_ordering_list(raw: &str) -> Vec<(String, bool)> {
     raw.split(',')
@@ -10393,15 +10541,16 @@ struct FieldAttrs {
     o2o: Option<String>,
     on: Option<String>,
     /// `#[rustango(on_delete = "cascade" | "restrict" | "set_null" |
-    /// "set_default" | "no_action")]` — Django-shape
-    /// `ForeignKey(on_delete=…)`. Only meaningful when `fk` / `o2o` is
+    /// "set_default" | "no_action")]` — what happens to this row when
+    /// the row it points at is deleted.
+    /// Only meaningful when `fk` / `o2o` is
     /// also set; the macro errors at compile time if applied to a
     /// non-FK field. Threaded into `FieldSchema::fk_on_delete`. The
     /// DDL writer renders `ON DELETE <action>` after the constraint
     /// clause when this is `Some`; `None` falls back to the database
     /// default (NO ACTION on every backend rustango supports).
     on_delete: Option<String>,
-    /// `#[rustango(related_name = "...")]` — Django-shape per-FK
+    /// `#[rustango(related_name = "...")]` — per-FK
     /// reverse-accessor override. When set, the derive emits
     /// `Parent::<related_name>[_pool]` instead of the container-level
     /// `default_related_name` or the `<child_snake>_set[_pool]`
@@ -10471,12 +10620,12 @@ struct FieldAttrs {
     /// path, so the database always recomputes the value from
     /// `EXPR`. Backlog item #35.
     generated_as: Option<String>,
-    /// `#[rustango(help_text = "…")]` — Django-shape help text
+    /// `#[rustango(help_text = "…")]` — help text
     /// rendered below the admin form's input. Threaded into
     /// `FieldSchema::help_text` so admin / serializer / OpenAPI
     /// layers can read it.
     help_text: Option<String>,
-    /// `#[rustango(choices = "value:Label, value:Label")]` — Django-shape
+    /// `#[rustango(choices = "value:Label, value:Label")]` — the
     /// enumerated allowed values. Threaded into `FieldSchema::choices`
     /// as a `&'static [(&'static str, &'static str)]` slice. When
     /// present, the admin form renders a `<select>` instead of `<input>`
@@ -10484,35 +10633,35 @@ struct FieldAttrs {
     /// for `FieldType::String`; the macro errors at compile time if
     /// applied to a non-string field.
     choices: Option<Vec<(String, String)>>,
-    /// `#[rustango(db_comment = "…")]` — Django-shape DB-side column
+    /// `#[rustango(db_comment = "…")]` — DB-side column
     /// comment. Threaded into `FieldSchema::db_comment`. MySQL inlines
     /// the comment in CREATE TABLE; Postgres emits a separate
     /// `COMMENT ON COLUMN` statement after the table is created;
     /// SQLite silently drops the value (no native column comments).
     db_comment: Option<String>,
-    /// `#[rustango(verbose_name = "…")]` — Django-shape human-readable
+    /// `#[rustango(verbose_name = "…")]` — human-readable
     /// label for the field. Threaded into `FieldSchema::verbose_name`
     /// so admin column headers, form labels, and other display
     /// surfaces can prefer the friendly caption over the Rust
     /// identifier. `None` means renderers fall back to the field name.
     verbose_name: Option<String>,
-    /// `#[rustango(editable = false)]` — Django-shape opt-out from
+    /// `#[rustango(editable = false)]` — opt out of
     /// auto-generated form rendering. Defaults to `true` so existing
     /// fields keep their current admin / form behavior; setting
     /// `false` removes the field from the admin change-form entirely
     /// (the value is still visible on detail / list views, just not
     /// editable).
     editable: bool,
-    /// `#[rustango(blank)]` / `#[rustango(blank = true)]` — Django-shape
+    /// `#[rustango(blank)]` / `#[rustango(blank = true)]` —
     /// "form may submit empty even when DB is NOT NULL". Threaded into
     /// `FieldSchema::blank`. Defaults to `false`.
     blank: bool,
     /// `#[rustango(citext)]` / `#[rustango(citext = true)]` (#344) —
-    /// Django-shape `CITextField`. Threaded into
+    /// case-insensitive text column. Threaded into
     /// `FieldSchema::case_insensitive`. Only meaningful for `String`
     /// fields; the macro errors at derive time if applied elsewhere.
     case_insensitive: bool,
-    /// `#[rustango(validators = "email,url")]` — Django-shape
+    /// `#[rustango(validators = "email,url")]` — the
     /// model-level validator chain. Comma-separated names that
     /// dispatch to the `validators::*` family in `validate_value`.
     /// Empty by default; fires on every typed INSERT/UPDATE.
@@ -10753,7 +10902,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("citext") {
-                // Django-parity CITextField (#344). Two forms:
+                // Case-insensitive text column (#344). Two forms:
                 //   #[rustango(citext)]          — flag form, true
                 //   #[rustango(citext = true)]   — explicit
                 //   #[rustango(citext = false)]  — explicit opt-out
@@ -10923,6 +11072,12 @@ struct FieldInfo<'a> {
     /// `Self::__rustango_from_aliased_row(row, prefix)` per-Model
     /// helper that `select_related` calls when stitching loaded FKs.
     from_aliased_row_init: TokenStream2,
+    /// MySQL twins of the two inits above. They differ only for a UUID
+    /// column, which MySQL keeps as `CHAR(36)` text (#1733).
+    from_row_init_my: TokenStream2,
+    from_aliased_row_init_my: TokenStream2,
+    /// A bare or optional `Uuid` field.
+    uuid_column: bool,
     /// Inner type from a `ForeignKey<T, K>` field, if any. The reverse-
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
     /// to point the generated method at the right child model.
@@ -11238,8 +11393,9 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ))
         }
     };
-    let schema = quote! {
-        #root::core::FieldSchema {
+    let auto_now_flag = attrs.auto_now;
+    let schema = quote! {{
+        #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
             name: #name,
             column: #column_lit,
             ty: #field_type_tokens,
@@ -11251,6 +11407,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             max: #max,
             default: #default,
             auto: #auto,
+            auto_now: #auto_now_flag,
             unique: #unique,
             generated_as: #generated_as,
             help_text: #help_text,
@@ -11262,8 +11419,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             case_insensitive: #case_insensitive,
             fk_on_delete: #fk_on_delete,
             validators: &[ #(#validators_lits),* ],
-        }
-    };
+        })
+    }};
 
     let from_row_init = quote! {
         #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
@@ -11273,6 +11430,22 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             row,
             ::std::format!("{}__{}", prefix, #column_lit).as_str(),
         )?
+    };
+    // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
+    // MySQL impls; a bare or optional `Uuid` needs `FlatScalar`'s cell.
+    let uuid_column = kind == DetectedKind::Uuid && !detected_auto && fk_inner.is_none();
+    let (from_row_init_my, from_aliased_row_init_my) = if uuid_column {
+        (
+            quote! { #ident: #root::sql::try_get_flat_my(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::try_get_flat_my(
+                    row,
+                    ::std::format!("{}__{}", prefix, #column_lit).as_str(),
+                )?
+            },
+        )
+    } else {
+        (from_row_init.clone(), from_aliased_row_init.clone())
     };
 
     Ok(FieldInfo {
@@ -11285,6 +11458,9 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         schema,
         from_row_init,
         from_aliased_row_init,
+        from_row_init_my,
+        from_aliased_row_init_my,
+        uuid_column,
         fk_inner: fk_inner.cloned(),
         fk_pk_kind: kind,
         nullable,
@@ -11331,6 +11507,15 @@ fn check_bound_compatibility(
         }
     }
     Ok(())
+}
+
+/// A `&'static [ty]` of `const fn` results. The slice needs its own
+/// `const`: a `&[..]` assigned in a statement is not extended to `'static`.
+fn const_slice(ty: &TokenStream2, items: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+    quote!({
+        const ITEMS: &[#ty] = &[ #(#items),* ];
+        ITEMS
+    })
 }
 
 fn optional_u32(value: Option<u32>) -> TokenStream2 {
@@ -11382,10 +11567,10 @@ fn relation_tokens(
         }
         let on = attrs.on.as_deref().unwrap_or("id");
         return Ok(quote! {
-            ::core::option::Option::Some(#root::core::Relation::Fk {
-                to: <#inner as #root::core::Model>::SCHEMA.table,
-                on: #on,
-            })
+            ::core::option::Option::Some(#root::core::Relation::fk(
+                <#inner as #root::core::Model>::SCHEMA.table,
+                #on,
+            ))
         });
     }
     match (&attrs.fk, &attrs.o2o) {
@@ -11402,14 +11587,14 @@ fn relation_tokens(
             // inside Self::SCHEMA's own initializer.
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::Fk { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::fk(#resolved, #on))
             })
         }
         (None, Some(to)) => {
             let on = attrs.on.as_deref().unwrap_or("id");
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(#root::core::Relation::O2O { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::o2o(#resolved, #on))
             })
         }
         (None, None) => {
@@ -11744,7 +11929,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
             ));
         }
         // `Array<String>` / `Array<i32>` / `Array<i64>` → PG `text[]` /
-        // `integer[]` / `bigint[]` (Django `ArrayField`, #341).
+        // `integer[]` / `bigint[]` (#341).
         "Array" => {
             let (inner, _) = generic_pair(ty, &last.arguments, "Array")?;
             let elem = match inner {
@@ -11774,8 +11959,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         }
         // `Range<i32>` / `Range<i64>` / `Range<Decimal>` /
         // `Range<NaiveDate>` / `Range<DateTime<…>>` → PG `int4range` /
-        // `int8range` / `numrange` / `daterange` / `tstzrange` (Django
-        // `RangeField` family, #343).
+        // `int8range` / `numrange` / `daterange` / `tstzrange` (#343).
         "Range" => {
             let (inner, _) = generic_pair(ty, &last.arguments, "Range")?;
             let elem = match inner {
@@ -11819,7 +12003,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
                 fk_inner: None,
             });
         }
-        // `HStore` → PG `hstore` (Django `HStoreField`, #342). No generic
+        // `HStore` → PG `hstore` (#342). No generic
         // parameter — always a string→string map.
         "HStore" => {
             return Ok(DetectedType {
@@ -11937,7 +12121,7 @@ struct FormFieldAttrs {
     max: Option<i64>,
     min_length: Option<u32>,
     max_length: Option<u32>,
-    /// `#[form(clean = "fn_name")]` — Django-shape `clean_<field>` hook.
+    /// `#[form(clean = "fn_name")]` — per-field clean hook.
     /// The named static method on the form struct is called after the
     /// field's typed parse + length/range checks; it gets the parsed
     /// value by reference and returns `Result<<FieldType>, String>`.
@@ -11947,10 +12131,10 @@ struct FormFieldAttrs {
 }
 
 /// Container-level `#[form(...)]` attributes. Currently only the
-/// Django-shape cross-field `validate` hook (issue #373).
+/// cross-field `validate` hook (issue #373).
 #[derive(Default)]
 struct FormContainerAttrs {
-    /// `#[form(validate = "fn_name")]` — Django-shape `clean()` hook.
+    /// `#[form(validate = "fn_name")]` — whole-form clean hook.
     /// After every per-field parse succeeds, the named method on the
     /// form struct is called with `&self` and may return
     /// `Result<(), FormErrors>`. Errors merge into the field error
@@ -12023,8 +12207,8 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // #372 — append the per-field `clean_<field>` call right after
         // the parse block when the attribute is set. The clean fn
         // takes &T and returns Result<T, String>; on Err we attach
-        // the message to the field error list without aborting
-        // (matches Django's "collect all field errors" shape).
+        // the message to the field error list without aborting, so
+        // the caller sees every field error at once.
         let clean_block = if let Some(clean_fn) = &attrs.clean {
             quote! {
                 if __errors.fields().get(#name_lit).is_none() {
@@ -12049,7 +12233,7 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // #373 — after every per-field parse + clean succeeds, call the
     // cross-field validator if declared. Errors merge into the
     // outgoing FormErrors via the existing `FormErrors::merge` helper
-    // (same primitive the DRF serializer cross-field hook uses).
+    // (same primitive the serializer cross-field hook uses).
     let cross_field_call = if let Some(validate_fn) = &container.validate {
         quote! {
             if __errors.is_empty() {
@@ -12414,6 +12598,7 @@ struct ViewSetAttrs {
     ordering: Vec<(String, bool)>,
     page_size: Option<usize>,
     read_only: bool,
+    allow_anonymous: bool,
     perms: ViewSetPermsAttrs,
     /// `#[viewset(serializer = SomeSerializer)]` — render list /
     /// retrieve / create responses through this `#[derive(Serializer)]`
@@ -12500,6 +12685,11 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote!()
     };
+    let allow_anonymous_call = if attrs.allow_anonymous {
+        quote!(.allow_anonymous())
+    } else {
+        quote!()
+    };
 
     // `.serializer::<S>()` — reshape responses through a derived
     // serializer. Requires the downstream crate to enable the
@@ -12559,6 +12749,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #page_size_call
                     #perms_call
                     #read_only_call
+                    #allow_anonymous_call
                     #serializer_call
                     .router_pool(prefix, pool.into())
             }
@@ -12574,6 +12765,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut ordering: Vec<(String, bool)> = Vec::new();
     let mut page_size: Option<usize> = None;
     let mut read_only = false;
+    let mut allow_anonymous = false;
     let mut perms = ViewSetPermsAttrs::default();
     let mut serializer: Option<syn::Path> = None;
 
@@ -12621,6 +12813,10 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
                 read_only = true;
                 return Ok(());
             }
+            if meta.path.is_ident("allow_anonymous") {
+                allow_anonymous = true;
+                return Ok(());
+            }
             if meta.path.is_ident("permissions") {
                 meta.parse_nested_meta(|inner| {
                     let parse_codenames = |inner: &syn::meta::ParseNestedMeta| -> syn::Result<Vec<String>> {
@@ -12648,7 +12844,8 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, serializer, permissions(...))",
+                 search_fields, ordering, page_size, read_only, allow_anonymous, serializer, \
+                 permissions(...))",
             ))
         })?;
     }
@@ -12665,6 +12862,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         ordering,
         page_size,
         read_only,
+        allow_anonymous,
         perms,
         serializer,
     })
@@ -12674,7 +12872,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
 
 struct SerializerContainerAttrs {
     model: syn::Path,
-    /// `#[serializer(validate = "fn_name")]` on the struct — DRF-shape
+    /// `#[serializer(validate = "fn_name")]` on the struct — the
     /// cross-field validation hook (#436). The named inherent method
     /// must take `&self` and return
     /// `Result<(), rustango::forms::FormErrors>`. The macro-emitted
@@ -12690,8 +12888,8 @@ struct SerializerFieldAttrs {
     write_only: bool,
     source: Option<String>,
     skip: bool,
-    /// `#[serializer(method = "fn_name")]` — DRF SerializerMethodField
-    /// analog. The macro emits `from_model` initializer that calls
+    /// `#[serializer(method = "fn_name")]` — computed field. The macro
+    /// emits a `from_model` initializer that calls
     /// `Self::fn_name(&model)` and stores the return value.
     method: Option<String>,
     /// `#[serializer(validate = "fn_name")]` — per-field validator
@@ -12723,7 +12921,8 @@ struct SerializerFieldAttrs {
     /// possible (the M2M / one-to-many accessor is async); callers
     /// fetch the children + call the setter post-from_model.
     many: Option<syn::Type>,
-    /// `#[serializer(slug = "name")]` — DRF `SlugRelatedField` analog.
+    /// `#[serializer(slug = "name")]` — render a relation as one of
+    /// its fields.
     /// Source field on the model must be a `ForeignKey<T>`; the
     /// macro emits `from_model` glue that walks
     /// `model.<source>.value()?.<slug>` and clones it. Field type on
@@ -12733,17 +12932,17 @@ struct SerializerFieldAttrs {
     /// `nested`. Source defaults to the field name; override with
     /// `source = "..."`. v0.44.
     slug: Option<String>,
-    /// `#[serializer(max_length = N)]` — DRF `MaxLengthValidator`. Caps
+    /// `#[serializer(max_length = N)]` — caps
     /// the character count of a string field on write. Overrides the
     /// model's `max_length`; when absent the model value is inherited.
     max_length: Option<u64>,
-    /// `#[serializer(min_length = N)]` — DRF `MinLengthValidator`.
+    /// `#[serializer(min_length = N)]` — minimum character count.
     /// Serializer-only (the model has no `min_length` column).
     min_length: Option<u64>,
-    /// `#[serializer(min = N)]` — DRF `MinValueValidator`. Inclusive
+    /// `#[serializer(min = N)]` — inclusive
     /// integer lower bound; overrides the model's `min` when given.
     min: Option<i64>,
-    /// `#[serializer(max = N)]` — DRF `MaxValueValidator`. Inclusive
+    /// `#[serializer(max = N)]` — inclusive
     /// integer upper bound; overrides the model's `max` when given.
     max: Option<i64>,
 }
@@ -12762,8 +12961,8 @@ fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<Serializ
                 return Ok(());
             }
             if meta.path.is_ident("validate") {
-                // #436 — container-level `validate = "fn_name"` for the
-                // DRF cross-field-validation shape. Field-level
+                // #436 — container-level `validate = "fn_name"` for
+                // cross-field validation. Field-level
                 // `#[serializer(validate = "...")]` on a field is
                 // parsed separately in `parse_serializer_field_attrs`.
                 let s: LitStr = meta.value()?.parse()?;
@@ -13039,7 +13238,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             && fi.attrs.slug.is_none()
     };
 
-    // Declarative field constraints (DRF `validators=[...]`): one block
+    // Declarative field constraints: one block
     // per writable field, run inside `validate()`. Each resolves its
     // bounds as the serializer attr when given (`#[serializer(max_length
     // = N)]`), else the model's `FieldSchema` (`max_length` / `min` /
@@ -13073,7 +13272,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let attr_min = opt_i64(fi.attrs.min);
             let attr_max = opt_i64(fi.attrs.max);
             quote! {
-                {
+                if __sent(#fname) {
                     let __sf = <#model_path as #root::core::Model>::SCHEMA.field(#mname);
                     let __max_length: ::core::option::Option<usize> = #attr_max_len
                         .or_else(|| __sf.and_then(|__f| __f.max_length).map(|__n| __n as usize));
@@ -13095,7 +13294,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
     let has_constraints = !constraint_blocks.is_empty();
 
-    // Per-field validators (DRF-shape `validators=[...]`). Emit a
+    // Per-field validators. Emit a
     // `validate(&self)` method that runs each user-defined validator
     // and aggregates errors into `FormErrors`.
     let validator_calls: Vec<_> = fields_info
@@ -13106,13 +13305,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let method = fi.attrs.validate.as_ref()?;
             let method_ident = syn::Ident::new(method, ident.span());
             Some(quote! {
-                if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
-                    __errors.add(#name_lit.to_owned(), __e);
+                if __sent(#name_lit) {
+                    if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
+                        __errors.add(#name_lit.to_owned(), __e);
+                    }
                 }
             })
         })
         .collect();
-    // #436 — DRF cross-field `validate(self)` shape. If the
+    // #436 — cross-field `validate(&self)`. If the
     // container declared `#[serializer(validate = "fn_name")]`,
     // the macro-generated `validate(&self)` runs every per-field
     // validator first, then calls the user's cross-field method,
@@ -13133,8 +13334,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let has_run_validations = has_validators || has_constraints;
     // Shared body: declarative field constraints first (length / range /
     // choices, serializer-attr-or-model), then per-field validators, then
-    // the cross-field hook.
-    let validate_body = quote! {
+    // the cross-field hook. Field rules run only where `__sent(name)` (#1995).
+    let checks = quote! {
         let mut __errors = #root::forms::FormErrors::default();
         #( #constraint_blocks )*
         #( #validator_calls )*
@@ -13144,6 +13345,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         } else {
             ::core::result::Result::Err(__errors)
         }
+    };
+    let validate_body = quote! {
+        let __sent = |_: &str| true;
+        #checks
+    };
+    // PATCH: only the keys the body carries.
+    let validate_patch_body = quote! {
+        let __sent = |__n: &str| __obj.is_some_and(|__o| __o.contains_key(__n));
+        #checks
     };
     // Inherent `validate(&self)` — kept for back-compat with direct
     // `serializer.validate()` calls that don't import `ModelSerializer`.
@@ -13263,6 +13473,27 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // `readable_source_fields`: model columns the JSON output copies
+    // straight from the model, so `?ordering=` cannot sort on a column
+    // the API never shows (#1845).
+    let readable_source_lits: Vec<String> = fields_info
+        .iter()
+        .filter(|fi| {
+            !fi.attrs.write_only
+                && !fi.attrs.skip
+                && fi.attrs.method.is_none()
+                && !fi.attrs.nested
+                && fi.attrs.many.is_none()
+                && fi.attrs.slug.is_none()
+        })
+        .map(|fi| {
+            fi.attrs
+                .source
+                .clone()
+                .unwrap_or_else(|| fi.ident.to_string())
+        })
+        .collect();
+
     // `from_writable_json`: build a partial instance for input
     // validation. Writable fields are parsed from the JSON body (keyed
     // by serializer field name); every other field defaults. Per-field
@@ -13297,6 +13528,46 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         })
         .collect();
+    // `validate_patch`: overlay each sent writable field on the stored row.
+    let patch_overlays: Vec<_> = fields_info
+        .iter()
+        .filter(is_writable)
+        .map(|fi| {
+            let ident = &fi.ident;
+            let fname = ident.to_string();
+            let ty = &fi.ty;
+            quote! {
+                if let ::core::option::Option::Some(__v) = __obj.and_then(|__o| __o.get(#fname)) {
+                    match #root::__serde_json::from_value::<#ty>(::core::clone::Clone::clone(__v)) {
+                        ::core::result::Result::Ok(__x) => __merged.#ident = __x,
+                        ::core::result::Result::Err(__e) => {
+                            __errors.add(#fname.to_owned(), __e.to_string());
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+    let patch_validate_call = if has_run_validations {
+        quote! { __merged.__rustango_validate_patch(__obj) }
+    } else {
+        quote! { let _ = &__merged; ::core::result::Result::Ok(()) }
+    };
+    let patch_validate_helper = if has_run_validations {
+        quote! {
+            impl #struct_name {
+                #[doc(hidden)]
+                fn __rustango_validate_patch(
+                    &self,
+                    __obj: ::core::option::Option<&#root::__serde_json::Map<::std::string::String, #root::__serde_json::Value>>,
+                ) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                    #validate_patch_body
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     // OpenAPI: emit `impl OpenApiSchema` when our `openapi` feature is on.
     // Only includes fields shown in JSON output (skips write_only). For each
@@ -13360,6 +13631,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 &[ #( #writable_source_lits ),* ]
             }
 
+            fn readable_source_fields() -> &'static [&'static str] {
+                &[ #( #readable_source_lits ),* ]
+            }
+
             fn from_writable_json(
                 __body: &#root::__serde_json::Value,
             ) -> ::core::result::Result<Self, #root::forms::FormErrors> {
@@ -13375,8 +13650,25 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
+            fn validate_patch(
+                __stored: &Self::Model,
+                __body: &#root::__serde_json::Value,
+            ) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                let mut __errors = #root::forms::FormErrors::default();
+                let __obj = __body.as_object();
+                #[allow(unused_mut)]
+                let mut __merged = <Self as #root::serializer::ModelSerializer>::from_model(__stored);
+                #( #patch_overlays )*
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(__errors);
+                }
+                #patch_validate_call
+            }
+
             #trait_validate_override
         }
+
+        #patch_validate_helper
 
         impl #root::__serde::Serialize for #struct_name {
             fn serialize<S>(&self, serializer: S)
@@ -13413,4 +13705,59 @@ fn is_option(ty: &syn::Type) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod main_attr_tests {
+    use super::*;
+
+    fn expand(args: &str) -> String {
+        let body = quote! { async fn main() { run().await } };
+        expand_main(args.parse().unwrap(), body)
+            .expect("expansion failed")
+            .to_string()
+    }
+
+    /// Asserts on the expansion rather than on `parse_logging`,
+    /// because the defect was a subscriber reaching the output, not
+    /// an argument being misread (#1465).
+    #[test]
+    fn logging_false_emits_no_subscriber() {
+        let out = expand("logging = false");
+        assert!(
+            !out.contains("tracing_subscriber"),
+            "`logging = false` must not install a subscriber:\n{out}",
+        );
+        assert!(
+            out.contains("block_on"),
+            "the runtime must still be built:\n{out}",
+        );
+    }
+
+    #[test]
+    fn default_still_installs_a_subscriber() {
+        // The control. Without it, an `expand_main` that dropped the
+        // prologue unconditionally would pass the test above while
+        // leaving every default project with no logging at all.
+        let out = expand("");
+        assert!(
+            out.contains("tracing_subscriber"),
+            "the default entrypoint must still install one:\n{out}",
+        );
+    }
+
+    #[test]
+    fn logging_false_composes_with_flavor() {
+        let out = expand("flavor = \"current_thread\", logging = false");
+        assert!(!out.contains("tracing_subscriber"), "{out}");
+        assert!(out.contains("new_current_thread"), "{out}");
+    }
+
+    #[test]
+    fn logging_true_is_the_default_shape() {
+        // `logging = true` is accepted and means the default, so the
+        // match must not fire on the substring `logging`.
+        assert!(parse_logging(&"logging = true".parse().unwrap()));
+        assert!(!parse_logging(&"logging=false".parse().unwrap()));
+    }
 }

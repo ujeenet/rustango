@@ -1,8 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::find_many(pks, pool)` shortcut — Eloquent
-//! `Model::find([1, 2, 3])` (list arg) / Django
-//! `Model.objects.filter(pk__in=[...])` parity.
+//! `Model::find_many(pks, pool)` shortcut — fetch every row whose
+//! primary key is in the supplied list.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

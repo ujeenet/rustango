@@ -125,7 +125,7 @@ fn insert_pool_and_save_pool_methods_emitted() {
 #[test]
 fn ddl_create_table_emits_mysql_shape() {
     // batch 10 — DDL writer dispatches through Dialect.
-    // Verify MySQL emits backticks, TINYINT(1) for bool, TEXT for
+    // Verify MySQL emits backticks, TINYINT(1) for bool, LONGTEXT for
     // unbounded string, BIGINT for i64.
     use rustango::core::Model;
     use rustango::migrate::ddl::create_table_sql_with_dialect;
@@ -136,8 +136,8 @@ fn ddl_create_table_emits_mysql_shape() {
     assert!(sql.starts_with("CREATE TABLE `mysql_from_row_users` ("));
     // BIGINT for i64 PK (no Auto<T> on this test model — plain BIGINT)
     assert!(sql.contains("`id` BIGINT"));
-    // TEXT for unbounded String
-    assert!(sql.contains("`name` TEXT"));
+    // LONGTEXT for unbounded String (#1708)
+    assert!(sql.contains("`name` LONGTEXT"));
     // No PG-isms
     assert!(!sql.contains("\""));
     assert!(!sql.contains("BIGSERIAL"));
@@ -216,23 +216,7 @@ fn select_rows_pool_with_related_is_callable() {
     use rustango::core::Model;
     use rustango::core::SelectQuery;
     fn _probe(pool: &rustango::sql::Pool) {
-        let q = SelectQuery {
-            model: <User as Model>::SCHEMA,
-            joins: vec![],
-            subquery_joins: Vec::new(),
-            where_clause: rustango::core::WhereExpr::And(vec![]),
-            search: None,
-            order_by: vec![],
-            limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-            compound_order_by: vec![],
-            compound_limit: None,
-            compound_offset: None,
-        };
+        let q = SelectQuery::new(<User as Model>::SCHEMA);
         let _fut: _ = rustango::sql::select_rows_pool_with_related::<User>(pool, &q);
     }
 }
@@ -316,20 +300,9 @@ fn counter_pool_count_is_callable() {
 #[test]
 fn fetch_aggregate_pool_is_callable() {
     // batch 24 — bi-dialect aggregate fetch via &Pool.
-    use rustango::core::{AggregateQuery, Model, WhereExpr};
+    use rustango::core::{AggregateQuery, Model};
     fn _probe(pool: &rustango::sql::Pool) {
-        let q = AggregateQuery {
-            model: <User as Model>::SCHEMA,
-            joins: Vec::new(),
-            where_clause: WhereExpr::And(vec![]),
-            group_by: vec![],
-            aggregates: vec![],
-            aliases: vec![],
-            having: None,
-            order_by: vec![],
-            limit: None,
-            offset: None,
-        };
+        let q = AggregateQuery::new(<User as Model>::SCHEMA, vec![]);
         let _fut: _ = rustango::sql::fetch_aggregate_pool::<(i64,)>(pool, &q);
     }
 }
@@ -380,22 +353,16 @@ fn audited_plain_pk_model_gets_insert_pool() {
 #[test]
 fn audit_insert_one_with_audit_pool_is_callable() {
     use rustango::core::{InsertQuery, Model, SqlValue};
-    fn _probe(pool: &rustango::sql::Pool) {
-        let q = InsertQuery {
-            model: <AuditedAutoRecord as Model>::SCHEMA,
-            columns: vec!["name"],
-            values: vec![SqlValue::String("seed".into())],
-            returning: vec!["id"],
-            on_conflict: None,
-        };
-        let entry = rustango::audit::PendingEntry {
-            entity_table: "mysql_from_row_audited_auto",
-            entity_pk: String::new(),
-            operation: rustango::audit::AuditOp::Create,
-            source: rustango::audit::AuditSource::System,
-            changes: serde_json::json!({}),
-        };
-        let _fut = rustango::audit::insert_one_with_audit(pool, &q, &entry);
+    fn _probe(pool: &rustango::sql::Pool, rec: &mut AuditedAutoRecord) {
+        let q = InsertQuery::new(
+            <AuditedAutoRecord as Model>::SCHEMA,
+            vec!["name"],
+            vec![SqlValue::String("seed".into())],
+        )
+        .returning(vec!["id"]);
+        let _fut = rustango::audit::insert_one_with_audit(pool, &q, rec, |r| {
+            r.__rustango_audit_entry(rustango::audit::AuditOp::Create)
+        });
     }
 }
 
@@ -403,18 +370,14 @@ fn audit_insert_one_with_audit_pool_is_callable() {
 fn audit_save_one_with_audit_pool_is_callable() {
     use rustango::core::{Filter, Model, Op, SqlValue, UpdateQuery, WhereExpr};
     fn _probe(pool: &rustango::sql::Pool) {
-        let q = UpdateQuery {
-            model: <AuditedRecord as Model>::SCHEMA,
-            set: vec![rustango::core::Assignment {
-                column: "name",
-                value: SqlValue::String("changed".into()).into(),
-            }],
-            where_clause: WhereExpr::Predicate(Filter {
-                column: "id",
-                op: Op::Eq,
-                value: SqlValue::I64(1),
-            }),
-        };
+        let q = UpdateQuery::new(
+            <AuditedRecord as Model>::SCHEMA,
+            vec![rustango::core::Assignment::new(
+                "name",
+                SqlValue::String("changed".into()),
+            )],
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+        );
         let entry = rustango::audit::PendingEntry {
             entity_table: "mysql_from_row_audited",
             entity_pk: "1".into(),
@@ -430,14 +393,10 @@ fn audit_save_one_with_audit_pool_is_callable() {
 fn audit_delete_one_with_audit_pool_is_callable() {
     use rustango::core::{DeleteQuery, Filter, Model, Op, SqlValue, WhereExpr};
     fn _probe(pool: &rustango::sql::Pool) {
-        let q = DeleteQuery {
-            model: <AuditedRecord as Model>::SCHEMA,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: "id",
-                op: Op::Eq,
-                value: SqlValue::I64(1),
-            }),
-        };
+        let q = DeleteQuery::new(
+            <AuditedRecord as Model>::SCHEMA,
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(1))),
+        );
         let entry = rustango::audit::PendingEntry {
             entity_table: "mysql_from_row_audited",
             entity_pk: "1".into(),

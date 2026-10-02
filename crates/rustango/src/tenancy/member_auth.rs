@@ -8,11 +8,9 @@
 //! [`SsoProvider`] rows that already live in each tenant's storage — the
 //! difference is the *session it mints*. Because the core lives in the
 //! `sso` feature (not `admin-sso`), member SSO builds with just
-//! `tenancy + sso` — no auto-admin required. Where the admin flow is
-//! **link-to-existing** (an unknown email is refused), the member flow
-//! can **auto-provision** a new tenant user from a verified IdP email so
-//! a gym member / SaaS end-user can sign in the first time without an
-//! operator creating the row by hand.
+//! `tenancy + sso` — no auto-admin required. Like the admin flows it signs
+//! in by `(provider, sub)` link; unlike them it can **auto-provision** (and
+//! link) a new tenant user when no account has the verified IdP email.
 //!
 //! [`SsoProvider`]: crate::sso::SsoProvider
 //!
@@ -24,7 +22,7 @@
 //!   find-or-provision the member, mint the member session cookie.
 //!
 //! Mount the router returned by [`member_sso_router`] into a
-//! [`crate::server::Builder`] stack (it reads the `Arc<TenantContext>`
+//! [`crate::server::Builder`] stack (it reads the `TenantContext`
 //! extension the builder injects — the flow is mount-agnostic, so no
 //! separate `SessionSecret` extension is required).
 //!
@@ -41,13 +39,12 @@
 //! ## v1 scope / trims
 //!
 //! * The `provision` closure hook is intentionally **not** exposed —
-//!   v1 uses the built-in default provisioning in [`provision_member`].
+//!   v1 uses the built-in default provisioning in `provision_member`.
 //! * Providers are resolved from the tenant's own [`SsoProvider`] rows
 //!   only; the registry-wide shared-provider merge
 //!   ([`crate::tenancy::sso::SharedSsoProvider`]) is a follow-up.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Extension, FromRequestParts, Path, Query, Request};
@@ -60,12 +57,18 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::extractors::{Tenant, TenantContext};
-use crate::session::{secure_cookies, sign, SessionSecret};
+use crate::extractors::{Tenant, TenantScope};
+use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
+use crate::sql::sqlx::Database;
 use crate::sql::{Auto, Pool};
+use crate::sso::link::{
+    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
+    ProviderKey,
+};
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, verified_email, NormalizedUser};
-use crate::tenancy::{OrgResolver as _, User};
+use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
+use crate::tenancy::DefaultTenantDb;
+use crate::tenancy::User;
 
 // ===================================================================
 // A. Member session codec — SECURITY-CRITICAL, domain-separated.
@@ -105,19 +108,23 @@ pub struct MemberSessionPayload {
     pub slug: String,
     /// Expiry as Unix seconds.
     pub exp: i64,
-    /// Issued-at as Unix seconds. Compared against
-    /// `rustango_users.password_changed_at` so a password rotation
-    /// invalidates live member sessions (parity with `SessionUser`).
+    /// Issued-at as Unix seconds. A session issued before
+    /// `rustango_users.password_changed_at` is rejected.
     pub iat: i64,
     /// Audience tag — always `"member"` for this codec.
     pub aud: String,
+    /// Fingerprint of the user's `password_hash` at login. Any password
+    /// change makes it stop matching (#1338).
+    #[serde(default)]
+    pub pwf: PasswordFingerprint,
 }
 
 impl MemberSessionPayload {
     /// Mint a fresh member payload. `aud` is fixed to `"member"`; `iat`
-    /// is now and `exp` is `iat + ttl_secs`.
+    /// is now and `exp` is `iat + ttl_secs`. `pwf` is the
+    /// [`PasswordFingerprint`] of the user's current hash.
     #[must_use]
-    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64, pwf: PasswordFingerprint) -> Self {
         let iat = chrono::Utc::now().timestamp();
         Self {
             uid,
@@ -125,6 +132,7 @@ impl MemberSessionPayload {
             exp: iat + ttl_secs,
             iat,
             aud: "member".to_owned(),
+            pwf,
         }
     }
 
@@ -220,12 +228,24 @@ fn secure_suffix() -> &'static str {
     }
 }
 
-/// Build a `Set-Cookie` value minting a fresh member session for `uid`
+/// Build a `Set-Cookie` value minting a fresh member session for `user`
 /// on `slug`, valid for `ttl` seconds. `HttpOnly; SameSite=Lax; Path=/`
-/// with `; Secure` added on the prod tier.
+/// with `; Secure` added on the prod tier. Changing the user's password
+/// ends the session.
+///
+/// # Panics
+/// If `user` has no id (was never saved).
 #[must_use]
-pub fn mint_cookie(secret: &SessionSecret, uid: i64, slug: &str, ttl: i64) -> String {
-    let value = encode(secret, &MemberSessionPayload::new(uid, slug, ttl));
+pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+    let uid = user
+        .id
+        .get()
+        .copied()
+        .expect("mint_cookie needs a saved user row");
+    let pwf = PasswordFingerprint::of(secret, &user.password_hash);
+    let mut payload = MemberSessionPayload::new(uid, slug, ttl, pwf);
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
+    let value = encode(secret, &payload);
     format!(
         "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
         s = secure_suffix(),
@@ -233,9 +253,23 @@ pub fn mint_cookie(secret: &SessionSecret, uid: i64, slug: &str, ttl: i64) -> St
 }
 
 /// Build a `Set-Cookie` value that expires the member session (logout).
+/// Only clears this browser; [`logout`] also ends the other sessions.
 #[must_use]
 pub fn clear_cookie() -> String {
     format!("{MEMBER_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+}
+
+/// Log `user` out on every device and return the [`clear_cookie`] value.
+/// Pass the row [`CurrentMember`] just loaded from the tenant `pool`.
+///
+/// # Errors
+/// [`crate::sql::ExecError`] when the cut-off cannot be stored.
+pub async fn logout(pool: &crate::sql::Pool, user: &User) -> Result<String, crate::sql::ExecError> {
+    if let Some(&id) = user.id.get() {
+        // No cookie here, so no skew cover: the cut-off is this node's clock.
+        crate::session::revoke_sessions::<User>(pool, id, user.sessions_revoked_at, 0).await?;
+    }
+    Ok(clear_cookie())
 }
 
 // ===================================================================
@@ -257,16 +291,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(CurrentMember(None));
         };
 
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(CurrentMember(None)),
         };
 
@@ -275,14 +307,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
             None => return Ok(CurrentMember(None)),
         };
 
-        let payload = match decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(CurrentMember(None)),
         };
 
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(CurrentMember(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(CurrentMember(None)),
         };
 
         use crate::core::Column as _;
@@ -295,11 +327,16 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
-        // change (parity with `SessionUser`). `password_changed_at IS
-        // NULL` (never rotated) stays valid.
-        let user = user.filter(|u| match u.password_changed_at {
-            Some(changed) => payload.iat >= changed.timestamp(),
-            None => true,
+        // change or logout (parity with `SessionUser`).
+        let user = user.filter(|u| {
+            crate::tenancy::session::session_survives(
+                keys.session,
+                &payload.pwf,
+                payload.iat,
+                &u.password_hash,
+                u.password_changed_at,
+                u.sessions_revoked_at,
+            )
         });
         Ok(CurrentMember(user))
     }
@@ -307,16 +344,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
 
 /// Pull one cookie value out of the `Cookie` request header by name.
 fn extract_cookie(parts: &Parts, name: &str) -> Option<String> {
-    let header = parts.headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in header.split(';') {
-        let pair = pair.trim();
-        if let Some(val) = pair.strip_prefix(name) {
-            if let Some(v) = val.strip_prefix('=') {
-                return Some(v.to_owned());
-            }
-        }
-    }
-    None
+    crate::cookies::cookie_from_headers(&parts.headers, name).map(str::to_owned)
 }
 
 // ===================================================================
@@ -333,8 +361,8 @@ pub struct MemberAuthConfig {
     /// Default `"/"`.
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
-    /// time it's seen. When `false`, an unknown email is refused (like
-    /// the admin link-to-existing flow). Default `true`.
+    /// time it's seen. When `false`, an unknown email is refused.
+    /// Default `true`.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -357,16 +385,27 @@ impl Default for MemberAuthConfig {
 
 /// Build the member SSO router: begin + per-slug callback. Mount into a
 /// [`crate::server::Builder`] stack — the handlers read the
-/// `Arc<TenantContext>` extension for the resolved tenant, its scoped
+/// `TenantContext` extension for the resolved tenant, its scoped
 /// pool, and the session secret.
 #[must_use]
 pub fn member_sso_router(config: MemberAuthConfig) -> Router<()> {
+    member_sso_router_for::<DefaultTenantDb>(config)
+}
+
+/// [`member_sso_router`] for a `Tenant<DB>` other than the default, e.g.
+/// SQLite in a build that also enables `postgres` (#1741).
+#[must_use]
+pub fn member_sso_router_for<DB>(config: MemberAuthConfig) -> Router<()>
+where
+    DB: Database,
+    Tenant<DB>: FromRequestParts<()> + Send,
+{
     let login = config.login_base.trim_end_matches('/').to_owned();
     let begin_path = format!("{login}/sso/{{slug}}");
     let callback_path = format!("{login}/sso/{{slug}}/callback");
     Router::new()
-        .route(&begin_path, get(sso_begin))
-        .route(&callback_path, get(sso_callback))
+        .route(&begin_path, get(sso_begin::<DB>))
+        .route(&callback_path, get(sso_callback::<DB>))
         .layer(Extension(config))
 }
 
@@ -380,9 +419,9 @@ struct CallbackParams {
     next: Option<String>,
 }
 
-/// Best-effort external scheme+host for building absolute redirect URIs,
-/// honoring `X-Forwarded-Proto` and `X-Forwarded-Host` (behind a proxy /
-/// load balancer) and falling back to the request scheme + `Host`.
+/// Best-effort external scheme+host for building absolute redirect URIs:
+/// the request scheme + `Host`. `X-Forwarded-Proto` / `X-Forwarded-Host`
+/// count only from a proxy named in `RealIpLayer::trust_proxies` (#1842).
 /// Default scheme is `https` for non-local hosts, `http` for
 /// `localhost` / `127.` so local plain-HTTP dev works.
 ///
@@ -392,18 +431,19 @@ struct CallbackParams {
 pub(crate) fn external_base(parts: &Parts) -> String {
     let headers = &parts.headers;
     let first = |v: &str| v.split(',').next().unwrap_or(v).trim().to_owned();
+    let forwarded =
+        |name: &str| crate::real_ip::trusted_forwarded(headers, &parts.extensions, name);
 
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(first)
-        .filter(|s| !s.is_empty());
+    let proto = forwarded("x-forwarded-proto").map(str::to_owned);
 
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()))
-        .map(first)
+    let host = forwarded("x-forwarded-host")
+        .map(str::to_owned)
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(first)
+        })
         .unwrap_or_else(|| "localhost".to_owned());
 
     let scheme = proto.unwrap_or_else(|| {
@@ -431,25 +471,29 @@ fn callback_uri(parts: &Parts, login_base: &str, slug: &str) -> String {
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
 /// the IdP, seal the flow into the transient flow cookie.
-async fn sso_begin(
-    t: Tenant,
+fn sso_begin<DB: Database>(
+    t: Tenant<DB>,
     Path(slug): Path<String>,
-    Extension(ctx): Extension<Arc<TenantContext>>,
     Extension(config): Extension<MemberAuthConfig>,
+    req: Request,
+) -> impl std::future::Future<Output = Response> + Send {
+    sso_begin_in(t.into(), slug, config, req)
+}
+
+async fn sso_begin_in(
+    t: TenantScope,
+    slug: String,
+    config: MemberAuthConfig,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
-
-    let pool = match ctx.pools.scoped_pool_dyn(&t.org).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, slug, "scoped pool build failed");
-            return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
-        }
+    let Some(secret) = session_secret(&parts) else {
+        return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
     };
+    let pool = t.pool();
 
     let redirect_uri = callback_uri(&parts, &config.login_base, &slug);
-    let resolved = match resolve_by_slug(&pool, &slug, redirect_uri).await {
+    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(slug, "SSO provider not found / disabled");
@@ -461,7 +505,7 @@ async fn sso_begin(
         }
     };
 
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
@@ -470,7 +514,7 @@ async fn sso_begin(
     };
 
     let (authorize_url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, ctx.session_secret.key());
+    let sealed = seal_flow(&flow, secret.key());
     let flow_cookie = format!(
         "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path=/; Max-Age={FLOW_TTL_SECS}{s}",
         s = secure_suffix(),
@@ -480,16 +524,28 @@ async fn sso_begin(
 
 /// `GET {login_base}/sso/{slug}/callback` — exchange the code,
 /// find-or-provision the member, mint the member session cookie.
-async fn sso_callback(
-    t: Tenant,
+fn sso_callback<DB: Database>(
+    t: Tenant<DB>,
     Path(slug): Path<String>,
-    Extension(ctx): Extension<Arc<TenantContext>>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,
+    req: Request,
+) -> impl std::future::Future<Output = Response> + Send {
+    sso_callback_in(t.into(), slug, config, params, req)
+}
+
+async fn sso_callback_in(
+    t: TenantScope,
+    slug: String,
+    config: MemberAuthConfig,
+    params: CallbackParams,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
     let login_base = &config.login_base;
+    let Some(secret) = session_secret(&parts) else {
+        return sso_error("Sign-in is temporarily unavailable.", login_base);
+    };
 
     if let Some(err) = params.error {
         tracing::warn!(slug, error = %err, "IdP returned an error");
@@ -505,7 +561,7 @@ async fn sso_callback(
             login_base,
         );
     };
-    let flow = match open_flow(&sealed, ctx.session_secret.key()) {
+    let flow = match open_flow(&sealed, secret.key()) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
@@ -516,16 +572,10 @@ async fn sso_callback(
         }
     };
 
-    let pool = match ctx.pools.scoped_pool_dyn(&t.org).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, slug, "scoped pool build failed");
-            return clear_flow(sso_error("Sign-in is temporarily unavailable.", login_base));
-        }
-    };
+    let pool = t.pool();
 
     let redirect_uri = callback_uri(&parts, login_base, &slug);
-    let resolved = match resolve_by_slug(&pool, &slug, redirect_uri).await {
+    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
         Ok(Some(r)) => r,
         _ => {
             return clear_flow(sso_error(
@@ -534,7 +584,7 @@ async fn sso_callback(
             ))
         }
     };
-    let provider = match build_provider(&resolved).await {
+    let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
@@ -550,81 +600,191 @@ async fn sso_callback(
         }
     };
 
-    let email = match verified_email(&normalized) {
-        Ok(e) => e.to_ascii_lowercase(),
-        Err(e) => {
-            tracing::warn!(error = %e, "unverified / missing email from IdP");
+    let key = resolved.key(LinkSource::Tenant);
+    let member_id = match find_or_provision_member(
+        pool,
+        &key,
+        resolved.allow_email_link,
+        &normalized,
+        config.auto_provision,
+    )
+    .await
+    {
+        Ok(MemberSignIn::Member(id)) => id,
+        Ok(MemberSignIn::NotLinked) => {
+            return clear_flow(sso_error(
+                "This sign-in is not linked to your account. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::NoAccount) => {
+            return clear_flow(sso_error(
+                "There is no account for this sign-in. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Inactive) => {
+            return clear_flow(sso_error(
+                "This account is disabled. Please contact your administrator.",
+                login_base,
+            ));
+        }
+        Ok(MemberSignIn::Unverified) => {
             return clear_flow(sso_error(
                 "Your identity provider did not return a verified email.",
                 login_base,
             ));
         }
+        Ok(_) => {
+            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "find-or-provision member failed");
+            return clear_flow(sso_error("Could not complete sign-in.", login_base));
+        }
     };
 
-    let member_id =
-        match find_or_provision_member(&pool, &email, &normalized, config.auto_provision).await {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::warn!(email, "no member account and auto-provision disabled");
-                return clear_flow(sso_error(
-                    "There is no account for that email. Please contact your administrator.",
-                    login_base,
-                ));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "find-or-provision member failed");
-                return clear_flow(sso_error("Could not complete sign-in.", login_base));
-            }
-        };
-
-    let cookie = mint_cookie(
-        &ctx.session_secret,
-        member_id,
-        &t.org.slug,
-        config.session_ttl,
-    );
+    let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
+        tracing::warn!(member_id, "member missing or inactive after sign-in");
+        return clear_flow(sso_error("Could not complete sign-in.", login_base));
+    };
+    let cookie = mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &config.landing_url);
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
 
-/// Match the IdP email to an existing member, else auto-provision one
-/// (when `auto_provision`). Returns `Ok(Some(id))` on match/create,
-/// `Ok(None)` when unknown and auto-provision is off (caller refuses).
+/// The mounted context's session secret, whichever backend it is for.
+fn session_secret(parts: &Parts) -> Option<SessionSecret> {
+    crate::tenancy::middleware::session_keys(&parts.extensions).map(|k| k.session.clone())
+}
+
+/// What [`find_or_provision_member`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSignIn {
+    /// Signed in (linked, email-linked, or newly provisioned) as this user id.
+    Member(i64),
+    /// An account has this email but may not be linked by it: email linking
+    /// is off, the account is privileged, or the email collides with another.
+    NotLinked,
+    /// No account has this email, and provisioning is off.
+    NoAccount,
+    /// The account is inactive.
+    Inactive,
+    /// The IdP sent no verified email (and there is no link).
+    Unverified,
+    /// Refused for another reason, e.g. no subject.
+    Refused,
+}
+
+/// The member linked to `(provider, profile.provider_user_id)`; else see
+/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
 ///
-/// Public because the browser SSO flow is not the only caller any more: a
-/// native mobile sign-in verifies an ID token itself and then needs exactly
-/// this rule. Keeping it private forced the one downstream app that does so to
-/// reimplement it, and two copies of "which existing member is this, and may
-/// we create one" drift apart silently — both keep working, differently.
+/// Public so a native sign-in that verified its own ID token uses the same rule.
+///
+/// # Errors
+/// Storage failures.
 pub async fn find_or_provision_member(
     pool: &Pool,
-    email: &str,
+    provider: &ProviderKey,
+    allow_email_link: bool,
     profile: &NormalizedUser,
     auto_provision: bool,
-) -> Result<Option<i64>, String> {
+) -> Result<MemberSignIn, String> {
+    let refusal = match sign_in(
+        pool,
+        provider,
+        allow_email_link,
+        profile,
+        &TenantAccounts(pool),
+    )
+    .await
+    {
+        Ok(id) => return Ok(MemberSignIn::Member(id)),
+        Err(LinkRefusal::NoAccount(email)) if auto_provision => {
+            return provision_member(pool, provider, &email, profile)
+                .await
+                .map(MemberSignIn::Member);
+        }
+        Err(LinkRefusal::Storage(e)) => return Err(e),
+        Err(e) => e,
+    };
+    tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
+    Ok(match refusal {
+        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
+            MemberSignIn::NotLinked
+        }
+        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
+        LinkRefusal::Inactive => MemberSignIn::Inactive,
+        LinkRefusal::Unverified => MemberSignIn::Unverified,
+        _ => MemberSignIn::Refused,
+    })
+}
+
+/// A tenant's users. Privileged = superuser, or holds any admin permission;
+/// a permission read error counts as privileged.
+pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+
+impl TenantAccounts<'_> {
+    async fn account(&self, user: &User) -> Result<Option<Account>, String> {
+        let Some(user_id) = user.id.get().copied() else {
+            return Ok(None);
+        };
+        let privileged = user.is_superuser
+            || crate::tenancy::permissions::user_permissions_pool(user_id, self.0)
+                .await
+                .map_or(true, |perms| !perms.is_empty());
+        Ok(Some(Account::new(user_id, privileged, user.active)))
+    }
+}
+
+impl AccountLookup for TenantAccounts<'_> {
+    async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
+        match find_tenant_user(self.0, id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(u) => self.account(&u).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn by_email(&self, email: &str) -> Result<EmailLookup, String> {
+        use crate::sql::FetcherPool as _;
+        let rows = User::objects()
+            .filter("email__iexact", email.to_owned())
+            .fetch(self.0)
+            .await
+            .map_err(|e| format!("lookup: {e}"))?;
+        match EmailLookup::pick(&rows, email, |u| u.email.as_deref()) {
+            Ok(Some(u)) => Ok(self
+                .account(u)
+                .await?
+                .map_or(EmailLookup::Missing, EmailLookup::Found)),
+            Ok(None) => Ok(EmailLookup::Missing),
+            Err(()) => Ok(EmailLookup::Collides),
+        }
+    }
+}
+
+/// The tenant user with this id; a driver error is an error, not "missing".
+pub(crate) async fn find_tenant_user(
+    pool: &Pool,
+    id: i64,
+) -> Result<Option<User>, crate::sql::ExecError> {
+    use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    // Idempotent — find by (lowercased) email first.
-    let existing = User::objects()
-        .filter("email", email.to_owned())
+    Ok(User::objects()
+        .where_(User::id.eq(id))
         .fetch(pool)
-        .await
-        .map_err(|e| format!("lookup: {e}"))?
+        .await?
         .into_iter()
-        .next();
-    if let Some(u) = existing {
-        return Ok(Some(
-            u.id.get()
-                .copied()
-                .ok_or_else(|| "existing user missing id".to_owned())?,
-        ));
-    }
+        .next())
+}
 
-    if !auto_provision {
-        return Ok(None);
-    }
-
-    provision_member(pool, email, profile).await.map(Some)
+/// The tenant user with this id, if it can be read.
+pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
+    find_tenant_user(pool, id).await.ok().flatten()
 }
 
 /// Auto-create a tenant user from a verified IdP email. `password_hash`
@@ -633,6 +793,7 @@ pub async fn find_or_provision_member(
 /// The username is the email local-part, deduped on unique clash.
 async fn provision_member(
     pool: &Pool,
+    provider: &ProviderKey,
     email: &str,
     profile: &NormalizedUser,
 ) -> Result<i64, String> {
@@ -661,7 +822,8 @@ async fn provision_member(
         let mut user = User {
             id: Auto::Unset,
             username,
-            password_hash: crate::tenancy::password::hash(&random_unusable_secret())
+            password_hash: crate::tenancy::password::hash_async(&random_unusable_secret())
+                .await
                 .map_err(|e| format!("hash: {e}"))?,
             email: Some(email.to_owned()),
             is_superuser: false,
@@ -669,15 +831,25 @@ async fn provision_member(
             created_at: chrono::Utc::now(),
             data: data.clone(),
             password_changed_at: None,
+            sessions_revoked_at: None,
         };
 
-        match user.insert_pool(pool).await {
+        // The user and its link commit together, or neither does.
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| format!("begin: {e}"))?;
+        match user.insert_tx(&mut tx).await {
             Ok(()) => {
-                return user
+                let id = user
                     .id
                     .get()
                     .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned());
+                    .ok_or_else(|| "insert returned no id".to_owned())?;
+                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
+                    .await
+                    .map_err(|e| format!("link: {e}"))?;
+                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+                return Ok(id);
             }
             Err(e) if attempt == 0 => {
                 // Likely a username/email unique clash — retry once with
@@ -717,13 +889,19 @@ fn random_unusable_secret() -> String {
     base64::engine::general_purpose::STANDARD.encode(buf)
 }
 
-/// Sanitize a `?next` redirect target: only a same-origin absolute path
-/// (`/...`, not `//host`) is honored, else fall back to `landing`.
+/// Sanitize a `?next` redirect target: only a same-origin absolute
+/// path is honored, else fall back to `landing`.
+///
+/// Delegates to `auth_decorators::safe_next`, the one hardened copy of
+/// this rule. The hand-rolled version here checked `starts_with('/')`
+/// and `!starts_with("//")` and accepted `/\evil.example/x`, which a
+/// browser rewrites to `//evil.example/x` — and the result goes
+/// straight into `LOCATION` via `redirect_with_cookie`. Found by the
+/// ratchet added with the #1526 re-fix; the review of PR #1604 caught
+/// the two sibling copies and missed this one.
 fn safe_landing(next: Option<&str>, landing: &str) -> String {
-    match next {
-        Some(n) if n.starts_with('/') && !n.starts_with("//") => n.to_owned(),
-        _ => landing.to_owned(),
-    }
+    next.and_then(crate::auth_decorators::safe_next)
+        .unwrap_or_else(|| landing.to_owned())
 }
 
 /// A `303 See Other` redirect carrying a single `Set-Cookie`.
@@ -778,12 +956,16 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn fp() -> PasswordFingerprint {
+        PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
     // ---- A. domain separation (security-critical) -------------------
 
     #[test]
     fn member_cookie_round_trips() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let back = decode(&s, "acme", &value).expect("round-trips");
         assert_eq!(back.uid, 7);
         assert_eq!(back.slug, "acme");
@@ -796,7 +978,7 @@ mod tests {
         // the domain tag makes the signed message disjoint, so the HMAC
         // never matches.
         let s = secret();
-        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let err = tenant_console::decode(&s, "acme", &member_value).unwrap_err();
         assert!(
             matches!(err, SessionError::BadSignature),
@@ -809,7 +991,7 @@ mod tests {
         let s = secret();
         let tenant_value = tenant_console::encode(
             &s,
-            &tenant_console::TenantSessionPayload::new(7, "acme", 3600),
+            &tenant_console::TenantSessionPayload::new(7, "acme", 3600, fp()),
         );
         let err = decode(&s, "acme", &tenant_value).unwrap_err();
         assert!(
@@ -821,7 +1003,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_wrong_slug() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         assert_eq!(
             decode(&s, "globex", &value).unwrap_err(),
             MemberSessionError::WrongTenant
@@ -831,7 +1013,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_expired() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10, fp()));
         assert_eq!(
             decode(&s, "acme", &value).unwrap_err(),
             MemberSessionError::Expired
@@ -841,7 +1023,7 @@ mod tests {
     #[test]
     fn member_decode_rejects_tampered_signature() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600));
+        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
         let (_, sig) = value.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"uid":999,"slug":"acme","exp":9999999999,"iat":0,"aud":"member"}"#);
@@ -863,6 +1045,7 @@ mod tests {
             exp: chrono::Utc::now().timestamp() + 3600,
             iat: chrono::Utc::now().timestamp(),
             aud: "admin".to_owned(),
+            pwf: fp(),
         };
         let value = encode(&s, &payload);
         assert_eq!(
@@ -890,13 +1073,27 @@ mod tests {
         b.body(()).unwrap().into_parts().0
     }
 
+    /// A client can't pick the `redirect_uri` host with forwarded headers (#1842).
     #[test]
-    fn external_base_honors_forwarded_headers() {
+    fn external_base_ignores_forwarded_headers_from_an_untrusted_peer() {
         let parts = parts_with(&[
+            ("x-forwarded-proto", "http"),
+            ("x-forwarded-host", "evil.example.com"),
+            ("host", "gym.example.com"),
+        ]);
+        assert_eq!(external_base(&parts), "https://gym.example.com");
+    }
+
+    #[test]
+    fn external_base_honors_forwarded_headers_from_a_trusted_proxy() {
+        let mut parts = parts_with(&[
             ("x-forwarded-proto", "https"),
             ("x-forwarded-host", "g.example.com"),
             ("host", "internal:8080"),
         ]);
+        parts
+            .extensions
+            .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
         assert_eq!(external_base(&parts), "https://g.example.com");
     }
 
@@ -920,5 +1117,10 @@ mod tests {
         assert_eq!(safe_landing(Some("//evil.com"), "/"), "/");
         assert_eq!(safe_landing(Some("https://evil.com"), "/"), "/");
         assert_eq!(safe_landing(None, "/home"), "/home");
+        // The case the hand-rolled version accepted: starts with `/`,
+        // is not `//`, and the browser rewrites `\` to `/` so it
+        // leaves as protocol-relative `//evil.com/x` (#1526).
+        assert_eq!(safe_landing(Some("/\\evil.com/x"), "/"), "/");
+        assert_eq!(safe_landing(Some("/%5Cevil.com/x"), "/"), "/");
     }
 }

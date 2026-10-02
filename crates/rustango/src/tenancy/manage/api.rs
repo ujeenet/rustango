@@ -4,7 +4,8 @@
 //! `create-user`) but with structured argument types and direct return
 //! values — for use from `Builder::seed_with` closures and any other
 //! in-process caller. CLI-style verb dispatch via
-//! [`super::run_with_writer`] is unchanged for shell consumers.
+//! [`run_with_writer`](crate::tenancy::manage::run_with_writer) is
+//! unchanged for shell consumers.
 //!
 //! Every function suffixed `_if_missing` is **idempotent** — if a row
 //! with the requested key already exists, the existing row is
@@ -125,6 +126,11 @@ where
         StorageMode::Schema => Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned())),
         StorageMode::Database => None,
     };
+    // Same rule as the provisioner, so neither path can create `public`.
+    if let Some(schema) = &schema_name {
+        crate::tenancy::provision::validate_schema_name(schema)
+            .map_err(TenancyError::Validation)?;
+    }
 
     if let StorageMode::Schema = opts.mode {
         #[cfg(feature = "postgres")]
@@ -253,10 +259,11 @@ where
     let mut op = Operator {
         id: Auto::default(),
         username: username.to_owned(),
-        password_hash: crate::tenancy::password::hash(password)?,
+        password_hash: crate::tenancy::password::hash_async(password).await?,
         active: true,
         created_at: chrono::Utc::now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     op.insert_pool(&registry).await?;
     Ok(op)
@@ -299,7 +306,7 @@ where
     let mut user = User {
         id: Auto::default(),
         username: username.to_owned(),
-        password_hash: crate::tenancy::password::hash(password)?,
+        password_hash: crate::tenancy::password::hash_async(password).await?,
         #[cfg(feature = "sso")]
         email: None,
         is_superuser: superuser,
@@ -307,6 +314,7 @@ where
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
     user.save_pool(&scoped).await?;
     Ok(user)

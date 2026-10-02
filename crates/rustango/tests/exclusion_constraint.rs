@@ -1,5 +1,5 @@
-//! Django parity — `Meta.constraints = [ExclusionConstraint(...)]`
-//! lets a model declare Postgres `EXCLUDE USING …` constraints
+//! Exclusion constraints let a model declare Postgres
+//! `EXCLUDE USING …` constraints
 //! (no two rows of group X may overlap in column Y). rustango spells
 //! the attribute as `#[rustango(exclude(name = "…", using = "gist",
 //! elements = "col WITH op, col WITH op", where = "…"))]`. PG-only:

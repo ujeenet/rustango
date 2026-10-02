@@ -4,24 +4,3737 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — in-memory jobs and scheduled tasks keep the caller's audit source and timezone (#1229)
+
+`InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. `PgJobQueue` still runs as `system`.
+
+## [0.59.18] — 2026-10-02
+
+### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)
+
+`CreateView` and `ModelForm::save` write the `create` (or `update`) audit row in the write's transaction. A webhook allowed private targets still refuses all of `169.254.0.0/16` and `fd00:ec2::/32`.
+
+### Fixed — an admin edit commits with its audit row (#2060)
+
+The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
+Its "before" side is read under lock in that transaction, so a stale form that undoes a concurrent edit is audited.
+Only models with `audit(...)` fail without the audit table ("run `manage migrate`"); others still log best-effort.
+
+### Fixed — test assertions that passed when they should fail (#1960)
+
+`assert_cookie_set` fails on a deleting `Set-Cookie` (a Netscape-style past `Expires` too), `assert_messages` on a cookie that does not verify, and a nested `assert_num_queries` counts toward the outer one.
+
+### Fixed — an `atomic()` inside `with_rollback` is rolled back too (#1761)
+
+**Breaking:** the `with_rollback` closure gets an `AtomicTx`; lock it per statement.
+
+### Fixed — tenant URL derivation keeps the query string (#1932)
+
+`tenant_url_on_registry_server` splits the query off first, so `sslrootcert=/ca.pem` is not cut and `sslmode` carries over. Only TLS keys carry over: a `dbname=` or `password=` is dropped, and a `dbname=` naming the registry is refused. `redact` masks a query `password=`.
+
+### Security — a schema-mode tenant cannot be named `public` (#1868)
+
+`public` holds the registry and ends every tenant's `search_path`; provisioning and `create_tenant` now refuse it.
+
+### Fixed — tenant hosts are validated on every write path and cannot clash (#1931)
+
+The console edit form uses the CLI's validators; edit and provision refuse a host, path prefix or port another tenant uses (hosts compared case-insensitively); the `<slug>.<APEX>` default is validated; the resolver orders by id.
+
+### Fixed — path-prefix tenants get a working admin and impersonation (#2059)
+
+The tenant admin serves login, admin and handoff under the org's `path_prefix`; the console's handoff URL carries it when it is a valid one-segment prefix.
+
+### Fixed — admin audit and impersonation attribution (#1939)
+
+The update diff no longer records a skipped readonly/hidden value as "after"; impersonation sessions are named `operator:<username>`, so `updated_by` is never empty.
+
+### Fixed — mail and console config failures are loud (#1948)
+
+`mail.backend = "file"` without a dir and unknown backends are errors; an SMTP 550–555 refusal is `MailError::Rejected`, not retried, while auth and connect failures stay retryable; a broken config logs where it broke, not the error text.
+
+### Security — direct uploads are checked against the bucket, not the client (#1851)
+
+The presigned PUT signs the declared size, and `finalize_upload` reads the object's real size and type with
+`Storage::metadata`; a mismatch is deleted and the row marked `Failed`.
+
+### Security — direct uploads never store an active MIME (#2057)
+
+`begin_upload` signs `text/html`, SVG, XML and script types as `application/octet-stream`; `UploadTicket.content_type` says what to send.
+
+### Fixed — storage keys may contain `..` inside a name (#1903)
+
+`validate_key` rejects `..` only as a whole path segment, so `report..final.pdf` uploads again.
+
+### Fixed — no orphan or torn upload files (#1905)
+
+`save_bytes` deletes the object when the row insert fails; `LocalStorage` writes via temp file + rename;
+`save_uploads` removes earlier files on any error; random key prefixes are UUIDs.
+
+### Fixed — S3 presigning derives the SigV4 key once per date (#1570)
+
+### Fixed — `purge` deletes links and row in one transaction; `MediaPerms::from_manager` (#1573)
+
+### Security — `finalize_upload` only changes a `Pending` row
+
+A second finalize no longer deletes a `Ready` row's object or flips `Failed` back; the update is `WHERE status = 'pending'`.
+
+### Security — direct-upload URLs are create-only
+
+`begin_upload` signs `If-None-Match: *`, so a replayed URL cannot swap a finalized object; `UploadTicket.headers` lists what to send.
+
+### Fixed — `purge_pending` deletes the storage objects, and sweeps `Failed` rows too
+
+Each row is deleted on its read status with its tag links, and its object inside the same transaction.
+
+### Fixed — a cancelled `LocalStorage::save` leaves no temp file
+
+A drop guard removes the temp file unless the rename ran; it is opened with `create_new`.
+
+### Fixed — `finalize_upload` compares only `type/subtype`
+
+A backend that rewrites the type's parameters no longer fails a good upload.
+
+### Fixed — `begin_upload` caps the declared size
+
+`MediaManager::with_max_upload_bytes` sets it; the default is 100 MiB (`DEFAULT_MAX_UPLOAD_BYTES`).
+
+### Fixed — `validate_key` rejects empty and `.` segments
+
+`a//b`, `./a` and `a/` named a different file on disk than on S3.
+
+## [0.59.17] — 2026-10-01
+
+### Fixed — humanize and number rounding (#1896)
+
+`naturaltime`/`timesince` read 360–364 days as "12 months", not "0 years"; KRW shows `₩`, CLP `$`, and unknown codes no longer leak memory.
+`floatformat`, `format_number` and `format_currency` round halves up (`0.125` → `0.13`, `2.5` → `3`) and never print `-0`.
+
+### Fixed — email, IRI, nullable-bool and timesince parsing (#1897)
+
+`validate_email` rejects whitespace, control chars and over-long addresses; `uri_to_iri` keeps `%25`; an absent nullable bool is `NULL` (admin shows a Yes/No/Unknown select, preset to the model default); `timesince` stops at the first zero unit.
+
+### Fixed — i18n plural rules, `pt_BR` locales, `q=0` and placeholder substitution (#1921)
+
+Plural rules for ar, cs/sk, lt, ro, he and sl, and `pt-PT` 0 is plural; `Locale` treats `_` as `-` so `pt_BR.json` serves `pt-BR`, and `LocaleMiddleware` matches a `pt_BR` cookie too.
+`negotiate_language` skips `q=0`; placeholders fill in one pass, so a value is never re-substituted and Tera arg order no longer matters.
+
+### Fixed — feeds and sitemaps drop XML-illegal control chars; custom guids are not permalinks (#1925)
+
+A stray `\u{8}` in a title no longer breaks the whole document; `.with_guid(..)` emits `<guid isPermaLink="false">`.
+
+### Fixed — `slugify` keeps accented Latin letters; `unique_slug` never builds an empty slug (#2048)
+
+`"Café"` slugs to `"cafe"` (was `"caf"`); all-punctuation input gives `"untitled"`, `"untitled-2"` instead of `""`, `"-2"`.
+
+### Fixed — the translations editor no longer blanks file-catalog fallbacks (#1920)
+
+`apply_edits` writes only non-empty, changed cells, so saving an untouched grid no longer stores `""` over `fr.json` or re-upserts every row.
+
+### Security — GitHub email verification is read, member `redirect_uri` ignores spoofed hosts (#1842)
+
+**Breaking:** the GitHub preset takes `email_verified` from `/user/emails` and Facebook
+never vouches for an email. Member SSO honours `X-Forwarded-Host`/`-Proto` only from a
+proxy named in `RealIpLayer::trust_proxies`, and so do tenant and admin SSO and MCP for
+`X-Forwarded-Proto`. New `OAuth2Provider::with_emails_url`; a 403 or 404 from it means no
+verified email, not a failed login.
+
+### Security — passkey challenges expire and open once; counters can't reset (#1841)
+
+**Breaking:** a sealed challenge carries its ceremony and issue time, expires after 5 min
+and opens once (`cache.add`). A stored non-zero counter followed by 0 is refused, and
+`update_sign_count` never moves the counter back and returns a `#[must_use]` `SignCountUpdate`.
+`verify_authentication` returns the UV flag. `open_challenge` warns once on a process-local cache.
+
+### Security — `[auth] argon2_*` set the cost of new password hashes (#1728)
+
+The keys were read by nothing. New `passwords::Argon2Params`, `configure_argon2` and
+`argon2_params`; an invalid combination keeps the default and logs an error. Built-in logins
+store a fresh hash when the old one is weaker (`passwords::upgrade_stored_hash`).
+
+### Security — a logout ends JWT refresh chains (#2036)
+
+`/refresh` checks `sessions_revoked_at`, so a chain started before a logout stops rotating.
+A JWT login stamps its session start after the last logout.
+
+### Security — tenant `change_password` keeps hasher errors out of the redirect URL (#2021)
+
+The error is logged; the form shows a fixed message.
+
+### Security — the OAuth2 callback 502 no longer echoes upstream error text (#1847)
+
+The IdP body or transport error is logged; the browser gets a fixed message.
+
+### Security — credential hardening: undecodable TOTP secret, redacted Debug, HOTP digits, argon2 rehash (#1875)
+
+A confirmed TOTP row that is not base32, or decodes to under 10 bytes, refuses the login instead
+of skipping 2FA; the lenient `totp_store::confirmed_secret` is deprecated. `TotpSecret`,
+`AdminTotp` and `Signer` redact secrets in `Debug`; 10-digit HOTP no longer overflows; the hasher
+chain rehashes argon2id below today's cost (`PasswordHasher::needs_rehash`, `passwords::needs_rehash`).
+
+### Fixed — `runserver` auto-migrate applies the framework's system chain (#2056)
+
+It ran only the project chain, so tables and columns like `sessions_revoked_at` were missing and logins failed.
+
+### Fixed — system and project chains apply in one safe order everywhere (#2055, #2052)
+
+A system step that FKs a project-created framework table waits for it on PG/MySQL; such tables get the framework's newer columns, on the tenancy runners too.
+Steps on those tables run after the project chain, under one migrate lock; a table the project later drops is the framework's again.
+A later system step's index on such a table is created.
+A system step that only FKs such a table first adds just the FK target columns.
+`pre_migrate`/`post_migrate` fire outside that lock, and a migrate started while the task holds it fails instead of hanging.
+A cancelled migrate closes its lock connection, so the pool does not keep the lock.
+
+### Fixed — converging a NOT NULL column with no default on an empty table (#2066)
+
+`migrate` adds it instead of asking for it by hand; a table with rows still fails.
+MySQL adds it nullable, then `MODIFY`s it NOT NULL, so a row written in between fails it instead of getting `''` or `0`.
+
+## [0.59.16] — 2026-10-01
+
+### Security — custom admin views check a codename; string-PK redirects are encoded (#1862)
+
+**Breaking:** under `with_user_perms`, a `register_admin_view!` write route now needs
+`{table}.change` (or its `perm = "…"`), else 403. The admin and `CreateView`/`UpdateView`
+percent-encode PKs in redirects, so a CR/LF no longer panics; a `/` in a `success_url`
+value becomes `%2F`.
+
+### Security — admin inlines hide secret fields (#1861)
+
+A child's `password`-widget field shows only set/not set on the detail page, renders empty on edit, and an empty one keeps the stored value.
+
+### Fixed — admin inlines: view hook per row, `max_num` on save, natural-PK inserts (#1717)
+
+Rows the child's `view` hook refuses are not shown; a save that adds rows past `max_num` is refused; a slot past `INITIAL_FORMS` inserts, so a typed natural PK works.
+
+### Security — admin list URL filters only on shown columns (#2031)
+
+`?<field>=` applies only to `list_filter`, displayed, FK or inline-parent columns, and never to a secret one, so a URL cannot probe a hidden value.
+
+### Fixed — the NULL facet lists the NULL rows (#2006)
+
+It links `?<field>__isnull=1`, which the list reads as `IS NULL`; `?<field>=` showed every row.
+
+### Security — FK facet labels respect the target's queryset hooks (#2029)
+
+A target row the hooks hide is shown by its key, not its display value.
+
+### Fixed — admin bulk actions cap the selected keys (#2049)
+
+More than 10,000 `_selected` keys is a 400, and FK facet labels load in chunks, so one `IN` list stays under every dialect's bind cap.
+
+### Fixed — the ViewSet list follows the model's `default_order` (#2047)
+
+With no `.ordering(..)`, the list uses `default_order`, as ListView and the admin do; the PK always breaks ties.
+
+### Fixed — the ViewSet honours `#[rustango(soft_delete)]` (#1998)
+
+`DELETE` stamps the soft-delete column instead of deleting the row, and list, retrieve, update and destroy hide soft-deleted rows.
+
+### Fixed — a duplicate unique value on a `CreateView` is a form error (#2033)
+
+The form re-renders with `422` and an error on the taken field (`__all__` when no single field is to blame), not a `500`, on `router` and `tenant_router`.
+
+### Security — an empty `?ordering=` allow-list permits nothing (#1996)
+
+`list_params::parse_ordering` with an empty allow-list drops every token, so a serializer that renders no model field no longer makes every column a sort key.
+`ViewSet::ordering_fields(&[])` makes nothing sortable.
+
+### Security — ViewSet bulk create is capped; the throttle map is bounded (#1999)
+
+A bulk create takes at most `max_bulk_create(n)` rows (default 1000, else `413`) and spends one `create` throttle unit per row.
+A rejected request charges no units; a bulk larger than the `create` throttle's `max` is a `413`.
+The throttle store sweeps ended windows once it holds 100k keys, so per-client keys no longer grow forever.
+
+### Security — ViewSet `QUERY` requests are throttled (#1997)
+
+`QUERY` spends the `list` throttle, the same budget as `GET`.
+
+### Fixed — a panicking handler is a logged 500, not a dropped connection (#1541)
+
+`Cli` and `server::Builder` catch handler panics: an opaque `text/plain` 500 with the request id, CORS and security headers, logged under `rustango::error`. The oauth2 login no longer panics on a bad header value.
+
+### Fixed — `EtagLayer` no longer blanks large or streamed bodies; method override answers 413 (#1866)
+
+`EtagLayer::default()` caps at 4 MiB like `new()`; a body over the cap or of unknown size passes through untouched. An over-limit `_method` form gets `413`, not an empty body.
+
+### Fixed — CORS sends `Vary: Origin` on refused origins and in any-origin mode (#1867)
+
+Only the always-`*` policy (any origin with credentials) leaves it out.
+
+### Fixed — flash cookie size, `q=0`, WebSocket size cap, event panics, encoded redact keys (#1957)
+
+Flash messages drop the oldest past 4000 bytes; `negotiate` honours `q=0` and range specificity; `WsHub::upgrade` caps frames before buffering.
+A panicking event subscriber no longer skips the rest; `pass%77ord=` is redacted in logs.
+
+### Fixed — tenant pool span leak, fragment-key collisions, SSE lag example (#1884)
+
+The pool-init span no longer stays entered across `.await`; fragment keys are length-prefixed; the SSE example keeps lagged clients.
+
+### Fixed — `TestClient` and `LiveServer` behave like a browser (#1958)
+
+The jar keeps `Path` and honours `Max-Age`/`Expires`; requests send `Host: testserver`, a same-origin `Origin` and a `127.0.0.1` peer; 307/308 keep the method; `logout()` reaches the server with the session and CSRF token.
+`LiveServer` serves with `ConnectInfo`; `TestResponse::header_all` returns repeated headers.
+301/302 rewrite only `POST`, `?query` and `../` locations resolve; `X-Forwarded-Proto: https` gives an `https://` Origin.
+
+### Fixed — test DB helpers work on MySQL and after a panic; fixtures load typed and atomic (#1959)
+
+`truncate_tables` runs in one transaction in any FK order on all three backends; `with_truncate_after` clears even when the body panics.
+A `Fixture` load types values from the table's model, rolls back on error and resets the PG sequence; `create_tables` is re-runnable.
+A custom user model sharing `rustango_users` with the built-in `User` is picked by its fields, not link order.
+
+### Security — page cache never stores or serves a page for an unresolved tenant (#2045)
+
+`CachePageLayer` bypasses the cache when no tenant resolves, so a route varying on an input the resolver ignored cannot leak one tenant's page to another.
+
+### Fixed — tenancy lifecycle: PG permission seeding, port-routed impersonation, webhook race, stale brand files (#1933)
+
+PG tenants seed `auth.access_admin` and extra permissions; impersonation lands on a port-routed org's own port; a webhook delivery that loses the idempotency race gets the existing run (200), not a 500; re-upload and purge delete old brand files.
+A logo of another type is removed only after the new path is saved (new `branding::prune_brand_asset`); CLI `purge-tenant` reaches only the default brand store and says so.
+
+### Fixed — audit: a no-op save writes no `update` row; a failed pre-read fails the save (#1907)
+
+On MySQL/SQLite the UPDATE could commit with no audit row when the BEFORE read failed.
+
+### Fixed — `DynamicForm`: multi-select keeps every value; lengths count characters; NaN refused; required checkbox enforced (#1895)
+
+New `bind_pairs` takes repeated keys from `<select multiple>`; `NaN`/`inf` no longer pass float bounds. A checkbox stays optional unless its schema says `"required": true`.
+
+### Fixed — `without_signals` silences `m2m_changed`; a repeat soft delete keeps its stamp; unread `Settings.secret_key` removed (#1929)
+
+A second `soft_delete` matches no row, so the prune clock and audit log stay put; the admin delete view and bulk delete/restore skip a row someone else already marked. The cookbook no longer says `delete()` soft-deletes.
+
+## [0.59.15] — 2026-10-01
+
+### Fixed — `migrate` on a fresh database with a project-created framework table (#2051)
+
+A system step that alters a table the project's own `0001` creates (a pre-system-chain scaffold) now waits for that migration; it failed with `relation does not exist`.
+
+### Security — the default tenant chain no longer trusts `X-Org` (#1856)
+
+`ChainResolver::standard` and `server::Builder` resolve by host only; opt in with `Builder::header_resolver` / `Cli::tenant_header`.
+`PortResolver` reads the listener port (`ListenerPort`), not the client URI; the apex check ignores case and reads HTTP/2 `:authority`.
+
+### Fixed — `Cli::with_welcome()` / `with_health()` work on manage-only builds (#2013)
+
+Both are gated on `_http_layers` instead of `admin`, so the `api` template's `/` and `/health` mount.
+
+### Fixed — static files stream off the async workers and honour `Range` (#1531)
+
+Resolve and open run in `spawn_blocking`, the root is canonicalized once, and bodies stream; a single byte range gets a `206`.
+`If-Range` matches the file's strong `ETag` or `Last-Modified`; a malformed `Range` gets a `200`; the cached root expires after a second.
+
+### Fixed — `LocaleMiddleware` sends `Vary`; `localtime` no longer panics (#1924)
+
+Responses vary on `Accept-Language` (and `Cookie` when the cookie is read); a bad `format=` is a render error.
+
+### Fixed — S3 stores the content type, `exists()` surfaces errors, virtual-hosted endpoints keep the bucket (#1904)
+
+`Storage::save_with_content_type` (media passes its MIME); `exists` errs on anything but 2xx/404; `<bucket>.<endpoint-host>` when `path_style = false`.
+The signed content type is SigV4-normalized and CR/LF is refused; media stores active MIMEs as `application/octet-stream`.
+
+### Fixed — template views, M2M and bulk writes on non-integer keys (#1950)
+
+A template-view URL PK that does not parse as the PK type is a 404, not a PostgreSQL 500.
+M2M managers take String / Uuid destination keys (`all_as::<K>()` reads them, a Uuid on MySQL and
+SQLite too); a key that doesn't fit the junction column converts or is a `TypeMismatch`, not a PG 500.
+A bulk insert with set PKs fills unset `auto_now` / `default_uuid_v7` fields instead of binding NULL.
+
+### Fixed — list `__in` filters and huge page numbers (#1865)
+
+A ViewSet `?field__in=` list over 1000 values, or lists over the dialect's bind limit together, is a
+400, not a driver 500. `?page=` past `i64` range
+is an empty page in the ViewSet, `ListView`, admin and `paginate` instead of a negative OFFSET.
+
+### Fixed — `ListView` uses the model's `default_order` (#2005)
+
+With no builder `order_by`, `ListView` sorts by `default_order` before the PK, like the admin.
+
+### Fixed — `column = "..."` on a `ForeignKey` field compiles (#1936)
+
+The derive used the SQL column as the Rust field name for `select_related` and prefetch.
+
+### Fixed — `truncate_html` on a bare `&`, `slugify` on non-ASCII, pagination links (#1919)
+
+A bare `&` is plain text, so `AT&T …` truncates and a later `;` keeps tags closed. `slugify` of
+all-non-ASCII text returns `slugify_unicode` instead of `""`. Page links no longer double-encode, and
+a bare key like `?x%26page%3D9` stays encoded instead of adding a second `page`.
+
+## [0.59.14] — 2026-10-01
+
+### Fixed — error responses no longer leak DB, env or template text; server faults are 5xx (#1955)
+
+`RustangoError` DB, hashing, JWT-issue and env errors answer 500/503 with an opaque body; `get_object_or_404`, `render()`, template-view and operator-console 500s too.
+`file_response` strips every control and bidi-override character and always sends `Content-Disposition: attachment`.
+
+### Fixed — public `/ready` no longer returns driver errors or probe targets (#1840)
+
+A failing check reports only its status and latency; the error is logged under `rustango::error`. `HealthRouter::show_errors()` opts back in.
+
+### Fixed — compression no longer empties large or streaming responses (#1954)
+
+Bodies over `max_body_bytes`, without a known size, or `206` pass through whole; `gzip;q=0, *` no longer gzips.
+
+### Fixed — ViewSet form-urlencoded bodies run serializer validation (#1993)
+
+A form body is typed by its model fields and checked like JSON; it no longer skips `validate`, lengths, ranges and choices.
+`Array`, `HStore` and `Vector` implement `OpenApiSchema`, so a serializer can carry them with `openapi` on.
+
+### Fixed — a ViewSet `source` rename no longer lets the model column be written (#1994)
+
+The model key behind a renamed field is dropped from JSON and form bodies before the write.
+
+### Fixed — a UUID-default column adds on MySQL and SQLite (#1987)
+
+`AddColumn` with `gen_random_uuid()` adds the column bare, fills each row, then sets the DEFAULT (MySQL refused with 1674).
+
+### Fixed — SQLite adds a `now()` column to a table with rows (#2017)
+
+`migrate` and unapply retry a refused `AddColumn` with the time frozen, as the system-chain converge does.
+
+### Fixed — MySQL drops an FK column, forward and on unapply (#1981)
+
+`DropColumn` of an FK column drops its constraint first, found by column so renames and 64-byte names work (MySQL refused with 1828). New export `migrate::unapply_pool_with_ledger`.
+
+### Fixed — `auto_uuid` tables create on MySQL and SQLite (#1987)
+
+`DEFAULT gen_random_uuid()` was a syntax error there. MySQL now gets `(UUID())`, SQLite a random v4 UUID blob (needs SQLite 3.41+).
+
+### Fixed — a system-migration generation error fails `migrate` (#2014)
+
+An unsupported framework field change (or an unwritable `system/migrations/`) was dropped, and `migrate` applied the stale chain.
+
+### Fixed — tenant migration failures exit non-zero; ledger bootstrap takes the migrate lock (#1844)
+
+`migrate-tenants`, `migrate` and `migrate --fake --all-tenants` now fail when any tenant failed.
+The ledger `CREATE TABLE` runs under the migrate lock (the legacy `PgPool` runner too), so concurrent PG replicas no longer hit 23505.
+
+### Fixed — change-password forms share one 8-character rule (#1874)
+
+The bare admin counted bytes and the tenant admin had no minimum. Both, and the operator
+console, now call `password_validators::check_builtin_form_password`.
+
+### Fixed — admin hides soft-deleted rows (#1918)
+
+Lists, counts, facets, detail/edit/delete pages, actions and inlines skip rows with the soft-delete
+column set. `?trashed=1` lists them, offers only `restore_selected`, and keeps the view across the action.
+
+### Fixed — admin facet and date counts follow the active filters (#2004)
+
+Counts are within the list's filters, search and row scope; a facet ignores its own filter, as in Django.
+The year strip shows the newest 200 years (`MAX_YEAR_BUCKETS`).
+Both now run through the ORM. Dict rows (`values()`, `aggregate()`) decode date and timestamp cells on PG/MySQL instead of `NULL`.
+
+### Fixed — admin signals: pre hooks fire, in order, and bulk actions send them (#1928)
+
+`admin_pre_save` / `admin_pre_delete` now run before the write, receivers run in registration order,
+and bulk actions send one signal per row: delete for `delete_selected`, save (`change = true`) for the rest.
+A refused or no-op action sends none.
+
+### Fixed — natural PKs in CreateView and ModelForm; ViewSet create fills v7 PKs (#1725)
+
+HTML `CreateView` and `ModelForm` inserts now take a client-supplied PK (never on update), via one
+`FieldSchema::accepts_input` rule. Schema-driven INSERTs, admin create included, fill `default_uuid_v7` keys and skip `generated_as` columns.
+
+### Security — logout revokes signed sessions server-side (#1855)
+
+Logout on the tenant admin, operator console and bare admin stamps a new `sessions_revoked_at` column, and every
+session check refuses cookies issued at or before it; `member_auth::logout` does the same for members.
+A logout that cannot read the user is a 500; an impersonation handoff from before the operator's logout is refused.
+
+## [0.59.13] — 2026-10-01
+
+### Fixed — admin bool facets and cells read SQLite/MySQL `1`/`0` as bools (#1730)
+
+A bool facet showed `1`/`0`, linked `?flag=1` and never marked the active value on SQLite/MySQL.
+Edit-form and list cells now read a numeric bool as checked/unchecked, not empty.
+
+### Fixed — admin bulk actions post under the admin prefix (#1765)
+
+The list's action form no longer posts to `/{table}/__action`, which 404ed under a prefix.
+
+### Fixed — admin links keep the whole filter state and the admin prefix (#1916)
+
+Pager, facet, date and custom-filter links and the search form keep every active filter,
+the date drill and `count=skip`. Audit feed, FK cell, generic-FK and 403 sign-out links use the prefix.
+
+### Fixed — admin and `ListView` paging is stable; `orphans` keeps the last rows (#1917)
+
+Admin lists order by `admin.ordering`, else the model's `default_order`, and both they and
+`ListView` end on the PK. `Page::limit()` on an orphan-merged last page now covers every row.
+
+### Fixed — ViewSet `PATCH` validates only the sent fields (#1995)
+
+Field rules skip absent fields, and the cross-field `validate` hook sees the stored row with only the fields the update writes applied.
+
+### Fixed — `check_unique_together_pool` reports collisions on PostgreSQL (#1872)
+
+The probe now runs as an ORM `exists` count; its raw `SELECT 1` failed to decode on PG and hid the field error.
+
+### Fixed — feature flags no longer expire after an hour (#1956)
+
+`FeatureFlags` writes through the new `Cache::set_forever`, so `enable` / `disable` stick even on a cache with a default TTL. `FeatureFlags::ttl` opts in to expiry.
+
+### Fixed — `create-admin` no longer logs a PG ERROR on every run (#1642)
+
+It swallowed a plain `CREATE TABLE` failure; it now uses the shared idempotent ensure path.
+A live test counts server-rejected statements on a repeat ensure.
+
+### Fixed — the fullstack template mounts the admin again (#1272)
+
+`src/urls.rs` gets a driver-neutral `admin_router(pool)` behind a login, and `main.rs` mounts it with the new
+`Cli::nest_with("/admin", …)`, built from the server's own pool, so no other verb needs `DATABASE_URL` (#1216).
+
+### Fixed — `check --deploy` warns about an admin with no login (#1627)
+
+Building an admin without `with_session_auth` now raises an `[admin]` warning; `check` builds the `nest_with` routers to see it.
+`admin::Builder::new` now defaults `secure_cookies` from `session::secure_cookies()` (`[security].secure_cookies`, else the prod tier).
+The getting-started guide teaches the gated admin and `create-admin`.
+
+### Fixed — a deploy image no longer skips framework schema changes (#1988)
+
+The scaffolded `Dockerfile` now ships `system/`, and every template seeds it.
+A chain regenerated into an empty `system/` now converges by content: missing framework tables and columns are created.
+Every tenant converges too, not only the first, and tenants of a mixed-scope project use the committed `system/`.
+Converge adds one object at a time and lists what it cannot add; on SQLite a `now()` column gets a fixed default on a table with rows.
+
+### Fixed — the `api` template gets the request span, `X-Request-Id` and access log (#1514)
+
+They were gated on `admin`, so a `manage`-only build mounted none of them.
+They now need only `_http_layers`, which `manage` implies.
+
+## [0.59.12] — 2026-10-01
+
+### Fixed — edited CHECK / EXCLUDE / composite FK / M2M now migrate (#1881)
+
+Same-name edits migrate as Drop + Add, and `Option<T>` → `T` with a default fills NULLs before `SET NOT NULL`.
+A junction, CHECK, EXCLUDE or index name shared by two models now resolves in a fixed order, not `inventory` order.
+
+### Fixed — a `max_length` change no longer undoes a type change (#1878)
+
+Shrinking a length on PostgreSQL now refuses over longer values instead of truncating them.
+
+### Fixed — migrations drop dependents first (#1879)
+
+Indexes, checks, composite FKs and M2M junctions drop before their columns and tables,
+and tables child first; SQLite and MySQL refused the old order.
+
+### Fixed — `AddColumn` keeps the field's FK and UNIQUE (#1877)
+
+As `CREATE TABLE` does; SQLite gets inline `REFERENCES` and a unique index.
+On SQLite a column with a default skips the FK and warns: SQLite refuses it on a table with rows.
+
+### Fixed — removing `unique` works for long table and column names (#1880)
+
+Every UNIQUE is named by one 63-byte helper (PG's rule), so the drop finds it.
+FK names are cut to 63 bytes, as PG already stored them, so MySQL no longer refuses long ones (1059).
+Two columns whose names shorten to one UNIQUE name are refused with an error.
+
+### Fixed — grouped aggregate `having` / `order_by` on a joined column (#1975)
+
+Over a derived table (distinct, limit, …) they now read the projected `alias__col`; a subquery inside them keeps its own aliases.
+`order_by(&[("a.name", ..)])` on a grouped aggregate now names `"a"."name"`, not one `"a.name"` identifier.
+
+### Fixed — integer division, `__second` and date lookups agree across backends (#1900)
+
+MySQL divides two integer expressions with `DIV`; PostgreSQL floors `__second` (59.7 is 59).
+PostgreSQL date lookups and `trunc_*` on a `DateTime` column, also across a relation, read it in UTC, not the session TimeZone.
+
+### Fixed — `Decimal` keeps its digits on MySQL; whole decimals show on SQLite (#1899)
+
+MySQL `Decimal` columns are now `DECIMAL(65, 28)`, wide enough for every `rust_decimal` value.
+The SQLite row decoder no longer shows a whole-number decimal as null.
+
+### Fixed — JSON equality on MySQL; `as_text` JSON paths on SQLite (#1898)
+
+MySQL now binds a JSON value as `CAST(? AS JSON)` (also for `<=>`), so `filter("data", json)` matches; its `as_text` of a JSON null is NULL.
+SQLite's `json_path(.., as_text = true)` returns text for numbers and booleans (`'1'`, `'true'`); other formatting can still differ from PostgreSQL.
+
+### Fixed — a model on table `audit` no longer grants the audit feed (#1979)
+
+The feed now needs `rustango_audit_log.view_feed` / `.clean_feed`, which no model's CRUD codename
+can equal. The old `audit.*` names still work while no model uses table `audit`.
+
+### Fixed — a parent with 1000+ inline children can be saved again (#1977)
+
+The edit form renders at most `MAX_FORMS` inline slots and links the child list for the rest.
+Rows it leaves out are not touched by the save.
+
+### Fixed — an INSERT whose generated PK can't be read back writes no row (#1978, #1969)
+
+On MySQL a non-integer DB-default PK is refused before the INSERT, so a re-submit can't duplicate it.
+SQLite reads a TEXT UUID default back. A submitted PK is reported as written (#1969, via #1894).
+
+### Fixed — `JtiStore` docs no longer suggest `rows_affected` after `DO NOTHING` (#1968)
+
+A MySQL skip reports one row too, so a replay passed. The example uses `sql::insert_or_ignore`.
+
+## [0.59.11] — 2026-09-30
+
+### Fixed — relation `SUM` keeps its type; grouped aggregates honour the queryset (#1944)
+
+`annotate_sum` over an M2M or generic relation no longer truncates a float column.
+`values(..).annotate(..)` now honours `distinct()`, `union()`, derived joins, `limit` and `offset`.
+There `.join()` joins run inside the grouped rows; grouping by a joined column of a `union()` is refused.
+
+### Fixed — `upsert` conflict target ignores field and partial unique indexes (#1935)
+
+Only a container-level `unique_together` (or `index(…, unique)`) without a `WHERE` is the
+target; otherwise the PK. An upsert on a set PK no longer fails on a field `index(unique)`.
+**Breaking:** an upsert of a new row whose field `index(unique)` value is taken now fails with
+a unique violation instead of updating that row; declare `unique_together` to keep the old target.
+
+### Fixed — `values()` reads Uuid and bytes columns on every backend (#1901)
+
+`values_dict` / `values_list` return `SqlValue::Uuid` and `SqlValue::Binary` instead of
+`Null` on SQLite and PostgreSQL, and bytes instead of `Null` on MySQL.
+
+### Fixed — compound queries keep the first branch whole (#1890)
+
+A union's first branch keeps its derived-table joins, DISTINCT and projection, and `values()`
+projects every branch. `fetch_paginated_pool` counts all branches; the MySQL/SQLite
+`distinct_on` keeps search and derived joins; `paginate()` orders by PK when unordered.
+
+### Fixed — PostgreSQL `bulk_update` of a column that is NULL in every row (#1888)
+
+Each NULL in the VALUES list is cast to its column type, so it no longer fails as text.
+
+### Fixed — MySQL do-nothing inserts use the PK and report skips (#1887)
+
+`insert_or_ignore` and friends no longer need an `id` column, and `insert_or_ignore` returns
+`false` for a skipped row. An upsert on an auto PK reads back the updated row's id, and
+`insert_returning_*` read it from the INSERT itself, not the session. New `rustango::sql::insert_or_ignore`.
+**Breaking:** `Dialect::write_conflict_clause` takes a `model: &ModelSchema` argument.
+
+## [0.59.10] — 2026-09-30
+
+### Fixed — tenancy `migrate` verbs honour their flags and scope (#1909)
+
+`migrate-registry --dry-run` previews instead of migrating; `migrate <target>` and
+`migrate --dry-run` see registry-scoped migrations only. **Breaking:** `migrate-registry`
+and `migrate-tenants` refuse flags they don't take, and a tenant-scoped `<target>` is refused.
+
+### Fixed — the CLI honours `with_tenant_pools` on SQLite and MySQL (#1914)
+
+Every backend now builds its `TenantPools` in one place, so `prewarm-pools` and
+`migrate-tenants` use the configured sizing, and `user_model` works without `postgres`.
+
+### Fixed — scaffolded viewsets and serializers compile (#1913)
+
+`make:viewset` (pool) and `make:serializer` import their model; the tenant viewset's mount
+comment names the file it wrote. `make:*` and `cargo rustango new` refuse names that
+become a Rust keyword or `std` / `core` / `crate` / `self` / `super`.
+
+### Fixed — `dumpdata` / `loaddata` round-trip (#1911)
+
+`loaddata` reads the fractional times `dumpdata` writes and integer strings for `i64`,
+loads parents before children, and resets Postgres id sequences, so the next insert
+doesn't collide. **Breaking:** `dumpdata` refuses Array, Range, HStore, Vector and Geometry
+columns (they were dumped as `null`), and `loaddata` exits non-zero when it skipped a row.
+New `Dialect::reset_sequence_sql` and `dumpdata --exclude`. Self-FK rows load parents first,
+and `--fail-fast` still resets sequences.
+
+### Fixed — `flush --yes` works on MySQL (#1912)
+
+Rows are deleted through the dialect's own `DELETE`; the hand-quoted `"table"` was a
+syntax error (1064) on MySQL for every table.
+
+### Fixed — tenancy user, permission and host verbs parse flags (#1910)
+
+`create-user acme --superuser` no longer makes a user named `--superuser`; a failed
+first-user check is an error, not a superuser; prompted passwords keep their spaces;
+`set-host-enabled --enabled false` reads `false` as the value. **Breaking:** `grant-perm`,
+`revoke-perm` and the host verbs refuse unknown flags (`--rol` granted to a user), and a
+valued flag refuses a following `--flag` as its value.
+
+### Fixed — shutdown has a drain deadline; interrupted runs are closed (#1883)
+
+After SIGTERM open connections get `[server] shutdown_timeout_secs` (default 20) to finish,
+then close; new `shutdown::serve_until_drained` and `server::Builder::drain_timeout`.
+Provisioning/migration runs left `running` for an hour are marked failed at boot, and a
+webhook retry of a failed run provisions again under the same `event_id`, resuming a
+tenant the failed run left inactive. A closed run is never reopened by its task. The stale
+limit is `WebhookConfig::stale_run_after` / `Builder::stale_run_after`.
+
+### Fixed — a broken SMTP config fails instead of mailing to stdout (#1923)
+
+**Breaking:** `email::from_settings` returns `Result`; `backend = "smtp"` with no host, a bad
+`from_address`, no `email-smtp` feature, or `smtp_tls = "tls"` / an unknown mode is a
+`MailError::Config` (new; `MailError` is now `#[non_exhaustive]`). `EmailJob` retries only
+transport errors, `dispatch_email` validates first, and `SmtpMailer` sends `Email.headers`.
+
+### Fixed — a bad settings value no longer boots on defaults (#1927)
+
+**Breaking:** with `Cli::with_settings_from_env`, a config that exists but does not load
+(bad TOML, a wrong type, a bad `RUSTANGO__*` override) now makes `Cli::run` fail. Only a
+missing `config/default.toml` still runs on Cli defaults. New `ConfigError::is_missing_config`.
+
+### Fixed — tenant pools follow `database_url` / schema edits from other processes (#1882)
+
+A cached tenant pool is keyed by the source it was built from, so a moved tenant is served
+from its new location once the Org cache refreshes (30 s), on every replica. New
+`TenantPools::cached_scoped_pool_count`.
+
+### Fixed — purging a tenant with an extra host (#1930)
+
+Purge now deactivates the tenant and evicts its pools first, drops the storage, then
+deletes its `rustango_org_hosts` rows and the Org. A failed purge can be retried.
+
+## [0.59.9] — 2026-09-30
+
+### Fixed — `DatabaseCache::incr` is atomic (#1871)
+
+One upsert per dialect, so parallel failed logins all count toward the lockout.
+The TTL is set when the counter is created, not on every call.
+
+### Fixed — change-password checks go through the login gate (#1873)
+
+A wrong current password on the admin, tenant admin and operator console forms now
+counts toward the account lock, so a stolen session cannot guess it at hash speed.
+
+### Fixed — `TrailingSlashLayer` open redirect (#1869)
+
+`//evil.com` and `/\evil.com` redirected off-site; the target's leading slashes and
+backslashes now collapse to one `/`, for both `Append` and `Strip`.
+
+### Fixed — uploaded HTML/SVG no longer runs on the app origin (#1849)
+
+New `with_uploads` (on `Cli` and `server::Builder`) and `StaticFiles::user_content` serve
+HTML, SVG and XML as `attachment` with `nosniff`. An empty `allowed_extensions` now refuses
+`ACTIVE_EXTENSIONS`, and `UploadConfig::max_files` (default 20) caps files per request.
+
+### Fixed — open ViewSets warn at mount, `make:viewset` guards writes (#1857)
+
+A ViewSet whose create/update/destroy need no codename logs a `rustango::viewset` warning;
+`.allow_anonymous()` (or `#[viewset(allow_anonymous)]`) says it is intended. `make:viewset`
+now scaffolds `.permissions_for_model()` (tenant) or `read_only` (pool).
+
+### Fixed — M2M on String / Uuid primary keys (#1926)
+
+The M2M managers bound every non-integer source PK as `0`, so all sources shared rows
+(MySQL matched any letter-first key). They now bind the real key and refuse an unsaved
+source with `ExecError::M2mUnsavedSource`. `M2MManager::contains` also decodes on PostgreSQL.
+**Breaking:** `M2mChangedContext::src_pk` is a `SqlValue`, not an `i64`.
+
+### Fixed — UPDATE checks field rules like INSERT (#1893)
+
+`update_pool`, `update_tx` and the audited `save_pool` now run `max_length`, `min` /
+`max`, `choices` and validators before writing, and `ModelForm::validate` reports them
+per field. **Breaking:** an update that broke these rules used to be stored; it now errors.
+
+### Fixed — template views bind values by field type (#1915)
+
+`CreateView` / `UpdateView` forms, `ListView` `filter_fields` and FK `_display` lookups
+now parse values like the admin (`forms::parse_form_value`) instead of binding text, so
+dates, UUIDs, decimals and JSON save on PostgreSQL and bool / int filters match on SQLite.
+**Breaking:** an empty or unparsable `ListView` filter value (bools take only
+`true`/`false`/`1`/`0`/`on`/`off`) is ignored. Filters accept `YYYY-MM-DD HH:MM:SS` datetimes.
+
+### Fixed — `default_uuid_v7` PKs on audited inserts and bulk writes (#1934)
+
+Audited `insert_pool` / `save_pool` no longer fail with `EmptyReturning`, and MySQL no
+longer overwrites the id with `LAST_INSERT_ID()`. `bulk_insert`, `bulk_upsert_pool` and
+`bulk_insert_or_ignore_pool` now fill `Uuid::now_v7()` per row instead of binding NULL.
+
+### Fixed — ModelForm, admin and CreateView report the PK they wrote (#1894)
+
+A client-set PK no longer comes back as MySQL's `LAST_INSERT_ID()` (`0`, so the admin
+redirected to `/0`), a Uuid PK no longer comes back as `NULL`, and a failed read is an
+error instead of `0` / `""`. All three now use the ORM's one PK read-back.
+
+### Fixed — formsets cap `TOTAL_FORMS` at 1000 (#1892)
+
+A huge client `TOTAL_FORMS` aborted the process (`Vec::with_capacity`) or pinned a worker
+in the admin inline loop. `total_forms` now refuses more than `formset::MAX_FORMS` (1000)
+with `FormSetError::TooManyForms`, and the admin re-renders the form with that error.
+**Breaking:** `FormSetError` gained a variant and is now `#[non_exhaustive]`.
+
+## [0.59.8] — 2026-09-30
+
+### Security — admin audit log needs `audit.view` / `audit.delete` (#1858)
+
+**Breaking:** a non-superuser gets 403 on the audit feed without `audit.view`, and
+sees only rows of tables they hold `{table}.view` on; cleanup needs `audit.delete`.
+The feed's record link no longer renders a raw `entity_pk` into `href`. The detail
+page's audit panel also needs `audit.view`; the cleanup form shows only with `audit.delete`.
+
+### Security — tenant admin puts `AdminSession` in request extensions (#1863)
+
+The translations editor now refuses non-superuser writes in the tenant admin too.
+New `admin::session::from_extensions` reads the extension, else the task-local.
+
+### Security — `register_admin_queryset!` scopes every admin route (#1859)
+
+Detail, edit, update, delete, bulk actions, autocomplete and facet counts now apply
+the hooks too, so a row the list hides is a 404. A delete of a missing row is a 404.
+Inline child rows follow the child table's hooks: hidden ones are neither shown nor editable.
+
+### Security — admin forms write only the fields they render (#1860)
+
+`editable = false` fields and fields outside `fieldsets` are no longer read from a
+create or edit POST, and an edit leaves them unchanged instead of NULL / `false`.
+
+### Fixed — `derive(Model)` builds schemas as full literals (#1720)
+
+A new `FieldSchema`, `ModelSchema` or `AdminConfig` field is a compile error in the derive again, not a silent `new()` default.
+
+### Tests — every session and flow cookie read has a happy-path test (#1694)
+
+A cookie reader that always returns `None` now fails a test at each call site.
+
+### Fixed — `DistributedLock` docs on `DatabaseCache` (#1837)
+
+`DatabaseCache::add` is atomic, so a DB-backed lock is safe across replicas; the page said it was not.
+
+### Fixed — test suites build with `postgres,sqlite,tenancy` (#1835)
+
+`urlencoding` is a dev-dependency, and the S3 and job-queue suites are gated on their features.
+
+### Fixed — `count()` / `exists()` / `sum()` honour the whole queryset (#1885)
+
+`.none()` now counts 0 without a query. Limit, offset, DISTINCT, joins, relation-span
+filters and `union()` are counted and aggregated through a derived table instead of dropped.
+`exists()` / `is_empty()` read at most one row, and unused ORDER BYs are dropped.
+
+### Fixed — `Sum` of a float column is no longer cast to an integer (#1886)
+
+`SUM` casts from the column type: float columns to double, decimals stay exact.
+SQLite has no decimal type; a NUMERIC `SUM` there reads as `f64` / `i64`.
+
+### Fixed — a multi-batch `bulk_insert_pool` is all-or-nothing (#1891)
+
+Batches split by the bind limit share one transaction. Inside `atomic()` on the same pool,
+any size runs in a savepoint of it, so the outer rollback undoes it.
+
+### Fixed — relation-span filters no longer leak memory per query (#1889)
+
+Multi-hop join aliases are interned once per path instead of leaked on every `compile()`.
+Paths deeper than 6 hops are refused, which keeps that set bounded by the schema.
+
+### Fixed — a job heartbeat no longer freezes the job (#1961)
+
+The `PgJobQueue` heartbeat now runs beside the job, so a job holding the last pool
+connection (or SQLite's writer) no longer stalls until `acquire_timeout`.
+
+## [0.59.7] — 2026-09-30
+
+### Security — `JwtBackend` checks the tenant binding (#1848)
+
+**Breaking:** on a tenant route a token must carry the resolved tenant's `tenant` claim,
+so tenant A's user 1 no longer logs in as tenant B's user 1. MCP agent tokens are refused
+by `JwtBackend` and `JwtAuth::verify_for_tenant`. New `JwtBackend::issue_for_tenant`.
+
+### Security — single-use auth links are one atomic `add` (#1853)
+
+Two simultaneous redemptions of a reset, magic-link or verify link no longer both pass.
+A failing cache or a `NullCache` now refuses the link instead of letting it be reused.
+
+### Security — JWT refresh ends on password change, cap and replay (#1854)
+
+**Breaking:** `/api/auth/refresh` refuses a chain after a password change, past
+`Config::refresh_absolute_ttl_secs` (default 30 days) from login, and once a rotated
+token is replayed. A retry within `refresh_reuse_grace_secs` (10 s) only gets a 401.
+Refresh tokens issued before this release are refused.
+
+### Fixed — a panicking job no longer kills its worker (#1843)
+
+A job panic is now a retryable failure, on both queues; a panicking dead-letter callback
+is logged. **Breaking:** `PgJobQueue` counts `attempt` at pickup and dead-letters a row
+reclaimed with no attempts left. Running jobs refresh `locked_at` (`heartbeat_interval`,
+default 10 s, min 1 ms), finishing writes need the worker's own lock, and `shutdown` aborts
+after 5 s and unlocks the aborted row. A lost lease drops the run's result and dead letter;
+a job with no handler keeps its attempt.
+
+### Security — ViewSet writes stay inside `fields()` and the owner (#1845)
+
+**Breaking:** create and update now write only the `fields()` columns (and the serializer's
+writable ones); other body keys are ignored. `OwnedBy` pins its column: create stores the
+caller, update never changes it, and a write with no principal is `403`.
+`?ordering=` with a serializer falls back to the fields it renders. New
+`ViewSetFilter::write_pins`, `WritePin` and `ModelSerializer::readable_source_fields`.
+
+### Security — expired API keys are verified before they are refused (#1729)
+
+`ApiKeyBackend` no longer answers an expired key faster than an unknown one.
+`api_keys` hashes through `passwords` and gains `*_async` variants; so does `PasswordHasherChain`.
+
+### Security — HMAC signatures cover the host (#1836)
+
+Signatures cover the host. A service sharing a key with another must pin its own with
+`HmacAuthLayer::host`; unpinned, the request's own `Host` is trusted.
+
+### Changed — SSO reuses OIDC discovery (#1833)
+
+An `oidc` provider fetches its discovery document once per issuer per hour, not on every login.
+
+### Fixed — MySQL `Uuid` fields save and load (#1733)
+
+A `Uuid` now binds as hyphenated text into its `CHAR(36)` column instead of 16 raw
+bytes (error 1366). Every read decodes that text: typed fetch, `Auto<Uuid>`,
+`ForeignKey<_, Uuid>`, `select_related`, `pluck` / `pks` / `values_list`, JSON rows
+and the audit diff. **Breaking:** a hand-made `BINARY(16)` column now fails writes
+with error 1406 (`Data too long`) and reads with sqlx "mismatched types"; use `CHAR(36)`.
+
+### Fixed — MySQL unbounded `String` columns hold more than 64 KiB (#1708)
+
+A `String` without `max_length` is now `LONGTEXT` on MySQL, not `TEXT`, so long
+content saves as on PostgreSQL and SQLite. Existing columns need an `ALTER`.
+
+### Added — `check --deploy` flags a case-insensitive MySQL database (#1742)
+
+MySQL's default `_ai_ci` collation makes `=` and `unique` ignore case, unlike PostgreSQL
+and SQLite. The deploy check now warns, and new MySQL projects use `utf8mb4_0900_as_cs`.
+
+## [0.59.6] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Added — egress proxy for checked outbound calls (#1792)
+
+Set `RUSTANGO_OUTBOUND_PROXY` to send SSO, Slack and webhook calls through a proxy;
+targets are still checked first. These calls now share pooled clients instead of
+building one per call. `HTTP(S)_PROXY` is no longer read, also for webhooks with
+`allow_private_targets(true)`.
+
+### Security — one tenant context per request (#1826)
+
+Auth, sessions, `Tenant<DB>` and `DatabaseTenant<DB>` now read the same mounted context,
+so an app with two contexts can no longer authenticate one tenant and serve another.
+
+### Changed — MCP authed handlers always have a token lifecycle (#1827)
+
+Authed routers carry their `JwtLifecycle` by type, so the unreachable "mcp auth not configured" 500s are gone.
+
+### Security — HMAC replay check is one atomic `add` (#1828)
+
+Two simultaneous copies of a signed request no longer both pass the nonce store.
+Nonces are kept `2 × tolerance_secs`, so a future-dated request cannot be replayed
+once its nonce expires. A `NullCache` nonce store, or a failing one, now warns.
+
+### Added — `testkit::CaptureWriter` (#1829)
+
+One shared writer for tests that assert on rendered `tracing` output; replaces ten copies.
+Needs the `testkit` and `runtime` features.
+
+## [0.59.5] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Security — lockouts that never lock, and unchecked JWT revocation, are flagged (#1809)
+
+A lockout on `NullCache` now warns at the first login, and in `check --deploy` when
+the manage binary installs the lockout (new `Cache::stores_nothing`). `JwtBackend` without a JTI store warns once when
+it accepts a revocable token.
+
+### Security — admin TOTP enrollment codes are rate limited (#1791)
+
+A wrong code on `POST /account/totp` now counts against the admin login lock,
+like a wrong code at sign-in.
+
+### Security — FileCache `add` has one winner over an expired key (#1811)
+
+`set`, `add`, `incr`, `touch` and expired-entry clears now hold an advisory lock
+(owner-only `.lock-XX` files in the cache dir), so `add` has one winner and lockout
+counts are not lost. A held lock is waited for off the async worker, for up to 5 s.
+
+### Security — OAuth2 success bodies are capped (#1793)
+
+Discovery, token and userinfo responses over 1 MiB now fail with a clear error
+instead of being buffered whole.
+
+### Security — the outbound allowlist never opens cloud metadata (#1796)
+
+`RUSTANGO_OUTBOUND_ALLOW` host and CIDR entries no longer reach 169.254.169.254,
+169.254.170.2, 169.254.170.23, 100.100.100.200, fd00:ec2::254 or fd00:ec2::23,
+including IPv6-embedded forms (mapped, compatible, NAT64, 6to4, Teredo).
+
+### Security — ViewSet create is audited (#1816)
+
+On an audited model, ViewSet single and bulk create now write one `create` audit
+row per row, in the insert's transaction. A create whose row can't be read back
+(an unreadable generated PK) or a failed audit write now rolls back with a `500`.
+New `ExecError::AuditWrite` / `ExecError::GeneratedPkUnreadable`.
+
+### Security — bulk actions bind keys with the model's PK type (#1817)
+
+**Breaking:** `BulkAction::run` takes a `PkSet` (keys typed from the model's PK)
+instead of a table name and `&[i64]`. The built-ins write through the ORM on the
+schema's PK column, so a text PK can no longer match the wrong rows on MySQL.
+A `PkSet` holds at most `PkSet::MAX_KEYS` (10 000), under SQLite's bind cap.
+
+### Fixed — MCP on the pure SQLite / MySQL stack (#1802)
+
+`Tenant<Sqlite>` / `Tenant<MySql>` now also read `DatabaseTenantContext`, so the
+`mcp::*_for` routers serve that stack. `mcp::router` and `mcp::tenant_router` no
+longer mount a `GET` SSE route that always answered `500`.
+
+### Changed — `AccessLogLayer::use_real_ip` (#1785)
+
+**Breaking:** the `trust_proxy_headers` field is now `use_real_ip`, since it reads
+only `TrustedRealIp`, never a header. The old setter stays as a deprecated alias.
+
+### Fixed — scaffolded examples' config tiers match the scaffolder (#1801)
+
+Regenerated, so the dev tiers set `secure_cookies = false` and `getting_started_blog`
+uses its compose credentials and ships its `.env.example`. A test now fails when
+they drift again.
+
+## [0.59.4] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — operator console requests log once (#1788)
+
+With a `Builder::observability` access log, the console no longer adds its own,
+so an apex request writes one line that honours `trust_proxy_headers`. With
+`observability(None)` the console keeps its own line. The span always redacts `next`.
+
+### Fixed — `pluck_pairs` reads NULL the same on every backend (#1808)
+
+**Breaking:** `pluck_pairs::<K, V>` now takes `FlatScalar` types; a NULL into a
+bare `i64` errors naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+
+### Security — ViewSet, template views and soft delete audit their writes (#1794)
+
+On an audited model, ViewSet update/delete, template `UpdateView` / `DeleteView` /
+`delete_selected`, `soft_delete::{soft_delete, restore, purge}` and the
+`bulk_actions` built-ins now write one audit row per row, in the write's transaction.
+New `audit::update` / `audit::delete` pick the audited path from the schema;
+`audit::update_as` records soft delete and restore under their own operation.
+
+### Security — admin custom actions check each row (#1805)
+
+A `register_action` action now needs the `change` hook and a hook named after
+the action to allow every selected row; one refusal is a `403` and the handler
+does not run. The handler only gets PKs of rows that exist.
+
+## [0.59.3] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — flat `values_list` reads NULL the same on every backend (#1773)
+
+**Breaking:** `pluck`, `pks`, `value` and `values_list_flat().fetch/first`
+now take a sealed `FlatScalar` type; a NULL into a bare `i64` errors
+naming the column (SQLite returned `0`), `Option<i64>` gives `None`.
+Your own newtypes can no longer be the flat `U`.
+
+### Security — warn when login defences are per process (#1534)
+
+The first login on an in-memory account lockout logs a warning and
+`check --deploy` notes it; `JwtAuth` warns when revocation uses
+`InMemoryJtiStore`. New `Cache::is_process_local` (true for `FileCache`)
+and `JtiStore::is_process_local` report it.
+
+### Security — pruning an audited model audits each row (#1782)
+
+`prune_all` on an audited model now deletes through the audited path, one
+`delete` entry per row. Rows removed by FK cascades are still not audited.
+
+### Security — admin bulk actions check each row (#1762)
+
+`delete_selected` and `restore_selected` now run the per-row `delete` /
+`change` hook on every selected row; one refused row refuses the action
+with `403`, as Django does. Only rows that were read and checked are written.
+
+### Security — idempotency holds a key while its request runs (#1724)
+
+A retry with the same `Idempotency-Key` while the first request runs now
+gets `409` with `Retry-After` instead of running the handler twice. The
+marker lives `lock_ttl` (60 s default) so a crash can't wedge the key.
+A response over `body_cap` now reaches the client whole instead of empty.
+The marker is renewed while the handler runs and only its owner frees it;
+a run that stored just before the marker was won is replayed, not re-run.
+`FileCache::add` is now atomic across processes. Admin bulk actions audit
+exactly the rows they write. `FileCache::set` replaces the file atomically,
+so a renewal no longer shows readers an empty marker; `add` works without
+hard links.
+## [0.59.2] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — feature sets that did not compile
+
+- `sqlite,webhook-delivery` and `sqlite,oauth2`: `messages` now also needs axum (#1797, #1719).
+- `sqlite,passwords`, `sqlite,signals`, `sqlite,config` and `sqlite,manage,config`: the request middleware follows `manage`, and `config` enables `signals` (#1739).
+- The three `tenancy,sso` live suites build their `User` from `testkit::user()` (#1737).
+- A build with no database backend now starts with one clear error (#1509).
+## [0.59.1] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Fixed — MCP tenant router on a non-default backend (#1787)
+
+New `mcp::tenant_router_authed_for::<DB>`, `secure_tenant_router_for::<DB>` and
+`secure_tenant_router_from_settings_for::<DB>` serve a SQLite or MySQL
+`TenantContext` in a build that also enables `postgres`; before, it got 500.
+
+### Fixed — member SSO on a non-default backend (#1741)
+
+New `member_auth::member_sso_router_for::<DB>`, same fix for member SSO.
+
+### Fixed — example configs list the `[auth]` login-limit keys (#1740)
+
+Regenerated from the scaffolder, so `login_ip_*`, `login_global_*` and
+`hash_wait_ms` are documented where new projects copy from.
+
+## [0.59.0] — 2026-09-29
+
+Tagged only; not published to crates.io.
+
+### Security — bulk writes on audited models write audit rows (#1747)
+
+`destroy`, `delete_where`, `update_where`, `update_all`, `increment_each`,
+`bulk_update`, `upsert`, non-`Auto` `bulk_insert` and
+`QuerySet::update().execute_pool` now audit each affected row in the
+write's transaction; `truncate` writes one bulk `delete` entry. Writes
+that cannot audit return `ExecError::AuditUnsupported` on audited models.
+
+### Security — outbound clients check their target (#1716)
+
+Slack `webhook_callback` and OAuth2 discovery, token and userinfo calls
+refuse private and metadata addresses, never follow redirects, and keep
+at most 256 bytes of an error body. Same check as webhook delivery.
+
+**Breaking:** an IdP or Slack hook on a private address is refused until
+listed in the new `RUSTANGO_OUTBOUND_ALLOW` (hosts and CIDRs); webhook
+delivery ignores that list. `OAuth2Provider::http` is removed; use the new
+`with_client_config` / `from_discovery_with` for a custom CA or mTLS.
+
+### Security — every framework template autoescapes (#1721)
+
+New `template_extensions::html_tera()` / `html_tera_from_glob()` escape
+every template, not only `.html`. `EmailRenderer` escapes the HTML body
+and leaves the subject and text body raw.
+
+**Breaking:** `EmailRenderer::tera_mut()` is replaced by `configure()`;
+`tera()` now returns the HTML engine.
+
+### Fixed
+
+- Admin TOTP re-enroll needs a current code from the confirmed device, so a stolen session cannot replace the factor; a failed start now shows an error (#1776).
+
 ### Added
-- **A job runs with the audit source and timezone of whoever enqueued it.**
-  `tokio::spawn` inherits no `task_local!`, so a job used to run with none of
-  its caller's ambient context — an audit row written from one recorded
-  `system`, making "who deleted this customer?" a dead end whenever a job did
-  the deleting. `task_context::TaskContext` captures the context at *dispatch*
-  (not at worker spawn, which happens once at boot, long before any caller
-  exists) and reinstalls it around the handler, unchanged: a job enqueued by
-  user 42 audits as `user:42`. Only the audit source and timezone cross — the
-  transaction callback queue, the signal suppression flag and the request
-  session would each cause bugs if they did, so the list is explicit rather
-  than a loop over every task-local (#1229). The row does not record that the
-  work ran deferred; that belongs in its own column rather than a prefix on
-  the token, which exact-match filters would miss (#1385).
-  **Carried by `InMemoryJobQueue` only**: `PgJobQueue` stores its envelope as a
-  `rustango_jobs` row, so context needs a column and a migration, and the
-  scheduler needs a context assigned rather than captured. Both still run as
-  `System`.
+
+- `JwtAuth::router_for::<DB>()` and `require_bearer_for::<DB>` serve a non-default `Tenant<DB>`, e.g. SQLite in a build with `postgres` on (#1778).
+
+### Security — a TOTP re-enroll keeps the confirmed factor until the new one is confirmed (#1756)
+
+Starting a re-enroll no longer replaces the confirmed device: the new
+secret waits in `pending_secret_base32` and a code for it swaps it in,
+so an unfinished re-enroll no longer lets the password alone sign in.
+The new key is shown only in the re-enroll response, and the next
+sign-in with the old factor drops an unfinished re-enroll.
+
+## [0.58.1] — 2026-09-28
+
+Tagged only; not published to crates.io.
+
+### Security — every IP reader uses the trusted client IP (#1745)
+
+The ViewSet throttle, the auth signals' `ip_address` and the access log
+no longer read the leftmost `X-Forwarded-For` / `X-Real-IP`; they use
+`TrustedRealIp`, else the socket, like the rate limiters.
+
+**Breaking:** `signals::auth::meta_from_headers` is replaced by
+`meta_from_parts` (needs `admin`). Behind a proxy without
+`RealIpLayer::trust_proxies`, every client now shares one ViewSet bucket
+and logs the proxy IP. See UPGRADING.
+
+New `server::Builder::real_ip` mounts `RealIpLayer` outside the access log
+and the tenant admin, so their IPs are the trusted client.
+
+### Security — login-limit leftovers (#1748)
+
+`RateLimitLayer::per_ip` groups IPv6 by /64. A raw MCP key on a busy
+hash queue answers 503, not 401. The admin 2FA prompt no longer spends
+login limit tokens.
+
+**Breaking:** `verify_raw_agent_credential` returns
+`Result<Option<McpAgent>, AgentError>`, not `Option<McpAgent>`.
+
+### Fixed — SQLite NULLs decode as `null`, not `0` (#1766)
+
+On SQLite a NULL cell came back as `0` / `false` / `""` in ViewSet JSON,
+the admin form and `values_dict`; it is `null` now, as on PG and MySQL.
+
+### Fixed — admin create of users, secrets and timestamps (#1763, #1764)
+
+The admin can create and edit tenant and bare-admin users: `password_hash`
+is a password input, hashed off the runtime, and an empty edit keeps it.
+SSO provider `client_secret`s are encrypted on admin writes and never shown.
+Read-only fields render locked and not `required`; read-only NOT NULL
+timestamps are filled on create, `auto_now` is restamped on update, and an
+untouched datetime is no longer truncated to seconds. New forms pre-check
+`default = "true"` checkboxes. API keys and agents are minted by their own
+flows, so the admin no longer offers an Add form for them. The audit log
+records a secret change as `[changed]` and never stores the value.
+
+### Fixed — `bin/bump-version.sh` covers `docs/index.toml` and install pins (#1750)
+
+- A series bump now rewrites `docs/index.toml`, `orm = { package = "rustango", version = … }` and `<crate> = "X.Y"` pins, and leaves example comments alone; the verify step checks what `docs_versions` checks.
+
+### Fixed — CI pulls service images from a GHCR mirror (#1688)
+
+- `mirror-images.yml` copies each CI image to `ghcr.io/ujeenet/ci-*` weekly, so jobs stop failing on `toomanyrequests`.
+
+### Fixed
+
+- `DatabaseCache` keys compare exactly on MySQL: `user:1` no longer reads `User:1`, nor `café` `cafe`.
+  Prefix deletes are exact-case on MySQL and SQLite too (#1757).
+
+## [0.58.0] — 2026-09-28
+
+### Security — bare admin logout needs a CSRF token
+
+`POST /logout` on the bare admin now refuses a missing token or a
+foreign Origin, like the tenant admin and console.
+
+### Security — ViewSet and template views apply global scopes (#1746)
+
+`ViewSet` and `ListView` / `DetailView` / `UpdateView` / `DeleteView`
+now apply the model's `global_scope(...)` filters, like a `QuerySet`:
+lists, counts, filters, search, pagination and the built-in
+`delete_selected` skip scoped-out rows, and a PK read, update or delete
+of one is a 404. Custom bulk actions get only the selected PKs the
+scopes let through, and FK `_display` lookups apply the target's scopes.
+A write that leaves its row outside the scope is not echoed: an update
+answers `204`, a create `201` with no body (`null` in a bulk array).
+`?search=` is now ANDed with the whole filter, also when it is an `OR`.
+The admin still sees every row; narrow it with
+`register_admin_queryset!`. New `ModelSchema::with_global_scopes` and
+`.with_global_scopes()` on `SelectQuery`, `CountQuery`, `UpdateQuery`
+and `DeleteQuery` for queries built from a schema.
+
+### Security — SSO links accounts by provider subject, email linking opt-in
+
+SSO logins (bare admin, tenant admin, member) now sign in the user linked
+to the IdP's `(provider, sub)` in the new `rustango_sso_links` table. A
+matching email links a first-time user only when the provider has the new
+`allow_email_link` (default off), and never a superuser or staff account.
+Links and emails match exactly on every collation. Only superusers write
+provider and link rows in the admin; an editable operator console sets the
+shared flag in place. `sso::resolve_by_slug` returns
+`ResolvedProvider`; `member_auth::find_or_provision_member` takes a
+`ProviderKey` and returns `MemberSignIn`.
+
+### Security — bounded update/delete; nested `atomic()` uses savepoints (#1666)
+
+`QuerySet::update()` and `delete()` dropped `limit`, `offset` and
+`order_by`, so `.limit(1).delete()` deleted every matching row. They
+now bound the statement by primary key on every backend, and refuse
+(`QueryError::BoundedDmlUnsupported`, reason `BoundedDmlReason`) when
+they cannot, including a negative limit or offset. A nested `atomic()`
+on the same pool opened a second transaction that survived the outer
+rollback and deadlocked a one-connection pool; it now runs in a
+savepoint on the outer connection. `on_commit` callbacks fire only at
+the outermost commit. SQLite `.offset(n)` without `.limit()` no longer
+emits invalid SQL. A transaction the server already ended (a PG
+statement error the closure ignored, a MySQL deadlock) makes `atomic`
+return `ExecError::AtomicAborted` instead of `Ok`; a MySQL DDL implicit
+commit returns `ExecError::AtomicEndedEarly`.
+
+**Breaking:** the `atomic` closure gets `&AtomicTx` (lock it per
+statement), not `&mut PoolTx`. New public items: `AtomicTx`, `TxGuard`,
+`ExecError::NestedAtomic`, `ExecError::AtomicAborted`, `ExecError::AtomicEndedEarly`,
+`QueryError::BoundedDmlUnsupported`, `BoundedDmlReason`.
+
+### Security — single-use refresh rotation, TOTP replay guard, fixed lockout window (#1672)
+
+`JwtLifecycle::refresh` and `refresh_with` redeem the old refresh token
+through one `JtiStore::mark_used` call, so two concurrent refreshes of
+one token no longer both succeed. An admin TOTP code is accepted once:
+the device stores the last accepted time step (`last_used_step`) and a
+code must be for a later one. New `totp::matched_step` /
+`matched_step_at` return the step a code matched, and
+`admin::totp_store::redeem_code` / `confirm_with_code` accept a code
+once. Account lockout counts failures in a fixed window from the first
+failure; a failure no longer extends it.
+
+`migrate` now creates `rustango_admin_totp`, so a fresh install with
+`totp` no longer refuses every admin login before enrollment.
+
+### Security — page cache keys on the resolved tenant; long DB cache keys hashed (#1674)
+
+`CachePageLayer` resolves the request's tenant and puts its slug in the
+key, so tenants picked by `X-Org` on one Host no longer share a page.
+With `tenancy` on and no tenant context it does not cache; opt out per
+route with `tenant_agnostic(true)`. `DatabaseCache` stores keys over
+255 bytes as a 190-byte head plus SHA-256, so they round-trip on MySQL
+instead of truncating and colliding.
+
+### Security — trusted client IP, dual-stack IP rules, streamed body limit (#1673)
+
+`RealIpLayer::trust_proxies` now takes the rightmost `X-Forwarded-For`
+/ `Forwarded` hop that is not a trusted proxy; it took the leftmost,
+which the client writes. Behind a trusted proxy `HeaderStrategy::Auto`
+reads only `X-Forwarded-For`. `ip_filter` and `trust_proxies` match
+IPv4-mapped IPv6 peers against IPv4 rules, so a v4 blocklist no longer
+fails open on a dual-stack listener. `BodyLimitLayer` caps chunked and
+HTTP/2 bodies as they stream (413) and checks `QUERY` by default. An
+all-trusted chain resolves to the rightmost hop. A ViewSet create or
+update over the cap answers 413 too, not 400.
+
+### Security — Model shortcuts honour global scopes; Pool writes are audited (#1675)
+
+`Model::sum`, `avg`, `min`, `max`, `destroy` and `delete_where` now
+apply the model's global scopes, like their `QuerySet` versions. On
+audited models `soft_delete(&Pool)` and `restore(&Pool)` write their
+audit row in the same transaction as the UPDATE, and `insert_pool`
+records the assigned PK instead of an empty `entity_pk`. On MySQL only
+the first `Auto` field is read back after an insert, so other tracked
+`Auto` fields (such as `auto_now_add`) and generated columns are
+recorded as `null` in the create row there. Audited writes that change no row write no audit row, and soft-delete
+and restore rows record the value written.
+
+### Security — login rate limits and a bounded hashing queue (#1609, #1732)
+
+Every built-in password login (admin, operator console, tenant admin,
+JWT, HTTP Basic) passes one gate before the user lookup: a global
+ceiling, a per-IP limit, and a per-username lock that counts unknown
+usernames like real ones. A refused login gets `429` with
+`Retry-After`, the same whether or not the account exists; a locked
+account no longer answers differently from an unknown one. Hashing
+waits at most `[auth] hash_wait_ms` (default 5 s) for a slot, then
+answers `503`, the same for known and unknown users. New `[auth]`
+keys: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`,
+`login_global_window_secs`, `hash_wait_ms`; `lockout_threshold` and
+`lockout_duration_secs` now take effect.
+
+The gate checks the account lock, then the per-IP limit, then a
+global limit per login scope (admin, operator console, each tenant); a
+refused request spends nothing from later limits, and successful logins
+are free. IPv6 clients are limited per /64. Once the row is found the
+lock also follows the stored username, so spellings MySQL treats as
+equal share one lock. HTTP Basic and API keys have their own scopes,
+count only failures per IP, and use at most half the hashing slots. A
+failure while locked no longer extends the lock. A busy hash queue
+answers 503 on the password-change pages and agent `/token`.
+The tenant admin behind `server::Builder` now gets the client IP, so
+its per-IP login limit applies (the route wrapper dropped it).
+
+### Fixed — session extractors on SQLite and MySQL
+
+`SessionUser`, `SessionOperator` and `CurrentMember` looked only for
+the Postgres `TenantContext`, so with the `postgres` feature on (the
+default) a stack that mounts `TenantContext<Sqlite>`,
+`TenantContext<MySql>` or `DatabaseTenantContext` saw every request as
+anonymous. They now find the tenant context of any backend.
+
+### Security — a password change ends sessions from the same second (#1338)
+
+Tenant admin, member, `SessionUser` and operator-console sessions now
+carry a fingerprint of the password hash, so any change or reset ends
+every older session, even one issued in the same second.
+`SessionOperator` now checks this too; it used to ignore password
+changes. An open impersonation in the tenant admin ends when that
+operator's password changes (#1735). The fingerprint is domain-tagged,
+so it never matches another MAC made with the session secret. See
+UPGRADING.
+
+### Security — password hashing no longer blocks the async runtime (#1709)
+
+Login, change-password, API-key and agent checks ran argon2 inline on
+Tokio workers, so a few parallel logins could stall every request. New
+`passwords::{hash_async, verify_async, verify_dummy_async}` and
+`tenancy::password::*_async` run it on the blocking pool, at most one
+per CPU at a time, and every framework call site uses them. Call the
+async ones from handlers; clippy now refuses the sync ones inside the
+crate.
+
+### Security — examples escape product text in the storefronts (#1636)
+
+`platform_commerce` and `platform_commerce_saas` HTML-escape product
+`sku` and `name`.
+
+### Security — idempotency replays are scoped to the caller and route (#1668)
+
+`IdempotencyLayer` now keys a stored response on host, the request's
+tenant, the resolved caller, method, path and query, then the client's
+key. With no resolved caller it hashes `Authorization`, `Cookie` and
+`X-Api-Key` instead, so a token refresh between retries still replays
+when auth runs first. A response that sets a cookie is not stored. A
+reused key with a different body gets `422`; a body over `body_cap`
+gets `413`, other body errors `400`. `require_auth` now records the
+tenant slug.
+
+### Security — ViewSet create keeps a client-supplied primary key (#1671)
+
+ViewSet create and bulk create now write the PK a client sends for a
+model whose PK is not `Auto<T>` (a `String` slug, say). Before, it was
+dropped: the create failed, and on SQLite with a nullable PK column it
+committed an unreachable NULL-key row. A create with no PK is now a 400
+on every backend. Update still ignores a PK in the body. The created
+row is read back by that PK, so MySQL returns the right row and a Uuid
+PK no longer 500s. On SQLite, Uuid columns in ViewSet JSON now show
+their value instead of `null`.
+
+### Security — CSRF refuses an empty token (#1693)
+
+An empty `rustango_csrf` cookie with an empty `_csrf` field or
+`X-CSRF-Token` header passed the double-submit check. The CSRF layer
+and `verify_form_token` now share one check that refuses it.
+
+### Fixed — the admin sets one CSRF cookie on a first visit (#1711)
+
+A first visit to a protected admin page set two different
+`rustango_csrf` cookies; it worked only because browsers keep the last.
+
+### Security — `urlize` escapes its output; built-in HTML views check CSRF (#1669)
+
+`urlize` and `urlizetrunc` now HTML-escape the href, the link text and
+the text around links, so `{{ x | urlize | safe }}` is safe on user
+input. Every `template_views` router with a POST route now refuses a
+POST without a matching CSRF token; before, the token was rendered but
+nothing checked it unless `Cli::with_csrf()` was on. `urlizetrunc` no
+longer breaks non-ASCII text.
+
+### Security — tenant FKs from ensure helpers stay in the tenant schema (#1645)
+
+On PostgreSQL, the tables that permissions, API keys, audit, TOTP and
+passkeys create for themselves now schema-qualify every FK target. A
+schema-mode tenant without `rustango_users` could get an FK bound to
+`public.rustango_users`, so a delete in `public` cascaded into the
+tenant. It now gets a "relation does not exist" error. MySQL and SQLite
+are unchanged.
+
+### Security — admin inline formsets stay under their parent (#1667)
+
+Inline updates and deletes are keyed on the parent (the FK, or content
+type and object pk), and inserts always set the parent, ignoring a
+submitted FK. Each inline row passes the child table's own admin gates
+first. A child PK from another parent returns 404; a refused gate
+returns 403 and the parent is not saved. Inline and child
+`readonly_fields` are no longer written. Rows you did not edit skip
+the change check, so one locked child row no longer blocks the save. A
+child deleted by someone else since the page loaded counts as deleted;
+editing it re-renders the form with a message.
+
+### Security — webhook delivery checks its target (#1670)
+
+Delivery sends only to http/https, does not follow redirects, and
+refuses loopback, private, link-local, CGNAT, multicast and unspecified
+addresses, including IPv4 inside 6to4, Teredo and NAT64, checked after
+DNS and pinned for the connection. The refusal does not name the
+resolved address. A failed
+delivery stores the status code, not the response body. Use
+`WebhookSubscription::allow_private_targets(true)` for intranet or test
+receivers.
+
+### Changed — schema structs are `#[non_exhaustive]`, with `const fn` constructors (#1661)
+
+**Breaking** for hand-built schemas; see UPGRADING. `FieldSchema`,
+`ModelSchema` and the other structs in `core::schema`, the
+`Relation` variants, `SqlError` and `ExecError` can now grow without a
+breaking release. `clippy::exhaustive_structs` is denied in
+`core::schema`, so a new struct there cannot slip in exhaustive.
+
+### Security — tenant admin writes are CSRF-protected (#1713)
+
+The tenant admin's create, update, delete, bulk actions, change-password
+and logout checked no CSRF token. Tenant hosts are same-site, so a page
+on one tenant could edit another tenant's data through its admin's
+browser. `TenantAdminBuilder::build()` now wraps every route in the
+token and `Origin` check, and every tenant admin form carries the token.
+
+### Security — the operator console is CSRF-protected (#1710)
+
+None of its POSTs checked a token or `Origin`, and a tenant subdomain
+is same-site with the apex, so `SameSite=Lax` did not help: a page on
+any tenant host could act as a signed-in operator — purge tenants, or
+add a shared SSO provider and sign in as any tenant user. Every console
+POST now needs the CSRF token and a same-host `Origin`; every console
+form carries the token, and the branding upload sends it as a header.
+Scripts that POST to the console must send `X-CSRF-Token`.
+
+`csrf::ensure_token` now reuses a `rustango_csrf` cookie only if it has
+the shape of a minted token, and mints a fresh one otherwise. A sibling
+subdomain can plant any cookie value, and the token is rendered into
+pages.
+
+### Fixed — a new tenant project loads its settings (#1702)
+
+`cargo rustango new --template tenant` wrote `config/*.toml` but its
+`main.rs` never called `.with_settings_from_env()`, so the tier files
+did nothing and the login, admin and console sent no security headers.
+Existing projects: add that call to the `Cli` chain in `main.rs`.
+
+With settings loaded, two template defaults mattered. The dev tier now
+sets `secure_cookies = false`, so login works over plain HTTP. The
+release `Dockerfile` sets `RUSTANGO_ENV=prod`; unset, the image loaded
+the dev tier and bound 127.0.0.1 (the fullstack image already did).
+
+### Security — `allowed_hosts` and the HTTPS redirect cover the whole tenancy server (#1700)
+
+Under `Cli::tenancy()`, `[security] allowed_hosts` and
+`secure_ssl_redirect` reached only the api router, so the tenant login
+and admin took any `Host` and answered plain HTTP. Both now go on the
+server's outermost router, as the headers do since #1699
+(`server::Builder::allowed_hosts`, `::ssl_redirect`). On every server a
+bad `Host` is now refused (400) before the redirect; it used to get a
+301 to `https://<that host>`.
+
+### Security — tenant login, admin and console get the security headers (#1699)
+
+Under `Cli::tenancy()` the `[security]` headers reached only the api
+router, so the tenant login and admin could be framed. They now go on
+the server's outermost router (`server::Builder::security_headers`).
+A header a handler sets itself is kept rather than overwritten.
+A `[security] csp` now reaches these pages too; they use inline script,
+so a CSP without `'unsafe-inline'` breaks them (#1703).
+
+### Security — login forms check Origin (#1695)
+
+`verify_form_token`, used by the tenant and admin logins, now requires
+the Origin to match the request's Host (`csrf_trusted_origins` does not
+apply). A foreign Origin with a valid cookie pair was signing users in;
+tenants share an apex, so one tenant's page could plant the cookie for
+another. Over TLS a POST without Origin is refused, as `CsrfLayer` does.
+
+The `strict` headers preset now sends `Referrer-Policy: same-origin`,
+not `no-referrer`. Under `no-referrer` browsers send `Origin: null`, so
+every login and every `CsrfLayer` form was refused. See UPGRADING.
+
+### Changed — one cookie reader (#1663)
+
+New `cookies::cookie_value(header, name)` and `cookies::cookie_from_headers`
+replace fourteen private `Cookie:` readers. A repeated cookie name now
+resolves to the first one everywhere (RFC 6265 §5.4), and values are
+trimmed and unquoted the same way `parse_cookie_header` does.
+
+### Changed — one set of percent codecs (#1663)
+
+Five private copies now use `url_codec`: `method_override` decoded bytes
+as Latin-1, the CSRF form parser had its own strict decoder (now
+`url_codec::url_decode_strict`), and the tenant admin, operator
+console, test client and signed URLs had their own encoders.
+`?next=` values in their login redirects now escape `/` as `%2F`.
+
+### Fixed — `intcomma(i64::MIN)` panicked; one `redirect_to_login` (#1663)
+
+`humanize::intcomma` overflowed on `i64::MIN` and now shares
+`numberformat`'s digit grouper. **Breaking:**
+`shortcuts::redirect_to_login(next, login_url)` is removed; it took its
+arguments in the opposite order to
+`auth_decorators::redirect_to_login(login_url, "next", next)`, which
+stays.
+
+### Changed — the ten query IR structs are `#[non_exhaustive]`, with constructors (#1661)
+
+**Breaking:** `Filter`, `Assignment`, `SelectQuery`, `InsertQuery`,
+`BulkInsertQuery`, `UpdateQuery`, `BulkUpdateQuery`, `DeleteQuery`,
+`CountQuery` and `AggregateQuery` can no longer be built with a struct
+literal outside the crate. Use `X::new(..)` and the builders
+(`InsertQuery::returning`, `.on_conflict`, `SelectQuery::where_clause`,
+`.projection`). Fields stay `pub`, so a new field is no longer a break.
+`Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
+struct fails if the marker is dropped. See UPGRADING.
+### Fixed — two HTML escapers skipped `'` (#1663)
+
+The operator console's provisioning page and the admin's error page
+escaped `& < > "` but not `'`. Twelve private escapers (and the
+cookbook example's) now import `text::html_escape` or the shared XML
+one, so `'` is `&#x27;` everywhere, `csrf_input_html` included (was
+`&#39;`). The `one_html_escaper` guard fails on a new copy.
+### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
+
+**Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
+now gain a variant without a breaking release, and
+`clippy::exhaustive_enums` is denied in `core` so a new one cannot
+slip in exhaustive.
+### Changed — one error envelope across the framework (#1193)
+
+**Breaking** for clients parsing error bodies. See UPGRADING.
+
+ViewSets, tenant and `Principal` rejections, media, the admin's JSON
+errors, body and rate limits, HMAC auth and maintenance mode now all
+answer with `ApiError`. A client no longer needs a layer to normalise
+four shapes, and a 5xx no longer sends the driver's message, which
+could name tables and columns.
+
+Serializer validation is now `422`, like every other
+`validation_failed`. `ApiError` is available with `_axum` (was `admin`)
+and gains `from_status`, `logged` and `rate_limited_response`.
+
+### Changed — JWT auth is a value, not a process global (#1190)
+
+**Breaking:** `jwt_router(cfg)` is now `JwtAuth::new(cfg).router()`,
+`require_bearer` needs `from_fn_with_state(auth, …)`, and
+`verify_for_tenant` is a `JwtAuth` method. See UPGRADING.
+
+`jwt_router` was removed rather than kept: it hid its `JwtAuth`, so the
+easy upgrade built a second one and lost logout revocation.
+
+The first `jwt_router` call used to win for the whole process, so a
+second config was silently ignored and tests had to set
+`RUSTANGO_SESSION_SECRET` before anything touched it.
+
+### Fixed — a callback in an atomic migration hung PostgreSQL forever (#1626)
+
+**Breaking:** the loader now refuses a callback in an atomic migration,
+and `atomic` defaults to true. See UPGRADING.
+
+The callback runs on a second connection and waited on the migration
+transaction's own locks: forever on PostgreSQL, until `busy_timeout` on
+SQLite, and on MySQL after a data op (50s error, or a metadata-lock
+hang). The `callbacks::` example also put the callback before the
+schema op it backfills; corrected.
+
+### Fixed — turning off the access log silently narrowed span redaction (#1610)
+
+The request span is mounted whether or not `[logging] access_log` is
+on, but it could only take the configured `redact_query_params` list
+*from* the access-log layer. With the log off it fell back to the
+defaults, so a project that set
+
+```toml
+[audit]
+redact_query_params = ["invite_token"]
+```
+
+got `invite_token` redacted in the access-log event and written in
+**clear text on the span** when there was no event.
+
+The two settings live in different config sections, and nothing in
+either said one disarmed the other — a control that reads as on in the
+configuration and is off in the process.
+
+`mount_observability` now takes the redact list directly, so there is
+one arm instead of two and no path that can fall back. `Cli` derives
+it from the same `AccessLogLayer` it would have mounted, rather than
+recomputing the composition, since building it a second way is how
+these drifted apart.
+
+`server::Builder` gains `span_redact` for the hand-built case, as an
+**override**: leave it unset and the span follows the access log's
+list, exactly as it did before. Defaulting it to the plain defaults
+instead would have re-created this bug with the log *on* — a
+hand-built server would have logged a configured param as
+`[redacted]` in the event and in clear text on the span, for the same
+request. Found by review before release.
+
+### Fixed — tenant login was the one POST with no CSRF protection (#1607)
+
+`POST /login` accepted a request with no token, a wrong token or no
+cookie — all three behaved identically — while every other
+server-rendered POST returned 403. That is login CSRF: a third-party
+page can auto-submit the attacker's own credentials and silently sign
+the victim's browser into an **attacker-controlled** account, after
+which the victim works inside the attacker's session.
+
+`SameSite=Lax` does not cover it. Login CSRF mints a *new* session
+cookie rather than replaying an existing one.
+
+`login_form` now seeds the double-submit token and `login_submit`
+verifies it before the user lookup, so a forged POST costs nothing and
+cannot probe usernames by timing. No new mechanism — the same
+`ensure_token` / `verify_form_token` pair the content POSTs already
+use.
+
+### Fixed — the CSRF Origin check was off by default (#1529)
+
+An empty `trusted_origins` skipped the Origin check entirely, so the
+default deployment ran on bare **unsigned** double-submit: a random
+cookie compared against a header. Cookies are scoped by registrable
+domain, not by origin, so anyone able to write one on the parent
+domain forges a valid pair — XSS on a sibling subdomain, a
+dangling-CNAME takeover, or a network attacker on any plaintext
+`http://*.example.com` (`Secure` stops the cookie being *sent* over
+HTTP, not *written*). Origin is what catches that.
+
+The check now runs with an empty list, using the request's own `Host`
+as the implicit trusted origin — so a same-origin deployment needs no
+configuration, and a foreign Origin is refused out of the box. Add
+entries only for origins other than the app's own.
+
+Two related holes closed with it:
+
+- **A missing Origin no longer passes over TLS.** Anything able to
+  omit the header skipped the check. Plain HTTP keeps the old
+  behaviour, so server-to-server callers are not locked out.
+- **Wildcard entries now match a non-default port.** `https://*.example.com`
+  did not cover `https://sub.example.com:8443`, a silent false
+  negative that reads as a flaky 403.
+
+Signing the token against the session — the remaining item on #1529 —
+is not in this release.
+
+### Fixed — a JWT with no `exp` never expired, and `decode` accepted it (#1538)
+
+`decode` skipped the expiry check when the claim was absent, so a
+token minted without `.ttl()` or `.expires_at()` was a permanent
+credential. `Claims::new(sub)` sets only `sub` and `iat`, so
+forgetting the TTL produced one silently.
+
+`exp` is required now, and its absence is `JwtError::MissingExp`
+rather than a pass. Non-expiring service tokens are a real case, so
+they get the explicit branch: `decode_allowing_no_exp` (and
+`decode_at_allowing_no_exp`), which still checks the signature and
+`nbf`.
+
+`JwtLifecycle` is unaffected — its `JwtClaims` has always had a
+required `exp` and always sets a TTL.
+
+**Breaking:** `JwtError` gains a variant, and a token your own code
+mints without an expiry now fails to decode. That is the bug.
+
+### Added — `jwt_router` takes a revocation store and a claims hook (#1190)
+
+`Config` gains `jti_store` and `extra_claims`, so an app no longer has
+to abandon the router to add its own claims or to share revocation
+state between replicas. The default `InMemoryJtiStore` is
+single-process and forgets every revocation on restart, which made
+`/logout` best-effort on more than one replica.
+
+The hook runs before the router's own `tenant` claim, so it cannot
+overwrite the binding that stops a token signed on one subdomain being
+replayed on another.
+
+The `OnceLock` the issue also names is unchanged: `verify_for_tenant`
+is public and reads it, so removing it is a breaking change. #1190
+stays open for that part.
+
+## [0.57.12] — 2026-09-24
+
+A security release. An admin could log in on the password alone when
+the 2FA device table was unreadable, and the two tenant pool caches
+broke in opposite directions once full. Most of this came out of a
+7-angle review of #1643 rather than from a bug report.
+
+### Fixed — an unreadable 2FA table let the password alone log an admin in (#1644)
+
+`confirmed_secret` returns an `Option`, so a read error and "this
+admin has no second factor" were the same answer: `None`. The login
+gate read that as "no 2FA" and granted the session.
+
+`rustango_admin_totp` is `managed = false`, so a missing table is a
+reachable state, not a hypothetical.
+
+`confirmed_secret_checked` returns the error instead. The gate uses it
+and fails closed — the login is refused and the cause is logged at
+error level. `confirmed_secret` stays for callers that genuinely want
+the lossy answer, and now documents that an auth gate is not one.
+
+### Fixed — the tenant pool caches had no eviction, and failed two ways (#1527, #1528)
+
+Both caches were fixed-size with no eviction, and past the cap they
+broke in opposite directions.
+
+- **Database mode refused.** The request failed — and so did every
+  later one, so tenant 65 was down until the process restarted. It
+  also built a connection before each refusal.
+- **Schema mode never refused.** It returned an uncached pool per
+  call, eagerly opening connections, with nothing bounding how many
+  existed at once — at exactly the tenant count the mode exists for.
+
+Both now carry an LRU stamp and evict the most idle entry, so the cap
+is the live pool count and the documented connection budget is real.
+
+A third cache, `DatabasePools`, had the same refuse-on-full policy and
+was named by neither issue. It shares the type now instead of being a
+fourth copy.
+
+The near-cap warning fires once per crossing rather than once per
+insert: a cache sitting at its cap inserts on every miss, and an
+unbounded warn there floods the log with the message meant to be
+noticed.
+
+### Fixed — MySQL DDL failures were swallowed as "already exists" (#1646)
+
+`is_mysql_dup_index_error` matched SQLSTATE `42000`, which on MySQL 8
+is the catch-all for DDL errors — it also covers 1064 syntax error,
+1071 key-too-long, 1072 unknown key column and 1170 TEXT-in-index. So
+`run_ddl_idempotent` reported `Ok` for statements that never ran, and
+a missing index stayed missing.
+
+It matches the error *number* now (1050, 1061, 1826). The
+`contains("Duplicate key name")` arm is gone with it — MySQL localises
+its messages.
+
+### Fixed — Bearer auth full-scanned the API key table (#1647)
+
+5.9–7.0 ms at 100k keys against 0.025 ms indexed, on every
+authenticated request. Indexed through the schema, not a hand-written
+migration.
+
+### Fixed — five small defects (#1605, #1608, #1635, #1637, #1638)
+
+- Admin **Save and add another** returned a 404 (#1635).
+- The CSRF cookie was issued without `Secure` in `ensure_token` (#1608).
+- 20 dangling doc links in emitted docstrings (#1637).
+- A runtime error documented as compile-time (#1638).
+- The bump script verified six of the eight shapes it rewrites (#1605).
+
+### Changed — the live suites run one test at a time (#1624)
+
+They share one database. Run in parallel they produced 758 false
+failures on PostgreSQL and 95 on MySQL; serially, none either way. A
+`live` nextest profile now pins them to a single thread.
+
+### Changed — one idempotent ensure-table path (#1642)
+
+Five copies of the ensure-table error swallow collapse into
+`migrate::ensure::apply_idempotent`. `CREATE TABLE` becomes `IF NOT
+EXISTS` on PostgreSQL only — the logged-ERROR symptom is PG-only, and
+on MySQL the rewrite costs 3.4× for nothing. What remains matches the
+backend error code rather than English text.
+
+### Known issue — a tenant FK can cascade a delete across tenants (#1645)
+
+An unqualified `REFERENCES` binds a tenant foreign key to `public`, so
+a delete there cascades into other tenants' rows. This is **not fixed
+in this release**: the fix needs the DDL renderer to carry schema
+context, and it has none today. The issue holds a live reproduction.
+
+### CI
+
+`guards` now builds and runs the lib tests without the `tenancy`
+feature, on sqlite, postgres and mysql separately. Nothing did before,
+which is what hid a compile break in #1643.
+
+`s3_live` ran nothing for four merges (#1651). MinIO withdrew its
+public images — the server, the `mc` client and the `dl.min.io` binary
+are all gone — so the job failed at `docker run` with `unauthorized`
+and the presigned-URL and media suites never executed. It now pulls
+the same server from Bitnami's archive at a pinned tag, creates the
+bucket through `MINIO_DEFAULT_BUCKETS` instead of `mc`, and fails
+outright when the server does not come up rather than falling through
+to a confusing test error.
+
+### Docs
+
+`cargo-rustango` has a README, so the scaffolder is no longer a blank
+page on crates.io. The 0.57.9 CI entry in this file described the gap
+backwards and is corrected (#1615).
+
+## [0.57.11] — 2026-09-21
+
+Two unrelated threads. The last of the `auto_now_add` timestamp bugs,
+and a documentation pass that stops explaining rustango in terms of
+another framework.
+
+**Breaking:** `Translation` gained two required fields. Details in the
+second entry below.
+
+### Fixed — schema-driven writers stamp their own timestamps too (#1464)
+
+The entry below fixed the writers that go through `#[derive(Model)]`.
+Six more do not: they build an `InsertQuery` from [`ModelSchema`] and
+the client payload, and a server-assigned timestamp is in no payload —
+so the column was omitted and the database default fired.
+
+- `ViewSet` create and bulk-create — the REST API.
+- The admin's create view, and inline formsets.
+- `ModelForm::save` / `PreparedSave::commit_pool`.
+- The generic `template_views` create handlers, plain and tenant.
+
+All six now call `forms::stamp_auto_timestamps`. **INSERT only**: the
+UPDATE paths deliberately do not, because `auto_now_add` is immutable
+after insert and `FieldSchema` cannot tell it from `auto_now`.
+
+`FieldSchema::is_auto_timestamp()` is how they know. It is inferred
+rather than stored — the macro rejects a non-PK `Auto<T>` field unless
+it carries `auto_uuid`, `default_uuid_v7`, `auto_now_add` or
+`auto_now`, and only the last two may be `DateTime` — which kept 57
+literal `FieldSchema` constructions across the test suite from having
+to grow a field.
+
+Found by the commerce soak, not by a unit test. 7572 tests passed on a
+tree where `ViewSet`-created rows still stored
+`2026-09-20 21:13:34`, and cursor pagination on SQLite still served
+page one forever. The soak's `KNOWN-GAP` excuse for that leg is gone
+with the bug.
+
+### Fixed — no writer reads its timestamp from a column default (#1464)
+
+A column default is a backstop for hand-written SQL. Every framework
+writer now stamps its own timestamps, on all three dialects.
+
+The reason is SQLite-shaped but the rule is not. SQLite stores a
+datetime as TEXT and compares it lexicographically, so the stored
+spelling is a correctness contract — and `CURRENT_TIMESTAMP` writes
+`YYYY-MM-DD HH:MM:SS`, whose separator at index 10 is `' '` (0x20)
+against the canonical `'T'` (0x54). A database created before this fix
+still carries that default and always will: SQLite's `ALTER TABLE`
+grammar is RENAME / ADD / DROP, and none of those replaces a column
+default. So on an upgraded database the migrate sweep converted the
+rows already stored while every new row arrived in the legacy shape,
+leaving the column permanently mixed.
+
+- **`auto_now` now binds on INSERT**, not only on UPDATE. The first
+  write of an `updated_at` took the database default and every later
+  one took the clock — one column filled two different ways.
+- **`audit`** binds `occurred_at` on every emit path, single-row and
+  batch. This is what made `cleanup_keep_last_n` discard the *newest*
+  entries: it ranks with `ORDER BY occurred_at DESC`, and a
+  legacy-spelled row sorts below every canonical one whatever instant
+  it holds.
+- **`jobs::dispatch`** binds `run_at` and `created_at`. `run_at` is the
+  pickup queue's sort key, so such a row jumped ahead of every
+  correctly-stamped job — permanently, since the stale default kept
+  writing more of them.
+- **`i18n` translations** map `created_at` / `updated_at` onto the
+  model, so both go through the ORM's write path. **Breaking:**
+  `Translation` gained two required fields; a struct literal that does
+  not set them no longer compiles. Add `created_at: Auto::Unset,
+  updated_at: Auto::Unset` — the ORM fills both.
+- **The migration ledger** binds `applied_at` across all five runners.
+  Nothing reads that column today, so this is not a live defect; it is
+  the writer that would otherwise undo `migrate`'s own datetime sweep
+  once per migration.
+
+### Changed
+
+- `Dialect` gained `current_timestamp_default()` and
+  `timestamp_now_column()`. Hand-written framework DDL asks the dialect
+  for the expression instead of spelling it out — five copies of the
+  canonical SQLite `strftime` are gone, along with the ledger's
+  three-arm dialect match and its unreachable "unrecognized dialect"
+  error.
+- `rustango_translations` renders its timestamps as `DATETIME(6)` on
+  MySQL rather than `TIMESTAMP`, matching every other `DateTime` column
+  the ORM emits, now that the ORM binds microseconds into them.
+  `CREATE TABLE IF NOT EXISTS` leaves an existing MySQL table on
+  `TIMESTAMP`, still truncating to whole seconds; that needs a
+  migration.
+
+### Changed — the docs no longer explain rustango in terms of Django
+
+Around 726 references to Django and DRF are gone: doc comments across
+every crate, the guides in all four languages, the examples, the
+scaffolder templates and the tests. Someone who has never used Django
+should not meet a docstring that explains a feature by naming one.
+
+The references were reworked, not deleted, because most carried real
+information. "Host-header allowlist middleware — Django `ALLOWED_HOSTS`
+parity" now reads "refuses a request whose `Host` is not on the list",
+which is what the reader needed in the first place.
+
+Three literals keep the name, because they are wire format rather than
+prose. Each now says why:
+
+- the HMAC salts `django.core.signing.Signer` and
+  `django.core.signing.TimestampSigner` in `signing.rs` — changing a
+  salt invalidates every signature already issued, which means live
+  password-reset links and signed cookies.
+- the `django_language` cookie name — browsers of a deployed site
+  already send it, and renaming it drops everyone's language choice.
+
+Also in this pass:
+
+- The eight `django6_*` ORM suites are renamed `orm_*`; CI and
+  `testkit/matrix.rs` follow. No test body changed.
+- `assert_num_queries` panicked with the camelCase text
+  `assertNumQueries`. It now names the Rust function. Two tests pinned
+  the old string and are updated.
+- The `CEIL` docstring claimed MySQL emits `CEILING`. Nothing in the
+  tree emits it.
+- `docs/django-parity-audit-2026-05-21.md` is deleted.
+- The README says up front that Rustango runs on axum and tokio, and
+  that everything it adds is a `tower` layer or an `axum::Router`.
+
+Comparisons to Laravel, Rails and the measured Python stack in
+`benchmarks.md` stay — they place rustango for a reader without
+implying a prerequisite. Older sections of this file are untouched:
+they record what shipped, and editing them would misreport history.
+
+## [0.57.10] — 2026-09-19
+
+A documentation release, and the first one where the docs were treated
+as code that can be wrong rather than as prose that can be stale.
+
+Fifteen corrections. The distinction that decides which of them matter:
+a stale doc costs a reader time, but a doc that is *confidently wrong*
+costs them a broken deployment, because they act on it. Six were the
+second kind.
+
+### Fixed — documentation a reader would have acted on
+
+- **The CSRF note sent you to fix the wrong half** (#1518). It told you
+  to repair a custom `Method::POST` view, then gave a remedy that only
+  works for the other half: `chrome_context` is `pub(crate)`, so
+  `csrf_input` is undefined in a user template and Tera renders it
+  empty — a 403 on a form that looks correct. Both halves now carry
+  their own fix.
+
+- **A comment claimed configured `redact_query_params` keys are logged
+  in cleartext** (#1504). It described the design that was *rejected*
+  during the fix, and gave a false reason for it. A reader would have
+  concluded their redaction list did nothing.
+
+- **A retry predicate that hard-fails mid-deploy** (#1517). The table
+  gave MySQL `3821` for both foreign-key drop errors; `DROP FOREIGN KEY`
+  raises `1091`. Anyone who wrote the documented predicate would have it
+  not match, in the middle of a migration.
+
+- **A cost warning that #1235 had already made obsolete** (#1543) steered
+  readers away from `Tenant::pool()` — the accessor that is always
+  tenant-scoped — toward paths that are not.
+
+- **`cannot find PgPool in sqlx`** (#1272). The mount snippet hardcoded
+  `PgPool`, so the documented example did not compile on any other
+  backend. Swept in all four locales.
+
+- **An invitation to fix something unfixable** (#1507). The note implied
+  SQLite FK naming could be corrected so `DROP CONSTRAINT` would start
+  working. SQLite has no such statement, and the framework already names
+  every FK.
+
+### Fixed — counts, omissions and drift
+
+#1502, #1503, #1505, #1506, #1515, #1519, #1520, #1521, #1522, #1523,
+and the remaining #1507 / #1543 items.
+
+### Fixed — not documentation
+
+- **A transaction suite that never ran without Postgres** (#1460, gap 4).
+  `tx_methods_sqlite_live` was gated on `sqlite` **and** `postgres`, so
+  the only end-to-end proof the transaction path works in a sqlite-only
+  or mysql-only build was compiled out of exactly those builds. Nothing
+  in the file touches Postgres. All three tests pass under
+  `sqlite,tenancy`.
+
+- **A published count with no guard.** The `192 SQLite suites` figure was
+  a frozen literal while its siblings in `matrix.rs` are recomputed from
+  the tree — the precise shape those siblings exist to prevent. It was
+  also wrong: the tree says 188. Corrected and brought under the existing
+  recount, verified by putting 192 back and watching it fail.
+
+### Known — filed, not fixed
+
+- **#1605** — `bin/bump-version.sh` rewrites eight version-claim shapes
+  while its verification alternation checks six, so the two
+  *series*-version substitutions are unverified. The script's own comment
+  asserted six and was silently false; it now describes the gap. Benign
+  across a patch bump, where the series does not move; a real exposure at
+  0.58.0.
+
+## [0.57.9] — 2026-09-19
+
+Thirteen verified defects from the 2026-09-18 triage, each small enough
+that the fix is smaller than the argument for it.
+
+Seven are security. The common shape is worth naming, because it decides
+how the rest of this list should be read: **four of these holes were
+guarded, and the guard passed against the defect it named.** A signed-URL
+test drove the clock explicitly and so never reached the fallback it
+existed to cover; a migration guard tested a predicate rather than the
+function that calls it; an MCP cache was cleared in the wrong process. In
+each case the guard was rewritten and revert-tested — the fix undone, the
+guard watched to *fail*, and only then restored. Three of the thirteen
+needed that second pass, and the commits say which.
+
+### Added
+
+- **`ViewSet::openapi_query(bool)`** (#1401). The ViewSet has answered
+  RFC 10008 `QUERY` since #1112 and the generated spec never mentioned
+  it, so no generated client could reach the method. Off by default, so
+  a document that does not need it stays at OpenAPI 3.1.0 — the `query`
+  Path Item field is 3.2.0, and `add_path` bumps the document version
+  when it sees one.
+
+- **`logging = false` for `#[rustango::main]`** (#1465), and a new
+  `no_orphaned_doc_comments` guard. The doc-swallow it catches — a
+  `# Errors` section landing on a `struct` or `const` instead of the
+  function below it — had happened three times, twice while writing
+  this release.
+
+### Fixed
+
+- **`url_has_allowed_host_and_scheme` accepted `/\evil.com/x`** (#1526).
+  Browsers rewrite `\` to `/` while parsing (WHATWG URL §4.1), so that
+  path leaves as protocol-relative and the redirect lands off-site. Both
+  the raw and the rewritten form are now validated, as Django does, and
+  control characters are rejected before decoding. The three live
+  `?next=` sanitizers — admin, operator console, member auth — now
+  delegate to the one implementation instead of carrying three copies
+  that had already drifted apart.
+
+- **Raw driver text in unauthenticated 5xx bodies** (#1525). Six paths
+  published sqlx's message — table, constraint, column list, database
+  host — to any client that could provoke the error. The cause is now
+  logged and the body withheld, split as two decisions rather than one:
+  whether to disclose a server error at all (off by default) and whether
+  the dev overlay is on (off in production). The previous fix was inert
+  by default and is recorded here as such.
+
+- **Operator branding injected attributes through `| safe`** (#1537).
+  `brand_logo_url` and `brand_favicon_url` reached `src=`/`href=`
+  unescaped on seven templates, including both login pages and the admin
+  sidebar. `brand_css` keeps its `| safe` — it has to — and the test
+  records why.
+
+- **Signed-URL expiry failed open** (#1542). An unreadable clock read as
+  `0`, which makes `now > exp` false for every timestamp ever minted.
+  It now reads as `u64::MAX`, so an unreadable clock refuses rather than
+  admits.
+
+- **A revoked MCP credential kept working for 60 seconds** (#1539). The
+  raw-key cache skipped argon2 on a hit and nothing invalidated it, so
+  `manage mcp revoke` reported success while the key still opened the
+  door. The cache entry now carries the credential's `secret_prefix` and
+  is dropped when it stops matching — which closes rotation, both
+  directions of clock skew, dialect timestamp precision and cross-tenant
+  redemption with one comparison, rather than four timing rules that
+  each had to be right.
+
+- **The CSRF same-origin check compared only the host** (#1529, partial).
+  `Origin: example.com`, `Origin: null` and a plain `http://` origin
+  against an https site all passed, and an absent header fell back to
+  the raw value. Scheme, host and port are now compared as a triple. The
+  check is still **off by default**; turning it on is a breaking change
+  and stays open.
+
+- **`#[rustango::main]` silently discarded `[logging]`** (#1465). It
+  installed a tracing subscriber before `main` ran, so `Cli::with_logging()`
+  always lost the race and every scaffolded project ignored its own
+  configuration. `Setup::install` now reports a lost race instead of
+  swallowing it.
+
+- **Every fresh non-tenancy project got a migration it could not apply**
+  (#1307). `makemigrations` emitted a registry-scoped `0001` that
+  `migrate` never runs and that later collides with `relation already
+  exists`. The registry snapshot is never empty — the shared tables are
+  pulled into every scope by name — so the emptiness test that was
+  supposed to suppress it could not fire.
+
+- **`AlterColumnMaxLength` refused SQLite** (#1220), where `VARCHAR(n)`
+  and `TEXT` share an affinity and the change is a no-op. MySQL still
+  errors, asserted as a control so an over-broad fix cannot pass for the
+  wrong reason.
+
+- **Documentation drift in `crypto`** (#1536). The module claimed OsRng
+  throughout while `get_random_string` uses `thread_rng`. Both are
+  CSPRNGs and no weak token was ever minted; the doc was wrong, not the
+  code.
+
+### CI
+
+- **A PR into a feature branch ran no jobs at all** (#1586). A
+  `branches:` filter on `pull_request` meant every stacked PR in this
+  repo merged with zero signal. Removed.
+
+- **`jlumbroso/free-disk-space@main`** (#1540) — a mutable ref on an
+  action that runs before checkout and can write the rust-cache. Pinned
+  to v2.0.0's SHA. The issue named one call site; there were two.
+
+- **No ungated job ran a single lib unit test.** `--test <name>` builds
+  only that integration target, so every `#[cfg(test)] mod tests` in
+  `src/` was invisible to `guards`; `tests_compile` is `--no-run`; and
+  `postgres_test`, `feature_combos` and `windows_test` all `needs: gate`.
+  An unlabelled PR therefore executed **no** lib test at all — and 17 of
+  the 18 assertions added by this release's own review round live in
+  `src/`, so almost none of that work was checked by the green tick on
+  its own PR. `guards` now runs
+  `cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --lib`.
+  `sso` is in that list because `member_auth` is gated on it, so its
+  sanitizer tests compile to nothing without it.
+
+## [0.57.8] — 2026-09-18
+
+A migrations release, and a CI-integrity one.
+
+Two defects made an ordinary "remove a model" migration unapplyable on
+MySQL and, when it failed, left the schema and the ledger permanently
+disagreeing — reported from a live tenant, reproduced twice. Both are
+fixed, and the fix for the first was itself wrong on the first attempt;
+that is recorded below rather than smoothed over.
+
+The rest is the machinery that was supposed to have caught this class.
+An audit of what this repo actually guards found **six structural guards
+running on no pull request at all**, two example crates compiled by
+nothing, and a guard whose own check was a frozen literal — the shape it
+existed to prevent. The `guards` job went from 9 targets to 16.
+
+### Changed — **breaking for exhaustive matches on `MigrateError`**
+
+- **`MigrateError` is `#[non_exhaustive]`**, and gained
+  `PartiallyApplied`. Deliberately together, so this is one break rather
+  than two — every future variant is now additive. Code that only
+  propagates or formats the error is unaffected; a `match` that
+  enumerates every variant needs a `_ =>` arm. #1513 wants the same
+  across the other public error enums.
+
+- **A MySQL migration that fails after committing DDL now says so, and
+  says how to recover** (#1588 part 2). MySQL commits DDL immediately,
+  so the transaction around an `atomic: true` migration protects only
+  the `RunSQL` / `RunPython` operations between them. When a later
+  operation failed, the schema had moved and the ledger row was never
+  written — and re-running replayed from the top and failed
+  *differently*, because the earlier work was still there. Reported from
+  a live tenant as `DropTable` succeeding and the re-run then reporting
+  `1051 Unknown table`.
+
+  The error now names how many operations completed, how many DDL
+  statements committed, and the recovery — inspect the schema, then
+  `manage migrate --fake <name>` once it matches. That path was
+  previously folklore.
+
+  Raised **only** when DDL actually committed. A failure preceded solely
+  by `RunSQL` rolled back cleanly and still surfaces as `Driver`,
+  unchanged, because telling an operator to `--fake` a migration that
+  undid itself would be wrong. Both directions are guarded.
+
+### Fixed
+
+- **Dropping a model produced a migration MySQL could not apply** (#1588).
+  `makemigrations` emitted `DropTable` plus one `DropIndex` per index, and
+  `SchemaChange::DropIndex` carried only a name — so the renderer refused on
+  MySQL, which needs `DROP INDEX <name> ON <table>`. An ordinary "remove a
+  table" migration was therefore un-appliable straight out of the generator.
+
+  Worse than un-appliable, because MySQL auto-commits DDL: the `DropTable`
+  succeeded, the first `DropIndex` failed, the migration was recorded as
+  failed — so the table was gone with **no ledger row**, and re-running
+  failed differently (1051, unknown table). Nothing reconciled that without
+  `migrate --fake`, which you have to already know exists.
+
+  Two fixes, and they are complementary rather than alternatives:
+
+  - `DropIndex` is **no longer emitted for an index whose table the same
+    migration drops**. Those ops were always redundant — MySQL and
+    PostgreSQL both drop a table's indexes with the table — and they were
+    the whole of the failure above.
+  - `DropIndex` now carries `{ name, table }` and renders MySQL's form. That
+    covers the case the suppression does not: dropping an index while
+    keeping its table.
+
+  `table` is `#[serde(default)]`, so a migration file written before this
+  still deserializes; it applies unchanged on PostgreSQL and SQLite, and on
+  MySQL gets an error naming the field to add rather than a serde failure
+  naming nothing.
+
+  A unit test previously asserted that MySQL *must* refuse, so the defect had
+  a green test defending it. It is replaced by one asserting the rendered
+  SQL, and by `migrate_drop_index_mysql_live` — which executes the DDL
+  against a real server and separately pins that MySQL does reject the
+  PostgreSQL `IF EXISTS` form, rather than trusting the comment that said so.
+
+- **…and that fix was wrong twice over** (#1598). Stated plainly because
+  both halves shipped and both were caught by review rather than by a
+  test.
+
+  It suppressed the dependent drop, and `detect_changes` has **three**
+  structurally identical "dropped dependent" loops. Only the index one was
+  touched, so a model carrying a table-level `CHECK` still emitted
+  `DropTable` then `DropCheckConstraint` — the same unrecoverable MySQL
+  state, through the loop the fix missed. `DropCompositeFk` already had the
+  correct guard and documented why.
+
+  And suppression broke rollback. With the index drop gone, a drop-model
+  migration's forward list is `[DropTable]`; `invert` yields
+  `[CreateTable]`; and `CreateTable` renders no index DDL. So rolling back
+  **succeeded** and silently restored the table without its indexes, UNIQUE
+  ones included, while the predecessor snapshot still listed them —
+  `makemigrations` then saw no drift and nothing recreated them. A loud
+  failure traded for a quiet one, which is worse.
+
+  Both are fixed by **ordering rather than suppression**: the dependent
+  drop is emitted *before* the table, which every dialect accepts because
+  the table is still there, and `invert` walks the list in reverse so
+  `[DropIndex, DropTable]` inverts to `[CreateTable, CreateIndex]` — the
+  right order for free. The same move fixes the CHECK and EXCLUDE loops.
+
+  Guarded by a round-trip test rather than an op-list assertion: the op
+  list is what changed, invertibility is the property that matters, and it
+  is what would have caught the regression.
+
+### Added
+
+- **`MediaManager::public_url(id)`** — the CDN-aware public address for a
+  media id, minting no signature. This is the supported way to put an
+  uploaded image on a page anyone can reach.
+
+  It exists because there was no answer to that question. `media::router`
+  is the *internal management API* — uploads, deletes, tagging, browsing —
+  and it refuses an anonymous request on every route by design. Nothing
+  said so, and `docs/files.md` presented the router as the way to serve
+  media without mentioning any other path, so the two ways to discover the
+  truth were both bad: hand-roll a second read endpoint beside the router
+  and lose its tenant and soft-delete filtering, or fit an `AllowAll`
+  authorizer and reopen all sixteen routes including `DELETE` and the
+  presigned `PUT`.
+
+  Sync-friendly on purpose: no signing means no `await` in a template.
+  Tera filters are sync, so a presigned URL could never be built from one
+  — which is why the answer is a handler computing a string, not a
+  template helper.
+
+### Changed
+
+- **`media::router` is documented as what it is**, in its module header,
+  `docs/files.md` and the three translations: the internal management
+  API, not a delivery API. The page gains a "Serving media on a public
+  page" section with the two delivery models side by side — public
+  bucket/CDN versus private bucket plus presigned — and points at
+  `Cli::with_static` for local-disk files, which already did this and was
+  never mentioned there.
+
+- **The `optional_auth` suggestion is withdrawn** from `MediaPerms`'s
+  rustdoc and `UPGRADING.md`. It compiled and then answered `401` anyway,
+  because that policy has no anonymous path, so it sent anyone building a
+  public page down a road ending in unexplained 401s. It is meaningful
+  only under a custom `MediaAuthorizer` that deliberately allows some
+  anonymous action.
+
+### CI
+
+An audit of what this repo actually guards, prompted by a stale number
+that three locally-run guards missed because only a subset of the job was
+run. Eleven jobs carry a hand-maintained list; two were guarded. The
+`guards` job went from **9 targets to 16**, and six of the seven
+additions are guards that previously ran on no pull request at all.
+
+- **Six structural guards ran on no pull request.**
+  `every_serve_shuts_down_gracefully`, `live_suites_fail_loudly`,
+  `macro_internals_stays_internal`, `tracing_targets` and
+  `pool_construction` were named in no job, so they ran only inside
+  `postgres_test` — which is `needs: gate`. All still passed; nothing
+  would have said otherwise. `every_structural_guard_runs_in_ci` now keeps
+  them there, keyed on a **property** (derives a path from
+  `CARGO_MANIFEST_DIR`, carries no crate-level `#![cfg]`) rather than a
+  filename convention, which had left four of them out while reporting
+  green.
+
+- **275 of 559 test suites compiled to empty crates** in the only ungated
+  job that built `tests/**`. `default = ["postgres", "batteries"]` omits
+  `sqlite` and `mysql`, so every suite gated on one of them built to
+  nothing under `clippy`'s feature set — including every guard the 0.57.7
+  security pass added. A new ungated `tests_compile` job builds the full
+  surface (#1572).
+
+- **Two example crates were compiled by nothing.** `mcp_demo` and
+  `tenant_user_extension` appeared in `ci.yml` only as `deny-examples` and
+  `lockfiles` rows, which read a manifest and compile nothing — and a
+  severed example is outside the workspace, so `cargo test --workspace`
+  never reached them either. `tenant_user_extension` also carried a test
+  that had never run anywhere. Guarded by
+  `every_example_crate_is_built` (#1592).
+
+- **The live-suite guard checked a frozen literal.**
+  `every_mysql_arm_runs_in_ci` asserted a hard-coded pair of suite names
+  rather than reading the directory, so it omitted `s3_live_presign` and
+  would have missed anything added after it was written — the shape it
+  existed to prevent. Renamed to `every_live_suite_runs_in_ci` and
+  generalised to four families; Redis and PostGIS had no coverage at all,
+  and both skip silently when their dependency is absent.
+
+- Also wired: `soft_delete_without_postgres`, compiled but never executed,
+  and `worker_reaches_the_apps_jobs`, whose own header claimed CI ran it
+  while no job passed `--ignored` for it.
+
+### Testing
+
+- **`tests/files_doc_media.rs`** — the media half of `docs/files.md` had
+  **no backing test at all**. `files_doc.rs` is gated on `storage` +
+  `uploads` and asserts nothing about `media`, while `docs_contract`
+  reported the page as covered because coverage there is tracked per
+  *page*: a page can be half-guarded and still count. That is how the
+  framing drifted ninety lines without anything failing.
+
+  The new suite executes the public-page recipe end to end and pairs it
+  with the refusal: the same row that `public_url` serves must still get
+  a `401` from the management router. Each of the three guards was
+  mutation-tested against production code — soft-delete filtering
+  removed, `public_url` made to presign, and the router's
+  `Unauthenticated → 401` mapping changed — and each dies on its own.
+
+## [0.57.7] — 2026-09-17
+
+The security pass. A review of `develop` at v0.57.6 produced 20 findings,
+every one traced to the code that implements it, with "is this currently
+exploitable?" answered honestly — including where the answer is no.
+
+### Security
+
+- **`media_router` served an unauthenticated, non-tenant-scoped media
+  API** (finding 01, High). Its 16 routes took no authentication,
+  authorization or tenant extractor — every handler was `State(manager)`
+  plus a path or body. An anonymous caller could `GET /media/{id}` for
+  the row **and a presigned S3 download URL**, walking the integer id
+  space to harvest signed links for the whole bucket; `DELETE
+  /media/{id}` by id with no ownership check; and `POST /uploads/begin`
+  to mint a presigned **PUT** for a caller-chosen disk and key prefix.
+  An integrator who copied the module's quick start shipped an open
+  bucket.
+
+  **`media_router` is deprecated and now refuses every request.** Build
+  the router with `media_router_with(manager, authorizer)` and supply a
+  `MediaAuthorizer`. This is a behaviour change on a patch release, and
+  it is the fail-closed direction deliberately.
+
+  ```rust
+  // before — served anyone who could reach it
+  .nest("/media", media_router(manager))
+  // after
+  .nest("/media", media_router_with(manager, MyPolicy))
+  ```
+
+  [UPGRADING.md](UPGRADING.md) has the full policy example. The router
+  needs the `admin` feature as well as `media`, and
+  `rustango::media::async_trait` is re-exported so implementing the
+  trait does not add a dependency.
+
+  A blanket `.layer(auth)` in front was never sufficient for a
+  multi-tenant deployment — no handler carried a tenant, so an
+  authenticated tenant-A user still read tenant B's row by id. The new
+  `MediaAction` names the target row so the decision can be made per
+  row.
+
+  The gate identifies that row through the new `MediaTarget`
+  (`Media(i64)` / `Collection(i64)` /
+  `CollectionContents { id, recursive }` /
+  `CollectionSubtree(i64)` /
+  `Tag(String)` / `NewUpload { disk, key_prefix, … }` /
+  `NewCollection {}` / `NewTag {}` /
+  `Listing`), and `MediaAction` splits into
+  `Read` / `Add` / `Change` / `Delete` to match the codenames used
+  elsewhere. The first cut of this API used a bare `Option<i64>`, and
+  review found three ways past it — all reproduced before fixing:
+
+  - `GET /media/%31` reached the authorizer with **no id** while the
+    handler decoded it and served row 1. Since the documented example
+    granted the no-id case (listings), copying the docs re-opened the
+    hole.
+  - `GET /tags/2024/media` handed `2024` over as an object id. A tag
+    slug is attacker-chosen, so that forged any id the policy trusted.
+  - `/collections/7` and `/media/7` were indistinguishable — one
+    integer, two tables.
+
+  Classification is now positional against the route table and
+  percent-decoded first, and an unrecognised shape is refused rather
+  than passed through. `url_codec::percent_decode_path` is the decoder:
+  path semantics, so `+` stays literal rather than becoming a space the
+  way the form-encoded `url_decode` does.
+
+  Review of the first cut found more, all reproduced before fixing:
+
+  - `/uploads/{id}/finalize` classified as a distinct `Upload(i64)`
+    target, but it mutates the **media row** of that id — one row
+    presented as two kinds. It is `Change(Media(id))` now, and
+    `MediaTarget::Upload` is gone.
+  - `?recursive` on a collection's contents reaches media in descendant
+    collections the policy was never asked about. It classifies as
+    `Listing`, not as a read of the one collection named.
+  - `HEAD` was refused on routes the policy allows, because axum maps
+    `HEAD` onto the `GET` handler and the gate matched `GET` only.
+  - `Arc<dyn MediaAuthorizer>` did not satisfy the constructor, so a
+    host could not pick its policy at runtime. There is a blanket impl.
+  - Both refusals now emit a `debug` tracing event naming the action, so
+    a misconfigured policy is debuggable without a debugger.
+
+  A third review round found one more, also reproduced before fixing:
+
+  - **`DELETE /collections/{id}` asked about one row and then destroyed
+    a subtree.** The gate classified it `Delete(Collection(id))`, but
+    the handler deletes every descendant collection and re-parents the
+    media underneath — rows the policy was never shown.
+
+    **That blast radius is new in this release**, and the entry above
+    read as though it were not. In 0.57.6 `delete_collection` orphaned
+    the media in *that one collection* and soft-deleted *that one row*;
+    child collections were untouched, which is the `#1551` B3 defect
+    (`collection_path` on the whole subtree became a permanent error).
+    Fixing B3 made the route recursive, and this finding is the gate
+    catching up with it. If you call `DELETE /collections/{id}` on a
+    collection with children, it now takes them — read that before you
+    upgrade, not after.
+
+    A policy that
+    granted delete on the one collection a caller owns deleted
+    everything nested under it, and the nesting is not the deleting
+    caller's to control: `POST /collections` takes `parent_id` in the
+    body, so anyone who may create a collection may graft one under
+    someone else's. It classifies as `Delete(CollectionSubtree(id))`
+    now — a distinct target, so a policy written for single rows
+    refuses it by falling through to its `_ => false` arm rather than
+    by remembering to check. `Read(Collection(id))` is unchanged: that
+    one really is a single row.
+
+  **There is a shipped policy now** (#1546). `MediaPerms::new(pool)`,
+  behind the `tenancy` feature, checks the `{table}.{action}` permission
+  codenames the admin and `auto_create_permissions` already use — so
+  the secure path is the one-liner:
+
+  ```rust
+  .nest("/media", media_router_with(manager, MediaPerms::new(pool)))
+  ```
+
+  It matters because the fastest way back to green from a 403 is an
+  `AllowAll` trait impl, which is the original hole with extra steps.
+  Superusers short-circuit; a request with no `AuthenticatedUser`
+  extension is `401`; a failed permission lookup **refuses**, because a
+  database blip is not a grant. `Media`, `MediaCollection` and
+  `MediaTag` now carry `#[rustango(permissions)]` so the codenames are
+  seeded — a model flag, not a column, so no migration.
+
+  `required_codenames` is public and is the whole mapping. One entry is
+  worth reading twice: `Delete(CollectionSubtree)` requires
+  **`rustango_media_collections.delete` and `rustango_media.change`**,
+  because that route re-parents every media row underneath, so it
+  writes to `rustango_media`. #1558 is the same point at the target
+  level.
+
+  What it cannot do is row-level: codenames are table-level, so a grant
+  of `rustango_media.view` reads *any* media row by id, and a
+  multi-tenant deployment still scopes rows in its own
+  `MediaAuthorizer`. `MediaPerms` is the floor, not the ceiling.
+
+  **The upload ticket's `disk` and `key_prefix` reach the policy now**
+  (#1546). `POST /uploads/begin` mints a presigned `PUT` for a disk and
+  key prefix the *caller* chooses, and both live in the body — which the
+  gate never read, so `Add(NewUpload)` carried nothing and granting it
+  meant "write anywhere in any bucket, attributed to anyone".
+  `NewUpload` now carries `disk`, `key_prefix`, `collection_id` and
+  `uploaded_by_id`, so a policy can allow-list a disk or pin a prefix
+  per tenant:
+
+  ```rust
+  MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+      disk == "user-uploads" && key_prefix.starts_with(&user.prefix())
+  }
+  ```
+
+  They are **unvalidated caller input**, not facts, and a body that does
+  not parse arrives as empty strings rather than a `400` — the gate
+  decides authorization, the handler decides validity, in that order. It
+  is the only route whose body the gate reads, capped at 16 KiB: an
+  upload-ticket body is a few hundred bytes, and buffering an unbounded
+  one inside an authorization layer would make the gate itself the place
+  to send a server a large request. A body over the cap is refused.
+
+  **A crew review of the assembled release found three more, all
+  reproduced before fixing.** The first two are the fourth and fifth
+  ways past this gate; the third is the shipped default policy granting
+  what its own documentation said nobody intended.
+
+  - **`?%72ecursive=true` walked past the subtree check.** `classify`
+    matched `recursive` against the **raw** query string while the
+    handler's `Query` extractor percent-decodes the key, so an encoded
+    spelling was authorized as a read of the one collection named and
+    served as a walk of the whole subtree — media from every descendant,
+    with a presigned URL each. Exactly the disagreement
+    `percent_decode_path` was introduced to close on the path segments;
+    the query side had been left raw. The key is decoded with form
+    semantics now, matching `form_urlencoded`. Presence still beats
+    value, so the gate stays *stricter* than the handler for a bare
+    `?recursive` — loosening it to match exactly would reopen the gap
+    from the other side.
+  - **`rustango_media_collections.view` read the whole library.**
+    `GET /collections/{id}/contents` classified as
+    `Read(Collection(id))`, but it answers `Vec<MediaResponse>` — media
+    rows, each carrying a presigned GET URL. The mapping had been made
+    by target *kind* rather than by what the route returns, so "may
+    browse folders" harvested signed download links one collection at a
+    time. It is `Read(MediaTarget::CollectionContents { id, recursive })`
+    now and requires **both** view codenames, at either width.
+  - **`MediaPerms` ignored the `disk` it was handed.** The fields added
+    above exist so a policy can constrain where an upload lands, and
+    `required_codenames` matched them away — so `rustango_media.add`
+    minted a presigned `PUT` into any registered disk. `StorageRegistry`
+    is process-wide, so on a multi-tenant deployment that is another
+    tenant's bucket: pool-per-tenant isolates the database, not the
+    object store. `MediaPerms::new(pool).allow_disks(["user-uploads"])`
+    is the fix, checked **in addition to** the codename. Unset still
+    means every disk — the default is documented rather than changed,
+    because narrowing it silently would break every single-disk
+    deployment on a patch release.
+
+  Also hardened: an empty codename list would have fallen through
+  `MediaPerms`' loop to `Allow`. Nothing returns one today; it refuses
+  now, so a future mapping that requires nothing is a mistake rather
+  than a grant.
+
+  A fourth round sharpened the gate's vocabulary, both prerequisites for
+  that policy:
+
+  - **Creating a folder and creating a tag were the same decision.**
+    `POST /collections` and `POST /tags` both arrived as
+    `Add(MediaTarget::Listing)` — one value, two tables, the same
+    confusion `Media(7)` and `Collection(7)` were split to remove. So a
+    grant that reads as "may label things" also created collections,
+    and since collections nest and take `parent_id` from the body, it
+    handed out a foothold under someone else's tree. They are
+    `Add(NewCollection {})` and `Add(NewTag {})` now, both empty struct
+    variants like `NewUpload {}` so body detail can be added later.
+    `Listing` means a read.
+  - **`authorize` returned `bool`, so every refusal was `403`** —
+    including one for a request carrying no identity at all. A token
+    client treats `401` as its cue to refresh, so a `403` there means
+    the refresh never fires and the member is silently logged out;
+    #1193 settled this for ViewSets. It returns `MediaDecision`
+    (`Allow` / `Unauthenticated` / `Forbidden`) now, with `From<bool>`
+    so an existing boolean policy needs only `.into()` — and `false`
+    maps to `Forbidden`, never `Unauthenticated`, because a bare
+    boolean carries no information about whether a principal existed.
+
+- **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
+  `+` left literal), for comparing a segment against what a router
+  decoded. `url_decode` keeps form semantics and is unchanged for that.
+
+- **Neither decoder treats a signed hex pair as an escape.** `%+5`
+  decoded to byte `0x05`, because `u8::from_str_radix` accepts a leading
+  sign — against the module's own documented contract. Malformed input
+  only.
+
+- **`media` no longer enables `_async_trait` redundantly** — `storage`,
+  which `media` already requires, enables it.
+
+- **Two ways past the media gate that this release's own fixes opened**,
+  found by a second crew review of the assembled branch. Both are
+  unreleased-only: neither exists in 0.57.6, where the gate did not.
+
+  - **`?recursive=true` cost less than not asking for it.** The
+    recursive contents listing classified as `Read(MediaTarget::Listing)`
+    — one codename, `rustango_media.view` — while the same route
+    without the flag classified as `Read(CollectionContents(id))` and
+    took two. The recursive form returns that collection's media *and
+    every descendant's*, so seven characters of query string turned a
+    403 into a 200 over strictly more rows. It also dropped the id, so a
+    custom `MediaAuthorizer` scoping collections by owner was handed
+    nothing to scope by on exactly the widest read.
+
+    Both widths are `CollectionContents { id, recursive }` now — one
+    target, one mapping, the flag carried so a policy can be *stricter*
+    about the wide one and cannot be looser. A guard asserts the
+    superset relation against the mapping itself rather than against a
+    fixed pair of codenames, so re-routing the wide form somewhere
+    cheaper fails the build.
+
+  - **The superuser short-circuit ran ahead of `allow_disks`.** So a
+    superuser minted a presigned `PUT` into any registered disk
+    regardless of the allow-list. `is_superuser` is the **per-tenant**
+    flag — org admin inside one tenant, no access to `/operator` — and
+    `StorageRegistry` is process-wide, so that is one tenant's admin
+    writing into another tenant's bucket, which is precisely the hole
+    `allow_disks` was added in this release to close. The disk check is
+    ahead of the short-circuit now, and it is the only check that is:
+    every other one is a permission lookup on that tenant's own pool,
+    and skipping those stays inside the tenant. Unset still means every
+    disk, so a deployment wanting admins exempt changes nothing.
+
+### Fixed
+
+- **`purge_pending` is one statement again.** 0.57.7 replaced 0.57.6's
+  single `DELETE … WHERE status = 'pending' AND uploaded_at < ?` with a
+  `SELECT` that resolved ids plus a transaction that deleted by id, then
+  patched that twice. Two review rounds found **six** defects in that
+  shape and none in this one, so it is back — with the `LIMIT` the
+  original lacked.
+
+  What the rewrite cost, in order: deleting by bare id dropped the
+  `status` predicate, so a row that finalized mid-sweep was destroyed —
+  a Ready row with a real storage object, while its client held a `200`
+  naming it. Putting the predicate back on the row delete only meant the
+  tag-link delete still ran for every captured id, so a row the
+  predicate *spared* lost every tag instead. Predicating both still does
+  not close it on PostgreSQL or MySQL, where the two statements evaluate
+  at different times under READ COMMITTED. One `IN (…)` over the whole
+  backlog exceeded the bind ceiling and, because the next run
+  re-selected the same rows, wedged the sweep permanently rather than
+  degrading. And chunking inside a single transaction then held write
+  locks for the length of the backlog — measured, MySQL blocked a
+  concurrent `finalize_upload` for **847 ms** and SQLite's WAL blocked
+  writes to *unrelated tables* for **1.25 s** at a 1M-row backlog.
+
+  One predicated statement has none of them. The predicate cannot drift
+  from the row set because there is no second evaluation, and
+  `PURGE_PENDING_BATCH` (10 000) bounds the lock footprint, the bind
+  count and the work per run. A larger backlog drains over successive
+  runs, which is the intended trade: a sweep that finishes late beats
+  one that blocks every other writer.
+
+  Tag links are reclaimed by "the media row is gone" rather than by a
+  captured id list, which is race-free by construction — a link whose
+  row is present is never touched, whatever happened concurrently — and
+  it also sweeps up orphans earlier versions left behind.
+
+  The statement is hand-built rather than `QuerySet`, for three ORM gaps
+  filed as **#1578**: `DeleteQuery` carries no `limit`, `InSubquery`
+  emits a form MySQL rejects with error 1235 when the inner select has
+  one, and `WhereExpr::RelExists` has no public builder. With those
+  closed this function is about eight lines of ORM.
+
+- **Three write-path regressions this release introduced**, found by a
+  crew review of the assembled branch. 0.57.6 had none of them.
+
+  **`purge_pending` lost the predicate from its destructive statement.**
+  0.57.6 was one statement, `DELETE … WHERE status = 'pending' AND
+  uploaded_at < ?`. It became a SELECT resolving ids plus a transaction
+  deleting **by bare id** — and the SELECT runs on a different
+  connection, with `transaction_pool` then acquiring one, so a
+  `finalize_upload` committing in that window meant a **Ready** row with
+  a real storage object was hard-deleted while its client held a 200
+  naming that id. Nothing else records the storage key, so the object
+  leaked permanently. Capturing the ids is what makes the two statements
+  agree about which rows they mean; it was never a licence to delete by
+  id alone, and the predicate is back.
+
+  **`purge_pending` bound every pending row into one `IN (…)`.** Past
+  the backend's parameter ceiling the statement is rejected before
+  execution, nothing is purged, and the next run re-selects the same
+  backlog — so the sweep **wedged permanently** instead of degrading.
+  Measured: 33 000 pending rows purged 0 on SQLite, and kept purging 0.
+  It chunks on `Dialect::max_bind_params` now, which already encodes
+  every ceiling and which `bulk_insert` already chunks on.
+
+  **`INSERT IGNORE` defeated the transaction it sat inside.** `tag` and
+  `set_tags` branched by hand to `INSERT IGNORE` on MySQL, which
+  downgrades *every* row-level error to a warning — measured on MySQL
+  8.0: a missing NOT NULL default (1364), a `CHECK` violation (3819),
+  and the `tag_id` foreign-key violation PostgreSQL and SQLite raise. So
+  the atomicity contract documented for `set_tags` below held on two
+  backends and silently dropped a tag on the third. Both sites route
+  through `Dialect::insert_on_conflict_skip` now — the narrow `ON
+  DUPLICATE KEY UPDATE` on MySQL, `ON CONFLICT (media_id, tag_id) DO
+  NOTHING` elsewhere — which is one helper in place of a hand-rolled
+  branch that had been copied twice.
+
+- **`GET /tags/{slug}/media` still ran one tag query per row.**
+  `tags_for_many` was added in this release to remove exactly that N+1
+  and was wired into the collection-contents handler fifty lines above;
+  this route kept the per-row `from_row`, so at `?limit=1000` it cost
+  ~1001 round trips plus 1000 presign operations. The fix had landed on
+  one of the two handlers that needed it.
+
+- **Two guards survived the regression they were written for**, which a
+  crew review of the release established by mutation:
+
+  - `tags_for_many_batches_the_whole_page` asserted only that the
+    batched call *agrees with* the per-row call it replaced — something
+    a per-row implementation satisfies by construction. Restoring the
+    full N+1 left all 60 tests green. Nothing in the media suites
+    counted queries, so the batching half of #1551 A was unguarded.
+  - `paging_the_contents_partitions_it` is a SQLite copy of a
+    PostgreSQL-only property. Removing the `, id DESC` tiebreaker and
+    running it passes — measured twice — because SQLite's scan order is
+    stable across separate `LIMIT`/`OFFSET` queries where PostgreSQL's
+    is not.
+
+  Two query-counting guards replace the first, using the
+  `assert_num_queries` coverage this same release added for
+  `raw_query_pool`. The second is kept for the weaker property it does
+  hold — paging without dropping or repeating a row — and its rustdoc
+  now says plainly that it cannot fail on the tiebreaker, and where the
+  guard that can lives.
+
+  Also moved: `media_collections_tags_live`'s isolation was a
+  `--test-threads=1` on the `s3_live` job's command line, so the suite
+  raced silently when run any other way. It takes a suite-wide lock now
+  and passes 17/17 under the default parallel harness.
+
+- **A failed `set_tags` left the row with neither tag set** (#1551 B5).
+  It was a bare `DELETE FROM rustango_media_tag_links` followed by
+  `tag()`. Anything failing in between — a driver error, a slug that
+  could not be created — stripped every tag and put none back, and
+  `POST /media/{id}/tags` is the API-reachable caller. Same shape as the
+  collection delete fixed earlier in this release: the first statement
+  had already committed when the second failed.
+
+  The delete and the inserts are one transaction now. Tag ids are
+  resolved **before** it opens, so `ensure_tag` — the step most likely
+  to fail, and the one that writes — fails while the row still has its
+  old tags, and N round trips stay out of an open write transaction.
+
+  `media_tags_mysql_live` is new, and is the media module's **first
+  MySQL coverage**: `media_live` and `media_collections_tags_live` are
+  PostgreSQL-typed and `media_sqlite_live` is SQLite, so `tag`'s
+  `INSERT IGNORE` branch and `tags_for_many`'s positional-`?` `IN (…)`
+  had never executed on MySQL at all.
+
+  Found while writing it, and worth knowing: **`INSERT IGNORE`
+  downgrades row-level failures to warnings on MySQL** — a missing
+  NOT NULL default (1364) and a `CHECK` violation (3819) both return
+  `Ok`. Measured against MySQL 8.0, not inferred. A control assertion is
+  what caught it; the first two versions of the rollback test injected
+  failures MySQL swallowed, so they proved nothing while passing.
+
+- **`purge` reported access revoked after failing to revoke it**
+  (#1551 B). It threw away the result of the storage delete (`let _ =`),
+  behind an `if let Some(disk)` that skipped the delete entirely when
+  the disk was not registered — and then deleted the row either way,
+  returning `Ok(())`.
+
+  The row is the only record that the object exists: `orphans_older_than`
+  finds it by `deleted_at`, and nothing else stores the key. So a failed
+  delete left a live object no sweep would ever look for again, with
+  every presigned URL minted for it resolving until its TTL — while the
+  call that is documented as *the* revocation said it had succeeded.
+  `Storage::delete` is a no-op on a missing key, so an error there was
+  never a stale row.
+
+  `purge` now returns `UnknownDisk` or the `Storage` error and **leaves
+  the row in place**, so the next `purge_orphans` retries it.
+  `purge_orphans` in turn attempts every row before returning the first
+  failure, rather than stopping at it — one unreachable object used to
+  strand every orphan behind it on every future run. Each failure logs
+  at `warn` with its disk and key, and the run is summarised at `error`,
+  because the count purged does not survive the `Err`.
+
+- **`storage::async_trait`** — the macro is re-exported from `storage`
+  now, not only from `media` (where it is behind `admin`). Implementing
+  the public `Storage` trait needed `async-trait` in your own
+  `Cargo.toml`, at a version that could drift from the one the trait was
+  declared with.
+
+- **`on_delete` never reached the database** (#1549). Every declared
+  `#[rustango(fk = "…", on_delete = "cascade")]` was dropped the moment
+  a schema snapshot was built, because `RelationSnapshot` had no field
+  for it. System migrations and `testkit::migrate_framework` render
+  *from snapshots*, so the clause reached no database at all: a declared
+  `cascade` arrived as `NO ACTION`, which turns a cascading delete into
+  a hard refusal (`ERROR 1451` on MySQL).
+
+  Measured on a fresh PostgreSQL, same probe both ways —
+  `pg_constraint.confdeltype` was `a` (NO ACTION) before and is `c`
+  (CASCADE) after.
+
+  **On new databases only.** An existing database keeps the constraints
+  it already has: a changed `on_delete` is not a schema operation this
+  release can emit, so `migrate` reports `nothing to migrate` and writes
+  no file. That is correct behaviour and it is also easy to misread as
+  "nothing to do" — see [UPGRADING.md](UPGRADING.md) for the `ALTER` to
+  run and how to check what you actually have. Emitting a drop/add pair
+  for a changed action is #1557.
+
+  Upgrading does **not** trip `make_migrations`. Adding the field
+  changes what an existing snapshot compares equal to, and the first
+  cut reported "fk changed" for every FK declaring an action — which
+  all three `make_migrations` entry points reject, so an upgrade with
+  zero model changes failed outright, listing framework tables the user
+  never wrote. FK identity and FK action are compared separately now:
+  `None → Some(_)` is the upgrade, while a real `Some(a) → Some(b)` is
+  still reported.
+
+  `RelationSnapshot` gains `on_delete`, skipped when absent so existing
+  snapshot JSON is byte-identical and already-written snapshots still
+  load. Both snapshot render paths emit the clause: the inline one for
+  SQLite and the post-hoc `ALTER` for PostgreSQL/MySQL.
+
+  Same bug class as `generated_as` and `db_comment`, both captured in
+  #559; `fk_on_delete` is the one that pass missed. It shipped green
+  because the guard rendered from a `ModelSchema` — the path that was
+  always correct — so it could not fail on this. There are now three
+  guards on the snapshot path, one of which executes the DDL and checks
+  the database enforces the cascade.
+
+- **`assert_num_queries` could not see a read** (#1561). The counter is
+  bumped per instrumented entry point in `sql::executor`. Writes all
+  funnel through `execute_pool`, which had one, and two read paths had
+  theirs — but `raw_query_pool`, `select_rows_pool`, `count_rows_pool`
+  (via `fetch_scalar_pool`), `fetch_aggregate_pool` and
+  `fetch_paginated_pool` issued their query directly and bumped nothing.
+  Same on the transaction side: `raw_execute_tx` and `raw_query_tx`
+  counted, while `insert_tx` / `update_tx` / `delete_tx` (all through
+  `execute_tx`), `insert_returning_tx` and `select_rows_tx_with_related`
+  did not.
+
+  So the framework's only N+1 detector could not see an N+1: a loop of
+  four `raw_query_pool` reads was observed as **0** queries, and
+  `assert_num_queries(1, …)` over it passed. The failure mode is a pass,
+  which is why the suite that exists to prove the counter fires "from
+  every instrumented entry point" had been green since it was written —
+  the paths it did not cover were the ones with nothing to fire.
+
+  All of them bump now, each with a guard that was run against the
+  un-bumped code first. The PostgreSQL-only `_on` family
+  (`annotate_count_children_on`, `fetch_aggregate_on`,
+  `fetch_with_prefetch`, `QuerySet::fetch_on`) is still uncounted —
+  it composes, so a bump per leaf double-counts — and the module docs
+  now say so outright: a `0` from a block touching `_on` code means
+  "not measured", not "no queries". Tracked as #1561.
+
+### Behaviour changes that had no entry
+
+Found by a crew review of the assembled release. Each is a user-visible
+change this release already shipped and did not write down — which is
+the same defect class as #1543, applied to the release notes rather than
+to a doc page.
+
+- **`GET /collections/{id}/contents` silently caps at 100 rows.**
+  `list_in_collection` was unbounded and is now `DEFAULT_LIST_CAP`, with
+  `?limit=` clamped to `1..=1000`. That is the right fix for the
+  amplification in #1551 A, but a client that previously received a
+  1 000-row collection in one response now receives 100 and no
+  indication there is more. Page with `?limit=` and `?offset=`.
+
+- **`popular_tags` counts changed meaning.** It used to count links to
+  soft-deleted media; it does not now, so every existing caller's
+  numbers drop. `GET /tags/popular` and `GET /tags` both serve it. The
+  new numbers are the correct ones — that contradiction is what #1551 B1
+  was — but a dashboard tracking them will show a step change on
+  upgrade, not a bug.
+
+- **Two doc claims contradicted the code beside them**, both corrected
+  here rather than left for a reader to trip over:
+  `OnDeleteAction::as_sql` said the shape of `ON DELETE` is "identical
+  across PG / MySQL / SQLite" when `SET NULL` and `SET DEFAULT` both
+  diverge on MySQL, and `has_perm_pool` claimed "three ORM queries …
+  ≈ 3× the CTE in latency" when its body is one round trip — which
+  anyone budgeting `MediaPerms` from that docblock would have
+  overstated threefold.
+
+## [0.57.6] — 2026-09-16
+
+The tri-dialect train. The theme is a single question: **does this behaviour
+work on all three databases, or only on the one somebody tested?**
+
+Of 188 `*_sqlite_live.rs` suites, 172 had no MySQL or PostgreSQL counterpart —
+not because the behaviour was SQLite-specific, but because the second and third
+copy cost more by hand than they returned. Three single-dialect failures in
+0.57.x reached users through that gap (#1450, #1457, #1464), each in code that
+looked correct and had passing tests.
+
+### Added
+
+- **A tri-dialect test harness** (`testkit::matrix`, feature `testkit`).
+  `tri_dialect_test!` fans one scenario list into one test per compiled-in
+  backend; `fresh_table::<M>` builds the table from `M::SCHEMA` through the real
+  DDL emitter rather than a hand-written guess; `Backend::pool()` owns the #1440
+  policy in one place (unset skips, set-but-unreachable panics).
+
+  `by_dialect!` is the part that carries the weight: **every backend must be
+  named, each with a `because`, and omitting one is a compile error.** It exists
+  so a genuine difference cannot be flattened into an assertion all three
+  satisfy — the move that makes a suite quieter while looking greener.
+
+### Changed — **breaking for anything consuming rustango's logs**
+
+- **The access log's field names are now the OpenTelemetry HTTP semantic
+  conventions.** `method` → `http.request.method`, `path` → `url.path`,
+  `status` → `http.response.status_code`, `ip` → `client.address`. `url.path`
+  is also the path *alone* now; the query string moved to its own `url.query`
+  field, so grouping by `url.path` no longer has unbounded cardinality.
+
+  **Every dashboard, alert and collector mapping keyed on the old names stops
+  matching.** The rename is the fix for #1480 — an app running both request
+  layers logged the same request twice under two different schemas — and OTel
+  was chosen over the shorter names because these lines are what ships to a
+  collector, where renaming at the edge is work every deployment repeats.
+
+- **`duration_ms` is now `f64` with microsecond precision, not `u64`
+  milliseconds.** The two layers disagreed on the type of a field they both
+  emitted, which Elasticsearch/OpenSearch rejects outright once a mapping is
+  established. Anyone already ingesting the `u64` needs the mapping updated —
+  this trades an existing conflict for a one-time migration. It also fixes
+  `duration_ms=0` on every sub-millisecond request.
+
+- **`LoggingSettings` gained `color` and `access_log`, and is now
+  `#[non_exhaustive]`.** A struct literal no longer compiles. Build the default
+  and assign — the fields are `pub`:
+
+  ```rust
+  let mut logging = rustango::config::LoggingSettings::default();
+  logging.level = Some("debug".into());
+  ```
+
+  Note **`..Default::default()` does not work either**: `#[non_exhaustive]`
+  forbids every struct expression outside the defining crate, functional update
+  syntax included (`error[E0639]`). The `#[non_exhaustive]` is so this is the
+  *last* release in which adding a logging setting breaks a caller at all.
+
+- **`Dialect` gained `drop_check_constraint_sql` and `drop_foreign_key_sql`.**
+  Both have default bodies that `unimplemented!` rather than falling through to
+  the PostgreSQL form, so a downstream `impl Dialect` still compiles — but a
+  dialect that does not implement them will panic naming the method rather than
+  silently emitting PostgreSQL DDL, which is what #559 was.
+
+- **The request span and `X-Request-Id` are now mounted by default** on every
+  serving path (#1480). Apps that mounted neither will see a new header on
+  every response and span context on every log line. `[logging] access_log =
+  false` turns off the *log*; the span and the request id stay, because a
+  service logging at the edge still wants trace context.
+
+### Security
+
+- **The request span rendered query-string credentials in cleartext.**
+  `AccessLogLayer` redacts `password`, `token`, `secret` and friends out of
+  `url.query`; `TracingLayer` recorded the raw string. That was dormant while
+  nothing mounted the span layer — and this release mounts it by default. Since
+  the span's context renders on the same line as the access-log event, one
+  request produced both halves at once:
+
+  ```
+  http.request{… url.query="password=hunter2&token=abc123"}:
+    rustango::access_log: … url.query=password=[redacted]&token=[redacted]
+  ```
+
+  The span now redacts with the access log's **configured** list, so a project
+  that added its own key is covered too. The default list gained the OAuth2 /
+  OIDC names — `code`, `client_secret`, `id_token`, `code_verifier`, `state`,
+  `assertion`, `session_state` — which this framework's own `oauth2::providers`
+  and `tenancy::sso` callbacks put in the URL, and which exact-match redaction
+  never covered (`access_token` does not match `id_token`).
+
+- **`JwtLifecycle::new` accepted any signing key, including a two-byte one.**
+  HMAC takes any length, so the tokens were perfectly valid — and forgeable by
+  anyone. It now refuses a key under 32 bytes, the floor `JwtBackend::new` and
+  `auth_routes::build_jwt` already enforced. Audit A-06.
+
+- **`SessionSecret::from_bytes` now panics on a key under 32 bytes.** Same
+  floor and same reasoning as `JwtLifecycle::new` above — which the change's
+  own doc comment cites as its precedent — and a forged session cookie on the
+  operator console is a larger blast radius than a forged JWT. A caller passing
+  a shorter key panics at startup. `UPGRADING.md` documented this; the release
+  notes did not, so a reader skimming for what breaks saw one of the two
+  (#1507).
+
+- **The key-floor panic no longer names the key's length.** CodeQL
+  `rust/cleartext-logging`: a panic message reaches logs and crash reports, and
+  the length of a signing key is information about it.
+
+### Fixed
+
+- **[#559](https://github.com/ujeenet/rustango/issues/559) — MySQL could not
+  parse the `DROP CONSTRAINT` the migration writer emitted.** `DropCheckConstraint`
+  and `DropCompositeFk` special-cased SQLite and let everything else fall through
+  to the PostgreSQL shape, so MySQL received
+  `ALTER TABLE … DROP CONSTRAINT IF EXISTS …` and answered `ERROR 1064`. MySQL
+  accepts `DROP CONSTRAINT` from 8.0.19 but takes no `IF EXISTS` on any form.
+  Every MySQL migration that dropped a check constraint or a composite foreign
+  key failed. Now `DROP CHECK` and `DROP FOREIGN KEY`, matching what
+  `ddl::drop_constraints_sql_with_dialect` already did for per-field FKs.
+
+  Two unit tests asserted the unparseable string and held it in place. Both
+  were named `…_uses_backticks` and both did check the quoting; the statement
+  around the quoting was simply never run against a server. **Neither MySQL
+  drop is idempotent**, where the PostgreSQL ones are, and they raise different
+  errors: `DROP CHECK` on an absent constraint is **3821**
+  (`ER_CHECK_CONSTRAINT_NOT_FOUND`), `DROP FOREIGN KEY` on an absent key is
+  **1091** (`ER_CANT_DROP_FIELD_OR_KEY`). A retry predicate written from 3821
+  alone hard-fails the first time a composite FK is dropped twice — mid-deploy,
+  on the composite-FK half of this very fix (#1517).
+
+- **[#559](https://github.com/ujeenet/rustango/issues/559) — `RenameTable` and
+  `RenameColumn` emitted hardcoded double quotes to every dialect.** The
+  migration writer wrote its identifiers straight into the format string:
+  `ALTER TABLE "post" RENAME TO "article"`. On MySQL `"` delimits a string, so
+  both were `ERROR 1064` and every rename migration failed there. SQLite accepts
+  double-quoted identifiers, which is why only MySQL saw it.
+
+  Both renames are portable (MySQL 8.0, SQLite 3.25+), so unlike the
+  neighbouring `ALTER COLUMN` arms they needed no capability guard — only the
+  dialect's quoting, which they now use. Found in the same `match` as the
+  `DROP CONSTRAINT` fix above, a few arms away.
+
+- **`bin/bump-version.sh` could not complete a bump.** The rewriting pass was
+  narrowed to anchored version *claims* so that prose about an old release keeps
+  its number, but the final verification still ran a bare `git grep` for the old
+  version and exited 1 on every prose hit — including the script's own usage
+  examples. It rewrote the files, regenerated the lockfiles, printed the lines
+  it had deliberately left alone, and then died naming those same lines. The
+  verification now checks the six claim shapes the rewrite handled at this
+  release. (It said five; the perl pass and the alternation both had six —
+  #1522.)
+
+- **The live-suite table counted every tri suite as needing no server.**
+  `docs/testing.md` and its three translations classify a suite by the
+  environment variable its source reads; a `_tri` suite reads none, because the
+  lookup moved into `Backend::pool()`. So each conversion *lowered* the
+  published MySQL and PostgreSQL counts and raised "Nothing — always run", in a
+  release whose headline is adding MySQL coverage. The guard passed throughout,
+  because it measured the same wrong thing the page printed.
+
+### Changed
+
+- **CI spends the matrix where it decides something.** `push` now covers release
+  branches, and the expensive jobs sit behind one `gate` job that fires for
+  non-PR events, PRs into `main`, or a PR carrying the `ci` label.
+
+  Concurrency is keyed **per commit on a push** and per ref everywhere else, and
+  push runs are never cancelled. Excluding a branch from cancellation is not
+  enough on its own: GitHub keeps only the most recent *pending* run in a group
+  and discards earlier ones, so merging three commits in quick succession left
+  the middle one with no build at all.
+
+  `fmt`, `clippy`, `guards`, `doc`, `deny`, `deny-examples`, `lockfiles` and
+  `trivy` are **not** gated and run on every pull request. Gating them was a
+  mistake in the first cut: it meant a feature PR into `develop` merged with no
+  signal whatsoever, including no dependency-advisory or container scan, when
+  the intent was only to defer the live matrix.
+
+  (This list named seven of the eight, omitting `guards` — the job that runs
+  this release's own new structural guards. Corrected as a historical record of
+  what 0.57.6 shipped; the ungated set has changed since, and `tests_compile`
+  joined it later — #1521.)
+
+- **Six suites converted to one body across three dialects** — `bulk_upsert`,
+  `values`, `regex`, `json_path`, `explain_pool`, plus the harness's own forms.
+  The value is the coverage the split was hiding: `values_list_flat::<bool>` was
+  PostgreSQL-only, and `bool` is the least portable column type in the suite;
+  PostgreSQL had no JSON-path suite at all; the two `regex` files tested
+  *opposite things* and both claims are now kept side by side with the reason.
+
+### Testing
+
+- **Two MySQL suites had never run anywhere.**
+  `migrate_fake_initial_mysql_live.rs` and `migrate_reconcile_mysql_live.rs`
+  were written, committed, and named in no workflow. `MYSQL_TEST_URL` is unset
+  outside the `mysql_live` job and an unset URL is a silent skip, so both
+  reported `ok` for as long as they existed — [#1437](https://github.com/ujeenet/rustango/issues/1437)
+  repeating. `every_mysql_arm_runs_in_ci` now fails when a `tests/*_mysql_live.rs`
+  or `tests/*_tri.rs` is missing from that job.
+
+  The `_tri` half is the sharper edge: such a suite with no CI line keeps running
+  its PostgreSQL and SQLite arms and reports a healthy pass count while the MySQL
+  arm — the reason it was converted — never runs. `values_tri`, `regex_tri` and
+  `testkit_matrix_forms_tri` had all shipped in that state.
+
+- **`explain_pool_tri` asserted nothing on two of three backends.** The ANALYZE
+  check sat inside a one-sided `if`, so the arms selecting `false` bought no
+  coverage. Making it two-sided immediately showed the MySQL arm's stated reason
+  was false: it claimed the framework does not opt into `EXPLAIN ANALYZE` and
+  that the plan stays an estimate, and **MySQL 8.0.18+** reports real
+  `actual time=` measurements — 8.0.18 being the release that shipped
+  `EXPLAIN ANALYZE`. The claim is corrected.
+
+  (This credited 8.0.46, which is only the server the CI leg happened to run
+  against. Stated as a floor everywhere else in this document, so a reader on
+  8.0.30 would conclude their server could not do it — #1523.)
+
+- `regex_tri` regained `not_iregex` and the runtime `__iregex` lookup, which the
+  conversion dropped and which no live suite covered afterwards.
+
+Carried forward from 0.57.5 as known and unfixed:
+
+- **[#1464](https://github.com/ujeenet/rustango/issues/1464) — SQLite
+  `auto_now_add` columns cannot be compared against a Rust-bound `DateTime`.**
+  `DEFAULT CURRENT_TIMESTAMP` writes `"YYYY-MM-DD HH:MM:SS"`; sqlx binds
+  RFC3339. `' '` sorts before `'T'`, so the comparison is true for every row
+  and cursor pagination on such a column serves page one forever. Every fix
+  changes the stored format, so it wants its own release and a migration.
+
+## [0.57.5] — 2026-09-14
+
+The correctness train. Version numbers 0.57.2 through 0.57.4 were consumed by
+release branches that were withdrawn before any of them was tagged or
+published, so this is the first release after 0.57.1 and carries all of their
+content.
+
+**Read the Changed section before upgrading.** Despite the patch number, this
+release rejects configuration it used to accept: a non-base64
+`RUSTANGO_SESSION_SECRET` of 32 or more characters signed JWTs fine and now
+panics at startup, and a live-test suite whose database URL is set but
+unreachable now fails instead of skipping.
+
+### Security
+
+These change behaviour. A freshly scaffolded project uses none of the affected
+surfaces — the generator wires no admin, calls no `cache::from_settings`, and
+sets no CORS — so the notes below are for hand-written apps.
+
+- **Admin mutations now require a CSRF token.** `docs/security.md` had always
+  claimed this; only `POST /login` actually had it, so create, update, delete,
+  bulk actions and audit cleanup accepted a cross-site POST riding the
+  administrator's session — audit cleanup included, meaning the same request
+  class could erase its own trace (#1395).
+
+  **You must update** any **custom admin template** with a POST form, and any
+  **custom admin view registered with `Method::POST`** — both are mounted inside
+  the new layer and will return `403` until the form carries a token. The two
+  halves need different fixes:
+
+  - **Custom template, built-in view.** Add `{{ csrf_input | safe }}` inside the
+    `<form>`. The built-in view built the context, so the variable is there.
+  - **Custom `Method::POST` view.** It builds its own context, and the injector
+    (`chrome_context`) is `pub(crate)` — so `csrf_input` is *not* defined and
+    Tera renders it empty, giving a form that 403s on every submit. Put the
+    token in yourself:
+
+    ```rust,ignore
+    // Outside a request there is no token. Render nothing rather than
+    // an empty `value=""`, which is what the framework's own injector
+    // does — an empty hidden field submits and then 403s, which is the
+    // failure this note exists to prevent.
+    let csrf_input = match rustango::admin::session::current_csrf_token() {
+        Some(t) if !t.is_empty() => rustango::forms::csrf::csrf_input_html(&t),
+        _ => String::new(),
+    };
+    ctx.insert("csrf_input", &csrf_input);
+    ```
+
+  Or send `X-CSRF-Token`. The bundled templates are already done.
+
+  (This said the variable "is in every admin template's context automatically",
+  which is true only for the first half — while the same sentence tells you to
+  fix the second. A reader following it ships a 403ing form and goes looking
+  for a bug in the layer — #1518.)
+
+  Only applies when you call `.with_session_auth(...)`; CSRF defends
+  cookie-borne credentials, and an admin without it has none.
+
+- **`allow_any_origin()` with `allow_credentials(true)` no longer reflects the
+  request origin** (#1394). It echoed it verbatim, and browsers accept a
+  reflected concrete origin alongside credentials even though they reject `*` —
+  so that pairing was a working read-any-response hole, and this page described
+  it as something the browser prevents. Such a response is now `*` with no
+  credentials header. **If you relied on it, move to
+  `.allow_origins([...])`** — which is unchanged and still sends credentials.
+
+- **`ScopedCache::clear()` no longer deletes other tenants' entries on a
+  `FileCache`** (#1400). `FileCache` had no `delete_prefix`, so it fell through
+  to a trait default that cleared everything. Nothing to update; the on-disk
+  format gained a header and old entries are evicted on first access, so the
+  only effect is a one-time cold cache.
+
+- **`cache::from_settings` panics for `backend = "redis"` or `"db"`** instead of
+  silently returning an in-memory cache (#1400). A per-process cache is not a
+  degraded shared one — it multiplies `CacheRateLimitLayer`'s limit by the
+  replica count and stops `verify_single_use` failing closed. **If your config
+  sets either, switch to `from_settings_async(...).await?`** for redis, or build
+  `DatabaseCache` where the pool is. `memory`, `null` and `file` are unchanged.
+
+- **Logging out now actually ends the session** (#1402). Three defects composed
+  into a logout that did nothing:
+
+  `JwtBackend` never read the revocation list, so `revoke()` and
+  `POST /api/auth/logout` wrote a `jti` that nothing on the authentication path
+  ever consulted. It never checked `typ` either, and access and refresh tokens
+  are wire-identical apart from it — so a refresh token presented as a bearer
+  authenticated, carrying days of life where minutes were intended. And logout
+  itself never touched the refresh token at all.
+
+  The result: a user clicked log out, got `204`, and the session survived for
+  the full refresh TTL — seven days by default — on a credential the endpoint
+  never looked at.
+
+  **You must wire a shared `JtiStore`** for revocation to be enforced:
+  `JwtBackend::new(secret).with_jti_store(store)`, the same store the
+  `JwtLifecycle` holds. Enforcement stays off without one — turning it on
+  silently would change what live tokens do — so a backend with no store
+  behaves exactly as before. **Clients should send `{"refresh": "…"}`** to
+  `/logout`; the body is optional and older clients keep working, revoking only
+  the bearer as they did before.
+
+- **The documented password-reset path now applies the documented password
+  policy** (#1399). `confirm_password_reset_pool` / `_into` checked only
+  `len() < 8`, while `passwords::strength_score` — the policy
+  `docs/auth-passwords.md` describes — rejects `12345678` and `password1`
+  outright. A user who could not set a weak password at registration could set
+  one by resetting.
+
+  **This is stricter than before.** A deployment that accepted 8-character
+  passwords at reset will start refusing them, with the reason in
+  `AuthFlowError::WeakPassword`. That is the point, but it will be visible.
+
+- **Reset links can now be made single-use** (#1399). The confirm helpers called
+  plain `verify`, so a reset link stayed valid for its full TTL — *including
+  after the password had been changed*. A copy of the email in a shared inbox, a
+  forward, or a support ticket with the mail pasted in was a working account
+  takeover until the token expired, at a point where the legitimate user had
+  finished and had no reason to suspect anything. `docs/auth-flows.md`
+  recommended single-use for reset while the helper it documented could not do
+  it.
+
+  New `confirm_password_reset_single_use` / `_single_use_into` take a `&Cache`
+  and refuse a replay with `AuthFlowError::AlreadyUsed`. The policy is checked
+  before the token is consumed, so a rejected password does not burn the link.
+  The existing helpers are unchanged and still replayable — the old signature
+  has nowhere to take a cache — and now say so in their docs.
+
+- **Per-IP rate limiting works behind a reverse proxy** (#1398), via a new
+  `RealIpLayer::trust_proxies([...])`. `RateLimitLayer::per_ip` keys on the
+  connecting socket, which behind a proxy is the proxy — so every client shared
+  one bucket, one noisy client throttled everybody, and no attacker was ever
+  individually limited. `docs/security.md` had prescribed pairing `per_ip` with
+  `real_ip`, which did nothing: `RealIpLayer` inserts a `RealIp` extension and
+  neither limiter had heard of it.
+
+  **The obvious repair would have been worse than the bug.** Keying the limiter
+  on `RealIp` trades a coarse limit for no limit — `X-Forwarded-For` is set by
+  whoever sends it, so any client could mint a fresh bucket per request by
+  varying a header. `RealIpLayer` has no trusted-proxy check; `HeaderStrategy`
+  selects which header to read, not whom to believe.
+
+  So a forwarded address now additionally produces `TrustedRealIp`, but **only**
+  when the connecting socket matches `trust_proxies`, and the limiters key on
+  that and never on the bare claim. **Nothing changes until you declare your
+  proxies** — `RealIp` is untouched for logging, and an undeclared deployment
+  keys on the socket exactly as before. Layer order is load-bearing: `real_ip`
+  must be added *after* `rate_limit` to run before it, and the limiter now warns
+  once when a forwarding header arrives with no trusted address.
+
+### Added
+
+- **`Cli::with_tenant_pools` / `server::Builder::tenant_pools`** — size the
+  per-tenant connection pools (#1456). See Fixed for why this was previously
+  impossible.
+- **`manage make:worker`** — scaffolds a standalone worker binary. The shape is
+  short enough to look obvious while being wrong in a way that only appears in
+  production: a worker awaiting `tokio::signal::ctrl_c()` handles SIGINT and
+  **not** SIGTERM, which is what `docker stop`, Kubernetes and systemd send, so
+  the drain never runs and in-flight jobs are lost with an exit code of 0.
+- **`manage make:scheduled`** — the fixed-interval task shape, under the name
+  that describes it (#1455).
+- **Deployable generated projects.** `cargo rustango new` now writes a
+  multi-stage `Dockerfile` (release profile, `--locked`, non-root, HEALTHCHECK)
+  alongside the existing cargo-watch image, which becomes `Dockerfile.dev`, plus
+  a `.dockerignore` — there was none anywhere in the repo, so a real image build
+  shipped `target/` and `.env`. `jobs`, `jobs-postgres` and `scheduler` are also
+  accepted by `--features`, which refused them outright before.
+- **`bin/bump-version.sh`** — the release version is repeated across 25 sites
+  cargo will not fix (four manifest pins, the `manage version` / `manage about`
+  transcripts, the MCP `serverInfo` and the `cargo install` line in all four doc
+  languages) plus every tracked lockfile. A hand pass on this release missed
+  one; the script found it. Lockfiles are discovered with
+  `git ls-files '*Cargo.lock'` rather than listed, so adding an example crate
+  needs no edit here; they are regenerated with `cargo metadata`, never
+  edited, and `CHANGELOG.md` is left alone because its older headings are
+  history.
+- **`docker/soak/`** — the commerce soak: two scaffolder-generated applications,
+  single- and multi-tenant, across all three dialects, under load in Docker,
+  asserting one named check per behaviour change in this release. Six of the
+  fixes above came from it.
+- **`Cli::on_shutdown(hook)`** — work that runs after the server drains, on
+  SIGINT and SIGTERM (#1409). This is where a job queue's `shutdown()` belongs;
+  see the Changed note below for why putting it after `run()` never worked.
+- **`rustango::shutdown::shutdown_signal()`** — the shared both-signals future,
+  public so a hand-rolled `axum::serve` or a standalone worker can use it
+  instead of `tokio::signal::ctrl_c()`, which is SIGINT-only on Unix.
+- **The executor-taking query operations** (#1431): `rustango::sql::{fetch_aggregate_on,
+  fetch_with_prefetch, select_rows_on, insert_on, update_on, bulk_insert_on,
+  annotate_count_children, annotate_count_children_on}`. PostgreSQL only — see
+  Fixed for why they were hidden and what that cost.
+- **`SessionSecret::from_b64`** (#1396) — the one definition of what
+  `RUSTANGO_SESSION_SECRET` means, public so `check --deploy` and the runtime
+  cannot answer differently.
+
+### Changed
+
+- **`Cli::run` returns on signal instead of never returning** (#1409). It
+  installed no graceful shutdown, so SIGINT/SIGTERM killed the process and
+  nothing after `run()` ran — including the `queue.shutdown()` the docs put
+  there. Code after `run()` now executes. Prefer `on_shutdown` anyway: it also
+  runs on the tenancy path and orders correctly against the server's drain.
+
+- **`server::Builder::serve` and `server::App::serve` now install graceful
+  shutdown too** (#1409). Both are public and both are taught in the docs —
+  `App::serve` is the README's headline example — and both were bare
+  `axum::serve`, so anything after them was unreachable on a signal.
+
+### Fixed
+
+Known gap, filed rather than fixed:
+[#1464](https://github.com/ujeenet/rustango/issues/1464) — on SQLite an
+`auto_now_add` column is written by `DEFAULT CURRENT_TIMESTAMP` as
+`"YYYY-MM-DD HH:MM:SS"` while sqlx binds `DateTime<Utc>` as RFC3339, and
+`' '` sorts before `'T'`. Every comparison against such a column is
+therefore true, and cursor pagination on one serves page one forever.
+Postgres and MySQL are unaffected. Every fix changes SQLite's stored
+datetime format, so it wants its own release and a migration for
+databases already holding both shapes; the framework hit this once
+before and patched a single call site (`audit.rs`, citing #560) instead
+of the binder, which is why it survived to be found again.
+
+The first six items were found by a soak test built for this release — two
+commerce applications, single- and multi-tenant, across PostgreSQL, MySQL and
+SQLite, under load in Docker (`docker/soak/`). Every fix in this release had
+been verified in isolation by a test written for that one issue; nothing had
+run them together against real infrastructure. Three of the six are only
+reachable that way.
+
+- **`Cli::with_health()` did nothing on SQLite and MySQL builds** (#1457).
+  `runserver` has **three** serving paths — a non-Postgres build, a Postgres
+  build on a `postgres://` URL, and a multi-backend build on a non-PG URL — and
+  only the Postgres one read the flag. On any other backend the builder method
+  set its boolean, returned `self`, the server started, and `/health` and
+  `/ready` answered **404** — identical code, 200 on Postgres. A load balancer
+  or container `HEALTHCHECK` aimed at `/health` reported the service
+  permanently unhealthy, with nothing logged to say why. The existing test
+  asserted the setter flips its own boolean, which was true throughout.
+
+  The first fix reached two of the three paths and a review caught the third
+  still 404ing, on exactly the `--features postgres,mysql,sqlite` build the
+  soak fleet ships. Three copies of the same router assembly is what let that
+  happen, so there is now one: every serving path goes through
+  `Cli::assemble_app`, and the guard is a request against the assembled router
+  rather than a search of one arm's source text.
+
+- **Two processes calling `ensure_table_pool` at once could crash one of them**
+  (#1458). `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
+  not atomic on PostgreSQL: both sessions pass the existence check, then race on
+  the catalogue insert, and the loser errors even though the object now exists.
+  `run_ddl_idempotent` swallowed MySQL's duplicate-index error and nothing else,
+  so that error propagated and killed the caller. This is the documented web +
+  worker topology — both call it at boot — and under a restart policy the only
+  evidence was a restart count. Now matched by a narrow predicate: `42P07`, and
+  `23505` **only** on the three catalogue indexes a racing `CREATE` can lose on
+  — `pg_class_relname_nsp_index` (the relation row), `pg_type_typname_nsp_index`
+  (the composite type Postgres creates for every table), and
+  `pg_namespace_nspname_index` (a racing `CREATE SCHEMA IF NOT EXISTS`, one per
+  tenant in schema mode) — plus `42710`. An ordinary unique violation is still
+  an error.
+
+- **Tenant pool sizing was unconfigurable** (#1456). `TenantPoolsConfig` was
+  public and documented, but every route to a running server built
+  `TenantPools::new(pool)` — the default — and `tenancy/pools.rs` reads no
+  environment variables. Connections multiply by tenant *and* by process: twenty
+  database-mode tenants at the default 16, across a web and a worker, is 640
+  against a stock PostgreSQL limit of 100, and the only lever was the database
+  server's own `max_connections`. New: `Cli::with_tenant_pools` and
+  `server::Builder::tenant_pools`, wired into all three paths that build tenant
+  pools.
+
+- **A serializer could not carry a foreign-key column at all** (#1454). Not
+  awkwardly — there was no spelling that compiled. `pub customer_id: i64` failed
+  on the type mismatch; `pub customer_id: ForeignKey<Customer>` failed on three
+  missing bounds. Every model with a relation had to give up field renaming,
+  validation, `read_only` and OpenAPI generation on that column, or drop the
+  serializer. `ForeignKey` now implements `Deserialize`, `Default` and
+  `OpenApiSchema`, and round-trips as its **key** — what a REST client sends,
+  and what DRF's `PrimaryKeyRelatedField` does.
+
+- **Cursor pagination on anything but an integer returned 500 on every
+  request** (#1459). The column was accepted at build time and rejected per
+  request, forever: the ViewSet built, the process started, health checks
+  passed, and the endpoint was dead. The restriction was undocumented — the docs
+  said "a stable, monotonically-ordered column", which a timestamp is, and which
+  is the canonical cursor on an append-only table. Timestamps, dates, uuids and
+  strings now work alongside integers, existing integer tokens are unchanged,
+  and an unusable column panics where it is configured instead.
+
+- **`make:job` scaffolded a scheduler task, not a job** (#1455). It emitted a
+  struct holding a `PgPool` with an inherent `run(self: Arc<Self>)` wired to
+  `scheduler::every(..)`. Nothing it produced could be dispatched, registered,
+  retried or dead-lettered, and the hardcoded `PgPool` meant it did not compile
+  in a `--features sqlite` project. It now emits a real `Job`; the timer shape
+  moved to a new **`make:scheduled`**, routed through `sql::Pool`. This changes
+  what an existing verb writes.
+
+- **Bulk create is now atomic in the writes, not only the validation** (#1403).
+  `docs/viewsets.md` said "validated atomically (one bad element rejects the
+  whole batch)". Validation was atomic; the writes were one `INSERT` each with
+  no enclosing transaction and an early return on the first database error.
+
+  So a `POST` of ten elements whose fifth violated a unique or foreign-key
+  constraint **committed elements 0–4**, answered `400 bulk entry 5`, and listed
+  none of the rows it had created. The caller is told the batch failed, five
+  rows exist, and nothing in the response says which — so a naive retry either
+  duplicates them or fails on element 0. Constraint violations are exactly the
+  class validation cannot decide up front.
+
+  The loop now runs inside one transaction and rolls back on any failure. The
+  rows are read back after the commit, so the response is unchanged on success.
+  Verified on PostgreSQL, MySQL and SQLite against live servers: reverting the
+  transaction leaves two rows behind on all three.
+
+- **`Cli::on_shutdown` was wired but unreachable on two of five paths** (#1409).
+  `docs/jobs.md` documented draining in-flight jobs on shutdown; under any
+  orchestrator the step never ran. Three defects:
+
+  `Cli::run` installed no graceful shutdown at all, so the signal killed the
+  process and **nothing after `run()` executed** — including the
+  `queue.shutdown()` the docs put there. The tenancy path *did* shut down
+  gracefully but waited on `tokio::signal::ctrl_c()`, which is SIGINT-only on
+  Unix, so it never fired for SIGTERM. And nothing in the crate handled SIGTERM
+  anywhere.
+
+  SIGTERM is how Kubernetes, `docker stop`, systemd and most supervisors ask a
+  process to stop; Ctrl-C is a laptop. So the drain worked where losing a job
+  does not matter and never where it does — invisibly: exit 0, nothing logged.
+
+  One `shutdown_signal()` now serves every path. A guard fails the build on any
+  bare `axum::serve`, because the first pass at this wired the hook into five
+  call sites and only three could reach it — the other two sat behind a
+  `Builder::serve` with no graceful shutdown at all, so the hook was called on
+  a line the process never got to.
+
+- **A documented prohibition the framework's own example violated** (#1431).
+  The executor-taking query operations — now public, see Added — lived in
+  `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not import", with
+  **fourteen call sites across twelve files** — nine in-tree tests, four in
+  the `cookbook_blog` example (two request handlers, two in its chapter-3
+  test), and one in rustango's own library, `tenancy::permissions`. Not
+  misuse: there was no public way to do it, and `cargo doc` would not show
+  the functions. Four of
+  them — `fetch_aggregate_on`, `select_rows_on` and the two
+  `annotate_count_children` forms — were **never emitted by the macro at all**;
+  they had been filed as codegen support and were never that.
+
+  **PostgreSQL only**, unlike the rest of the query surface. That is a gap
+  rather than a design choice (#1293), and it is now stated rather than hidden.
+
+  `__macro_internals` keeps only what codegen emits, and a guard fails the
+  build if anything imports it again. `raw_query_on` and `select_one_row_on`
+  were emitted by nothing and used by nobody, and are removed.
+
+- **`RUSTANGO_SESSION_SECRET` means one thing now, not three** (#1396). It was
+  read in three places that disagreed about "long enough": the cookie layer
+  base64-decoded and applied the 32-byte floor to the decoded bytes;
+  `auth_routes::Config::build_jwt` took the **raw string bytes**; and
+  `manage check --deploy` measured the **raw string length**.
+
+  A 32-character base64 secret — which several key generators emit — is 24
+  bytes. So `check --deploy` reported "length OK", JWTs were signed with a key
+  below the floor the assert believed it was enforcing, and the cookie layer
+  fell back to a random per-process key, silently ending session persistence
+  across restarts. Three answers, one variable, and the tool whose job is
+  catching this said it was fine.
+
+  Everything routes through `SessionSecret::from_b64`, now public — including
+  the two copies of the decode that already lived inside `session.rs` itself,
+  so the meaning is defined once. **A value `check --deploy` accepts is a value
+  the runtime accepts.**
+
+  **Breaking, and it can stop a working app booting.** Two cases:
+
+  - A secret that is **not valid base64** but ≥32 raw characters (a passphrase,
+    a hex string) used to sign JWTs perfectly well — `build_jwt` took the raw
+    bytes. It is now rejected, so `jwt_router` **panics at startup** rather
+    than signing with a key the rest of the framework does not recognise. A
+    JWT-only API on such a secret was not broken before and will not start
+    now. That is deliberate — one variable must not mean two keys — but it is
+    a boot failure, not a warning.
+  - `check --deploy` newly errors on secrets it used to pass. For cookies
+    those were already falling back to an ephemeral key.
+
+  Either way: regenerate with `openssl rand -base64 32`, which gives 44
+  characters, or pass bytes directly via `auth_routes::Config::session_secret`.
+
+- **A password reset now ends sessions issued before it** (#1449).
+  `confirm_password_reset_pool` rotated the hash and nothing else, leaving
+  `password_changed_at` — the column the session middleware compares `iat`
+  against — unwritten. `NULL` there is specifically the value that middleware
+  reads as "never rotated, do not enforce", so the check was not stale but
+  disabled: an attacker's session survived the victim's reset, in the one flow
+  where signing out everywhere is the entire point.
+
+  The admin change-password path had stamped it all along, so the same account
+  reached two documented ways got two different outcomes — and the weaker one
+  was the path the guide walked you through.
+
+  `confirm_password_reset_pool` / `_single_use` stamp it, in the same UPDATE as
+  the hash. **`_into` deliberately does not**: it takes a caller-named table
+  that may have no such column, so writing one would break custom schemas. If
+  yours has an equivalent, stamp it yourself in the same transaction — the docs
+  now say so, and steer you to the defaults form for `rustango_users`.
+
+- **66 live test suites reported green against a database that was not there**
+  (#1440). They read `DATABASE_URL` / `MYSQL_TEST_URL`, and turned a failed
+  connect into a skip — so a wrong port, a service that never came up, or a
+  container that died mid-run produced `ok. N passed` having done nothing.
+  204 test functions. #1434 and #1444 had fixed eight django6 files; this is
+  the rest.
+
+  Unset still skips, which is correct — "no database configured here". Set but
+  unreachable now panics with the URL and the driver error.
+
+  A guard recomputes this from the tree, so a suite added tomorrow cannot
+  reintroduce it. It found six files a hand-written grep missed, because they
+  build the pool through `PoolOptions` across several lines rather than in one
+  expression — which is also why the count is 66 rather than the 60 first
+  reported.
+
+  Not a hygiene exercise: #1437 turned on 22 media tests that had never run,
+  and all 22 failed on first contact with a real database — that was #1450, a
+  live break in media upload. A green wall hides defects, not just gaps.
+
+- **Writing `NULL` into any non-text column failed on PostgreSQL** (#1450).
+  `SqlValue::Null` was bound as `None::<String>`, which sends the parameter with
+  the **text** OID; Postgres then refuses it anywhere else:
+
+  ```
+  column "uploaded_by_id" is of type bigint but expression is of type text
+  ```
+
+  **Media upload was broken outright on Postgres** — `uploaded_by_id: None` is
+  the ordinary case for an anonymous or system upload — and 50-odd other sites
+  across `soft_delete`, `audit`, `fixtures`, `forms`, `viewset`, `admin` and
+  `migrate` share the expression. MySQL and SQLite type parameters loosely
+  enough to accept a text NULL in a bigint column, so only Postgres ever showed
+  it, and a tri-dialect suite passing on two backends said nothing about the
+  third.
+
+  Now bound with OID 0 — the wire protocol's "unspecified" — so the server
+  infers the type from the column. Nothing to update. The MySQL and SQLite
+  binders are deliberately unchanged.
+
+  Found by #1437: the 22 media tests that had never executed all failed the
+  first time they ran against a real database, and all 22 pass now.
+
+- **The S3 live suites had never run, and reported green on every build**
+  (#1437). Twenty-five tests gated on `RUSTANGO_S3_TEST_*`, which was set
+  nowhere in CI, and none carried `#[ignore]` — so `cargo test --workspace
+  --all-features` ran them and counted them passing without touching an S3
+  server. `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
+  endpoint existed. A new `s3_live` job runs it against MinIO.
+
+  The 22 media tests are wired into the same `s3_live` job. Pointing them at a
+  real Postgres for the first time made all 22 fail — on #1450, a framework bug
+  they were written to catch and never got the chance to — and they pass now,
+  as the #1450 entry above says. They skip via `maybe_setup()` returning `None`
+  when the env vars are unset, the #1440 policy, rather than `#[ignore]`; a set
+  but unreachable `DATABASE_URL` still panics.
+
+  (This entry said they were `#[ignore]`d rather than wired in, which is the
+  inverse of what shipped and contradicted the #1450 entry twenty lines above
+  it — #1515.)
+
+- **Job retry backoff was `2s, 4s, 8s, 16s`, not the documented `1s, 2s, 4s,
+  8s`** (#1410). The shift ran off the 1-based `next_attempt`, so every wait was
+  double what the module doc, `docs/jobs.md` and the comment directly above the
+  line all said — a failing job took twice as long to recover as promised, which
+  matters against a latency budget. Both backends carried the same expression in
+  two files, agreeing with each other and disagreeing with every description of
+  them; they now share one `retry_backoff_ms`, pinned by a unit test.
+
+  Also corrected, and separate: `MAX_ATTEMPTS` is a ceiling on **total
+  attempts**, not retries. The default of 5 is one run plus four retries, so
+  `MAX_ATTEMPTS = 3` gives two. The docs called it a "retry ceiling".
+
+- **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and
+  this release. #1397 made the lifecycle issue three-segment JWTs, and the
+  backend required *exactly one dot* before it would attempt verification — so
+  the pairing `docs/auth-jwt-api.md` tells you to use silently authenticated
+  nobody. It now accepts both shapes (#1402).
+
+### Changed
+
+- **`JwtLifecycle` tokens are now actual JWTs** (#1397). They were
+  `base64url(payload).base64url(signature)` — two segments, no JOSE header, no
+  `alg`, signed over the payload alone — while every doc, the type names, the
+  route and `/api/auth/login` called them JWTs. Nothing outside rustango could
+  read one, including `rustango::jwt::decode`, which rejected the framework's
+  own tokens as malformed.
+
+  They are now three segments with `{"alg":"HS256","typ":"JWT"}`, signed over
+  `header.payload`. Claims are unchanged — including MCP agent tokens, whose
+  `kind` / `tenant` / `skills` / `tools` / `uid` all survive and are now
+  readable by a standard decoder.
+
+  **Nothing to update**, and tokens minted before the upgrade still verify, so
+  nobody is logged out. If you wrote a custom verifier because the standard
+  libraries could not parse these, you can delete it. The two-segment
+  compatibility path is removed in 0.58.
+
+### Dependencies
+
+- **All eleven lockfiles refreshed** — the workspace and all ten example
+  crates. (Nine/eight was the count at v0.57.1; this release added
+  `platform_commerce` and `platform_commerce_saas`, so both figures were
+  already stale on the release that printed them — #1520.)
+  37 transitive crates move in the workspace lock, including
+  `rustls` 0.23.43 → 0.23.45, `quinn` 0.11.11 → 0.11.12 (and `quinn-proto`
+  0.11.17 → 0.11.18), `tokio-rustls` 0.26.4 → 0.26.5, the `crossbeam`
+  family, `pest` 2.9.0 → 2.9.1, `uuid` 1.26.0 → 1.26.1 and the
+  `wasm-bindgen` 0.2.127 → 0.2.128 set. No direct dependency's requirement
+  changed, so this is a lockfile refresh, not a version bump — nothing to
+  do on upgrade.
+
+## [0.57.1] — 2026-09-14
+
+A correctness-and-honesty release. Most of it is documentation that described
+something the code did not do — and, in several cases, a guard so the page
+cannot drift from the code again.
+
+### Fixed
+- **`db:dump > backup.sql` produced a file that was not valid SQL.** Its first
+  line was a `running: pg_dump …` status banner, because `pg_dump` inherits
+  stdout and the banner was written there. A restore choked on it — at the
+  moment you needed the backup rather than when you took it. The banner now goes
+  to stderr, and `db_dump_cmd` no longer takes a writer at all, so nothing can
+  put anything on the data stream (#1404).
+- **An unresolvable `list_display` name was dropped in silence.** A typo, a
+  renamed field, or a `register_admin_computed!` behind a `#[cfg]` that did not
+  run all produced a missing column and no output of any kind — which reads as
+  "the admin does not support that field". It now warns, naming the table, the
+  name, and the four things it could have been (#1412).
+- **A `Serializer` `source` rename leaked the model's column name** in validation
+  errors, so a field published as `content` reported a missing `body` (#1386).
+- **Two `tenancy --help` lines contradicted the code**, and the docs were the
+  correct side (#1407, #1408).
+- **A MySQL live suite read `MYSQL_URL` while CI sets `MYSQL_TEST_URL`**, so two
+  of its four tests had never run anywhere — while the file reported `4 passed`,
+  because the other two need no database (#1415).
+
+### Added
+- **Log lines name the tenant** (#1463). Tenant identity was an axum extractor,
+  so it lived in the request and died with it: every access-log line carried
+  method, path, status and IP, and nothing in the framework carried the tenant.
+  Investigating "tenant A saw tenant B's data" meant grepping logs that could
+  not tell the two apart.
+
+  `ChainResolver` — the one funnel every request path goes through — now
+  publishes what it resolved to the new `tenant_log` module. `AccessLogLayer`
+  reads it back and emits `tenant=acme`, or `tenant=-` when none resolved (an
+  apex or operator-console request, or a single-tenant app). `TracingLayer`'s
+  `http.request` span gained `tenant` / `org_id` fields, so with it installed
+  every event during the request — the ORM's included — carries the tenant in
+  its span context without any subsystem knowing what a tenant is.
+
+  `AccessLogLayer::tenant_field(TenantField::Id)` labels by org id instead:
+  the slug is operator-chosen and is often the customer's name, which some
+  deployments will not ship to an aggregator. `TenantField::Off` omits it.
+
+  Scope is the request path. A background job still has no tenant to log —
+  that needs the task-local propagation in #1229 / #1223.
+- **`viewset::match_nothing` is public.** The documented fail-closed filter
+  backend could not be written: the docs named a `deny_all` that never existed,
+  and the function that does the job was private. It also loses its `tenancy`
+  gate — `ViewSetFilter` never had one, and a soft-delete or date-window backend
+  needs to fail closed just as much as an ownership one (#1411).
+- **`cache::from_settings_async`**, which can build the backends that need to
+  connect. See the note under `[Unreleased]`.
+
+### Documentation
+- **`docs/logging.md`** — a page for a subsystem that had none (#1462). Across
+  the 39 published pages, `RUST_LOG` appeared zero times and
+  `logging::setup` / `[logging]` / `Cli::with_logging` appeared nowhere, so the
+  whole `rustango::logging` surface was undiscoverable from the docs site. The
+  page covers what `#[rustango::main]` already installs, levels and filters, the
+  32 `rustango::*` targets as a table, formats, the `[logging]` TOML section,
+  file rotation and the `WorkerGuard`, the access log's fields and levels, the
+  tenant field, `TracingLayer` and OTel, logging in tests, and a
+  nothing-is-coming-out section. Backed by `logging_doc.rs`,
+  `logging_first_installer_wins.rs`, `logging_file_appender_live.rs` and
+  `access_log_tenant_sqlite_live.rs`; the target table is guarded against the
+  code by `docs_inventories.rs`. Translated to de/es/fr.
+- **`manage.md` named a tracing target that cannot be filtered** — it told
+  readers to subscribe to `crate::tenancy::pools`, where the real target is
+  `rustango::tenancy::pools` and the span is `tenant_pool_init`. A `RUST_LOG`
+  filter written from that page matched nothing. Fixed in all four locales —
+  the same class of error `tracing_targets.rs` guards in the source, reproduced
+  in prose where that test could not see it.
+- **The scaffolder's generated config gained a `[logging]` block**, commented,
+  with a note about why it is inert until `#[rustango::main]` is swapped out
+  (#1465).
+- **Rate limiting behind a proxy.** `security.md` diagnosed the problem and then
+  prescribed a remedy that does nothing: `RealIpLayer` inserts its own extension
+  and never rewrites `ConnectInfo`, which neither limiter reads. The page now
+  says so, says not to hand-roll it either — `RealIpLayer` takes the leftmost
+  `X-Forwarded-For` with no trusted-proxy check, so keying a limiter on it turns
+  a coarse limit into a bypassable one — and gives a working alternative
+  meanwhile. The code fix needs a trust boundary first (#1398).
+- The HTML-form example described a context the views never stamp; the
+  scaffolding page claimed an `admin_router(pool)` the generator does not emit;
+  the operator-console mounting example could not be typed in as written; four
+  install pins named a series thirteen releases stale.
+
+### Testing
+- Six guards now recompute doc claims from the tree rather than restating them:
+  install pins across every tracked `.md`, the live-suite table, the
+  assertion-helper inventory, the scaffolder's `--features` table, the
+  `form.fields` contract, and the docs contract itself. Each was written after a
+  published number or list turned out to be wrong.
+- **The Django 6.0 parity suite reported `8 passed` against an unreachable
+  database.** `.ok()?` made "not configured" and "broken" the same outcome, so
+  the suite that verifies #1024–#1040 could not report a failure caused by its
+  own database (#1434).
+- **`mysql_live` spent ~32 minutes per run dialling a Postgres it does not
+  have.** `DATABASE_URL` is workflow-wide; eight suites compiled their PG arm in,
+  found the variable set, and timed out (#1435).
+- The selective-feature test build is at zero warnings, down from 44 (#1370).
+
+### Fixed (pool configuration)
+- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
+- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
+- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
+- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
+- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
+
+### Added
+- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
+- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
+- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
 
 ## [0.57.0] — 2026-09-12
 
@@ -79,10 +3792,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   but the texts existed nowhere — GitHub reported no license at all, and the
   terms an attribution claim would rest on were absent from the published
   crates. Both files are now packaged into all four published crates.
-- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
-- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
-- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
-- **`docs/database-tuning.md`**, in all four locales: what each pool knob does, the failure each default produces, and where to set it.
 
 ### Changed
 - **The MySQL and SQLite dialect emitters are no longer gated on their drivers**
@@ -118,12 +3827,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   every SQLite and MySQL deployment.
 
 ### Fixed
-- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
-- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
-- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
-- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
-- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
-- **The generated `prod_settings.toml` pointed operators at a variable nothing reads.** It said to set the database URL via `RUSTANGO__DATABASE__URL`, which overrides `Settings.database.url` — a field no pool consults. Every pool reads plain `DATABASE_URL`. An operator following their own generated config either failed to boot naming a variable the file never mentioned, or silently connected to whatever `DATABASE_URL` happened to hold.
 - **`cargo test --no-default-features --features sqlite,tenancy` did not
   compile** (#1363). The canonical no-Postgres litmus had been broken for a
   long time: two emission tests wanted `sql::MySql` (see Changed), 36 files used
@@ -1093,7 +4796,6 @@ neither did. Those releases are yanked; upgrade to this one.
   keep working.
 
 ### Added
-
 
 - **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
   a run of historical migrations into one file that recreates the same end
@@ -6533,7 +10235,7 @@ Initial workspace scaffolding through the first usable axe of the framework.
 - **`rustango-admin`** auto-CRUD router over the inventory registry. Zero per-model wiring — every derive shows up.
 - **Postgres DDL writer** in `rustango-sql` + **`migrate::apply_all(&pool)` / `migrate::drop_all(&pool)`** for fresh-DB bootstrap.
 
-[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.57.0...HEAD
+[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/ujeenet/rustango/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ujeenet/rustango/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ujeenet/rustango/compare/v0.2.0...v0.3.0

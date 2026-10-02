@@ -1,9 +1,9 @@
-//! `SessionUser` and `SessionOperator` extractors — read the current
-//! user / operator from the browser session cookie.
+//! The `SessionUser` and `SessionOperator` extractors read the
+//! current user or operator from the browser's session cookie.
 //!
-//! Both are infallible (`Rejection = Infallible`) — they return `None`
-//! for anonymous requests rather than rejecting, so public routes can
-//! still use them without forcing every visitor to be logged in.
+//! Neither can fail. An anonymous request gives `None` rather than a
+//! rejection, so a public route can use them without forcing every
+//! visitor to log in.
 //!
 //! # Usage
 //!
@@ -32,46 +32,39 @@
 //! }
 //! ```
 
-use std::sync::Arc;
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use crate::tenancy::auth::{Operator, User};
-use crate::tenancy::{operator_console, tenant_console, OrgResolver as _};
-
-use super::TenantContext;
+use crate::tenancy::middleware::{request_org, request_pool, session_keys};
+use crate::tenancy::{operator_console, tenant_console};
 
 // ------------------------------------------------------------------ SessionUser
 
-/// Reads the `rustango_tenant_session` browser cookie and returns the
-/// corresponding [`User`] row, or `None` for anonymous / expired sessions.
+/// Reads the `rustango_tenant_session` cookie and returns the
+/// matching [`User`], or `None` when the session is missing or has
+/// expired. It never rejects.
 ///
-/// Requires the [`crate::server::Builder`] stack — the extractor reads
-/// the session secret and resolver from the `Arc<TenantContext>` extension
-/// that `Builder::serve` injects. Returns `None` (never rejects) so it
-/// composes safely with public routes.
+/// It needs the [`crate::server::Builder`] stack, because it takes
+/// the session secret and the resolver from the tenant context
+/// extension that `Builder::serve` adds, on any backend.
 ///
-/// The resolved org's slug is used to validate the tenant binding in the
-/// cookie — a cookie minted for `acme` will never authenticate on `globex`.
+/// The cookie is bound to the tenant slug, so a cookie minted for
+/// `acme` never authenticates on `globex`.
 pub struct SessionUser(pub Option<User>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(SessionUser(None));
         };
 
-        // Resolve the tenant — needed for the slug binding check and the
-        // pool to look up the user row.
-        let org = match ctx
-            .resolver
-            .resolve(parts, &ctx.pools.registry_pool())
-            .await
-        {
-            Ok(Some(o)) => o,
+        // Resolve the tenant: needed for the slug check, and for the
+        // pool that holds the user row.
+        let org = match request_org(parts, &parts.extensions).await {
+            Some(Ok(Some(o))) => o,
             _ => return Ok(SessionUser(None)),
         };
 
@@ -80,19 +73,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             None => return Ok(SessionUser(None)),
         };
 
-        let payload = match tenant_console::decode(&ctx.session_secret, &org.slug, &cookie_value) {
+        let payload = match tenant_console::decode(keys.session, &org.slug, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
         };
 
-        // v0.41 (#317) — route through the tri-dialect Pool enum
-        // instead of acquiring a backend-specific TenantConn. This
-        // lets `SessionUser` resolve on sqlite + mysql tenancy builds
-        // the same way `SessionOperator` already does (via
-        // `fetch` on the registry pool below).
-        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
-            Err(_) => return Ok(SessionUser(None)),
+        let pool = match request_pool(&parts.extensions, &org).await {
+            Some(Ok(p)) => p,
+            _ => return Ok(SessionUser(None)),
         };
 
         use crate::core::Column as _;
@@ -104,13 +92,17 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             .unwrap_or_default();
 
         let user = users.into_iter().next().filter(|u| u.active);
-        // Audit P4 — reject a session minted before the user's last
-        // password change (parity with the tenant-admin gate at
-        // `tenancy::admin::validate_session`). `password_changed_at IS
-        // NULL` (never rotated since the column existed) stays valid.
-        let user = user.filter(|u| match u.password_changed_at {
-            Some(changed) => payload.iat >= changed.timestamp(),
-            None => true,
+        // Reject a session minted before the user's last password
+        // change or logout, as `tenancy::admin::validate_session` does.
+        let user = user.filter(|u| {
+            crate::tenancy::session::session_survives(
+                keys.session,
+                &payload.pwf,
+                payload.iat,
+                &u.password_hash,
+                u.password_changed_at,
+                u.sessions_revoked_at,
+            )
         });
         Ok(SessionUser(user))
     }
@@ -118,18 +110,19 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 
 // ------------------------------------------------------------------ SessionOperator
 
-/// Reads the `rustango_op_session` browser cookie and returns the
-/// corresponding [`Operator`] row, or `None` for anonymous / expired sessions.
+/// Reads the `rustango_op_session` cookie and returns the matching
+/// [`Operator`], or `None` when the session is missing or has
+/// expired. It never rejects.
 ///
-/// Uses the `operator_secret` stored in [`TenantContext`] by
-/// [`crate::server::Builder`]. Returns `None` (never rejects).
+/// It uses the `operator_secret` that [`crate::server::Builder`] put
+/// in the tenant context, on any backend.
 pub struct SessionOperator(pub Option<Operator>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
+        let Some(keys) = session_keys(&parts.extensions) else {
             return Ok(SessionOperator(None));
         };
 
@@ -138,7 +131,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
             None => return Ok(SessionOperator(None)),
         };
 
-        let payload = match operator_console::session::decode(&ctx.operator_secret, &cookie_value) {
+        let payload = match operator_console::session::decode(keys.operator, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(SessionOperator(None)),
         };
@@ -147,30 +140,27 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
         use crate::sql::FetcherPool as _;
         let ops = Operator::objects()
             .where_(Operator::id.eq(payload.oid))
-            .fetch(&ctx.pools.registry_pool())
+            .fetch(&keys.registry)
             .await
             .unwrap_or_default();
 
-        let op = ops.into_iter().next().filter(|o| o.active);
+        let op = ops.into_iter().next().filter(|o| {
+            o.active
+                && crate::tenancy::session::session_survives(
+                    keys.operator,
+                    &payload.pwf,
+                    payload.iat,
+                    &o.password_hash,
+                    o.password_changed_at,
+                    o.sessions_revoked_at,
+                )
+        });
         Ok(SessionOperator(op))
     }
 }
 
 // ------------------------------------------------------------------ helpers
 
-fn extract_cookie<'a>(parts: &'a Parts, name: &str) -> Option<String> {
-    let header = parts
-        .headers
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?;
-    for pair in header.split(';') {
-        let pair = pair.trim();
-        if let Some(val) = pair.strip_prefix(name) {
-            if val.starts_with('=') {
-                return Some(val[1..].to_owned());
-            }
-        }
-    }
-    None
+fn extract_cookie(parts: &Parts, name: &str) -> Option<String> {
+    crate::cookies::cookie_from_headers(&parts.headers, name).map(str::to_owned)
 }

@@ -1,4 +1,4 @@
-//! Django-parity #411 — `pre_migrate` / `post_migrate` signals fire
+//! Issue #411 — `pre_migrate` / `post_migrate` signals fire
 //! around `apply_all_pool` on a live SQLite pool.
 //!
 //! Verifies the integration end-to-end: a real bootstrap walk runs,

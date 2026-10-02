@@ -1,4 +1,4 @@
-//! Django-parity #384 — `register_template_context_processor!`
+//! Issue #384 — `register_template_context_processor!`
 //! registers a callable that gets merged into every Tera
 //! template's context via `apply_to_context`. Verifies the macro
 //! shape end-to-end + the handler-key-wins override semantics.

@@ -1,4 +1,4 @@
-//! `manage run-server` — Django-style `runserver` for rustango.
+//! `manage run-server` — the development server.
 //!
 //! Boots a complete operator + tenant admin stack with sensible
 //! defaults from env. Users running `cargo run --
@@ -33,7 +33,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, Request, Response};
+use axum::http::{Request, Response};
 use tower::ServiceExt as _;
 
 use super::error::TenancyError;
@@ -148,13 +148,8 @@ where
             let mut tenants = tenants.clone();
             let apex = apex.clone();
             async move {
-                let host = req
-                    .headers()
-                    .get(header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
-                    .unwrap_or_default();
-                let response: Response<Body> = if host == apex {
+                let on_apex = super::resolver::host_is_apex(req.headers(), req.uri(), &apex);
+                let response: Response<Body> = if on_apex {
                     operator.as_service().oneshot(req).await
                 } else {
                     tenants.as_service().oneshot(req).await
@@ -194,16 +189,13 @@ where
     writer.flush()?;
 
     // --- Serve until Ctrl-C ---
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
+    crate::shutdown::serve_until_drained(
+        |stop| axum::serve(listener, app).with_graceful_shutdown(stop),
+        crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!(target: "rustango::tenancy::server", "shutdown signal received");
 }
 
 /// Print a loud warning if no operators exist — the operator UI

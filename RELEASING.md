@@ -6,23 +6,42 @@ gone wrong at least once.
 
 ## 1. The bump PR — `release/vX.Y.Z` → `develop`
 
-One version string lives in `[workspace.package]` in the root
-`Cargo.toml`; the rest are pins that must move with it:
+Use the script — it does every step below and verifies the result:
 
-| file | what to change |
+```bash
+bin/bump-version.sh 0.58.0 --dry-run   # list every site it would touch
+bin/bump-version.sh 0.58.0             # apply, after you have read the list
+```
+
+One version string is authoritative — `[workspace.package]` in the root
+`Cargo.toml` — but it is repeated in places cargo will not fix for you,
+and a release where they disagree is a recurring failure here. The
+script covers three categories:
+
+| category | what moves |
 |---|---|
-| `Cargo.toml` | `[workspace.package] version`, plus the three `[workspace.dependencies]` pins |
-| `crates/rustango/Cargo.toml` | the `rustango-macros` pin |
-| `crates/rustango-renamed-smoke/Cargo.toml` | the `orm = { package = "rustango", … }` pin |
+| manifests | `[workspace.package] version`, the three `[workspace.dependencies]` pins, the `rustango-macros` pin in `crates/rustango`, the `orm = { package = "rustango", … }` pin in `rustango-renamed-smoke` |
+| prose | the `manage version` / `manage about` transcripts, the MCP `serverInfo`, and the `cargo install cargo-rustango --version …` line — in all four doc languages |
+| lockfiles | every `Cargo.lock` in the tree, **regenerated with `cargo metadata`**, never hand-edited |
 
 `Cargo.lock` **is committed** — this workspace ships binaries, and the
 example crates commit theirs too. Stage the lockfile changes; do not
 assume they are ignored.
 
-Then close the changelog: rename `## [Unreleased]` to
-`## [X.Y.Z] — YYYY-MM-DD`, matching the form of the sections below it.
+Two things the script deliberately leaves alone:
 
-Sanity check before opening the PR:
+- **`CHANGELOG.md`.** Its older sections are history — `## [0.57.1] — …`
+  must keep saying 0.57.1 forever. Close the changelog by hand: rename
+  `## [Unreleased]` to `## [X.Y.Z] — YYYY-MM-DD`, matching the sections
+  below it, and leave a fresh `## [Unreleased]` above.
+- **Any version that is not this workspace's.** Its verification step
+  checks the workspace's own packages by name inside each lockfile
+  rather than grepping for the number, because a third-party crate can
+  sit at the same version by coincidence — `wit-bindgen` really was at
+  0.57.1 while rustango was.
+
+The script finishes by running `docs_versions` itself. If you bump by
+hand anyway, run it:
 
 ```bash
 cargo metadata --no-deps >/dev/null   # the manifests still resolve
@@ -113,6 +132,18 @@ Do not add these to a checklist; they are already handled:
   in the docs, so it always resolves to the newest published version.
 - **Doc transcripts** are guarded by
   `crates/rustango/tests/docs_versions.rs`, in all four locales.
+- **Version-labelled doc headings** cannot go stale unnoticed: a heading
+  like `## What's new (v0.41 / v0.42)` fails
+  `docs_links::no_standing_heading_pins_itself_to_a_release`. It sat
+  fourteen releases out of date before anyone noticed (#1304). Headings
+  that are genuinely *about* one release, like `## Upgrading to 0.51.2`,
+  are deliberately not matched.
+- **The release-notes page** (`docs/release-notes.md`) links to the
+  changelog and to GitHub Releases rather than restating them, so it does
+  not need touching per release.
+- **Repo links in docs** are checked against the tree by
+  `docs_links::every_repo_link_names_a_path_that_exists`, so a renamed or
+  deleted file fails before a reader finds the 404 (#1305).
 
 ## `gh pr checks` lags
 

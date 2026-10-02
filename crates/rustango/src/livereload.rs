@@ -1,9 +1,9 @@
 //! Browser auto-reload — refreshes the page when the server restarts.
 //!
-//! Pairs with `cargo watch -x run` or `bacon run` for the canonical Rust
-//! dev-loop. The watcher recompiles + restarts; this middleware injects
-//! a `<script>` into HTML responses that polls a version endpoint. On
-//! restart the version changes, browser reloads.
+//! Use it with `cargo watch -x run` or `bacon run`. The watcher rebuilds
+//! and restarts the server; this middleware adds a `<script>` to HTML
+//! responses that polls a version endpoint. After a restart the version
+//! differs and the browser reloads.
 //!
 //! ## Quick start
 //!
@@ -23,23 +23,22 @@
 //! bacon run                                  # rebuilds + restarts on save
 //! ```
 //!
-//! Browser opens to `http://localhost:8080`. Edit any source file → bacon
-//! rebuilds → server restarts → browser reloads automatically.
+//! Open `http://localhost:8080`. Save a source file and the browser
+//! reloads once the rebuilt server is back up.
 //!
 //! ## How it works
 //!
-//! 1. At startup, the layer captures a random session ID (process lifetime).
-//! 2. Every HTML response gets a `<script>` injected before `</body>`.
-//! 3. The script polls `/__livereload__/check` every poll_ms.
-//! 4. The endpoint returns the session ID. The script remembers the first
-//!    one it saw; if a later poll returns a different ID (= server restarted),
-//!    `location.reload()`.
+//! 1. The layer picks a random session ID at startup.
+//! 2. Each HTML response gets a `<script>` before `</body>`.
+//! 3. The script polls `/__livereload__/check` every `poll_ms`.
+//! 4. The endpoint returns the session ID. A different ID means the
+//!    server restarted, so the script calls `location.reload()`.
 //!
-//! ## Production warning
+//! ## Never enable this in production
 //!
-//! **DO NOT use in production.** The injected script + version endpoint
-//! make HTML pages slightly larger and add a polling request per second.
-//! Gate the mount on `RUSTANGO_ENV != "prod"`:
+//! It injects script into every HTML page and adds a poll request per
+//! second from every open tab. Gate the mount on
+//! `RUSTANGO_ENV != "prod"`:
 //!
 //! ```ignore
 //! let app = Router::new().route(...);
@@ -73,7 +72,7 @@ pub struct LiveReloadLayer {
 }
 
 impl LiveReloadLayer {
-    /// Default dev config — 1-second poll, inject into HTML, fresh session.
+    /// Dev defaults: 1-second poll, HTML injection on, new session ID.
     #[must_use]
     pub fn dev() -> Self {
         Self {
@@ -86,21 +85,19 @@ impl LiveReloadLayer {
     /// New layer with a custom poll interval (ms).
     #[must_use]
     pub fn with_poll_ms(mut self, ms: u32) -> Self {
-        self.poll_ms = ms.max(100); // floor at 100ms to avoid silly rates
+        self.poll_ms = ms.max(100); // floor at 100ms
         self
     }
 
-    /// Disable HTML injection — the version endpoint still works, but the
-    /// browser script isn't auto-installed (use this if you inject the
-    /// script manually into your templates).
+    /// Turn off HTML injection. The version endpoint still works; use
+    /// this when your templates include the script themselves.
     #[must_use]
     pub fn without_injection(mut self) -> Self {
         self.inject_into_html = false;
         self
     }
 
-    /// The session ID this layer was constructed with — exposed for tests
-    /// and the version endpoint.
+    /// This layer's session ID, used by the version endpoint.
     #[must_use]
     pub fn session(&self) -> &str {
         &self.session
@@ -192,8 +189,7 @@ async fn handle(cfg: Arc<LiveReloadLayer>, req: Request<Body>, next: Next) -> Re
     let html = String::from_utf8_lossy(&bytes);
     let injected = inject_script(&html, &cfg.session, cfg.poll_ms);
     let mut response = Response::from_parts(parts, Body::from(injected));
-    // Recompute Content-Length is handled by axum implicitly when no header was set;
-    // explicit override needed for old clients
+    // The body grew, so the old Content-Length is wrong: drop it.
     response
         .headers_mut()
         .remove(axum::http::header::CONTENT_LENGTH);
@@ -211,7 +207,7 @@ fn inject_script(html: &str, session: &str, poll_ms: u32) -> String {
         out.push_str(&html[idx..]);
         out
     } else {
-        // No </body> — append at the end
+        // No </body>: append at the end.
         format!("{html}{script}")
     }
 }

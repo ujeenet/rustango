@@ -1,13 +1,14 @@
-# Benchmarks : Rustango vs Django vs Laravel vs Go
+# Benchmarks : Rustango vs Python vs Laravel vs Go
 
 À quel point **Rustango** est-il rapide, vraiment ? Cette page présente un benchmark
-en tête-à-tête face aux deux frameworks dont **Rustango** s'inspire — Django et Laravel — et
+en tête-à-tête face à deux stacks interprétés matures — un framework **Python** et **Laravel**
+(PHP) — et
 face à une référence **Go** (le `net/http` de la bibliothèque standard) qui ancre ce qu'un
 second runtime compilé et natif atteint sur la même charge de travail. Tous utilisent
 des sites de blog *fonctionnellement identiques* : mêmes données, même schéma, mêmes endpoints,
-même budget matériel — la seule variable est le runtime. Django et Laravel sont
-chacun mesurés dans **les deux** cas : leur déploiement de production conventionnel *et* un
-runtime plus robuste : **Django** sur **gunicorn** (WSGI) et sur **Hypercorn**
+même budget matériel — la seule variable est le runtime. L'application Python et Laravel sont
+chacune mesurées dans **les deux** cas : leur déploiement de production conventionnel *et* un
+runtime plus robuste : **Python** sur **gunicorn** (WSGI) et sur **Hypercorn**
 (ASGI) ; **Laravel** sur **php-fpm + nginx** et sur **Octane** (Swoole). Rustango
 et Go sont chacun un unique binaire résident, il n'y en a donc qu'un de chaque.
 
@@ -18,7 +19,7 @@ harnais en une seule commande (voir [Reproduce](#reproduire)). Rien ici n'est es
 > runtimes **compilés et natifs** — **Rustango** et **Go** — laissent les
 > frameworks interprétés **5 à 30× derrière** et se disputent la tête entre eux. Sur
 > l'index non caché, **Go** menait à **6 651 req/s** et **Rustango** suivait à
-> **4 781** — **5,6×** Django (gunicorn) et **11,7×** Laravel (php-fpm). L'avance
+> **4 781** — **5,6×** Python (gunicorn) et **11,7×** Laravel (php-fpm). L'avance
 > de Go est la plus large sur la page de détail non cachée (**13 921 vs 6 538**, 2,1×).
 > **Rustango** reprend la tête là où cela compte pour le trafic servi : les
 > chemins **cachés en Redis** (**25 546** vs 20 929 de Go sur l'index ; 35 781 vs
@@ -27,7 +28,7 @@ harnais en une seule commande (voir [Reproduce](#reproduire)). Rien ici n'est es
 > livre un framework complet et tout compris. Même le résultat non compilé le plus rapide,
 > **Laravel sur Octane**, reste 4 à 7× derrière les deux binaires.
 
-[![Requêtes/s sur l'index de blog non caché pour les six runtimes — Go 6 651, Rustango 4 781, Laravel+Octane 1 238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
+[![Requêtes/s sur l'index de blog non caché pour les six runtimes — Go 6 651, Rustango 4 781, Laravel+Octane 1 238, Python+Hypercorn 910, Python+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
 
 ---
 
@@ -48,10 +49,10 @@ rendant des pages HTML :
 Les cinq premières sont bornées par l'E/S + le rendu ; `/compute` est une charge de travail purement CPU — le
 même algorithme de division d'essai dans chaque langage — pour isoler la vitesse brute
 du runtime. Chaque application charge ses relations **de manière avide** (pas de N+1) : **Rustango** regroupe les
-requêtes explicitement, Django utilise `select_related` / `prefetch_related` /
-`annotate(Count)`, Laravel utilise `with()` + `withCount()`, **Go** charge par lots
+requêtes explicitement, l'application Python joint les relations et annote le nombre de
+commentaires, Laravel utilise `with()` + `withCount()`, **Go** charge par lots
 avec des requêtes `= ANY($1)`. Les templates sont délibérément minuscules et équivalents (Tera,
-templates Django, Blade, `html/template` de Go), afin que nous mesurions le *framework*, et non
+Blade, `html/template` de Go et le moteur propre à l'application Python), afin que nous mesurions le *framework*, et non
 l'effort de template.
 
 ### Ce qui en fait un combat équitable
@@ -75,8 +76,8 @@ l'effort de template.
 |---|---|---|
 | **Rustango** | un binaire `--release` (axum + Tokio, async, tous les cœurs) | `opt-level=3` + LTO ; cache de page Redis via `CachePageLayer` |
 | **Go** | un binaire statique (`net/http` stdlib, goroutines, tous les cœurs) | pool `pgx` + cache de page `go-redis` ; templates embarqués ; livré sur `scratch` |
-| **Django 5.2** · gunicorn | workers gthread + keep-alive (WSGI) | `DEBUG=False` ; cache Redis intégré + `@cache_page` ; connexions BDD persistantes |
-| **Django 5.2** · Hypercorn | serveur ASGI, 4 workers, keep-alive | même application, servie via ASGI ; les vues synchrones tournent dans un threadpool |
+| **Python** · gunicorn | workers gthread + keep-alive (WSGI) | debug désactivé ; cache de page Redis ; connexions BDD persistantes |
+| **Python** · Hypercorn | serveur ASGI, 4 workers, keep-alive | même application, servie via ASGI ; les vues synchrones tournent dans un threadpool |
 | **Laravel 13** · php-fpm | php-fpm + nginx, OPcache **activé**, 16 workers | `APP_ENV=production` ; `composer install --no-dev --optimize-autoloader` ; Blade caché ; `Cache::remember` sur Redis |
 | **Laravel 13** · Octane | Octane + **Swoole**, workers persistants | même application sur un runtime résident en mémoire — pas de bootstrap du framework par requête |
 
@@ -94,7 +95,7 @@ l'effort de template.
 Les deux binaires compilés, puis chaque framework interprété dans son runtime
 conventionnel **et** son runtime robuste :
 
-| Endpoint | **Rustango** | **Go** | Django · gunicorn | Django · Hypercorn | Laravel · php-fpm | Laravel · Octane |
+| Endpoint | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
 |---|--:|--:|--:|--:|--:|--:|
 | index, non caché | 4 781 | **6 651** | 850 | 910 | 408 | 1 238 |
 | index, **caché** | **25 546** | 20 929 | 4 841 | 1 537 | 1 224 | 5 777 |
@@ -109,7 +110,7 @@ sur l'E/S non cachée et Rustango en tête sur les hits cachés + le calcul) est
 gouffre de 5 à 30× vers les runtimes interprétés. Deuxièmement, **Laravel + Octane** (Swoole) est
 un **bond de 3 à 7×** par rapport à php-fpm — un worker résident qui évite le bootstrap
 du framework Laravel à chaque requête — et c'est le résultat non compilé le plus rapide sur chaque page.
-Troisièmement, **Django + Hypercorn** (ASGI) est à peu près **plat, et plus lent sur les chemins
+Troisièmement, **Python + Hypercorn** (ASGI) est à peu près **plat, et plus lent sur les chemins
 cachés** : les vues du blog sont *synchrones*, donc l'ASGI ne fait qu'ajouter un saut vers un threadpool
 sans aucun des gains de concurrence que des vues *async* apporteraient. Même le meilleur de
 ce peloton (Octane, 1 238 req/s sur l'index non caché ; 5 811 sur le détail caché) accuse
@@ -117,7 +118,7 @@ un retard de 4 à 7× sur les deux binaires.
 
 ### Latence — p50 en millisecondes (plus bas est meilleur)
 
-| Endpoint | **Rustango** | **Go** | Django · gunicorn | Django · Hypercorn | Laravel · php-fpm | Laravel · Octane |
+| Endpoint | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
 |---|--:|--:|--:|--:|--:|--:|
 | index, non caché | 10.2 | **7.2** | 56.9 | 43.2 | 114.7 | 39.9 |
 | index, caché | **1.8** | 2.1 | 9.3 | 5.0 | 20.2 | 7.6 |
@@ -134,7 +135,7 @@ GC — une traîne que le binaire Rust sans GC n'a pas.
 
 ### Empreinte — taille d'image, mémoire, CPU
 
-| | **Rustango** | **Go** | Django · gunicorn | Django · Hypercorn | Laravel · php-fpm | Laravel · Octane |
+| | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
 |---|--:|--:|--:|--:|--:|--:|
 | Image de conteneur (non compressée) | 164 MB | **18.5 MB** | 293 MB | 293 MB | 959 MB | 1.01 GB |
 | RAM, au repos | 12.1 MiB | **5.2 MiB** | 128 MiB | 173 MiB | 92 MiB | 248 MiB |
@@ -147,14 +148,14 @@ tourne au repos à seulement **5,2 Mio**. Mais sous charge, son tas GC croît ju
 allocation par requête, le binaire Rust sous pleine charge tient dans moins de RAM que Go n'en
 utilise, et en deçà de ce que n'importe quel runtime interprété consomme *au repos*. Les runtimes
 robustes coûtent *plus* de mémoire, pas moins : Octane conserve un Laravel résident dans chaque
-worker ; Hypercorn ajoute la pile ASGI par-dessus Django.
+worker ; Hypercorn ajoute la pile ASGI par-dessus l'application Python.
 
 ### Efficacité — travail accompli par ressource (la vraie histoire)
 
 Le débit brut est une chose ; le **débit par unité de ressource** est ce que votre
 facture cloud suit réellement (index non caché) :
 
-| Métrique | **Rustango** | **Go** | Django · gunicorn | Django · Hypercorn | Laravel · php-fpm | Laravel · Octane |
+| Métrique | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
 |---|--:|--:|--:|--:|--:|--:|
 | Requêtes/s **par Mio de RAM** | **258** | 192 | 3.9 | 3.3 | 3.1 | 4.6 |
 | Requêtes/s **par % de CPU** | 16.2 | **18.2** | 2.4 | 2.2 | 1.0 | 3.7 |
@@ -164,7 +165,7 @@ Par mégaoctet de mémoire, **Rustango** accomplit le plus de travail de tous le
 sous charge. Par pourcentage de CPU, **Go** prend légèrement l'avantage (il convertit les cœurs
 supplémentaires qu'il mobilise en un débit un peu plus élevé). Dans tous les cas, pour égaler le
 débit d'index d'un seul binaire compilé, il vous faudrait faire tourner ~4 Laravel sous Octane ou ~6
-Django sous gunicorn — chacun portant sa propre empreinte de plusieurs centaines de Mo.
+applications Python servies par gunicorn — chacune portant sa propre empreinte de plusieurs centaines de Mo.
 
 ---
 
@@ -176,8 +177,8 @@ le rendu entièrement — req/s de l'index non caché → **caché** :
 - **Rustango** : 4 781 → **25 546** (5,3× grâce au cache) — reprend la première place.
 - **Go** : 6 651 → **20 929** (3,1×) — en tête sans cache, deuxième avec cache.
 - **Laravel · Octane** : 1 238 → **5 777** (4,7×) — le meilleur du peloton interprété.
-- **Django · gunicorn** : 850 → **4 841** (5,7×).
-- **Django · Hypercorn** : 910 → **1 537** (1,7×) — la surcharge du threadpool ASGI
+- **Python · gunicorn** : 850 → **4 841** (5,7×).
+- **Python · Hypercorn** : 910 → **1 537** (1,7×) — la surcharge du threadpool ASGI
   plafonne le gain même sur les hits de cache.
 - **Laravel · php-fpm** : 408 → **1 224** (3,0×).
 
@@ -196,18 +197,18 @@ route `/compute` les évacue — elle somme tous les nombres premiers en dessous
 d'essai, le *même* algorithme en Rust, Go, Python et PHP. Tous les quatre retournent
 la même réponse (`21171191`) ; seule la vitesse diffère :
 
-| | **Rustango** | **Go** | Django | Laravel |
+| | **Rustango** | **Go** | Python | Laravel |
 |---|--:|--:|--:|--:|
 | Débit | **14 341 req/s** | 11 573 | 452 | 716 |
 | Latence p50 | 3.5 ms | **2.5 ms** | 70.8 ms | 87.4 ms |
 
-Les deux binaires natifs exécutent la boucle **~26 à 32×** plus vite que Django et
+Les deux binaires natifs exécutent la boucle **~26 à 32×** plus vite que l'application Python et
 **~16 à 20×** plus vite que Laravel — l'écart entre du code machine compilé et un
 interpréteur de bytecode. Entre Rust et Go, la boucle `--release` avec LTO de Rust s'empare de la
 couronne du débit tandis que la latence médiane de Go est en réalité plus basse ; le GC de Go se
 manifeste alors en latence de traîne (p99 ~47 ms) que le binaire Rust ne paie jamais. Fait intéressant, PHP 8.3
 (avec OPcache) surpasse CPython en calcul sur cette boucle d'entiers serrée, si bien que Laravel
-*surpasse en calcul* Django ici, même s'il perd sur chaque page bornée par l'E/S. C'est
+*surpasse en calcul* l'application Python ici, même s'il perd sur chaque page bornée par l'E/S. C'est
 la charge de travail où le langage, et non le framework, domine — et où pousser
 la logique chaude dans **Rustango** rapporte le plus.
 
@@ -222,24 +223,24 @@ Un benchmark que vous ne pouvez pas critiquer ne vaut pas la peine d'être publi
 - Il s'agit d'une charge de travail **à forte lecture, rendue côté serveur** — la forme de blog
   la plus courante. Elle ne mesure pas les écritures, les flux d'authentification, les websockets ou une
   logique métier lourde.
-- **Go ici est la bibliothèque standard, pas un framework pair.** Rustango, Django,
-  et Laravel sont des frameworks tout compris (ORM, admin, migrations, routage,
+- **Go ici est la bibliothèque standard, pas un framework pair.** Rustango, l'application
+  Python et Laravel sont des frameworks tout compris (ORM, admin, migrations, routage,
   templating, multi-tenancy) ; l'application Go est du `net/http` écrit à la main + du SQL brut —
   la référence la plus dépouillée et la plus rapide qu'un service Go atteint réalistement, et
   la représentation la plus équitable du langage. Qu'il fasse jeu égal ou batte Rustango sur le
   débit brut non caché est exactement là où réside le propos : **Rustango offre des performances
-  de classe Go avec une expérience développeur de classe Django/Laravel.** L'avance de Go sur les
+  de classe Go avec une expérience développeur tout compris.** L'avance de Go sur les
   endpoints non cachés s'achète en écrivant soi-même le SQL, le mappage et le câblage.
 - Les runtimes sont fondamentalement différents : Rustango et Go sont chacun un seul binaire
-  utilisant tous les cœurs avec des tâches bon marché ; Django et Laravel utilisent des pools fixes de
+  utilisant tous les cœurs avec des tâches bon marché ; les applications Python et PHP utilisent des pools fixes de
   processus/threads worker. Cette différence *fait* partie du résultat, et les
   nombres de workers ont été réglés à des valeurs par CPU sensées, non tunées pour favoriser quiconque.
-- Django et Laravel sont chacun présentés dans **les deux** runtimes — conventionnel
+- L'application Python et Laravel sont chacune présentées dans **les deux** runtimes — conventionnel
   (gunicorn, php-fpm) et robuste (Hypercorn, Octane). **Laravel sur Octane est
-  3 à 7× plus rapide** que php-fpm ; **Django sur Hypercorn** (vues synchrones) est à peu près
+  3 à 7× plus rapide** que php-fpm ; **Python sur Hypercorn** (vues synchrones) est à peu près
   plat. Les deux réduisent l'écart avec les binaires compilés ; aucun ne le comble.
 
-Le propos n'est pas que Django ou Laravel soient lents — ils propulsent une immense part du
+Le propos n'est pas que les frameworks interprétés soient lents — ils propulsent une immense part du
 web. C'est que **Rustango** vous offre cette même expérience développeur tout compris avec
 les performances et l'empreinte de Rust compilé — égalant un service Go réglé à la main tout en
 vous livrant le framework que Go vous oblige à construire.

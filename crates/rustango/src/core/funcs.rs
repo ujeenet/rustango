@@ -1,10 +1,7 @@
 //! Scalar database functions — text, math, comparison, date/time.
 //!
-//! Closes ORM Expression-DSL issues #2 (text/math/comparison) and #3
-//! (date/time). Builds on the [`crate::core::Expr`] tree introduced
-//! in #1; each function here returns an [`Expr::Function`] that
-//! composes freely with `F()`, arithmetic, other functions, and
-//! literal values.
+//! Each builder returns an [`Expr::Function`]. Calls compose freely
+//! with `F()`, arithmetic, other functions, and literal values.
 //!
 //! ```ignore
 //! use rustango::core::F;
@@ -37,55 +34,35 @@
 //!
 //! ## Per-dialect notes
 //!
-//! ### Text / math / comparison (#2)
-//!
-//! - **`concat`** falls back to `||` on SQLite (portable on every
-//!   SQLite version; SQLite added `concat()` only in 3.44).
+//! - **`concat`** emits `||` on SQLite. That form works on every
+//!   SQLite version; `concat()` only arrived in 3.44.
 //! - **`greatest` / `least`** emit SQLite's scalar `MAX(a, b, …)` /
-//!   `MIN(a, b, …)` forms — those are the scalar versions when given
-//!   2+ args, distinct from the aggregate `MAX(col)` form. The single-
-//!   arg case errors on SQLite (would collide with the aggregate).
-//! - **`length`** is **char-count** on PG, **byte-count** on MySQL,
-//!   **char-count for `TEXT`** on SQLite. For ASCII this matches; for
-//!   unicode-heavy data prefer `CHAR_LENGTH` on MySQL (not yet
-//!   exposed; file follow-up if needed).
-//! - **`round(x, n)`**: PG `ROUND(numeric, int)` doesn't accept float
-//!   without a cast; MySQL / SQLite cast implicitly. Pass an integer
-//!   column or wrap in a cast on PG when precision matters.
-//!
-//! ### Date / time (#3)
-//!
-//! - **`now()`** emits `NOW()` on PG / MySQL, `CURRENT_TIMESTAMP` on
-//!   SQLite (no parens — `NOW()` isn't a SQLite keyword).
-//! - **`extract_*`** return-type is normalized to integer everywhere
-//!   (PG via `CAST(... AS INTEGER)`, MySQL native, SQLite via
-//!   `CAST(strftime(...) AS INTEGER)`).
-//! - **`extract_weekday` is normalized to 0 = Sunday, 6 = Saturday**.
-//!   MySQL's native `DAYOFWEEK()` returns 1=Sunday; the writer
-//!   subtracts 1 to align with PG's `EXTRACT(DOW)`. SQLite's
-//!   `strftime('%w')` already matches.
-//! - **`extract_quarter` is cross-dialect** — PG/MySQL use native
-//!   QUARTER extraction; SQLite synthesizes it from the month
-//!   (`((month + 2) / 3)`), matching Django (#1037).
-//! - **⚠ `extract_week` is NOT cross-dialect**. Each backend uses a
-//!   different week-numbering convention (PG: ISO 8601; MySQL:
-//!   Sunday-start range 0–53; SQLite: Monday-start range 00–53). For
-//!   the same date the value differs. Single-backend deployments can
-//!   use it; cross-dialect code should compute the week boundary as
-//!   a typed `chrono::DateTime` in Rust and filter on the timestamp
-//!   column instead.
-//! - **`trunc_year / trunc_month` return-type diverges**: timestamp
-//!   on PG (`DATE_TRUNC('unit', x)`), text on MySQL/SQLite
-//!   (`DATE_FORMAT(x, '...')` / `strftime('...', x)`). Cast on the
-//!   app side when reading if you need a typed
-//!   `chrono::NaiveDate`. `trunc_date` is the one trunc-family
-//!   builder with identical SQL across every dialect.
+//!   `MIN(a, b, …)`. A single argument errors on SQLite, where it
+//!   would mean the aggregate instead.
+//! - **`length`** counts chars on PG and on SQLite `TEXT`, but bytes
+//!   on MySQL. Same answer for ASCII, different for other text.
+//! - **`round(x, n)`** wants a numeric on PG; a float needs a cast.
+//!   MySQL and SQLite cast for you.
+//! - **`now()`** emits `NOW()` on PG / MySQL and an RFC3339
+//!   `strftime(…, 'now')` on SQLite, so the value matches what every
+//!   other write path stores in a SQLite datetime column.
+//! - **`extract_*`** always return an integer.
+//! - **`extract_weekday`** is normalized to 0 = Sunday, 6 = Saturday
+//!   on all three backends.
+//! - **`extract_quarter`** gives the same value on all three backends.
+//! - **⚠ `extract_week` does not.** Each backend numbers weeks in its
+//!   own way, so one date gives three different values. Use it on a
+//!   single backend only. Otherwise compute the week start as a
+//!   `chrono::DateTime` in Rust and filter on the timestamp column.
+//! - **`trunc_year` / `trunc_month`** return a timestamp on PG but
+//!   text on MySQL / SQLite. Cast app-side if you need a typed
+//!   `chrono::NaiveDate`. `trunc_date` is the one trunc builder with
+//!   the same SQL everywhere.
 //!
 //! ## Composition with `F()` + arithmetic
 //!
-//! Every builder takes `impl Into<Expr>` for its argument(s), so
-//! [`F`], primitives, [`SqlValue`], and any other [`Expr`] (including
-//! the result of another builder call) pass directly:
+//! Every builder takes `impl Into<Expr>`, so [`F`], primitives,
+//! [`SqlValue`] and any other [`Expr`] pass straight in:
 //!
 //! ```ignore
 //! // Functions nest freely — each returns Expr.
@@ -150,8 +127,7 @@ pub fn abs(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Abs, arg)
 }
 
-/// `CEIL(arg)` — ceiling. Emits `CEIL` (PG/SQLite) / `CEILING` (MySQL
-/// alias of CEIL) — the writer picks the dialect-correct token.
+/// `CEIL(arg)` — ceiling. Emits `CEIL` on all three; SQLite needs 3.35+.
 #[must_use]
 pub fn ceil(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Ceil, arg)
@@ -181,9 +157,8 @@ pub fn round_to(arg: impl Into<Expr>, n: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `SUBSTRING(s, start, length)` — 1-indexed. PG emits the
-/// `FROM…FOR…` form, MySQL/SQLite the comma form. Both produce
-/// identical results.
+/// `SUBSTRING(s, start, length)` — 1-indexed. PG uses the `FROM…FOR…`
+/// form, MySQL / SQLite the comma form. Same result.
 #[must_use]
 pub fn substr(s: impl Into<Expr>, start: impl Into<Expr>, length: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -214,17 +189,12 @@ pub fn nullif(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
 
 /// `CONCAT(a, b, …)` — string concatenation. SQLite emits `||`.
 ///
-/// Takes `IntoIterator<Item = Expr>`. Array literals work as long as
-/// every element is already an [`Expr`] — call `.into()` on each
-/// non-Expr argument:
+/// Takes `IntoIterator<Item = Expr>`. A Rust array is homogeneous, so
+/// call `.into()` on every element:
 ///
 /// ```ignore
 /// concat([F("first").into(), " ".into(), F("last").into()])
 /// ```
-///
-/// (Rust arrays are homogeneous, so a heterogeneous mix of `F` and
-/// `&str` won't infer to a common type. The `.into()` per element is
-/// the price of variadic-arity at the type level.)
 #[must_use]
 pub fn concat<I>(args: I) -> Expr
 where
@@ -234,7 +204,8 @@ where
 }
 
 /// `COALESCE(a, b, c, …)` — first non-NULL argument.
-/// See [`concat`] re: passing args as already-lifted `Expr`.
+/// See [`concat()`](crate::core::funcs::concat) re: passing args as
+/// already-lifted `Expr`.
 #[must_use]
 pub fn coalesce<I>(args: I) -> Expr
 where
@@ -261,10 +232,10 @@ where
     variadic(ScalarFn::Least, args)
 }
 
-// ---------- Date / time functions (issue #3) ----------
+// ---------- Date / time functions ----------
 
-/// `NOW()` — server-side wall-clock timestamp. SQLite emits
-/// `CURRENT_TIMESTAMP` (no parens). 0-arg.
+/// `NOW()` — server-side wall-clock timestamp. 0-arg. SQLite emits an
+/// RFC3339 `strftime(…, 'now')` so the text matches other write paths.
 #[must_use]
 pub fn now() -> Expr {
     Expr::Function {
@@ -311,19 +282,17 @@ pub fn extract_second(arg: impl Into<Expr>) -> Expr {
 
 /// `EXTRACT(WEEK FROM x)` — week-of-year as integer.
 ///
-/// **⚠ NOT portable.** Each backend uses a different week-numbering
-/// convention; for the same date the value differs:
-/// - PG: ISO 8601, weeks start Monday, range 1–53.
-/// - MySQL (default mode 0): weeks start **Sunday**, range **0**–53.
-/// - SQLite (`strftime('%W')`): weeks start Monday, first
-///   Monday-of-year is week 01.
+/// **⚠ Not portable.** Each backend numbers weeks its own way:
+/// - PG: ISO 8601, Monday start, range 1–53.
+/// - MySQL (default mode 0): **Sunday** start, range **0**–53.
+/// - SQLite (`strftime('%W')`): Monday start, the first Monday of the
+///   year begins week 01.
 ///
-/// For 2024-01-01 (Monday): PG=1, MySQL=0, SQLite=01.
+/// For 2024-01-01 (a Monday): PG=1, MySQL=0, SQLite=01.
 ///
-/// Single-backend deployments can use this freely. Cross-dialect code
-/// should compute a typed week-start `chrono::DateTime` in Rust and
-/// filter with `Column::gte()` against the timestamp, or denormalize
-/// the week into an integer column with semantics under your control.
+/// Use it on a single backend only. For portable code, compute the
+/// week start as a `chrono::DateTime` in Rust and filter the
+/// timestamp column with `Column::gte()`.
 #[must_use]
 pub fn extract_week(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractWeek, arg)
@@ -336,24 +305,23 @@ pub fn extract_weekday(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractWeekDay, arg)
 }
 
-/// `EXTRACT(QUARTER FROM x)` — quarter (1–4) as integer. Cross-dialect:
-/// native on PG/MySQL; on SQLite synthesized from the month as
-/// `((month + 2) / 3)` (#1037).
+/// `EXTRACT(QUARTER FROM x)` — quarter (1–4) as integer. Native on
+/// PG / MySQL; SQLite computes it from the month as `((month + 2) / 3)`.
 #[must_use]
 pub fn extract_quarter(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractQuarter, arg)
 }
 
-/// `DATE(x)` — strip the time component from a timestamp. Same shape
-/// on all three backends; returns `DATE`.
+/// `DATE(x)` — drop the time part of a timestamp. Returns `DATE`,
+/// with the same SQL on all three backends.
 #[must_use]
 pub fn trunc_date(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::TruncDate, arg)
 }
 
-/// `DATE_TRUNC('year', x)` (PG) / `DATE_FORMAT(x, '%Y-01-01')` (MySQL)
-/// / `strftime('%Y-01-01', x)` (SQLite). **Returns timestamp on PG,
-/// text on MySQL/SQLite** — cast app-side if a typed value is needed.
+/// `DATE_TRUNC('year', x)` (PG) / `DATE_FORMAT(x, '%Y-01-01')`
+/// (MySQL) / `strftime('%Y-01-01', x)` (SQLite). **PG returns a
+/// timestamp, the others text** — cast app-side if you need a type.
 #[must_use]
 pub fn trunc_year(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::TruncYear, arg)
@@ -391,11 +359,10 @@ where
     }
 }
 
-// ---------- pg_trgm functions (issue #29 follow-up) ----------
+// ---------- pg_trgm functions ----------
 
-/// `SIMILARITY(a, b)` — pg_trgm trigram similarity, returns a `real`
-/// in `[0, 1]`. Useful as an annotation + ORDER BY for ranked fuzzy
-/// search:
+/// `SIMILARITY(a, b)` — pg_trgm trigram similarity, a `real` in
+/// `[0, 1]`. Annotate with it and order by it for ranked fuzzy search:
 ///
 /// ```ignore
 /// use rustango::core::F;
@@ -405,8 +372,7 @@ where
 ///     .order_by_desc("rank")
 /// ```
 ///
-/// Requires `CREATE EXTENSION pg_trgm` on the database. **PG-only** —
-/// MySQL / SQLite reject at compile time.
+/// Needs `CREATE EXTENSION pg_trgm`. **PG-only.**
 #[must_use]
 pub fn trigram_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -415,11 +381,9 @@ pub fn trigram_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `WORD_SIMILARITY(a, b)` — pg_trgm word-level similarity. Matches
-/// the per-word variant of [`trigram_similarity`]; pairs with the
-/// `__trigram_word_similar` WHERE-clause lookup.
-///
-/// Requires `CREATE EXTENSION pg_trgm`. **PG-only**.
+/// `WORD_SIMILARITY(a, b)` — the per-word form of
+/// [`trigram_similarity`]. Pairs with the `__trigram_word_similar`
+/// lookup. Needs `CREATE EXTENSION pg_trgm`. **PG-only.**
 #[must_use]
 pub fn trigram_word_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -428,11 +392,11 @@ pub fn trigram_word_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     }
 }
 
-// ---------- Postgres FTS scalar fns (issue #28 follow-up) ----------
+// ---------- Postgres FTS scalar fns ----------
 
-/// `to_tsvector(<expr>)` — build a Postgres FTS `tsvector` from a
-/// text expression using the database's default text-search config.
-/// Pairs with [`plainto_tsquery`] + [`ts_rank`] for ranked search:
+/// `to_tsvector(<expr>)` — build a `tsvector` from a text expression
+/// using the database's default text-search config. Pairs with
+/// [`plainto_tsquery`] + [`ts_rank`] for ranked search:
 ///
 /// ```ignore
 /// use rustango::core::funcs::{to_tsvector, plainto_tsquery, ts_rank};
@@ -445,22 +409,22 @@ pub fn trigram_word_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
 ///     .order_by_desc("rank")
 /// ```
 ///
-/// **PG-only** — MySQL / SQLite reject at compile time.
+/// **PG-only.**
 #[must_use]
 pub fn to_tsvector(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ToTsVector, arg)
 }
 
-/// `plainto_tsquery(<expr>)` — parse a plain user-provided string
-/// into a Postgres FTS `tsquery`. **PG-only**.
+/// `plainto_tsquery(<expr>)` — parse a plain user string into a
+/// `tsquery`. **PG-only.**
 #[must_use]
 pub fn plainto_tsquery(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::PlainToTsQuery, arg)
 }
 
-/// `ts_rank(<tsvector>, <tsquery>)` — Postgres FTS relevance score
-/// (`real`). Use with [`to_tsvector`] + [`plainto_tsquery`] for
-/// ranked search ordering. **PG-only**.
+/// `ts_rank(<tsvector>, <tsquery>)` — FTS relevance score (`real`).
+/// Order by it with [`to_tsvector`] + [`plainto_tsquery`].
+/// **PG-only.**
 #[must_use]
 pub fn ts_rank(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -469,9 +433,9 @@ pub fn ts_rank(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `ts_headline(<doc>, <tsquery>)` — Postgres FTS snippet generator
-/// with default highlighting (`<b>…</b>`). Use [`ts_headline_with`]
-/// for custom markers / max-fragments / etc.
+/// `ts_headline(<doc>, <tsquery>)` — FTS snippet with the default
+/// `<b>…</b>` highlighting. Use [`ts_headline_with`] for custom
+/// markers or fragment counts.
 ///
 /// ```ignore
 /// use rustango::core::funcs::{ts_headline, plainto_tsquery};
@@ -489,11 +453,10 @@ pub fn ts_headline(doc: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `ts_headline(<doc>, <tsquery>, <options>)` — Postgres FTS snippet
-/// generator with custom markers / fragment count / etc. `options`
-/// is a Postgres-style key=value string, e.g.
+/// `ts_headline(<doc>, <tsquery>, <options>)` — FTS snippet with
+/// custom options. `options` is a key=value string, for example
 /// `"StartSel='<mark>', StopSel='</mark>', MaxFragments=1"`.
-/// **PG-only**.
+/// **PG-only.**
 #[must_use]
 pub fn ts_headline_with(
     doc: impl Into<Expr>,
@@ -506,39 +469,34 @@ pub fn ts_headline_with(
     }
 }
 
-/// `phraseto_tsquery(<expr>)` — Postgres FTS phrase-preserving query
-/// parser. Builds a `tsquery` from a phrase, preserving word order:
-/// `"rust orm"` → `'rust' <-> 'orm'`. Use when exact-phrase semantics
-/// matter (vs `plainto_tsquery`, which ignores word order). **PG-only**.
+/// `phraseto_tsquery(<expr>)` — builds a `tsquery` that keeps word
+/// order: `"rust orm"` → `'rust' <-> 'orm'`. Use it when the exact
+/// phrase matters; [`plainto_tsquery`] ignores order. **PG-only.**
 #[must_use]
 pub fn phraseto_tsquery(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::PhraseToTsQuery, arg)
 }
 
-/// `websearch_to_tsquery(<expr>)` — Postgres FTS query parser that
-/// accepts Google-style search syntax: quoted `"exact phrase"`,
-/// unary `-exclude`, the literal `OR`. Best fit for end-user search
-/// boxes. **PG-only**.
+/// `websearch_to_tsquery(<expr>)` — accepts Google-style syntax:
+/// quoted `"exact phrase"`, `-exclude`, the literal `OR`. The best
+/// fit for a user-facing search box. **PG-only.**
 #[must_use]
 pub fn websearch_to_tsquery(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::WebsearchToTsQuery, arg)
 }
 
-/// `to_tsquery(<expr>)` — Postgres FTS query parser for the raw
-/// `tsquery` operator syntax (`'rust & orm'`, `'rust | python'`,
-/// `'rust & !python'`). Lower-level than [`plainto_tsquery`]; the
-/// caller is responsible for valid `tsquery` syntax. Use when the
-/// app constructs queries programmatically (composed AND/OR/NOT)
-/// rather than from raw user input. **PG-only**.
+/// `to_tsquery(<expr>)` — the raw `tsquery` operator syntax
+/// (`'rust & orm'`, `'rust | python'`, `'rust & !python'`). Lower
+/// level than [`plainto_tsquery`]: you must pass valid syntax, so use
+/// it for queries the app builds, not raw user input. **PG-only.**
 #[must_use]
 pub fn to_tsquery(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ToTsQuery, arg)
 }
 
-/// `ts_rank_cd(<tsvector>, <tsquery>)` — Postgres FTS cover-density
-/// ranking. Same shape as [`ts_rank`], different algorithm (factors
-/// in how closely matched terms cluster — better for short
-/// documents and phrase searches). **PG-only**.
+/// `ts_rank_cd(<tsvector>, <tsquery>)` — cover-density ranking. Same
+/// shape as [`ts_rank`], but it also weighs how close the matched
+/// terms sit. Better for short documents and phrases. **PG-only.**
 #[must_use]
 pub fn ts_rank_cd(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -547,12 +505,11 @@ pub fn ts_rank_cd(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     }
 }
 
-// ---------- DB functions batch 1 (issue #266 / T1.4) ----------
+// ---------- Cast, padding, hashes, more math ----------
 
 /// `CAST(<expr> AS <ty>)` — explicit type coercion. The writer maps
-/// `ty` to the dialect-specific SQL type token via
-/// [`crate::sql::Dialect::null_cast`], so the same call emits the
-/// correct token on PG / MySQL / SQLite.
+/// `ty` to the right SQL type token per dialect via
+/// [`crate::sql::Dialect::null_cast`].
 ///
 /// ```ignore
 /// use rustango::core::{funcs, FieldType, F};
@@ -567,9 +524,9 @@ pub fn cast(expr: impl Into<Expr>, ty: super::field_type::FieldType) -> Expr {
     }
 }
 
-/// `LPAD(s, len, fill)` — left-pad string `s` to `len` characters
-/// using `fill`. SQLite gets a `substr(printf(...))` fallback because
-/// the function isn't built-in.
+/// `LPAD(s, len, fill)` — left-pad `s` to `len` characters with
+/// `fill`. SQLite has no such function, so it gets a
+/// `substr(printf(...))` fallback.
 #[must_use]
 pub fn lpad(s: impl Into<Expr>, len: impl Into<Expr>, fill: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -587,22 +544,23 @@ pub fn rpad(s: impl Into<Expr>, len: impl Into<Expr>, fill: impl Into<Expr>) -> 
     }
 }
 
-/// `MD5(s)` → hex string. PG `md5()` (built-in), MySQL `MD5()`
-/// (built-in). **SQLite errors** with `OpNotSupportedInDialect`.
+/// `MD5(s)` → hex string. Built in on PG and MySQL. **SQLite errors**
+/// with `OpNotSupportedInDialect`.
 #[must_use]
 pub fn md5(s: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Md5, s)
 }
 
-/// `SHA1(s)` → hex string. PG uses `pgcrypto`'s `digest()` (requires
-/// `CREATE EXTENSION pgcrypto`), MySQL `SHA1()`. **SQLite errors**.
+/// `SHA1(s)` → hex string. PG uses `pgcrypto`'s `digest()`, so it
+/// needs `CREATE EXTENSION pgcrypto`. MySQL uses `SHA1()`.
+/// **SQLite errors.**
 #[must_use]
 pub fn sha1(s: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Sha1, s)
 }
 
 /// `SHA256(s)` → hex string. PG uses `pgcrypto`'s `digest()`, MySQL
-/// `SHA2(s, 256)`. **SQLite errors**.
+/// `SHA2(s, 256)`. **SQLite errors.**
 #[must_use]
 pub fn sha256(s: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Sha256, s)
@@ -610,10 +568,8 @@ pub fn sha256(s: impl Into<Expr>) -> Expr {
 
 /// `POSITION(needle IN hay)` (PG) / `LOCATE(needle, hay)` (MySQL) /
 /// `INSTR(hay, needle)` (SQLite). All return the 1-indexed position
-/// of the first occurrence, or 0 if not found.
-///
-/// Argument order is `(needle, hay)` to match Django's `StrIndex`;
-/// the SQLite writer swaps for the native `INSTR(hay, needle)` shape.
+/// of the first match, or 0 when there is none. Argument order is
+/// `(needle, hay)`; the SQLite writer swaps the two for you.
 #[must_use]
 pub fn position(needle: impl Into<Expr>, hay: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -622,8 +578,8 @@ pub fn position(needle: impl Into<Expr>, hay: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `REPEAT(s, n)` — repeat string `s`, `n` times. SQLite emits a
-/// `replace(printf(...))` workaround because the function isn't native.
+/// `REPEAT(s, n)` — repeat `s` `n` times. SQLite has no such
+/// function, so it gets a `replace(printf(...))` fallback.
 #[must_use]
 pub fn repeat(s: impl Into<Expr>, n: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -646,20 +602,19 @@ pub fn sign(x: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Sign, x)
 }
 
-/// `a % b` — modulo. Lowered to [`Expr::BinOp`] with [`super::expr::BinOp::Mod`]
-/// rather than a function call, because every dialect uses the same
-/// `%` operator. The function-shape spelling is provided to match the
-/// Django `Mod(F('a'), F('b'))` ergonomics.
+/// `a % b` — modulo. Every dialect uses `%`, so this lowers to
+/// [`Expr::BinOp`] with [`super::expr::BinOp::Mod`] rather than a
+/// function call. The function spelling is there so it composes with
+/// the other `funcs` builders.
 #[must_use]
 pub fn mod_(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     a.into().binop(super::expr::BinOp::Mod, b)
 }
 
-/// `POWER(a, b)` — `a` raised to the `b`th. PG/MySQL native. **SQLite
-/// errors** unless the library was built with `SQLITE_ENABLE_MATH_FUNCTIONS`
-/// (sqlx-sqlite's default build does not enable this) — the writer
-/// surfaces `OpNotSupportedInDialect` rather than producing a runtime
-/// `no such function: POWER` error.
+/// `POWER(a, b)` — `a` raised to the `b`th. Native on PG / MySQL.
+/// **SQLite errors**: the function needs
+/// `SQLITE_ENABLE_MATH_FUNCTIONS`, which sqlx-sqlite does not build
+/// with, so the writer fails early instead of at runtime.
 #[must_use]
 pub fn power(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -668,26 +623,25 @@ pub fn power(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `SQRT(x)` — square root. PG/MySQL native; SQLite same build-flag
-/// caveat as [`power`].
+/// `SQRT(x)` — square root. Native on PG / MySQL; SQLite has the
+/// same build-flag limit as [`power`].
 #[must_use]
 pub fn sqrt(x: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Sqrt, x)
 }
 
-// ---------- DB functions batch 2 (issue #294 / T2.7) ----------
+// ---------- Logs, constants, intervals ----------
 
-/// `LN(x)` — natural log (base e). PG `ln`, MySQL `LN`, SQLite `ln`
-/// (3.35+ with `SQLITE_ENABLE_MATH_FUNCTIONS`; the writer errors on
-/// default sqlx-sqlite builds).
+/// `LN(x)` — natural log (base e). Native on PG / MySQL. On SQLite it
+/// needs 3.35+ built with `SQLITE_ENABLE_MATH_FUNCTIONS`, so the
+/// writer errors on default sqlx-sqlite builds.
 #[must_use]
 pub fn log(x: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Log, x)
 }
 
-/// `LOG(base, x)` — log of `x` in base `base`. PG `log(base, x)`,
-/// MySQL `LOG(base, x)`, SQLite `log(base, x)` (3.35+ build-flag
-/// caveat; writer errors otherwise).
+/// `LOG(base, x)` — log of `x` in base `base`. Same SQLite build-flag
+/// limit as [`log`].
 #[must_use]
 pub fn log_with_base(base: impl Into<Expr>, x: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -696,8 +650,8 @@ pub fn log_with_base(base: impl Into<Expr>, x: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `EXP(x)` — `e^x`. PG / MySQL native; SQLite same 3.35+ build-flag
-/// caveat as [`log`].
+/// `EXP(x)` — `e^x`. Native on PG / MySQL; same SQLite build-flag
+/// limit as [`log`].
 #[must_use]
 pub fn exp(x: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Exp, x)
@@ -713,10 +667,9 @@ pub fn pi() -> Expr {
     }
 }
 
-/// `RANDOM()` — pseudo-random number. **Return-range divergence**: PG
-/// `random()` and MySQL `RAND()` return a float in `[0, 1)`; SQLite
-/// `random()` returns a 64-bit integer in `[-2^63, 2^63)`. Normalize
-/// app-side when cross-dialect floats matter.
+/// `RANDOM()` — pseudo-random number. **The range differs**: PG and
+/// MySQL return a float in `[0, 1)`; SQLite returns a 64-bit integer
+/// in `[-2^63, 2^63)`. Normalize app-side for portable code.
 #[must_use]
 pub fn random() -> Expr {
     Expr::Function {
@@ -726,8 +679,8 @@ pub fn random() -> Expr {
 }
 
 /// `MAKE_INTERVAL(years, months, days, hours, minutes, seconds)` —
-/// **PG-only**. MySQL has no native `interval` type; SQLite has neither
-/// — both emit `OpNotSupportedInDialect`. Pass zeros for unused fields.
+/// **PG-only**; MySQL and SQLite have no `interval` type and emit
+/// `OpNotSupportedInDialect`. Pass zeros for unused fields.
 #[must_use]
 pub fn make_interval(
     years: impl Into<Expr>,
@@ -750,15 +703,10 @@ pub fn make_interval(
     }
 }
 
-/// `AGE(ts1, ts2)` — duration between two timestamps. **Return-type
-/// divergence**:
-/// - PG returns `interval`.
-/// - MySQL returns numeric seconds (`TIMESTAMPDIFF(SECOND, ts2, ts1)`).
-/// - SQLite returns a `REAL` count of seconds.
-///
-/// Use only when staying on a single backend, or wrap with
-/// `EXTRACT(EPOCH FROM age(...))` on PG to normalize to seconds across
-/// the three dialects.
+/// `AGE(ts1, ts2)` — time between two timestamps. **The return type
+/// differs**: PG gives an `interval`, MySQL numeric seconds, SQLite a
+/// `REAL` count of seconds. Use it on one backend, or wrap the PG
+/// call in `EXTRACT(EPOCH FROM …)` to get seconds everywhere.
 #[must_use]
 pub fn age(ts1: impl Into<Expr>, ts2: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -767,14 +715,14 @@ pub fn age(ts1: impl Into<Expr>, ts2: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `date_trunc(unit, ts AT TIME ZONE tz)` (PG) and equivalents on
-/// MySQL / SQLite. `unit` must be one of `"year" | "month" | "day" |
-/// "hour" | "minute" | "second"`; `tz` is an IANA name on PG / MySQL
-/// (`"America/New_York"`) or a `±HH:MM` offset on SQLite. Other units
-/// or unsupported backends emit `OpNotSupportedInDialect`.
+/// `date_trunc(unit, ts AT TIME ZONE tz)` (PG) and the equivalents on
+/// MySQL / SQLite. `unit` is one of `"year" | "month" | "day" |
+/// "hour" | "minute" | "second"`. `tz` is an IANA name on PG / MySQL
+/// (`"America/New_York"`) or a `±HH:MM` offset on SQLite. Any other
+/// unit emits `OpNotSupportedInDialect`.
 ///
-/// **Return-type divergence**: PG returns timestamp; MySQL / SQLite
-/// return text. Cast app-side if a typed value is needed.
+/// PG returns a timestamp, MySQL / SQLite return text. Cast app-side
+/// if you need a typed value.
 #[must_use]
 pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) -> Expr {
     use super::SqlValue;
@@ -788,16 +736,16 @@ pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) 
     }
 }
 
-// ---------- JSON path extraction (issue #296 / T2.3) ----------
+// ---------- JSON path extraction ----------
 
 /// `<source> -> 'k1' -> 'k2' ->> 'k3'` (PG) /
 /// `JSON_UNQUOTE(JSON_EXTRACT(...))` (MySQL) /
-/// `json_extract(...)` (SQLite). Issue #296 / T2.3.
+/// `json_extract(...)` (SQLite).
 ///
-/// Builds an [`Expr::JsonPath`] over a JSON-typed column or expression.
-/// Each `&str` in `path` is treated as an object-key step (`$.<key>`).
-/// `as_text = true` requests the unwrapped scalar form (PG's `->>`),
-/// `false` keeps the JSON-typed form.
+/// Builds an [`Expr::JsonPath`] over a JSON column or expression.
+/// Each `&str` in `keys` is an object-key step (`$.<key>`).
+/// `as_text = true` unwraps to a scalar (PG's `->>`); `false` keeps
+/// the JSON-typed form.
 ///
 /// ```ignore
 /// use rustango::core::F;
@@ -824,9 +772,8 @@ pub fn json_path(source: impl Into<Expr>, keys: &[&str], as_text: bool) -> Expr 
 }
 
 /// `JSON_ARRAY_LENGTH(x)` — number of elements in a JSON array.
-/// Tri-dialect: emits `jsonb_array_length` on PG, `JSON_LENGTH` on
-/// MySQL, `json_array_length` on SQLite. Eloquent `whereJsonLength`
-/// / Django `JSONField` length lookup. Issue #826.
+/// Emits `jsonb_array_length` on PG, `JSON_LENGTH` on MySQL,
+/// `json_array_length` on SQLite.
 ///
 /// ```ignore
 /// use rustango::core::funcs::{json_array_length, json_path};
@@ -841,21 +788,17 @@ pub fn json_path(source: impl Into<Expr>, keys: &[&str], as_text: bool) -> Expr 
 ///     })
 /// ```
 ///
-/// **Backend notes**:
-/// * **PG**: errors on non-array input. Wrap arrays-of-unknown-shape
-///   with `COALESCE(jsonb_array_length(x), 0)` if your data is mixed.
-/// * **MySQL**: `JSON_LENGTH` returns 1 for non-array / non-object
-///   values; this is unfixable at the writer layer without per-call
-///   type-aware coercion (which we don't have JSON metadata for).
-/// * **SQLite >= 3.38**: returns 0 for non-array inputs.
+/// Non-array input behaves differently on each backend: PG errors,
+/// MySQL returns 1, SQLite (3.38+) returns 0. If your data is mixed,
+/// wrap the PG call in `COALESCE(jsonb_array_length(x), 0)`.
 #[must_use]
 pub fn json_array_length(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::JsonArrayLength, arg)
 }
 
-/// Like [`json_path`] but accepts a heterogeneous list of key + index
-/// steps — `&[JsonPathStep::Key("items"), JsonPathStep::Index(0),
-/// JsonPathStep::Key("name")]` for `data.items[0].name`.
+/// Like [`json_path`], but the steps may mix keys and array indices:
+/// `[JsonPathStep::Key("items"), JsonPathStep::Index(0),
+/// JsonPathStep::Key("name")]` reads `data.items[0].name`.
 #[must_use]
 pub fn json_path_indexed(
     source: impl Into<Expr>,
@@ -869,15 +812,15 @@ pub fn json_path_indexed(
     }
 }
 
-// ---- PostGIS spatial functions (GeoDjango queries, issue #58) -------
+// ---- PostGIS spatial functions -------
 //
-// All Postgres/PostGIS-only — they emit `OpNotSupportedInDialect` on
-// MySQL / SQLite. Pass a column via `F("col")` and a literal point as a
-// bare [`crate::sql::Point`] (which is `Into<Expr>`).
+// All PG/PostGIS-only — MySQL / SQLite emit `OpNotSupportedInDialect`.
+// Pass a column as `F("col")` and a literal point as a bare
+// `crate::sql::Point`, which is `Into<Expr>`.
 
-/// `ST_Distance(a, b)` — distance between two geometries in SRID units.
-/// Returns `double precision`; use with `.order_by_expr(...)` for
-/// nearest-neighbour ordering (or [`crate::query::QuerySet::order_by_distance_to`]).
+/// `ST_Distance(a, b)` — distance between two geometries in SRID
+/// units, as `double precision`. Order by it for nearest-neighbour
+/// queries, or use [`crate::query::QuerySet::order_by_distance_to`].
 #[must_use]
 pub fn st_distance(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     Expr::Function {
@@ -886,9 +829,9 @@ pub fn st_distance(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     }
 }
 
-/// `ST_DWithin(a, b, distance)` — boolean "within `distance` (SRID
-/// units)" predicate. Use with `.where_raw(...)` (or the
-/// [`crate::query::QuerySet::filter_dwithin`] shortcut).
+/// `ST_DWithin(a, b, distance)` — true when `a` is within `distance`
+/// (SRID units) of `b`. Use it in `.where_raw(...)`, or use the
+/// [`crate::query::QuerySet::filter_dwithin`] shortcut.
 #[must_use]
 pub fn st_dwithin(a: impl Into<Expr>, b: impl Into<Expr>, distance: impl Into<Expr>) -> Expr {
     Expr::Function {

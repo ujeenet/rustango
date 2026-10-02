@@ -1,4 +1,4 @@
-//! Django-parity #360 — `register_admin_queryset!` adds a
+//! Issue #360 — `register_admin_queryset!` adds a
 //! request-aware Filter contribution to the admin's list view
 //! WHERE clause. End-to-end: register a hook that hides
 //! `archived = true` rows, seed both kinds of rows, fetch the list
@@ -35,11 +35,7 @@ pub struct QhPost {
 // `parts.extensions` for a request-user struct + return per-user
 // scoping predicates.
 fn hide_archived(_parts: &axum::http::request::Parts) -> Vec<Filter> {
-    vec![Filter {
-        column: "archived",
-        op: Op::Eq,
-        value: SqlValue::Bool(false),
-    }]
+    vec![Filter::new("archived", Op::Eq, SqlValue::Bool(false))]
 }
 rustango::register_admin_queryset!("qh_post", hide_archived);
 

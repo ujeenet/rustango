@@ -1,5 +1,5 @@
-//! Compile + type-check coverage for the three Django model-inheritance
-//! shapes adapted to Rust idioms (Issue #51). Lives alongside the
+//! Compile + type-check coverage for the three model-inheritance
+//! shapes in Rust idioms (Issue #51). Lives alongside the
 //! `inheritance` module's rustdoc — proves the patterns compile
 //! end-to-end against real `#[derive(Model)]` types.
 //!
@@ -18,7 +18,7 @@ use rustango::Model;
 // SHAPE 1 — Abstract base class → shared TRAIT + per-model fields
 // ============================================================
 
-/// Django's "Timestamped" abstract base: every child gets
+/// A "Timestamped" abstract base: every child gets
 /// `created_at` / `updated_at`. In Rust we declare the BEHAVIOR
 /// as a trait; field declarations live on each model.
 pub trait Timestamped {
@@ -69,9 +69,9 @@ impl Timestamped for Comment {
     }
 }
 
-/// Generic helper that operates on any `Timestamped` model. This
-/// is the Rust equivalent of methods Django would put on the
-/// abstract base class — write once, reuse across every child.
+/// Generic helper that operates on any `Timestamped` model — the
+/// place shared behaviour lives instead of a base class. Write once,
+/// reuse across every child.
 fn age_in_seconds<T: Timestamped>(item: &T, now: DateTime<Utc>) -> i64 {
     now.signed_duration_since(item.created_at()).num_seconds()
 }
@@ -79,8 +79,7 @@ fn age_in_seconds<T: Timestamped>(item: &T, now: DateTime<Utc>) -> i64 {
 #[test]
 fn abstract_base_via_trait_dispatches_across_child_models() {
     // Both Article and Comment share the `Timestamped` behavior
-    // via trait dispatch — same shape Django's abstract base
-    // class gives via Python inheritance.
+    // via trait dispatch, with no shared table and no base type.
     let t = "2026-01-15T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
     let a = Article {
         id: Auto::Set(1),
@@ -104,9 +103,8 @@ fn abstract_base_via_trait_dispatches_across_child_models() {
 // SHAPE 2 — Multi-table inheritance → explicit OneToOne FK
 // ============================================================
 
-/// "Place IS-A entity with a name + address." Django would put
-/// this in the base; in rustango it's just a regular Model with
-/// its own table.
+/// "Place IS-A entity with a name + address." The would-be base
+/// class is just a regular Model with its own table.
 #[derive(Model, Debug)]
 #[rustango(table = "inh_place")]
 #[allow(dead_code)]
@@ -119,15 +117,15 @@ pub struct Place {
     pub address: String,
 }
 
-/// "Restaurant IS-A Place." The OneToOne FK to Place gives
-/// Django's multi-table inheritance shape — Restaurant has its
+/// "Restaurant IS-A Place." The OneToOne FK to Place gives the
+/// multi-table inheritance shape — Restaurant has its
 /// own table, but every Restaurant row corresponds to exactly one
 /// Place row.
 #[derive(Model, Debug)]
 #[rustango(table = "inh_restaurant")]
 #[allow(dead_code)]
 pub struct Restaurant {
-    /// FK back to Place — the implicit OneToOne Django wires for you.
+    /// FK back to Place — the OneToOne is declared, never implicit.
     #[rustango(primary_key)]
     #[rustango(o2o = "inh_place", on = "id")]
     pub place_id: i64,
@@ -144,8 +142,8 @@ fn multi_table_inheritance_via_one_to_one_fk_compiles() {
         place_id: 7,
         serves_hot_dogs: true,
     };
-    // Both QuerySets are usable independently — same dispatch
-    // shape Django gives via `Restaurant.objects.all()` / `place.restaurant`.
+    // Both QuerySets are usable independently: query either table
+    // on its own, and hop across the OneToOne when you need to.
     let _: QuerySet<Restaurant> = Restaurant::objects();
     let _: QuerySet<Place> = Place::objects();
 }
@@ -165,9 +163,9 @@ pub struct Post {
     pub published: bool,
 }
 
-/// Proxy-style "view" — different Manager personality on the same
-/// table. Django writes `class PublishedPost(Post): Meta.proxy = True`;
-/// in Rust it's an extension trait on `QuerySet<Post>`.
+/// Proxy-style "view" — a different Manager personality on the same
+/// table, spelled as an extension trait on `QuerySet<Post>` rather
+/// than a second model type.
 trait PublishedPostExt: Sized {
     fn only_published(self) -> Self;
 }
@@ -181,8 +179,7 @@ impl PublishedPostExt for QuerySet<Post> {
 #[test]
 fn proxy_model_via_extension_trait_chains_with_framework_methods() {
     // Pin: a "proxy-style" extension method composes with the
-    // framework's built-in QuerySet methods — same chain Django
-    // gets from `PublishedPost.objects.all()`.
+    // framework's built-in QuerySet methods in one chain.
     let _chain: QuerySet<Post> = Post::objects()
         .only_published() // proxy-style
         .limit(20); // framework

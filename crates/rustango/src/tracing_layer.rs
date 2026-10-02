@@ -5,25 +5,43 @@
 //!
 //! - `http.request.method`         — `GET` / `POST` / ...
 //! - `url.path`                    — request path (no query)
-//! - `url.query`                   — query string (omitted when empty)
+//! - `url.query`                   — **redacted** query string (omitted when empty)
 //! - `network.protocol.version`    — `HTTP/1.1`, `HTTP/2`, etc.
 //! - `user_agent.original`         — User-Agent header
 //! - `http.response.status_code`   — set after the handler returns
 //! - `http.response.body.size`     — Content-Length when emitted
 //! - `duration_ms`                 — full request lifetime
+//! - `request_id`                  — set by [`crate::request_id::record`]
+//! - `tenant` / `org_id`           — set when a tenant resolves
 //!
-//! Plus, when the incoming request carries a W3C `traceparent`
-//! header, the parsed trace_id / parent_span_id are recorded so any
-//! `tracing-opentelemetry` layer the user installs picks them up
-//! automatically.
+//! `url.query` is always redacted, using the **configured**
+//! `redact_query_params` — so a key added under `[audit]
+//! redact_query_params` is hidden on the span too, whether or not
+//! `[logging] access_log` is on.
+//!
+//! That independence is the point. The span used to take its list
+//! *from* the access-log layer, so turning the log off left the span
+//! on `default_redact_params()` and wrote a configured key in clear
+//! text — one config section quietly narrowing another (#1610). The
+//! list now reaches the span directly, and `server::Builder` derives
+//! it from the access log only when no explicit list was given.
+//!
+//! [`crate::tenant_log::record`] and [`crate::request_id::record`] set
+//! `tenant` and `request_id` partway through the request, so every
+//! later event, the ORM's included, carries them. `tenant` is left out
+//! when no tenant resolves.
+//!
+//! When the request carries a W3C `traceparent` header, the trace_id
+//! and parent_span_id are recorded, so a `tracing-opentelemetry` layer
+//! picks them up on its own.
 //!
 //! ## Why not just use `tower-http::TraceLayer`?
 //!
-//! `tower-http`'s tracer ships a different set of field names
-//! ([`http.method`], [`http.status_code`]) that pre-date the current
-//! OpenTelemetry semantic conventions. This layer matches the
-//! [v1.30 conventions](https://opentelemetry.io/docs/specs/semconv/http/http-spans/)
-//! so OTel collectors don't need attribute-renaming rules.
+//! `tower-http`'s tracer uses older field names (`http.method`,
+//! `http.status_code`) from before the current OpenTelemetry
+//! conventions. This layer matches the
+//! [v1.30 conventions](https://opentelemetry.io/docs/specs/semconv/http/http-spans/),
+//! so a collector needs no renaming rules.
 //!
 //! ## Quick start
 //!
@@ -41,15 +59,13 @@
 //!
 //! ## Distributed tracing wiring
 //!
-//! For full distributed traces, install a `tracing-opentelemetry`
-//! layer in your subscriber (this module deliberately doesn't pull
-//! that dep — it's heavy). The layer reads the `traceparent` /
-//! `parent_span_id` fields recorded by `TracingLayer` and threads
-//! them through the OTel context.
+//! For full distributed traces, add a `tracing-opentelemetry` layer
+//! to your subscriber. This module does not depend on it, because the
+//! dependency is heavy. That layer reads the `traceparent` and
+//! `parent_span_id` fields this one records.
 
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -58,13 +74,40 @@ use axum::http::{header, HeaderMap, Request, Response, Version};
 use tower::Service;
 use tracing::{field, info_span, Instrument};
 
-#[derive(Clone, Default, Debug)]
-pub struct TracingLayer;
+#[derive(Clone, Debug)]
+pub struct TracingLayer {
+    /// Query parameters whose values are redacted out of `url.query`
+    /// on the span. Defaults to the [`crate::access_log`] list.
+    ///
+    /// It is a field, not a constant, because a project can extend
+    /// the list through `[audit] redact_query_params`. The span must
+    /// use the same set: the span renders on the same line as the
+    /// event, so a key hidden in one and shown in the other leaks.
+    redact_query_params: std::sync::Arc<Vec<String>>,
+}
+
+impl Default for TracingLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TracingLayer {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            redact_query_params: std::sync::Arc::new(crate::access_log::default_redact_params()),
+        }
+    }
+
+    /// Redact these query parameters instead of the defaults.
+    ///
+    /// Pass `AccessLogLayer::redact_query_params` so both layers
+    /// agree. The framework's serving paths already do that.
+    #[must_use]
+    pub fn redact(mut self, params: Vec<String>) -> Self {
+        self.redact_query_params = std::sync::Arc::new(params);
+        self
     }
 }
 
@@ -72,23 +115,21 @@ impl<S> tower::Layer<S> for TracingLayer {
     type Service = TracingService<S>;
     fn layer(&self, inner: S) -> Self::Service {
         TracingService {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            inner,
+            redact_query_params: std::sync::Arc::clone(&self.redact_query_params),
         }
     }
 }
 
-/// The wrapped service. Internal `Arc<Mutex<S>>` so we can safely
-/// `clone()` per-request without requiring `S: Clone`.
+/// The wrapped service.
+///
+/// It holds the inner service directly and uses tower's ready-clone.
+/// Do not wrap it in a lock: the `Service` impl below already needs
+/// `S: Clone`, so a lock would only add contention on every request.
+#[derive(Clone)]
 pub struct TracingService<S> {
-    inner: Arc<tokio::sync::Mutex<S>>,
-}
-
-impl<S> Clone for TracingService<S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
+    inner: S,
+    redact_query_params: std::sync::Arc<Vec<String>>,
 }
 
 impl<S> Service<Request<Body>> for TracingService<S>
@@ -104,20 +145,21 @@ where
     type Future =
         Pin<Box<dyn std::future::Future<Output = Result<Response<Body>, Infallible>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Always ready — we lock the inner service per-call.
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
-        let span = build_request_span(&req);
+        // tower's ready-clone. A fresh clone is not ready, so use the
+        // original that `poll_ready` readied and keep the clone for
+        // next time.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let span = build_request_span(&req, &self.redact_query_params);
         Box::pin(
             async move {
                 let started = Instant::now();
-                let mut svc = inner.lock().await.clone();
-                drop(inner);
-                let resp = svc.call(req).await?;
+                let resp = inner.call(req).await?;
                 record_response(&resp, started);
                 Ok(resp)
             }
@@ -126,7 +168,7 @@ where
     }
 }
 
-fn build_request_span(req: &Request<Body>) -> tracing::Span {
+fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
     let method = req.method().as_str();
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
@@ -147,13 +189,27 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         "http.response.status_code" = field::Empty,
         "http.response.body.size" = field::Empty,
         "duration_ms" = field::Empty,
+        // Tenant identity, set mid-request by `tenant_log::record`.
+        // Left empty on single-tenant apps and on apex or
+        // operator-console requests.
+        "tenant" = field::Empty,
+        "org_id" = field::Empty,
+        // The `X-Request-Id`, set by `request_id::record`. Keeping it
+        // on the span means every event below it, the ORM's included,
+        // carries the id without knowing it exists.
+        "request_id" = field::Empty,
         // Distributed-tracing fields populated when traceparent is present.
         "trace_id" = field::Empty,
         "parent_span_id" = field::Empty,
         "trace_flags" = field::Empty,
     );
     if !query.is_empty() {
-        span.record("url.query", query);
+        // Never record the raw query here. The span renders on the
+        // same line as the access-log event, so a raw value would put
+        // the cleartext credential right beside the redacted copy.
+        // `redact` is the caller's configured list, not the defaults.
+        let redacted = crate::access_log::redact_query(query, redact);
+        span.record("url.query", redacted.as_str());
     }
     if let Some(tp) = parse_traceparent(req.headers()) {
         span.record("trace_id", tp.trace_id);
@@ -194,9 +250,8 @@ const fn http_version_str(v: Version) -> &'static str {
 // W3C Trace Context — `traceparent` parser
 // =====================================================================
 
-/// Parsed traceparent bits we care about. `trace-id` and `parent-id`
-/// are kept as their hex-string representation so we can record them
-/// directly into the span without re-hexing.
+/// The traceparent fields we use. `trace_id` and `parent_id` stay as
+/// hex strings so they go straight onto the span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTraceparent<'a> {
     pub version: &'a str,
@@ -205,12 +260,12 @@ pub struct ParsedTraceparent<'a> {
     pub flags: &'a str,
 }
 
-/// Extract a traceparent from the request headers and parse it. The
-/// W3C format is `<version>-<trace-id>-<parent-id>-<flags>` with
-/// length-checked hex segments.
+/// Parse the `traceparent` header. The W3C format is
+/// `<version>-<trace-id>-<parent-id>-<flags>`, all hex, each segment
+/// a fixed length.
 ///
-/// Returns `None` for any non-conforming value — the spec mandates
-/// silent ignore in that case.
+/// Returns `None` for anything else; the spec says to ignore a bad
+/// value silently.
 fn parse_traceparent(headers: &HeaderMap) -> Option<ParsedTraceparent<'_>> {
     let raw = headers.get("traceparent")?.to_str().ok()?;
     parse_traceparent_str(raw)
@@ -222,7 +277,7 @@ fn parse_traceparent_str(s: &str) -> Option<ParsedTraceparent<'_>> {
     let trace_id = it.next()?;
     let parent_id = it.next()?;
     let flags = it.next()?;
-    // W3C v00: 2-hex version, 32-hex trace-id, 16-hex parent-id, 2-hex flags.
+    // W3C v00: version 2 hex, trace-id 32, parent-id 16, flags 2.
     if version.len() != 2 || !is_hex(version) {
         return None;
     }
@@ -320,10 +375,9 @@ mod tests {
         assert_eq!(http_version_str(Version::HTTP_10), "HTTP/1.0");
     }
 
-    // -------- Service integration smoke test (no subscriber wired up
-    // — we verify the request flows through the layer cleanly + the
-    // span metadata is built without panicking; field-capture
-    // assertions live in the parser tests above).
+    // -------- Service smoke tests. No subscriber is installed, so
+    // these only check that a request passes through the layer and
+    // the span is built without panicking.
 
     #[tokio::test]
     async fn layer_passes_through_request_returning_response() {
@@ -352,9 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn layer_records_response_status_into_span() {
-        // Verify build_request_span + record_response don't panic and
-        // produce a non-disabled span. We capture the span Id by
-        // entering it briefly.
+        // build_request_span and record_response must not panic.
         use axum::http::StatusCode;
         let req = Request::builder()
             .method("POST")
@@ -362,7 +414,7 @@ mod tests {
             .header(header::USER_AGENT, "test-ua/1.0")
             .body(Body::empty())
             .unwrap();
-        let span = build_request_span(&req);
+        let span = build_request_span(&req, &crate::access_log::default_redact_params());
         let _enter = span.enter();
         let resp: Response<Body> = Response::builder()
             .status(StatusCode::CREATED)
@@ -370,9 +422,92 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         record_response(&resp, Instant::now());
-        // Span is non-disabled (we used info_span! which respects the
-        // current subscriber; with no subscriber it's disabled, so
-        // accept either — the contract is "doesn't panic").
-        // No assertion needed beyond reaching this line.
+        // With no subscriber the span is disabled, so there is
+        // nothing to assert: reaching this line is the test.
+    }
+
+    /// A key the *project* configured must be redacted on the span
+    /// too, not just the framework defaults.
+    #[test]
+    fn a_project_configured_key_is_redacted_on_the_span() {
+        let redact = vec!["client_secret".to_owned()];
+        let req = Request::builder()
+            .uri("/cb?client_secret=shhh&page=2")
+            .body(Body::empty())
+            .unwrap();
+        let span = build_request_span(&req, &redact);
+        drop(span);
+
+        let out = crate::access_log::redact_query("client_secret=shhh&page=2", &redact);
+        assert!(!out.contains("shhh"), "configured key not redacted: {out}");
+        assert!(out.contains("page=2"), "non-credential param lost: {out}");
+    }
+
+    /// OAuth callbacks such as `/sso/callback?code=…&state=…` carry
+    /// credentials under their own names. Matching is exact, so
+    /// `access_token` does not cover `id_token`.
+    #[test]
+    fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
+        let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\
+&client_secret=CS&page=2";
+        let out = crate::access_log::redact_query(raw, &crate::access_log::default_redact_params());
+        for leaked in ["AUTHCODE", "STATEVAL", "IDTOK", "VERIFIER", "CS"] {
+            assert!(
+                !out.contains(leaked),
+                "`{leaked}` survived the default redaction: {out}"
+            );
+        }
+        assert!(
+            out.contains("page=2"),
+            "a plain param must pass through: {out}"
+        );
+    }
+
+    /// The span must not carry credentials the access log redacts.
+    ///
+    /// This asserts on **rendered output**, not on the redaction
+    /// helper. The helper was always right; the span recorded the raw
+    /// string next to it. Only a real rendered line catches that.
+    // `runtime` gates `tracing_subscriber`, which this test needs to
+    // capture rendered output. A build with the layer but no
+    // subscriber would fail to compile.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_span_redacts_credentials_in_the_query_string() {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/reset?password=hunter2&token=abc123XYZ&page=2")
+                .body(Body::empty())
+                .unwrap();
+            let span = build_request_span(&req, &crate::access_log::default_redact_params());
+            let _e = span.enter();
+            // Any event inside the span renders the span's context,
+            // which is where the leak showed up.
+            tracing::info!("handled");
+        });
+
+        let out = buf.contents();
+        assert!(
+            out.contains("url.query"),
+            "the span did not render url.query at all, so this proves nothing:\n{out}"
+        );
+        assert!(
+            !out.contains("hunter2"),
+            "the span leaked a password into the log line:\n{out}"
+        );
+        assert!(
+            !out.contains("abc123XYZ"),
+            "the span leaked a token into the log line:\n{out}"
+        );
+        assert!(
+            out.contains("page=2"),
+            "a non-credential query param must survive:\n{out}"
+        );
     }
 }

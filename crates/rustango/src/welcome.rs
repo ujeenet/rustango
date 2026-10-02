@@ -1,7 +1,7 @@
-//! First-run welcome page — confidence signal that rustango is wired up.
+//! First-run welcome page. It shows that rustango is wired up.
 //!
-//! Mount under `/` while you're getting started; replace with your own
-//! root handler when you have content to serve.
+//! Mount it at `/` while you start out, then replace it with your own
+//! root handler.
 //!
 //! ## Quick start
 //!
@@ -20,19 +20,14 @@ use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::Router;
 
-/// Embedded brand image (square `icon.png`). Welcome page
-/// references this via a sibling route so the page works
-/// standalone even in single-tenant projects with no static-file
-/// infrastructure. v0.30.19. Replaces the inline SVG mark used
-/// in v0.29.12 → v0.30.18; the .ico variant tested in interim
-/// rendered poorly because the embedded inner image was non-
-/// square.
+/// Brand image built into the binary. The welcome page loads it from
+/// a sibling route, so the page works in a project with no
+/// static-file setup at all.
 const RUSTANGO_ICON_PNG: &[u8] = include_bytes!("tenancy/static/icon.png");
 
-/// Build a router that serves a welcome page at `/` and the
-/// embedded favicon at `/welcome_icon.png` so the welcome page
-/// can render the real rustango brand mark without depending on
-/// the tenancy static-file infrastructure.
+/// Router serving the welcome page at `/` and its icon at
+/// `/welcome_icon.png`. Both are built in, so the page needs no
+/// static-file setup.
 #[must_use]
 pub fn welcome_router() -> Router {
     Router::new()
@@ -44,16 +39,10 @@ async fn welcome_page(
     OriginalUri(uri): OriginalUri,
 ) -> ([(axum::http::HeaderName, &'static str); 1], Html<String>) {
     let version = env!("CARGO_PKG_VERSION");
-    // The welcome router can be mounted at `/` (via Cli::with_welcome())
-    // OR nested at any prefix (e.g. `/welcome` in tango — see
-    // `urls.rs::api()`). axum's `Router::nest` strips the prefix
-    // from the inner request path before our handler runs, so
-    // `req.uri().path()` returns "/" in both cases — wrong for
-    // building an absolute icon URL when nested.
-    //
-    // `OriginalUri` preserves the pre-nest path: "/" when mounted
-    // via merge, "/welcome" when nested at "/welcome", etc. We
-    // strip the trailing "/" and append "/welcome_icon.png".
+    // This router can sit at `/` or be nested under any prefix.
+    // `Router::nest` strips the prefix before the handler runs, so
+    // `req.uri().path()` says "/" either way, which builds the wrong
+    // icon URL. `OriginalUri` keeps the path the client asked for.
     let req_path = uri.path();
     let prefix = req_path.trim_end_matches('/');
     let icon_url = format!("{prefix}/welcome_icon.png");
@@ -190,7 +179,7 @@ a:hover {{ text-decoration: underline; }}
   <img src="{icon_url}" alt="rustango">
   <div>
     <h1>rustango is running<span class="pill">v{version}</span></h1>
-    <p class="tag">Django-shape Rust web framework — ready to build something.</p>
+    <p class="tag">Batteries-included Rust web framework — ready to build something.</p>
   </div>
 </header>
 
@@ -247,7 +236,7 @@ a:hover {{ text-decoration: underline; }}
   <div class="card">
     <h3>HTTP + UI</h3>
     <ul>
-      <li>Auto-admin (Django-shape) + theming</li>
+      <li>Auto-admin + theming</li>
       <li>Class-based views (List/Detail/Create/Update/Delete)</li>
       <li>ViewSets + OpenAPI auto-derive</li>
       <li>Tera templates + CSRF + bulk actions</li>
@@ -302,16 +291,13 @@ mod tests {
     #[test]
     fn welcome_html_is_self_contained_no_external_deps() {
         let html = welcome_html("x", "/welcome_icon.png");
-        // No cdn references, no external js, fonts use system stack.
-        // Outbound links to docs.rs / github.com are fine — those
-        // are user-clickable, not loaded resources.
+        // No CDN, no external JS, system fonts. Links the user can
+        // click are fine; the page must not load anything remote.
         assert!(!html.contains("cdn."));
         assert!(!html.contains("googleapis"));
         assert!(!html.contains("<script"));
-        // v0.30.19 — the icon comes from a sibling route inside
-        // welcome_router (also embedded into the binary), so no
-        // external static-file pipeline is required, even though
-        // the page now uses <img> rather than inline SVG.
+        // The icon is a sibling route in the same binary, so the
+        // page needs no static-file pipeline.
         assert!(
             html.contains(r#"<img src="/welcome_icon.png""#),
             "expected hero <img> referencing the sibling PNG route"
@@ -322,11 +308,9 @@ mod tests {
         );
     }
 
-    /// v0.30.19 — the welcome handler picks the icon URL based on
-    /// the actual request path so the page works whether mounted
-    /// at `/` (via `Cli::with_welcome()`) or nested at any prefix
-    /// (e.g. `Router::nest("/welcome", welcome_router())`). Tests
-    /// the URL-shape contract rather than booting axum end-to-end.
+    /// The icon URL follows the request path, so the page works
+    /// mounted at `/` or nested under any prefix. This checks the
+    /// URL shape without booting axum.
     #[test]
     fn welcome_html_icon_url_is_pluggable_for_nested_mounts() {
         // Mounted at /
@@ -338,16 +322,13 @@ mod tests {
         assert!(html.contains(r#"href="/welcome/welcome_icon.png""#));
         assert!(html.contains(r#"src="/welcome/welcome_icon.png""#));
 
-        // Deeply nested (operator stash, etc.)
+        // Nested more than one level deep
         let html = welcome_html("x", "/admin/intro/welcome_icon.png");
         assert!(html.contains(r#"src="/admin/intro/welcome_icon.png""#));
     }
 
-    /// v0.30.10 — the polished welcome page demonstrates the v0.30
-    /// surface in its commands grid + features grid. Locks in that
-    /// the page mentions the modern verbs (`make:viewset`, `migrate
-    /// --squash`, `migrate-tenants`) and key feature areas a fresh
-    /// developer would want to know exist.
+    /// The page's command and feature grids must name the current
+    /// verbs, so a new developer sees what the framework offers.
     #[test]
     fn welcome_html_demonstrates_modern_v030_surface() {
         let html = welcome_html("x", "/welcome_icon.png");
@@ -376,8 +357,7 @@ mod tests {
         }
     }
 
-    /// Outbound links are present + look plausibly valid — caught
-    /// trailing-slash / typo regressions.
+    /// The outbound links are present and spelled right.
     #[test]
     fn welcome_html_has_outbound_doc_links() {
         let html = welcome_html("x", "/welcome_icon.png");
@@ -389,9 +369,8 @@ mod tests {
         }
     }
 
-    /// The page tells the user how to remove it. Without this, fresh
-    /// projects keep the welcome page mounted forever and can't find
-    /// the toggle. Regression guard for v0.30.10.
+    /// The page must say how to remove it. Otherwise a new project
+    /// keeps it mounted and cannot find the switch.
     #[test]
     fn welcome_html_explains_how_to_disable_itself() {
         let html = welcome_html("x", "/welcome_icon.png");

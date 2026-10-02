@@ -1,32 +1,17 @@
-//! `SQLite` 3.35+ dialect — ANSI double-quoted identifiers, `?`
-//! placeholders, `INTEGER PRIMARY KEY AUTOINCREMENT` for `Auto<T>` PKs,
-//! `RETURNING` support, no native boolean / json / uuid / datetime types
-//! (all map to TEXT or INTEGER affinities).
+//! The SQLite 3.35+ dialect: ANSI double-quoted identifiers, `?`
+//! placeholders, `INTEGER PRIMARY KEY AUTOINCREMENT` for an `Auto<T>`
+//! PK, and `RETURNING`. SQLite has no boolean, json, uuid or datetime
+//! type, so those all become TEXT or INTEGER.
 //!
-//! ## v0.27 Phase 1 status
-//!
-//! - **Phase 1** (this batch) — `Sqlite` Dialect impl + writer dispatch.
-//!   SELECT / COUNT / AGGREGATE / INSERT (with RETURNING) / UPDATE /
-//!   DELETE all produce valid SQLite SQL through the
-//!   [`crate::sql::writers`] machinery.
-//! - **Phase 2** (planned) — `Pool::Sqlite` variant + sqlx `SqlitePool`
-//!   integration so the `_pool` family executes against SQLite the way
-//!   it does against Postgres / MySQL today.
-//! - **Phase 3** (planned) — bi-dialect macro `__rustango_from_sqlite_row`
-//!   decoder + `LoadRelatedSqlite` / `FkPkAccess` SQLite-typed
-//!   counterparts (mirrors the v0.23 MySQL rollout).
-//!
-//! Operators that don't have a one-shot SQLite translation today
-//! (`ILIKE` lowers to `LOWER(<col>) LIKE LOWER(?)` so case-insensitive
-//! search works; `IS DISTINCT FROM` lowers to `IS NOT` / `IS`; the
-//! Postgres-flavored JSONB containment operators don't translate —
-//! SQLite's json1 extension uses function calls, not operators) surface
-//! a clear [`SqlError::OperatorNotSupportedInDialect`] from the writers
-//! when a query tries to use them.
+//! A few operators translate: `ILIKE` becomes
+//! `LOWER(col) LIKE LOWER(?)`, and `IS DISTINCT FROM` becomes `IS`.
+//! The JSONB containment operators do not, because SQLite's json1
+//! extension uses functions rather than operators, so a query using
+//! one gets [`SqlError::OperatorNotSupportedInDialect`].
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -35,17 +20,92 @@ use super::writers::{
 };
 use super::{CompiledStatement, Dialect, SqlError};
 
+/// The `strftime` format for the one text shape a SQLite datetime
+/// column may hold.
+///
+/// **SQLite has no datetime type.** A `DateTime<Utc>` column is TEXT
+/// and compares as text, so the stored spelling is part of the
+/// contract. Two shapes in one column and both `<` and `ORDER BY`
+/// give wrong answers.
+///
+/// This matches what sqlx writes, which is the side that cannot
+/// change. `CURRENT_TIMESTAMP` does not: it writes
+/// `YYYY-MM-DD HH:MM:SS`, and a space sorts below the `T` in the
+/// RFC3339 that sqlx binds, so `WHERE col < ?` was true for every
+/// row and a cursor returned its first page forever.
+///
+/// sqlx's own width varies, emitting 0, 3, 6 or 9 fractional digits,
+/// but the family still sorts correctly. `+` sorts below `.` and
+/// below every digit, so no fraction comes before any fraction, and
+/// a short fraction before a longer one that extends it.
+///
+/// SQLite's `%f` is `SS.SSS`, so the literal `000` pads its
+/// milliseconds out to the six digits this format wants. A DEFAULT
+/// therefore has millisecond resolution, SQLite's own limit here,
+/// while still sorting against binds of any precision.
+pub(crate) const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%f000+00:00";
+
+/// [`SQLITE_DATETIME_FORMAT`] spelled for chrono instead of SQLite's
+/// `strftime`.
+///
+/// Two strings are needed because the engines disagree on syntax:
+/// SQLite's `%f` means seconds plus milliseconds, while chrono's `%S`
+/// is seconds alone and `%.6f` is a dot plus six digits. They must
+/// produce identical bytes for the same instant, which
+/// `the_two_format_spellings_agree` checks.
+///
+/// **The fixed width is the point.** Left to itself, sqlx emits 0, 3,
+/// 6 or 9 fractional digits depending on the value, so the same
+/// instant can have two spellings. Equality then finds nothing and
+/// `>` finds the row itself, which is how a cursor stops advancing.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) const SQLITE_DATETIME_CHRONO: &str = "%Y-%m-%dT%H:%M:%S%.6f+00:00";
+
+/// Encode a timestamp the one way a SQLite datetime column may hold
+/// it. Every write goes through here, so the bind path and the DDL
+/// default cannot drift apart.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
+    d.format(SQLITE_DATETIME_CHRONO).to_string()
+}
+
+/// A `GLOB` pattern matching [`SQLITE_DATETIME_FORMAT`]'s output and
+/// nothing else, so a migration sweep can ask whether a value is
+/// already in the canonical shape.
+///
+/// It has to test the shape rather than round-trip through
+/// `strftime`. SQLite's `%f` is milliseconds while the bind path
+/// writes microseconds, so `strftime(FMT, col)` is not the identity:
+/// `.413681` comes back as `.414000`. A sweep keyed on that would
+/// rewrite nearly every correct row, rounding each one forward.
+///
+/// `?` matches one character and `[0-9]` a digit, so the pattern is
+/// exact: the date, `T`, the time, six fraction digits and `+00:00`.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) const SQLITE_CANONICAL_GLOB: &str =
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00";
+
+/// A random v4 UUID as 16 bytes, the form sqlx binds a `Uuid` in. `unhex`
+/// needs SQLite 3.41+ (the bundled one is newer).
+pub(crate) const SQLITE_UUID_V4: &str =
+    "(unhex(hex(randomblob(6)) || '4' || substr(hex(randomblob(2)), 2) \
+     || substr('89AB', 1 + (abs(random()) % 4), 1) || substr(hex(randomblob(8)), 2)))";
+
+/// `true` for a DEFAULT meaning "the current time", which SQLite renders
+/// as a non-constant expression.
+pub(crate) fn is_now_expr(expr: &str) -> bool {
+    matches!(
+        expr.trim(),
+        "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP"
+    )
+}
+
 /// The `SQLite` 3.35+ dialect. Stateless; construct with `Sqlite`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Sqlite;
 
-/// `'static` reference to the singleton [`Sqlite`] dialect, symmetric
-/// with [`super::postgres::DIALECT`] / [`super::mysql::DIALECT`]. Used
-/// by [`crate::sql::Pool::dialect`] (Phase 2) to hand back a
-/// `&'static dyn Dialect` regardless of pool variant.
-///
-/// Gated where the emitter above is not: every caller is a `Pool` arm
-/// that only exists with the driver linked.
+/// The singleton [`Sqlite`] dialect, which
+/// [`crate::sql::Pool::dialect`] hands back for a SQLite pool.
 #[cfg(feature = "sqlite")]
 pub static DIALECT: &Sqlite = &Sqlite;
 
@@ -54,19 +114,21 @@ impl Dialect for Sqlite {
         "sqlite"
     }
 
-    // ANSI double-quoted identifiers + `?`-style placeholders are the
-    // trait defaults; SQLite uses both, no override.
+    /// SQLite's grammar has no bare `OFFSET`; `LIMIT -1` means no limit.
+    fn offset_without_limit_clause(&self) -> Option<&'static str> {
+        Some(" LIMIT -1")
+    }
+
+    // SQLite uses the trait defaults for quoting and placeholders.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {
-        // SQLite's `INTEGER PRIMARY KEY AUTOINCREMENT` is an
-        // indivisible token — the storage layer alias-rules require
-        // PRIMARY KEY in the type itself for the rowid alias to take
-        // effect. We override `serial_type_includes_primary_key()`
-        // below so the DDL writer skips its own PRIMARY KEY append.
+        // `INTEGER PRIMARY KEY AUTOINCREMENT` must stay one phrase:
+        // the rowid alias only works with PRIMARY KEY in the type
+        // itself. `serial_type_includes_primary_key` below stops the
+        // DDL writer adding its own.
         //
-        // Note: SQLite ignores the int-width distinction (everything
-        // is a variable-length INTEGER under the hood), so we emit the
-        // same string for I32 and I64.
+        // SQLite stores every integer the same way, so I32 and I64
+        // get the same string.
         let _ = field_type;
         "INTEGER PRIMARY KEY AUTOINCREMENT"
     }
@@ -75,61 +137,80 @@ impl Dialect for Sqlite {
         true
     }
 
-    /// SQLite has no `ALTER TABLE … ADD CONSTRAINT` for foreign keys
-    /// (or any other constraint kind). The migration renderer must
-    /// fold every FK into the originating CREATE TABLE instead.
+    /// SQLite has no `ALTER TABLE … ADD CONSTRAINT` at all, so every
+    /// foreign key has to go inside its `CREATE TABLE`.
     fn inline_fks_in_create_table(&self) -> bool {
         true
     }
 
-    /// `SQLITE_MAX_VARIABLE_NUMBER` — 32766 since SQLite 3.32 (it was
-    /// 999 before). sqlx bundles a modern build, so 32766 is right
-    /// here; a host linking an ancient system SQLite would need the
-    /// lower figure. Half Postgres' ceiling, so an 8-column model
-    /// chunks at ~4k rows rather than ~8k (#1284).
+    /// SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so there is no
+    /// statement to return. Rebuild the table without the constraint
+    /// instead.
+    fn drop_check_constraint_sql(&self, _table: &str, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// As [`Sqlite::drop_check_constraint_sql`]: rebuilding the table
+    /// is the only way.
+    ///
+    /// Naming the constraint would not help. There is no statement to
+    /// name, whether or not the emitter gave the key a name.
+    fn drop_foreign_key_sql(&self, _table: &str, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// A unique index: SQLite has no `ADD CONSTRAINT`, and refuses
+    /// `ADD COLUMN … UNIQUE`.
+    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+        format!(
+            "CREATE UNIQUE INDEX {} ON {} ({})",
+            self.quote_ident(name),
+            self.quote_ident(table),
+            self.quote_ident(column)
+        )
+    }
+
+    /// `SQLITE_MAX_VARIABLE_NUMBER`, which is 32766 since SQLite 3.32
+    /// and 999 before it. sqlx bundles a modern build. This is half
+    /// Postgres' limit, so batches chunk at half the size.
     fn max_bind_params(&self) -> usize {
         32766
     }
 
     fn supports_returning(&self) -> bool {
-        // SQLite ≥ 3.35 (released 2021-03). Lower versions reject the
-        // clause; rustango doesn't try to detect the runtime version
-        // — operators on ancient SQLite get a parse error and need to
-        // upgrade.
+        // SQLite 3.35+. The runtime version is not checked, so an
+        // older SQLite gives a parse error and must be upgraded.
         true
     }
 
-    /// Translate Postgres-native `DEFAULT` expressions to SQLite
+    /// Translate a Postgres `DEFAULT` expression into SQLite's
     /// spelling.
     ///
-    /// - `now()` / `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP` (SQLite has
-    ///   no `now()` function in DDL).
-    /// - `'<lit>'::<type>` → `'<lit>'` (SQLite has no `::` cast syntax;
-    ///   the bare literal is the right encoding for JSON-as-TEXT,
-    ///   boolean-as-INTEGER, etc.).
-    /// - Everything else passes through. `_ty` / `_max_length` are
-    ///   ignored — SQLite has no per-type DEFAULT syntax quirks and
-    ///   accepts literal defaults on every column type.
+    /// - `now()` becomes a `strftime` call in
+    ///   [`SQLITE_DATETIME_FORMAT`], **not** `CURRENT_TIMESTAMP`,
+    ///   whose output does not sort against the values the bind path
+    ///   writes. The parentheses are required: SQLite accepts a
+    ///   non-constant DEFAULT only as an expression.
+    /// - `gen_random_uuid()` becomes [`SQLITE_UUID_V4`].
+    /// - `'<lit>'::<type>` becomes `'<lit>'`, since SQLite has no
+    ///   `::` cast and the bare literal is already right.
+    /// - Everything else passes through. `ty` and `max_length` are
+    ///   ignored: SQLite takes a literal default on any column.
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         let trimmed = expr.trim();
-        match trimmed {
-            "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
-                return "CURRENT_TIMESTAMP".to_owned();
-            }
-            _ => {}
+        if is_now_expr(trimmed) {
+            return format!("(strftime('{SQLITE_DATETIME_FORMAT}','now'))");
         }
-        // Strip Postgres `::<type>` cast suffix. Common cases:
-        //   "'[]'::jsonb"   → "'[]'"
-        //   "'{}'::jsonb"   → "'{}'"
-        //   "0::int"        → "0"
-        // The `::` token can't legally appear inside a single-quoted
-        // SQL literal except as part of an escape, so a simple
-        // rfind('::') is safe for the well-formed defaults the macro
-        // layer emits.
+        if super::dialect::is_uuid_expr(trimmed) {
+            return SQLITE_UUID_V4.to_owned();
+        }
+        // Strip a Postgres `::<type>` cast, so `'[]'::jsonb` becomes
+        // `'[]'`. `::` cannot appear inside a quoted literal, so
+        // searching from the right is safe for the defaults the
+        // derive emits.
         if let Some(idx) = trimmed.rfind("::") {
-            // Guard: only strip if everything after `::` is an identifier
-            // (no spaces, parens, etc.) so we don't mangle expressions
-            // that legitimately contain `::` outside cast position.
+            // Only strip when what follows is a bare identifier, so
+            // an expression holding `::` elsewhere survives.
             let suffix = &trimmed[idx + 2..];
             if !suffix.is_empty()
                 && suffix
@@ -142,9 +223,8 @@ impl Dialect for Sqlite {
         expr.to_owned()
     }
 
-    /// SQLite has no native `BOOLEAN`. `INTEGER` 1 / 0 is the
-    /// canonical encoding. Emit `1` / `0` so DEFAULT clauses and
-    /// inline comparisons match the storage shape.
+    /// SQLite has no `BOOLEAN`; it stores 1 and 0 as integers, so
+    /// emit those and match how the value is stored.
     fn bool_literal(&self, b: bool) -> &'static str {
         if b {
             "1"
@@ -154,8 +234,7 @@ impl Dialect for Sqlite {
     }
 
     fn cast_aggregate_to_int(&self, expr: &str) -> String {
-        // SQLite supports `CAST(<expr> AS INTEGER)`. Use that; the
-        // ANSI default `BIGINT` is not a recognized SQLite type.
+        // SQLite has no `BIGINT`, so cast to `INTEGER`.
         format!("CAST({expr} AS INTEGER)")
     }
 
@@ -164,27 +243,14 @@ impl Dialect for Sqlite {
         format!("CAST({expr} AS REAL)")
     }
 
-    /// SQLite's "type affinities" map onto a small fixed set of
-    /// storage classes: INTEGER, REAL, TEXT, BLOB, NUMERIC. We pick
-    /// the closest affinity for each rustango `FieldType`:
-    /// - `Bool` → `INTEGER` (1/0 encoding; sqlx maps `bool` to
-    ///   INTEGER on SQLite).
-    /// - `DateTime` / `Date` → `TEXT` (ISO-8601 string; sqlx-sqlite
-    ///   uses TEXT round-trip for `chrono::DateTime<Utc>`).
-    /// - `Uuid` → `TEXT` (canonical hyphenated form).
-    /// - `Json` → `TEXT` (json1 extension stores JSON as TEXT
-    ///   internally; the parser sees it as text).
-    /// - `String` with `max_length` → `TEXT` (SQLite ignores VARCHAR
-    ///   lengths but accepts the keyword; emit `TEXT` for clarity).
-    /// SQLite has no `USING` clause — drop the method entirely.
-    /// Indexes work as btree on every SQLite engine. Issue #34.
+    /// SQLite has no `USING` clause; every index is a btree.
     fn index_method_clause(&self, _method: &str) -> String {
         String::new()
     }
 
-    /// SQLite CAST targets are the affinity names: `INTEGER`, `REAL`,
-    /// `TEXT`, `NUMERIC`, `BLOB`. Datetime/UUID/JSON have no native
-    /// CAST target — they store as TEXT, so cast routes through TEXT.
+    /// A SQLite CAST target is an affinity name: `INTEGER`, `REAL`,
+    /// `TEXT`, `NUMERIC` or `BLOB`. Datetimes, UUIDs and JSON are
+    /// stored as TEXT, so they cast through TEXT.
     fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I16 | FieldType::I32 | FieldType::I64 | FieldType::Bool => "INTEGER",
@@ -197,22 +263,22 @@ impl Dialect for Sqlite {
             | FieldType::Json => "TEXT",
             FieldType::Decimal => "NUMERIC",
             FieldType::Binary => "BLOB",
-            // SQLite has no array type — `Array<T>` (#341) is PG-only.
-            // Degrade the CAST target to TEXT affinity.
+            // These are all Postgres-only types with no SQLite
+            // equivalent, so they fall back to TEXT.
             FieldType::Array(_) => "TEXT",
-            // Ditto for PG range columns (#343).
             FieldType::Range(_) => "TEXT",
-            // Ditto for PG hstore columns (#342).
             FieldType::HStore => "TEXT",
-            // Ditto for pgvector `vector` columns (#824).
             FieldType::Vector(_) => "TEXT",
-            // Ditto for PostGIS `geometry` columns (#443).
             FieldType::Geometry(_) => "TEXT",
         })
     }
 
+    /// The `CREATE TABLE` column type, picked from SQLite's five
+    /// storage affinities: INTEGER, REAL, TEXT, NUMERIC and BLOB.
+    /// A bool is an integer, and a datetime, UUID or JSON value is
+    /// text, which is how sqlx round-trips each of them.
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
-        let _ = max_length; // SQLite has no length constraint on TEXT
+        let _ = max_length; // SQLite puts no length limit on TEXT
         match ty {
             FieldType::I16 | FieldType::I32 | FieldType::I64 => "INTEGER".into(),
             FieldType::F32 | FieldType::F64 => "REAL".into(),
@@ -223,41 +289,32 @@ impl Dialect for Sqlite {
             | FieldType::Time
             | FieldType::Uuid
             | FieldType::Json => "TEXT".into(),
-            // `NUMERIC` affinity: SQLite stores small values as
-            // INTEGER, larger as TEXT, preserving exact arithmetic.
-            // `rust_decimal::Decimal` round-trips through `sqlx`'s
-            // text encoding on this affinity.
+            // `NUMERIC` keeps exact arithmetic: SQLite holds a small
+            // value as an integer and a larger one as text.
             FieldType::Decimal => "NUMERIC".into(),
-            // `BLOB` storage class — round-trips `Vec<u8>` directly.
             FieldType::Binary => "BLOB".into(),
-            // SQLite has no native array type — `Array<T>` (#341) is
-            // PG-only by language semantics. Degrade to `TEXT`; the
-            // bind / decode paths error on SQLite.
+            // These are all Postgres-only types with no SQLite
+            // equivalent, so the column is TEXT and the bind and
+            // decode paths reject them.
             FieldType::Array(_) => "TEXT".into(),
-            // Ditto for PG range columns (#343).
             FieldType::Range(_) => "TEXT".into(),
-            // Ditto for PG hstore columns (#342).
             FieldType::HStore => "TEXT".into(),
-            // Ditto for pgvector `vector` columns (#824).
             FieldType::Vector(_) => "TEXT".into(),
-            // Ditto for PostGIS `geometry` columns (#443).
             FieldType::Geometry(_) => "TEXT".into(),
         }
     }
 
-    // #344 — CITextField. SQLite has built-in `COLLATE NOCASE` that
-    // makes `=` / `LIKE` / `ORDER BY` case-insensitive without an
-    // extension. Column-level collation propagates to expressions
-    // referencing the column.
+    // `COLLATE NOCASE` is built in and makes `=`, `LIKE` and
+    // `ORDER BY` case-insensitive with no extension. The collation
+    // carries into expressions over the column.
     fn ci_text_type(&self, _max_length: Option<u32>) -> String {
         "TEXT COLLATE NOCASE".to_owned()
     }
 
     fn supports_op(&self, op: Op) -> bool {
-        // SQLite supports every operator we lower below. The Postgres-
-        // shape JSONB operators are intentionally NOT translated to
-        // json1 function calls — that's a Phase 2+ feature; today
-        // they surface a clear "not supported" error.
+        // SQLite handles every operator lowered below. The JSONB
+        // operators are not translated into json1 function calls, so
+        // they report "not supported" instead.
         !matches!(
             op,
             Op::JsonContains
@@ -268,10 +325,9 @@ impl Dialect for Sqlite {
         )
     }
 
-    /// SQLite has no native `ILIKE`. Lower to
-    /// `LOWER(<col>) LIKE LOWER(<placeholder>)` — handles ASCII
-    /// case-insensitivity. Unicode case folding requires the
-    /// `ICU` extension; outside scope here.
+    /// SQLite has no `ILIKE`, so write
+    /// `LOWER(<col>) LIKE LOWER(<placeholder>)`. That folds ASCII
+    /// only; other alphabets need the ICU extension.
     fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
         if negated {
             sql.push_str("NOT (");
@@ -286,18 +342,14 @@ impl Dialect for Sqlite {
         }
     }
 
-    /// SQLite's `REGEXP` operator delegates to a user-defined
-    /// `regexp(pattern, value)` function. sqlx-sqlite does **not**
-    /// register one by default — callers either enable sqlx-sqlite's
-    /// `regexp` cargo feature (which adds a `.with_regexp()` builder
-    /// on `SqliteConnectOptions`) or register their own via
-    /// `SqliteConnection::lock_handle()` + raw FFI. Without one
-    /// registered, the query fails at execution with `no such
-    /// function: REGEXP` (parser-clean, runtime-only). For case-
-    /// insensitive matching we mirror the ILIKE strategy: lowercase
-    /// both sides so the comparison is collation-independent. ASCII-
-    /// only folding; non-ASCII patterns may not behave as expected
-    /// without the ICU extension. Issue #26.
+    /// SQLite's `REGEXP` calls a `regexp(pattern, value)` function
+    /// that **you must register**. sqlx does not by default: turn on
+    /// its `regexp` feature and use `.with_regexp()`, or register
+    /// your own. Without one the query parses but fails at run time
+    /// with `no such function: REGEXP`.
+    ///
+    /// For the case-insensitive form, both sides are lowercased, as
+    /// with ILIKE. That folds ASCII only.
     fn write_regex(
         &self,
         sql: &mut String,
@@ -322,10 +374,8 @@ impl Dialect for Sqlite {
         }
     }
 
-    /// `pg_trgm` trigram operators are Postgres-only. SQLite has no
-    /// equivalent. Reject at compile time so the user retargets the
-    /// query rather than seeing a driver-level syntax error at run
-    /// time. Issue #29.
+    /// SQLite has no trigram operators, so reject the query here
+    /// rather than let the driver fail on it later.
     fn write_trigram_similar(
         &self,
         _sql: &mut String,
@@ -343,12 +393,10 @@ impl Dialect for Sqlite {
         })
     }
 
-    /// Postgres-shape FTS (`to_tsvector @@ plainto_tsquery`) doesn't
-    /// translate to SQLite. SQLite's FTS lives in FTS5 virtual tables
-    /// with a `MATCH` operator that requires the column to live on an
-    /// FTS5-shadow table — a different schema shape entirely. Reject
-    /// at compile time so the user either retargets the backend or
-    /// queries the FTS5 shadow table via a raw predicate. Issue #28.
+    /// SQLite's full-text search lives in FTS5 virtual tables, whose
+    /// `MATCH` needs the column to sit on a shadow table. That is a
+    /// different schema, so the Postgres shape cannot be translated.
+    /// Query the FTS5 table with a raw predicate instead.
     fn write_search(
         &self,
         _sql: &mut String,
@@ -362,8 +410,7 @@ impl Dialect for Sqlite {
         })
     }
 
-    /// SQLite has no native array type. Reject every PG array op at
-    /// compile time. Issue #30.
+    /// SQLite has no array type, so reject every array operator.
     fn write_array_op(
         &self,
         _sql: &mut String,
@@ -378,8 +425,7 @@ impl Dialect for Sqlite {
         })
     }
 
-    /// SQLite has no native range type. Reject every PG range op at
-    /// compile time. Issue #31.
+    /// SQLite has no range type, so reject every range operator.
     fn write_range_op(
         &self,
         _sql: &mut String,
@@ -394,10 +440,8 @@ impl Dialect for Sqlite {
         })
     }
 
-    /// SQLite's `IS` / `IS NOT` are null-safe equality / inequality
-    /// (both `NULL IS NULL` and `1 IS 1` evaluate to true). Same
-    /// semantics as Postgres' `IS [NOT] DISTINCT FROM` — we just
-    /// emit the SQLite spelling.
+    /// SQLite's `IS` and `IS NOT` are null-safe comparisons, with
+    /// the same meaning as Postgres' `IS [NOT] DISTINCT FROM`.
     fn write_null_safe_eq(
         &self,
         sql: &mut String,
@@ -410,13 +454,12 @@ impl Dialect for Sqlite {
         sql.push_str(placeholder);
     }
 
-    /// SQLite supports the same `ON CONFLICT (target) DO NOTHING |
-    /// DO UPDATE SET ...` shape as Postgres (via the json1 / upsert
-    /// extensions, both bundled in modern builds). The shape matches
-    /// 1:1 so we mirror the Postgres writer.
+    /// SQLite takes the same `ON CONFLICT … DO NOTHING | DO UPDATE`
+    /// shape as Postgres, so this mirrors the Postgres writer.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
+        _model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -491,12 +534,8 @@ impl Dialect for Sqlite {
     }
 
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
-        // #560 — SQLite's UPDATE-FROM doesn't accept the
-        // column-list-alias-on-inline-VALUES form Postgres uses
-        // (`FROM (VALUES …) AS __data(pk, col, …)` → `near "(":
-        // syntax error`). Route to a CTE + correlated-subquery
-        // shape that parses on every SQLite that supports CTEs
-        // (3.8.3, 2014); see `writers::write_bulk_update_sqlite`.
+        // SQLite's UPDATE … FROM rejects Postgres' column-list
+        // alias on inline VALUES, so use the CTE form instead.
         let mut b = Sql::new(self);
         write_bulk_update_sqlite(&mut b, query)?;
         Ok(b.finish())
@@ -509,9 +548,8 @@ impl Dialect for Sqlite {
     }
 }
 
-/// SQLite identifier writer — same shape as Postgres' (ANSI double
-/// quotes, embedded `"` doubled). Pulled out so the conflict-clause
-/// writer doesn't have to allocate a new String per identifier.
+/// Write a quoted identifier, doubling any embedded quote. It writes
+/// in place so the conflict-clause writer allocates no string.
 fn write_sqlite_ident(sql: &mut String, name: &str) {
     sql.push('"');
     for c in name.chars() {
@@ -541,10 +579,8 @@ mod tests {
 
     #[test]
     fn placeholder_is_question_mark() {
-        // Trait default. SQLite also accepts `?N` (1-based) but the
-        // sequential `?` form lines up cleanly with the existing
-        // writer machinery — the writer already binds parameters in
-        // order.
+        // Trait default. SQLite also takes `?N`, but the writer
+        // already binds in text order, so bare `?` fits.
         assert_eq!(Sqlite.placeholder(1), "?");
         assert_eq!(Sqlite.placeholder(7), "?");
     }
@@ -598,7 +634,7 @@ mod tests {
 
     #[test]
     fn supports_op_rejects_postgres_jsonb_operators() {
-        // Phase 1 doesn't translate Postgres-flavored JSONB operators.
+        // The Postgres JSONB operators are not translated.
         assert!(!Sqlite.supports_op(Op::JsonContains));
         assert!(!Sqlite.supports_op(Op::JsonContainedBy));
         assert!(!Sqlite.supports_op(Op::JsonHasKey));
@@ -634,7 +670,7 @@ mod tests {
     fn conflict_clause_do_nothing() {
         let mut sql = String::new();
         Sqlite
-            .write_conflict_clause(&mut sql, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, &MODEL, &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(sql, " ON CONFLICT DO NOTHING");
     }
@@ -645,6 +681,7 @@ mod tests {
         Sqlite
             .write_conflict_clause(
                 &mut sql,
+                &MODEL,
                 &ConflictClause::DoUpdate {
                     target: vec!["user_id", "codename"],
                     update_columns: vec!["granted"],
@@ -657,69 +694,72 @@ mod tests {
         );
     }
 
+    use crate::core::{ModelScope, WhereExpr};
+
+    static FIELDS: &[crate::core::FieldSchema] = &[crate::core::FieldSchema {
+        name: "id",
+        column: "id",
+        ty: FieldType::I64,
+        nullable: false,
+        primary_key: true,
+        relation: None,
+        max_length: None,
+        min: None,
+        max: None,
+        default: None,
+        auto: false,
+        auto_now: false,
+        unique: false,
+        generated_as: None,
+        help_text: None,
+        choices: None,
+        db_comment: None,
+        verbose_name: None,
+        editable: true,
+        blank: false,
+        case_insensitive: false,
+        fk_on_delete: None,
+        validators: &[],
+    }];
+    static MODEL: ModelSchema = ModelSchema {
+        name: "demo",
+        table: "demo",
+        fields: FIELDS,
+        display: None,
+        app_label: None,
+        admin: None,
+        soft_delete_column: None,
+        permissions: false,
+        audit_track: None,
+        m2m: &[],
+        indexes: &[],
+        check_constraints: &[],
+        exclusion_constraints: &[],
+        default_permissions: &[],
+        composite_relations: &[],
+        generic_relations: &[],
+        scope: ModelScope::Tenant,
+        default_order: &[],
+        is_view: false,
+        verbose_name: None,
+        verbose_name_plural: None,
+        managed: true,
+        db_table_comment: None,
+        default_related_name: None,
+        base_manager_name: None,
+        required_db_vendor: None,
+        required_db_features: &[],
+        order_with_respect_to: None,
+        proxy: false,
+        get_latest_by: None,
+        extra_permissions: &[],
+        global_scopes: &[],
+    };
+
     #[test]
     fn compile_select_smoke_test() {
         // Build a minimal SelectQuery and assert the SQL emission
         // looks like SQLite.
-        use crate::core::{ModelSchema, ModelScope, SelectQuery, WhereExpr};
-        static FIELDS: &[crate::core::FieldSchema] = &[crate::core::FieldSchema {
-            name: "id",
-            column: "id",
-            ty: FieldType::I64,
-            nullable: false,
-            primary_key: true,
-            relation: None,
-            max_length: None,
-            min: None,
-            max: None,
-            default: None,
-            auto: false,
-            unique: false,
-            generated_as: None,
-            help_text: None,
-            choices: None,
-            db_comment: None,
-            verbose_name: None,
-            editable: true,
-            blank: false,
-            case_insensitive: false,
-            fk_on_delete: None,
-            validators: &[],
-        }];
-        static MODEL: ModelSchema = ModelSchema {
-            name: "demo",
-            table: "demo",
-            fields: FIELDS,
-            display: None,
-            app_label: None,
-            admin: None,
-            soft_delete_column: None,
-            permissions: false,
-            audit_track: None,
-            m2m: &[],
-            indexes: &[],
-            check_constraints: &[],
-            exclusion_constraints: &[],
-            default_permissions: &[],
-            composite_relations: &[],
-            generic_relations: &[],
-            scope: ModelScope::Tenant,
-            default_order: &[],
-            is_view: false,
-            verbose_name: None,
-            verbose_name_plural: None,
-            managed: true,
-            db_table_comment: None,
-            default_related_name: None,
-            base_manager_name: None,
-            required_db_vendor: None,
-            required_db_features: &[],
-            order_with_respect_to: None,
-            proxy: false,
-            get_latest_by: None,
-            extra_permissions: &[],
-            global_scopes: &[],
-        };
         let q = SelectQuery {
             model: &MODEL,
             where_clause: WhereExpr::and_predicates(vec![crate::core::Filter {
@@ -746,5 +786,73 @@ mod tests {
         assert!(stmt.sql.contains("\"demo\""), "table quoted: {}", stmt.sql);
         assert!(stmt.sql.contains("\"id\" = ?"), "predicate: {}", stmt.sql);
         assert_eq!(stmt.params.len(), 1);
+    }
+
+    /// The encoder must produce a fixed width for every input.
+    /// sqlx's own is variable, which is what once made a stored
+    /// timestamp differ from its own re-bound form.
+    #[test]
+    fn the_encoder_is_fixed_width_at_every_precision() {
+        use chrono::{TimeZone as _, Utc};
+        for ns in [0, 1_000, 123_000_000, 869_000_000, 413_181_000, 999_999_000] {
+            let d = Utc.timestamp_opt(1_800_000_000, ns).unwrap();
+            let s = encode_datetime(d);
+            assert_eq!(
+                s.len(),
+                32,
+                "every encoding must be 32 chars or two instants of different \
+                 precision cannot be compared: {ns}ns gave {s}"
+            );
+            assert!(s.ends_with("+00:00"), "offset must be explicit: {s}");
+        }
+    }
+
+    /// The `strftime` and chrono spellings must produce the same
+    /// bytes, or the DDL default and the bind path drift apart
+    /// without anything saying so.
+    ///
+    /// The check is on the output shape, not the two format strings:
+    /// those are deliberately different, so comparing them would
+    /// prove nothing.
+    #[test]
+    fn the_two_format_spellings_agree() {
+        use chrono::{TimeZone as _, Utc};
+        // What chrono writes for a whole-millisecond instant, the
+        // only precision SQLite's `%f` can express.
+        let d = Utc.timestamp_opt(1_800_000_000, 869_000_000).unwrap();
+        let chrono_side = encode_datetime(d);
+        // What `strftime` writes, reproduced from the format's own
+        // structure: `%f` gives `SS.SSS`, the literal `000` pads to six.
+        let strftime_side = "2027-01-15T08:00:00.869000+00:00";
+        assert_eq!(
+            chrono_side, strftime_side,
+            "the two spellings of SQLITE_DATETIME_FORMAT disagree; a value \
+             written by the DDL default would not equal the same instant \
+             bound from Rust"
+        );
+    }
+
+    /// The test above compares chrono against a hand-typed literal,
+    /// so it never reads `SQLITE_DATETIME_FORMAT` and a change to
+    /// that spelling would slip past it.
+    ///
+    /// Running `strftime` needs a live SQLite, which a unit test has
+    /// not, so this checks the format's structure instead. The
+    /// integration test `the_two_engines_render_the_same_bytes`
+    /// runs both engines against a real database.
+    #[test]
+    fn the_literal_above_still_matches_the_strftime_format() {
+        // Derive the shape from the format, so editing the format
+        // without editing the literal fails here.
+        let f = SQLITE_DATETIME_FORMAT;
+        assert!(
+            f.starts_with("%Y-%m-%dT%H:%M:%f"),
+            "the literal in the test above assumes this prefix: {f}"
+        );
+        assert!(
+            f.ends_with("000+00:00"),
+            "the literal assumes `%f` is padded by `000` to six digits \
+             and closed with a fixed offset: {f}"
+        );
     }
 }

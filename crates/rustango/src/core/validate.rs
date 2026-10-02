@@ -1,21 +1,22 @@
-//! Per-field write-time validation: `max_length`, `min`, `max`.
+//! Per-field write-time checks: `max_length`, `min`, `max`, `choices`
+//! and the named validators.
 //!
-//! Used by the query and SQL layers before binding a value to a parameter.
-//! Type-shape validation (`FieldType` vs `SqlValue`) lives elsewhere — this
-//! module is purely for declared bounds.
+//! The query and SQL layers run these before binding a value. Type-shape
+//! checks (`FieldType` vs `SqlValue`) live elsewhere.
 
 use super::{FieldSchema, QueryError, SqlValue};
 
-/// Validate a single bound value against its field's declared bounds.
+/// Check one bound value against the rules declared on its field.
 ///
-/// Skips:
-/// * `SqlValue::Null` — the database enforces NOT NULL via the schema.
-/// * `SqlValue::List` — element-by-element checking is the caller's job
-///   (used for `IN`, where bounds normally don't apply anyway).
+/// Skips `SqlValue::Null`, since the database enforces NOT NULL, and
+/// `SqlValue::List`, whose elements are the caller's job.
 ///
 /// # Errors
-/// Returns [`QueryError::MaxLengthExceeded`] for over-length strings and
-/// [`QueryError::OutOfRange`] for integers outside `[min, max]`.
+/// [`QueryError::MaxLengthExceeded`] for over-long strings,
+/// [`QueryError::OutOfRange`] for integers outside `[min, max]`,
+/// [`QueryError::InvalidChoice`] for a value outside `choices`, and
+/// [`QueryError::UnknownValidator`] / [`QueryError::ValidatorFailed`]
+/// from the named validators.
 pub fn validate_value(
     model: &'static str,
     field: &FieldSchema,
@@ -30,9 +31,7 @@ pub fn validate_value(
         SqlValue::I16(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I32(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I64(v) => check_int_range(model, field, *v),
-        // No declared bounds for these variants in v0.1; `Null` is enforced
-        // by the DB's NOT NULL constraint, and `List` is bound element-wise
-        // by the caller (used only for `IN`).
+        // No declared bounds apply to these variants.
         SqlValue::Null
         | SqlValue::List(_)
         | SqlValue::Array(_)
@@ -89,12 +88,10 @@ fn check_choices(model: &'static str, field: &FieldSchema, value: &str) -> Resul
     })
 }
 
-/// Dispatch each `#[rustango(validators = "...")]` name in
-/// `field.validators` to the built-in `validators::*` family. #447.
-///
-/// Unknown names surface as [`QueryError::UnknownValidator`]; a
-/// validator that rejects the value surfaces as
-/// [`QueryError::ValidatorFailed`].
+/// Run each `#[rustango(validators = "...")]` name in
+/// `field.validators` through the built-in `validators::*` family.
+/// An unknown name gives [`QueryError::UnknownValidator`]; a rejected
+/// value gives [`QueryError::ValidatorFailed`].
 fn check_named_validators(
     model: &'static str,
     field: &FieldSchema,
@@ -116,14 +113,10 @@ fn check_named_validators(
             "iso_datetime" => v::validate_iso_datetime(value),
             "ipv4" => v::validate_ipv4_address(value),
             "ipv6" => v::validate_ipv6_address(value),
-            // #337 — Django `GenericIPAddressField` accepts either
-            // family. Alias `genericipaddress` for callers translating
-            // verbatim from a Django Field.
+            // Either IP family; `genericipaddress` is an accepted alias.
             "ip_address" | "genericipaddress" => v::validate_ip_address(value),
-            // #338 — Django `FilePathField` — structural-only check
-            // (non-empty, no NUL, no `..` segments). Existence-on-disk
-            // is project-specific; callers add their own validator
-            // when needed.
+            // Shape only: non-empty, no NUL, no `..` segments. It does
+            // not touch the disk.
             "filepath" | "filepath_field" => v::validate_filepath(value),
             "no_null" => v::validate_prohibit_null_characters(value),
             "email_list" => v::validate_email_list(value),

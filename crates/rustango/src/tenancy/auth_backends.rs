@@ -43,6 +43,8 @@ use crate::sql::Pool;
 
 use super::auth::parse_basic_auth;
 use super::password;
+use super::password::HashLane;
+use crate::login_throttle::{ClientIp, LoginAttempt, LoginScope};
 
 // ------------------------------------------------------------------ AuthUser
 
@@ -71,6 +73,44 @@ pub enum AuthError {
     InvalidToken,
     #[error("account is inactive")]
     Inactive,
+    /// Locked out or password hashing busy; answer with its response.
+    #[error("login refused: {0:?}")]
+    Refused(crate::login_throttle::LoginRefused),
+}
+
+impl AuthError {
+    /// A hashing error: busy is [`LoginRefused::Busy`], anything else an
+    /// invalid credential.
+    ///
+    /// [`LoginRefused::Busy`]: crate::login_throttle::LoginRefused::Busy
+    fn from_hash(e: super::TenancyError) -> Self {
+        match e {
+            super::TenancyError::Busy => Self::Refused(crate::login_throttle::LoginRefused::Busy),
+            _ => Self::InvalidToken,
+        }
+    }
+}
+
+/// Admit one per-request credential check for this request's tenant and
+/// client. Refuses without a tenant, so tenants never share limits.
+async fn begin(
+    parts: &Parts,
+    scope: fn(String) -> LoginScope,
+    username: &str,
+) -> Result<LoginAttempt, AuthError> {
+    let Some(slug) = parts.extensions.get::<super::TenantSlug>() else {
+        tracing::error!("auth backend ran without a TenantSlug; use require_auth / optional_auth");
+        return Err(AuthError::InvalidToken);
+    };
+    let ip = parts
+        .extensions
+        .get::<ClientIp>()
+        .cloned()
+        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers));
+    crate::login_throttle::shared()
+        .begin(&scope(slug.0.clone()), &ip, username)
+        .await
+        .map_err(AuthError::Refused)
 }
 
 // ------------------------------------------------------------------ Trait
@@ -95,7 +135,7 @@ pub type BoxedBackend = Arc<dyn AuthBackend>;
 /// Username + password backend. Reads `Authorization: Basic <b64>` and
 /// verifies against `rustango_users` with argon2id.
 ///
-/// This is the default backend — equivalent to Django's `ModelBackend`.
+/// This is the default backend.
 pub struct ModelBackend;
 
 #[async_trait]
@@ -118,6 +158,9 @@ impl AuthBackend for ModelBackend {
             None => return Ok(None),
         };
 
+        // Own lock scope, apart from the login forms; only failures count.
+        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
+
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
@@ -127,15 +170,24 @@ impl AuthBackend for ModelBackend {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
-            password::verify_dummy(&password);
+            password::verify_dummy_async_in(HashLane::Credential, &password)
+                .await
+                .map_err(AuthError::from_hash)?;
+            attempt.failed().await;
             return Ok(None);
         };
+        attempt
+            .resolve(&user.username)
+            .await
+            .map_err(AuthError::Refused)?;
 
         // Verify before the active check so active vs inactive accounts
         // take the same time (audit H1/N4).
-        let ok = password::verify(&password, &user.password_hash)
-            .map_err(|_| AuthError::InvalidToken)?;
+        let ok = password::verify_async_in(HashLane::Credential, &password, &user.password_hash)
+            .await
+            .map_err(AuthError::from_hash)?;
         if !user.active || !ok {
+            attempt.failed().await;
             // Audit N4 — an inactive account must look identical to a
             // wrong password at this (username-keyed, pre-credential)
             // boundary: same `Ok(None)`, not a distinguishable
@@ -145,6 +197,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         }
 
+        attempt.succeeded().await;
         Ok(Some(AuthUser {
             id: user.id.get().copied().unwrap_or(0),
             username: user.username,
@@ -185,7 +238,12 @@ pub struct ApiKey {
     /// accepted, minor exposure — a DB leak reveals which prefixes exist
     /// but NOT the secret (the secret half is argon2id-hashed in
     /// `key_hash`), so a stolen prefix can't authenticate on its own.
-    #[rustango(max_length = 8)]
+    ///
+    /// Indexed: every Bearer request looks the row up by this column,
+    /// so without one it is a sequential scan on the hit path — 5.9 ms
+    /// at 100k keys against 0.025 ms indexed, growing with every key
+    /// ever issued (#1647).
+    #[rustango(max_length = 8, index)]
     pub key_prefix: String,
     /// argon2id hash of the 32-char secret. Never returned to callers.
     #[rustango(max_length = 255)]
@@ -199,6 +257,11 @@ pub struct ApiKey {
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
+
+// A key is minted by `create-api-key`, which shows the secret once; an admin
+// form could only store a row nobody can use (#1763).
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_api_keys", "add", |_, _| false);
 
 /// Create the `rustango_api_keys` table if it doesn't exist.
 ///
@@ -229,23 +292,7 @@ pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> 
     // DDL. Idempotent (swallows "already exists").
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models(&[ApiKey::SCHEMA]);
-    let changes =
-        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
-    let batch =
-        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
-            .map_err(sqlx::Error::Protocol)?;
-    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
-        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
-            let msg = format!("{e}").to_lowercase();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(match e {
-                crate::sql::ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            });
-        }
-    }
+    crate::migrate::apply_idempotent(pool, &snapshot).await?;
     Ok(())
 }
 
@@ -286,6 +333,8 @@ impl AuthBackend for ApiKeyBackend {
         // types). One round-trip per ApiKey lookup + one per user
         // resolve; both indexed (key_prefix UNIQUE + id PK) so the
         // total latency on the hot path is two index seeks.
+        // Failures per IP and per tenant; no lock, the prefix is no account.
+        let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
@@ -293,20 +342,26 @@ impl AuthBackend for ApiKeyBackend {
         let Some(key) = keys.into_iter().next() else {
             // Audit N4 — equalize timing on the unknown-prefix path so it
             // doesn't reveal whether a key prefix exists.
-            password::verify_dummy(secret);
+            password::verify_dummy_async_in(HashLane::Credential, secret)
+                .await
+                .map_err(AuthError::from_hash)?;
+            attempt.failed().await;
             return Ok(None);
         };
 
-        if let Some(exp) = key.expires_at {
-            if chrono::Utc::now() > exp {
-                return Err(AuthError::InvalidToken);
-            }
-        }
-
-        let ok = password::verify(secret, &key.key_hash).map_err(|_| AuthError::InvalidToken)?;
+        // Verify before judging expiry, so an expired prefix costs the
+        // same as an unknown one (#1729).
+        let ok = password::verify_async_in(HashLane::Credential, secret, &key.key_hash)
+            .await
+            .map_err(AuthError::from_hash)?;
         if !ok {
+            attempt.failed().await;
             return Ok(None);
         }
+        if key.expires_at.is_some_and(|exp| chrono::Utc::now() > exp) {
+            return Err(AuthError::InvalidToken);
+        }
+        attempt.succeeded().await;
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(key.user_id))
@@ -353,7 +408,8 @@ pub async fn create_api_key(
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
-    let hash = password::hash(&secret)
+    let hash = password::hash_async(&secret)
+        .await
         .map_err(|e| crate::tenancy::error::TenancyError::Validation(e.to_string()))?;
 
     let mut key = ApiKey {
@@ -387,6 +443,17 @@ pub struct JwtBackend {
     secret: Vec<u8>,
     /// Token lifetime in seconds for tokens issued via [`JwtBackend::issue`].
     pub ttl_secs: i64,
+    /// Revocation list consulted on every authentication (#1402).
+    ///
+    /// `None` means revocation is not enforced on this backend, which is
+    /// the pre-0.57.3 behaviour and stays the default only because
+    /// turning it on silently would change what an existing deployment's
+    /// tokens do. Set it with [`JwtBackend::with_jti_store`], passing the
+    /// **same** store the issuing [`JwtLifecycle`] holds — two stores
+    /// mean logout writes to one and verification reads the other.
+    jti_store: Option<std::sync::Arc<dyn crate::jti_store::JtiStore>>,
+    /// Set once this backend has warned that revocation is not checked.
+    warned_unchecked: std::sync::atomic::AtomicBool,
 }
 
 impl JwtBackend {
@@ -399,14 +466,49 @@ impl JwtBackend {
     /// weak key. Matches the 32-byte floor on `auth_routes::build_jwt`.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        // No `secret.len()` in the message — same reason as
+        // `JwtLifecycle::new`: a panic message reaches logs and crash
+        // reports, and the length of a key is information about it.
         assert!(
             secret.len() >= 32,
-            "JwtBackend signing key is {} bytes; need >= 32 (a shorter key is forgeable)",
-            secret.len(),
+            "JwtBackend signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
             secret,
             ttl_secs: 3600,
+            jti_store: None,
+            warned_unchecked: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Enforce revocation on this backend (#1402).
+    ///
+    /// Pass the **same** store the issuing
+    /// [`JwtLifecycle`](crate::tenancy::jwt_lifecycle::JwtLifecycle)
+    /// holds. Without
+    /// this, `revoke()` and `/api/auth/logout` write to a blacklist that
+    /// nothing on the authentication path reads — a revoked token keeps
+    /// authenticating until it expires, and a deployment can watch a
+    /// shared Redis store fill with JTIs that all still work.
+    ///
+    /// Off by default because turning it on changes what an existing
+    /// deployment's live tokens do, which is not a thing to do silently
+    /// in a patch release.
+    #[must_use]
+    pub fn with_jti_store(mut self, store: std::sync::Arc<dyn crate::jti_store::JtiStore>) -> Self {
+        self.jti_store = Some(store);
+        self
+    }
+
+    /// A revocable token met a backend with no store: say so, once (#1809).
+    fn warn_unchecked_revocation(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.warned_unchecked.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "rustango::tenancy",
+                "JwtBackend has no JTI store, so tokens are not checked for revocation: a \
+                 logged-out token works until it expires; call `with_jti_store`"
+            );
         }
     }
 
@@ -418,40 +520,107 @@ impl JwtBackend {
         Self::new(s.key().to_vec())
     }
 
-    /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`.
+    /// Issue a signed JWT for `user_id` valid for `self.ttl_secs`, with no
+    /// tenant binding: it authenticates only where no tenant is resolved.
     #[must_use]
     pub fn issue(&self, user_id: i64) -> String {
+        self.sign_payload(&serde_json::json!({"sub": user_id, "exp": self.exp()}))
+    }
+
+    /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
+    #[must_use]
+    pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
+        let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp()});
+        payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
+        self.sign_payload(&payload)
+    }
+
+    fn exp(&self) -> i64 {
+        chrono::Utc::now().timestamp() + self.ttl_secs
+    }
+
+    fn sign_payload(&self, payload: &serde_json::Value) -> String {
         use base64::Engine;
-        let exp = chrono::Utc::now().timestamp() + self.ttl_secs;
-        let payload = serde_json::json!({"sub": user_id, "exp": exp});
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap_or_default());
+            .encode(serde_json::to_vec(payload).unwrap_or_default());
         let sig = hmac_sha256(&self.secret, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         format!("{payload_b64}.{sig_b64}")
     }
 
-    fn verify_token(&self, token: &str) -> Option<i64> {
+    /// Verify and return `(sub, jti)`.
+    ///
+    /// Accepts both token shapes. Three segments is what `JwtLifecycle`
+    /// issues since #1397 and what any standard JWT looks like; two is
+    /// what `JwtBackend::issue` still emits and what `JwtLifecycle` emitted
+    /// before it. Signing input differs — `header.payload` for the former,
+    /// `payload` alone for the latter — so each is checked against its own.
+    ///
+    /// Handling both is not politeness: `docs/auth-jwt-api.md` tells you to
+    /// pair this backend with `JwtLifecycle`, and between #1397 and this
+    /// change that pairing silently stopped authenticating anyone, because
+    /// the caller below required exactly one dot.
+    ///
+    /// **Refresh tokens are refused.** They carry `typ: "refresh"` and are
+    /// wire-identical to access tokens, so without this check one
+    /// authenticates as a bearer credential with the refresh token's much
+    /// longer life — seven days by default (#1402).
+    ///
+    /// The tenant binding and `kind` go through [`UserTokenScope`] (#1848).
+    ///
+    /// [`UserTokenScope`]: super::jwt_lifecycle::UserTokenScope
+    fn verify_claims(
+        &self,
+        token: &str,
+        scope: super::jwt_lifecycle::UserTokenScope<'_>,
+    ) -> Option<(i64, Option<String>)> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let (payload_b64, sig_b64) = token.split_once('.')?;
-        let expected = hmac_sha256(&self.secret, payload_b64.as_bytes());
-        let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(sig_b64)
-            .ok()?;
+        let parts: Vec<&str> = token.split('.').collect();
+        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
+            [header, payload, sig] => {
+                // Pin the algorithm. The HMAC below catches a swapped one
+                // anyway, but refusing here makes `alg: none` fail as
+                // itself rather than as a signature mismatch.
+                let h: serde_json::Value =
+                    serde_json::from_slice(&b64.decode(header).ok()?).ok()?;
+                if h.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
+                    return None;
+                }
+                (format!("{header}.{payload}"), *payload, *sig)
+            }
+            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
+            _ => return None,
+        };
+
+        let expected = hmac_sha256(&self.secret, signing_input.as_bytes());
+        let provided = b64.decode(sig_b64).ok()?;
         if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
             return None;
         }
-        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_b64)
-            .ok()?;
-        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&b64.decode(payload_b64).ok()?).ok()?;
         let exp = payload.get("exp")?.as_i64()?;
         if chrono::Utc::now().timestamp() >= exp {
             return None; // expired
         }
-        payload.get("sub")?.as_i64()
+        // Absent `typ` is a `JwtBackend::issue` token, which is an access
+        // credential by construction. Present-and-not-"access" is refused.
+        if let Some(typ) = payload.get("typ").and_then(serde_json::Value::as_str) {
+            if typ != "access" {
+                return None;
+            }
+        }
+        scope.admits(payload.as_object()?).ok()?;
+        let sub = payload.get("sub")?.as_i64()?;
+        let jti = payload
+            .get("jti")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Some((sub, jti))
     }
 }
 
@@ -484,20 +653,46 @@ impl AuthBackend for JwtBackend {
             return Ok(None);
         };
 
-        // JWT has exactly one dot (payload.sig). API key has one dot (prefix.secret).
-        // Both are one dot — distinguish by prefix length (JWT payload is base64, not 8 hex chars).
-        if token.chars().filter(|&c| c == '.').count() != 1 {
+        // A JWT is two dots (`header.payload.sig`) since #1397, or one for
+        // the legacy shape `JwtBackend::issue` still emits. An API key is
+        // also one dot (`prefix.secret`), distinguished by its 8-char hex
+        // prefix — a base64 JWT payload is never 8 characters.
+        //
+        // This used to require *exactly* one dot, which meant a real JWT
+        // was handed back as "not mine" before verification ran. Between
+        // #1397 and #1402 that silently stopped `JwtLifecycle` tokens
+        // authenticating through the backend chain the docs tell you to
+        // pair them with.
+        let dots = token.chars().filter(|&c| c == '.').count();
+        if dots != 1 && dots != 2 {
             return Ok(None);
         }
-        // If the part before the first dot is exactly 8 chars, it's an API key prefix.
-        if token.split_once('.').map(|(p, _)| p.len()) == Some(8) {
+        if dots == 1 && token.split_once('.').map(|(p, _)| p.len()) == Some(8) {
             return Ok(None);
         }
 
-        let user_id = match self.verify_token(token) {
-            Some(id) => id,
+        // All tenants share one key, so a resolved tenant must match the
+        // token's `tenant` claim (#1848).
+        let scope = match parts.extensions.get::<super::TenantSlug>() {
+            Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
+            None => super::jwt_lifecycle::UserTokenScope::Unscoped,
+        };
+        let (user_id, jti) = match self.verify_claims(token, scope) {
+            Some(c) => c,
             None => return Err(AuthError::InvalidToken),
         };
+
+        // Revocation, when a store is wired (#1402). Without this the
+        // blacklist is write-only: `revoke()` and `/api/auth/logout` record
+        // a JTI that nothing ever reads, so a "logged out" token keeps
+        // working for its full remaining life.
+        match (self.jti_store.as_ref(), jti.as_deref()) {
+            (Some(store), Some(jti)) if store.is_used(jti).await => {
+                return Err(AuthError::InvalidToken);
+            }
+            (None, Some(_)) => self.warn_unchecked_revocation(),
+            _ => {}
+        }
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(user_id))
@@ -532,4 +727,47 @@ fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
     };
     let s = value.to_str().unwrap_or("");
     Ok(s.strip_prefix("Bearer ").map(str::trim))
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    /// Authenticate `token` twice on `backend`; count revocation warnings.
+    async fn revocation_warnings(backend: &JwtBackend, token: &str) -> usize {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        for _ in 0..2 {
+            let (parts, ()) = axum::http::Request::builder()
+                .header("authorization", format!("Bearer {token}"))
+                .body(())
+                .unwrap()
+                .into_parts();
+            let _ = backend.authenticate(&parts, &pool).await;
+        }
+        buf.contents().matches("not checked for revocation").count()
+    }
+
+    /// #1809 — a revocable token on a backend without a JTI store is not silent.
+    #[tokio::test]
+    async fn a_revocable_token_without_a_jti_store_warns_once() {
+        let token = super::super::jwt_lifecycle::JwtLifecycle::new(vec![7u8; 32])
+            .issue_pair(42)
+            .access;
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        assert_eq!(revocation_warnings(&backend, &token).await, 1);
+    }
+
+    /// A token with no `jti` can't be revoked, so there is nothing to warn about.
+    #[tokio::test]
+    async fn a_token_without_a_jti_stays_silent() {
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let token = backend.issue(42);
+        assert_eq!(revocation_warnings(&backend, &token).await, 0);
+    }
 }

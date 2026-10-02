@@ -44,6 +44,10 @@
 //!
 //! Same pattern with [`EmailVerification`] — issue the URL after signup,
 //! verify on the callback, mark the user's `email_verified_at` column.
+//!
+//! [`EmailVerification`]: crate::auth_flows::EmailVerification
+//! [`PasswordReset::issue`]: crate::auth_flows::PasswordReset::issue
+//! [`PasswordReset::verify`]: crate::auth_flows::PasswordReset::verify
 
 use std::time::Duration;
 
@@ -152,18 +156,31 @@ impl PasswordReset {
     }
 }
 
-/// Django-shape `PasswordResetConfirmView` — verifies a reset URL,
-/// validates the new password, hashes it, and updates the named
-/// user row. Returns the `user_id` on success. Issue #391.
+/// Finish a password reset: verify the reset URL, validate the new
+/// password, hash it, and update the named user row. Returns the
+/// `user_id` on success.
 ///
 /// Sensible defaults:
 /// - `user_table` = `"rustango_users"`
 /// - `pk_column` = `"id"`
 /// - `password_column` = `"password_hash"`
 ///
-/// The password is rejected if shorter than 8 characters
-/// (`AuthFlowError::WeakPassword`); operators wanting stricter rules
-/// run their own validators on the input before calling this helper.
+/// The new password must pass [`crate::passwords::strength_score`] —
+/// the same policy `docs/auth-passwords.md` documents, so a password
+/// refused at registration can no longer be set by resetting (#1399).
+///
+/// **This link is replayable for its full TTL.** A copy of the email —
+/// forwarded, archived, in a shared inbox, pasted into a support ticket —
+/// still works after the legitimate reset completes. Use
+/// [`confirm_password_reset_single_use`] instead wherever you have a
+/// cache.
+///
+/// Stamps `password_changed_at`, so sessions issued before the reset stop
+/// validating (#1449) — a reset is what someone does when they think
+/// their account is compromised, and leaving the attacker's session alive
+/// defeats the point. [`confirm_password_reset_pool_into`] does **not**,
+/// because a caller-named table may have no such column; prefer this form
+/// for `rustango_users`.
 ///
 /// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
 /// and call this helper from your POST `/password-reset/confirm`
@@ -172,7 +189,7 @@ impl PasswordReset {
 /// # Errors
 /// - [`AuthFlowError`] from `PasswordReset::verify` (Malformed,
 ///   InvalidSignature, Expired, WrongPurpose).
-/// - [`AuthFlowError::WeakPassword`] when `new_password.len() < 8`.
+/// - [`AuthFlowError::WeakPassword`] when the password fails the policy.
 /// - [`AuthFlowError::Database`] for SQL / driver failures.
 #[cfg(feature = "passwords")]
 pub async fn confirm_password_reset_pool(
@@ -181,14 +198,18 @@ pub async fn confirm_password_reset_pool(
     new_password: &str,
     secret: &[u8],
 ) -> Result<i64, AuthFlowError> {
-    confirm_password_reset_pool_into(
+    let user_id = PasswordReset::verify(url, secret)?;
+    check_password_strength(new_password)?;
+    // Not a delegation to `_into`: this form owns `rustango_users`, so it
+    // also stamps `password_changed_at` and ends existing sessions (#1449).
+    write_password_hash(
         pool,
-        url,
+        user_id,
         new_password,
-        secret,
         "rustango_users",
         "id",
         "password_hash",
+        Some("password_changed_at"),
     )
     .await
 }
@@ -197,6 +218,13 @@ pub async fn confirm_password_reset_pool(
 /// caller-named table / columns. Use when the user model lives in a
 /// custom table (e.g. tenant `app_users`) rather than the framework's
 /// default `rustango_users`. Issue #391.
+///
+/// **Writes only the password column.** A caller-named table may have no
+/// rotation timestamp, so this form cannot stamp one — which means it
+/// does not end sessions issued before the reset (#1449). If your table
+/// has an equivalent of `password_changed_at`, update it yourself in the
+/// same transaction, or use [`confirm_password_reset_pool`] when the
+/// table really is `rustango_users`.
 ///
 /// # Errors
 /// Same shape as [`confirm_password_reset_pool`].
@@ -211,30 +239,160 @@ pub async fn confirm_password_reset_pool_into(
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
     let user_id = PasswordReset::verify(url, secret)?;
-    if new_password.len() < 8 {
-        return Err(AuthFlowError::WeakPassword(
-            "Password must be at least 8 characters.".into(),
-        ));
+    check_password_strength(new_password)?;
+    write_password_hash(
+        pool,
+        user_id,
+        new_password,
+        user_table,
+        pk_column,
+        password_column,
+        None,
+    )
+    .await
+}
+
+/// As [`confirm_password_reset_pool`] but the link is **single-use**: the
+/// token is recorded in `cache` and a replay returns
+/// [`AuthFlowError::AlreadyUsed`] (#1399).
+///
+/// `docs/auth-flows.md` recommends single-use for reset links; this is
+/// the helper that can honour it. Without it a leaked copy of the reset
+/// email is a working account takeover for the rest of the TTL, *after*
+/// the legitimate user has completed their reset.
+///
+/// The password policy is checked before the token is consumed, so a
+/// rejected password does not burn the user's link.
+///
+/// # Errors
+/// As [`confirm_password_reset_pool`], plus [`AuthFlowError::AlreadyUsed`].
+#[cfg(all(feature = "passwords", feature = "cache"))]
+pub async fn confirm_password_reset_single_use(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+    cache: &std::sync::Arc<dyn crate::cache::Cache>,
+) -> Result<i64, AuthFlowError> {
+    let user_id = PasswordReset::verify(url, secret)?;
+    check_password_strength(new_password)?;
+    consume_single_use(url, cache).await?;
+    // As with the non-single-use form: this one owns `rustango_users`,
+    // so it stamps `password_changed_at` too (#1449).
+    write_password_hash(
+        pool,
+        user_id,
+        new_password,
+        "rustango_users",
+        "id",
+        "password_hash",
+        Some("password_changed_at"),
+    )
+    .await
+}
+
+/// As [`confirm_password_reset_single_use`] but writes into a
+/// caller-named table / columns.
+///
+/// # Errors
+/// Same shape as [`confirm_password_reset_single_use`].
+#[cfg(all(feature = "passwords", feature = "cache"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn confirm_password_reset_single_use_into(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+    cache: &std::sync::Arc<dyn crate::cache::Cache>,
+    user_table: &str,
+    pk_column: &str,
+    password_column: &str,
+) -> Result<i64, AuthFlowError> {
+    let user_id = PasswordReset::verify(url, secret)?;
+    // Policy before consumption: a weak password must not cost the user
+    // their link, but a replay must not reach the write.
+    check_password_strength(new_password)?;
+    consume_single_use(url, cache).await?;
+    write_password_hash(
+        pool,
+        user_id,
+        new_password,
+        user_table,
+        pk_column,
+        password_column,
+        None,
+    )
+    .await
+}
+
+/// The framework's documented password policy, applied where the reset
+/// path used to check only `len() < 8` (#1399).
+#[cfg(feature = "passwords")]
+fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
+    use crate::passwords::StrengthIssue;
+
+    let issues = crate::passwords::strength_score(new_password);
+    if issues.is_empty() {
+        return Ok(());
     }
-    let hash =
-        crate::passwords::hash(new_password).map_err(|e| AuthFlowError::Database(e.to_string()))?;
+    let reasons: Vec<&str> = issues
+        .iter()
+        .map(|i| match i {
+            StrengthIssue::TooShort => "it must be at least 12 characters",
+            StrengthIssue::NoDigitsOrSymbols => "it needs a digit or a symbol",
+            StrengthIssue::NoVariety => "it needs more than lowercase letters",
+            StrengthIssue::KnownWeak => "it is a well-known weak password",
+        })
+        .collect();
+    Err(AuthFlowError::WeakPassword(format!(
+        "Password rejected: {}.",
+        reasons.join("; ")
+    )))
+}
+
+/// Hash and store the new password. Shared by the replayable and
+/// single-use confirm helpers.
+///
+/// `rotated_at_column`, when given, is stamped with "now" in the same
+/// UPDATE so sessions issued before the reset stop validating (#1449).
+/// It is `Some("password_changed_at")` for the framework's own
+/// `rustango_users` and `None` for a caller-named table, which may have
+/// no such column.
+#[cfg(feature = "passwords")]
+async fn write_password_hash(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    new_password: &str,
+    user_table: &str,
+    pk_column: &str,
+    password_column: &str,
+    rotated_at_column: Option<&str>,
+) -> Result<i64, AuthFlowError> {
+    let hash = crate::passwords::hash_async(new_password)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))?;
     let dialect = pool.dialect();
     let t = dialect.quote_ident(user_table);
     let pw = dialect.quote_ident(password_column);
     let pk = dialect.quote_ident(pk_column);
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
-    let sql = format!("UPDATE {t} SET {pw} = {p1} WHERE {pk} = {p2}");
-    crate::sql::raw_execute_pool(
-        pool,
-        &sql,
-        vec![
-            crate::core::SqlValue::String(hash),
-            crate::core::SqlValue::I64(user_id),
-        ],
-    )
-    .await
-    .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+
+    let mut sets = format!("{pw} = {}", dialect.placeholder(1));
+    let mut args = vec![crate::core::SqlValue::String(hash)];
+    if let Some(col) = rotated_at_column {
+        // Same statement as the hash: a reset that rotated the password
+        // but not the timestamp would leave every existing session live,
+        // which is the failure this closes.
+        let rot = dialect.quote_ident(col);
+        sets.push_str(&format!(", {rot} = {}", dialect.placeholder(2)));
+        args.push(crate::core::SqlValue::DateTime(chrono::Utc::now()));
+    }
+    let pk_ph = dialect.placeholder(args.len() + 1);
+    args.push(crate::core::SqlValue::I64(user_id));
+
+    let sql = format!("UPDATE {t} SET {sets} WHERE {pk} = {pk_ph}");
+    crate::sql::raw_execute_pool(pool, &sql, args)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))?;
     Ok(user_id)
 }
 
@@ -383,26 +541,30 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
 /// remaining lifetime; a repeat within that window returns
 /// [`AuthFlowError::AlreadyUsed`].
 ///
-/// **Fail-closed:** a cache read error is treated as "already used" — we
-/// refuse rather than risk replaying a passwordless / reset link while
-/// the cache is unavailable. `exists`+`set` is not atomic, so two
-/// *simultaneous* redemptions of the same URL could race; that window is
-/// sub-millisecond and this is defense-in-depth over the signature+TTL
-/// the token already carries.
+/// One atomic `add`, so of two concurrent redemptions one wins (#1853).
+/// Fails closed: a cache error, or a cache that stores nothing, refuses.
 #[cfg(feature = "cache")]
 async fn consume_single_use(
     url: &str,
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<(), AuthFlowError> {
     let sig = extract_query(url, "signature").ok_or(AuthFlowError::Malformed)?;
-    let key = format!("authflow_used:{sig}");
-    match cache.exists(&key).await {
-        Ok(true) => return Err(AuthFlowError::AlreadyUsed),
-        Ok(false) => {}
-        Err(_) => return Err(AuthFlowError::AlreadyUsed),
+    if cache.stores_nothing() {
+        tracing::error!(
+            target: "rustango::auth_flows",
+            "single-use token refused: the cache keeps nothing (`NullCache`); use a shared cache"
+        );
+        return Err(AuthFlowError::AlreadyUsed);
     }
-    let _ = cache.set(&key, "1", Some(single_use_ttl(url))).await;
-    Ok(())
+    let key = format!("authflow_used:{sig}");
+    match cache.add(&key, "1", Some(single_use_ttl(url))).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AuthFlowError::AlreadyUsed),
+        Err(e) => {
+            tracing::error!(target: "rustango::auth_flows", error = %e, "single-use token refused: cache failed");
+            Err(AuthFlowError::AlreadyUsed)
+        }
+    }
 }
 
 /// Remaining lifetime of the token from its `expires` param (unix secs),
@@ -567,6 +729,123 @@ mod tests {
         assert!(MagicLink::verify_single_use(&other, SECRET, &cache)
             .await
             .is_ok());
+    }
+
+    #[cfg(feature = "cache")]
+    fn link() -> String {
+        MagicLink::issue(
+            "https://x/login",
+            "alice@example.com",
+            SECRET,
+            Duration::from_secs(900),
+        )
+    }
+
+    /// `InMemoryCache` whose `exists` waits until two callers are inside it.
+    #[cfg(feature = "cache")]
+    struct Racy(crate::cache::InMemoryCache, tokio::sync::Barrier);
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Racy {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.0.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            t: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.0.set(k, v, t).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.0.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            let seen = self.0.exists(k).await;
+            self.1.wait().await;
+            seen
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.0.clear().await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            t: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.0.add(k, v, t).await
+        }
+    }
+
+    /// #1853 — two simultaneous redemptions of one link: exactly one wins.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn concurrent_redemptions_of_one_link_yield_one() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> = std::sync::Arc::new(Racy(
+            crate::cache::InMemoryCache::new(),
+            tokio::sync::Barrier::new(2),
+        ));
+        let url = link();
+        let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                MagicLink::verify_single_use(&url, SECRET, &cache),
+                MagicLink::verify_single_use(&url, SECRET, &cache),
+            )
+        })
+        .await
+        .expect("no deadlock");
+        assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1, "{a:?} {b:?}");
+    }
+
+    /// #1853 — a cache that keeps nothing cannot enforce single use, so it refuses.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_null_cache_refuses_single_use() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> =
+            std::sync::Arc::new(crate::cache::NullCache);
+        let r = MagicLink::verify_single_use(&link(), SECRET, &cache).await;
+        assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
+    }
+
+    /// Accepts reads, fails every write.
+    #[cfg(feature = "cache")]
+    struct WriteFails;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for WriteFails {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+    }
+
+    /// #1853 — a failed marker write would leave the link reusable, so it refuses.
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn a_failed_marker_write_refuses() {
+        let cache: std::sync::Arc<dyn crate::cache::Cache> = std::sync::Arc::new(WriteFails);
+        let r = MagicLink::verify_single_use(&link(), SECRET, &cache).await;
+        assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
     }
 
     // -------------------------------- query string handling

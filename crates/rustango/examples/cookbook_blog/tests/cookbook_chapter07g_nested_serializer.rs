@@ -109,8 +109,7 @@ fn nested_serializer_pulls_parent_via_value_when_loaded() {
 
     let v = s.to_value();
     assert_eq!(v["body"], "first comment");
-    // JSON shape carries the nested object — DRF's nested serializer
-    // result.
+    // JSON carries the related row inline, not just its foreign key.
     assert_eq!(v["author"]["name"], "ada");
 }
 

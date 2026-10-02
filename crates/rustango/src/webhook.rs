@@ -1,8 +1,8 @@
-//! Webhook signature verification — HMAC-based, constant-time.
+//! Webhook signature checks, using HMAC and constant-time compare.
 //!
-//! Most webhook providers (Stripe, GitHub, Slack, etc.) sign the request
-//! body with HMAC and put the signature in a header. This module verifies
-//! those signatures so you don't run handler code on forged payloads.
+//! Providers such as Stripe, GitHub and Slack sign the request body
+//! and send the signature in a header. Verify it before you act on
+//! the payload, or you will run your handler on forged data.
 //!
 //! ## Quick start
 //!
@@ -26,7 +26,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-/// Signature encoding format — what the webhook provider sends.
+/// How the provider encodes the signature.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum SignatureFormat {
     /// `sha256=<hex>` (GitHub `X-Hub-Signature-256`)
@@ -37,10 +37,10 @@ pub enum SignatureFormat {
     Base64Sha256,
 }
 
-/// Verify `signature` against `body` using HMAC-SHA256 with `secret`.
+/// Check `signature` against `body` with HMAC-SHA256 and `secret`.
 ///
-/// Returns `true` only when the signature matches. Comparison is
-/// constant-time to prevent timing attacks.
+/// Returns `true` only on a match. The compare is constant-time, so
+/// it does not leak the expected signature through timing.
 ///
 /// # Example
 ///
@@ -69,8 +69,8 @@ pub fn verify_signature(
     expected_bytes.ct_eq(&provided_bytes).unwrap_u8() == 1
 }
 
-/// Sign `body` with `secret`, producing a signature in the given format.
-/// Useful for generating webhooks (or in tests).
+/// Sign `body` with `secret` in the given format. Use it when you
+/// send webhooks, or in tests.
 #[must_use]
 pub fn sign(format: SignatureFormat, secret: &[u8], body: &[u8]) -> String {
     let bytes = compute_hmac(secret, body);
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn cross_format_does_not_verify() {
-        // A hex signature should NOT verify against the base64 format
+        // A hex signature must not pass as base64.
         let hex_sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
         assert!(!verify_signature(
             SignatureFormat::Base64Sha256,

@@ -1,5 +1,5 @@
-//! Django-parity tests for `Email::send(mailer)` builder-terminating
-//! shape + `email::utils.formataddr`-style display-name formatter.
+//! `Email::send(mailer)` as a builder terminator, plus the
+//! `formataddr` display-name formatter and its `parseaddr` inverse.
 
 #![cfg(feature = "email")]
 
@@ -9,9 +9,8 @@ use rustango::email::{formataddr, parseaddr, Email, InMemoryMailer, Mailer, Null
 
 #[tokio::test]
 async fn email_send_routes_to_supplied_mailer() {
-    // Django parity: `EmailMessage(...).send()` posts the message to
-    // the supplied connection. rustango spells the connection as a
-    // `&dyn Mailer`.
+    // `.send()` posts the message to the supplied connection, spelled
+    // here as a `&dyn Mailer`.
     let m = InMemoryMailer::new();
     Email::new()
         .to("alice@example.com")
@@ -29,7 +28,7 @@ async fn email_send_routes_to_supplied_mailer() {
 
 #[tokio::test]
 async fn email_send_surfaces_mailer_validation_error() {
-    // Django parity: `send()` doesn't swallow validation errors —
+    // `send()` doesn't swallow validation errors —
     // missing recipients should surface as MailError::InvalidMessage,
     // not pass silently.
     let m = NullMailer;
@@ -129,7 +128,7 @@ fn formataddr_round_trips_through_email_from() {
     assert_eq!(e.from.as_deref(), Some(formatted.as_str()));
 }
 
-// ------------------------------------------------------------------ parseaddr (Django parity inverse)
+// ------------------------------------------------------------------ parseaddr (formataddr's inverse)
 
 #[test]
 fn parseaddr_splits_name_and_address() {

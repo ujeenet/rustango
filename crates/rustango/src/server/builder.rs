@@ -11,7 +11,7 @@ use tower::ServiceExt as _;
 use crate::extractors::TenantContext;
 use crate::tenancy::{
     admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
-    RegisteredHostResolver, SubdomainResolver, TenantPools,
+    ListenerPort, TenantPools,
 };
 
 /// Stateless API router that the user supplies. The Builder injects
@@ -55,12 +55,58 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console cannot create tenants — see that method for
     /// why this is opt-in rather than on by default.
     provisioning_dir: Option<std::path::PathBuf>,
-    /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
-    /// Mounted at `serve` time as
-    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
+    /// How long `serve` lets open connections finish after SIGTERM.
+    drain_timeout: std::time::Duration,
+    /// A `running` run silent this long is closed at boot.
+    stale_run_after: std::time::Duration,
+    /// Mounts registered via [`Builder::with_static_files`].
+    /// Nested at `serve` time as `Router::nest(prefix, static_router(files))`
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
-    static_dirs: Vec<(String, std::path::PathBuf)>,
+    static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
+    /// Whether to mount request observability at all, set by
+    /// [`Builder::observability`].
+    ///
+    /// It has to be applied here rather than by the caller. `Cli` used
+    /// to layer its api router before handing it over, but this builder
+    /// then merges the tenant admin into that router and dispatches the
+    /// operator console on a sibling branch — and axum's own rule is
+    /// that "routes added after `layer` is called will not have the
+    /// middleware added". So the entire tenant-admin surface and the
+    /// whole operator console served with no access log and no request
+    /// span, on the multi-tenant path #1480 was opened about.
+    ///
+    /// Separate from `access_log` on purpose: `[logging] access_log =
+    /// false` turns off the log, not the trace context.
+    observability: bool,
+    /// The access-log layer, when request logging is on. `None` with
+    /// `observability == true` means "span and request id, no log line".
+    access_log: Option<crate::access_log::AccessLogLayer>,
+    /// Query params the span redacts, when the caller has named them.
+    ///
+    /// `None` means **derive from `access_log`**, which is what the
+    /// span did before `span_redact` existed. Holding an `Option`
+    /// rather than a list is what keeps the two in step: a default of
+    /// `default_redact_params()` would silently drop a configured list
+    /// whenever `observability()` was called without this setter,
+    /// which is #1610 again with the access log *on*.
+    span_redact: Option<Vec<String>>,
+    /// Applied to the outermost router, so the tenant login, tenant
+    /// admin and operator console carry them too (#1699).
+    #[cfg(feature = "admin")]
+    security_headers: Option<crate::security_headers::SecurityHeadersLayer>,
+    /// Same reason: the Host allowlist and HTTPS redirect must see the
+    /// tenant and console routes too (#1700).
+    #[cfg(feature = "admin")]
+    allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
+    #[cfg(feature = "admin")]
+    ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
+    /// Outermost, so the access log and every throttle see its
+    /// `TrustedRealIp` (#1745).
+    #[cfg(feature = "admin")]
+    real_ip: Option<crate::real_ip::RealIpLayer>,
+    /// Opt-in `X-Org`-style fallback after the host resolvers (#1856).
+    header_resolver: Option<HeaderResolver>,
     _phantom: PhantomData<DB>,
 }
 
@@ -120,9 +166,73 @@ impl<DB: Database> Builder<DB> {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             provisioning_dir: None,
+            drain_timeout: crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
+            stale_run_after: crate::tenancy::provision_store::STALE_RUN_AFTER,
             static_dirs: Vec::new(),
+            observability: false,
+            access_log: None,
+            span_redact: None,
+            #[cfg(feature = "admin")]
+            security_headers: None,
+            #[cfg(feature = "admin")]
+            allowed_hosts: None,
+            #[cfg(feature = "admin")]
+            ssl_redirect: None,
+            #[cfg(feature = "admin")]
+            real_ip: None,
+            header_resolver: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Send these security headers on every response, the tenant
+    /// login, tenant admin and operator console included (#1699).
+    /// `Cli` calls this for you from `[security]`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn security_headers(
+        mut self,
+        layer: crate::security_headers::SecurityHeadersLayer,
+    ) -> Self {
+        self.security_headers = Some(layer);
+        self
+    }
+
+    /// Refuse requests whose `Host` is not allowed, on every route
+    /// (#1700). `Cli` calls this from `[security] allowed_hosts`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn allowed_hosts(mut self, layer: crate::host_validation::AllowedHostsLayer) -> Self {
+        self.allowed_hosts = Some(layer);
+        self
+    }
+
+    /// Redirect plain HTTP to HTTPS on every route (#1700). `Cli`
+    /// calls this from `[security] secure_ssl_redirect`.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn ssl_redirect(mut self, layer: crate::ssl_redirect::SslRedirectLayer) -> Self {
+        self.ssl_redirect = Some(layer);
+        self
+    }
+
+    /// Resolve the client IP from a trusted proxy on every route. A
+    /// `RealIpLayer` on the api router runs after the access log reads it.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn real_ip(mut self, layer: crate::real_ip::RealIpLayer) -> Self {
+        self.real_ip = Some(layer);
+        self
+    }
+
+    /// Resolve the tenant from a request header when no host matched.
+    ///
+    /// Off by default, since the client picks the value (#1856). Pair
+    /// it with [`HeaderResolver::allow_only`] or tenant-scoped credentials.
+    #[must_use]
+    pub fn header_resolver(mut self, resolver: HeaderResolver) -> Self {
+        self.header_resolver = Some(resolver);
+        self
     }
 
     /// Auto-mount `/health` (liveness) + `/ready` (readiness with
@@ -137,6 +247,43 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Log every request this server answers, on every serving branch.
+    ///
+    /// Applied to the **outermost** router in [`Self::into_router`], so
+    /// the tenant app, the tenant admin merged into it, the operator
+    /// console on the apex branch and the health endpoints all inherit
+    /// it. Layering the api router before handing it here does not do
+    /// that — the admin is merged in afterwards and the operator
+    /// console is a sibling — which is how the multi-tenant path ended
+    /// up with the two surfaces that most need attribution being the
+    /// two that had none (#1480).
+    ///
+    /// `Cli` calls this for you from `[logging]`; call it directly only
+    /// when building the server by hand.
+    #[must_use]
+    pub fn observability(mut self, access_log: Option<crate::access_log::AccessLogLayer>) -> Self {
+        self.observability = true;
+        self.access_log = access_log;
+        self
+    }
+
+    /// Override the query params the request span replaces with
+    /// `[redacted]`.
+    ///
+    /// Optional. Without it the span uses the list from
+    /// [`Self::observability`]'s access-log layer, and
+    /// `default_redact_params()` when there is no layer — so a
+    /// configured list reaches the span whether or not `[logging]
+    /// access_log` is on (#1610). `Cli` calls this for you.
+    ///
+    /// Reach for it only when the span should redact something the
+    /// access log does not.
+    #[must_use]
+    pub fn span_redact(mut self, params: Vec<String>) -> Self {
+        self.span_redact = Some(params);
         self
     }
 
@@ -169,11 +316,37 @@ impl<DB: Database> Builder<DB> {
     /// [`crate::manage::Cli::with_static`] when tenancy mode is on.
     #[must_use]
     pub fn with_static(
-        mut self,
+        self,
         prefix: impl Into<String>,
         root_dir: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.static_dirs.push((prefix.into(), root_dir.into()));
+        let prefix = prefix.into();
+        crate::static_files::warn_if_uploads_prefix(&prefix);
+        let files = crate::static_files::StaticFiles::new(root_dir);
+        self.with_static_files(prefix, files)
+    }
+
+    /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
+    /// download instead of running on the tenant host
+    /// ([`crate::static_files::StaticFiles::user_content`]).
+    #[must_use]
+    pub fn with_uploads(
+        self,
+        prefix: impl Into<String>,
+        root_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let files = crate::static_files::StaticFiles::new(root_dir).user_content();
+        self.with_static_files(prefix, files)
+    }
+
+    /// Mount a configured [`crate::static_files::StaticFiles`] at `prefix`.
+    #[must_use]
+    pub fn with_static_files(
+        mut self,
+        prefix: impl Into<String>,
+        files: crate::static_files::StaticFiles,
+    ) -> Self {
+        self.static_dirs.push((prefix.into(), files));
         self
     }
 
@@ -195,6 +368,52 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn routes(mut self, routes: crate::tenancy::RouteConfig) -> Self {
         self.routes = routes;
+        self
+    }
+
+    /// The tenant pools this builder will hand the server.
+    ///
+    /// Read access, mirroring [`TenantPools::pool_config`]. Useful for
+    /// asserting that a [`Builder::tenant_pools`] call actually reached
+    /// the pools — a setter that stores a value nothing reads is the
+    /// shape of #1456, so being able to check is worth the method.
+    #[must_use]
+    pub fn pools(&self) -> &Arc<TenantPools<DB>> {
+        &self.pools
+    }
+
+    /// Size the per-tenant connection pools (#1456).
+    ///
+    /// `from_pool` builds `TenantPools` with
+    /// [`TenantPoolsConfig::default`](crate::tenancy::TenantPoolsConfig),
+    /// and until this existed there was
+    /// no way to change it: the type was public and documented, but
+    /// every route to a running server went through a constructor that
+    /// ignored it, and `tenancy/pools.rs` reads no environment
+    /// variables. Connection counts multiply by tenant *and* by
+    /// process — 20 database-mode tenants at the default 16 across a
+    /// web and a worker process is 640 connections, against a stock
+    /// `PostgreSQL` limit of 100 — so the only available lever was the
+    /// database server's own `max_connections`, which is the wrong
+    /// place to size an application's pools and often not the
+    /// operator's to change.
+    ///
+    /// ```no_run
+    /// # use rustango::tenancy::TenantPoolsConfig;
+    /// # fn demo<DB: sqlx::Database>(b: rustango::server::Builder<DB>) -> rustango::server::Builder<DB> {
+    /// b.tenant_pools(TenantPoolsConfig {
+    ///     database_pool_max_connections: 4,
+    ///     max_cached_database_pools: 200,
+    ///     ..Default::default()
+    /// })
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
+        // `TenantPools` is behind an `Arc` by this point, so rebuild
+        // rather than mutate — the registry pool itself is cheap to
+        // clone (it is an `Arc` internally).
+        self.pools = Arc::new(TenantPools::<DB>::new(self.registry.clone()).config(config));
         self
     }
 
@@ -306,8 +525,8 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// Apply every migration discoverable from `project_root` to the
-    /// registry + every active tenant. The Django-shape one-call setup
-    /// for multi-app projects:
+    /// registry + every active tenant. One call sets up a multi-app
+    /// project:
     ///
     /// 1. Write the packaged tenancy bootstrap migrations
     ///    (`0001_rustango_registry_initial`, `0001_rustango_tenant_initial`)
@@ -399,7 +618,7 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
-        let resolver_for_admin = build_resolver(&self.apex);
+        let resolver_for_admin = self.resolver();
 
         // v0.27.7 (#60) — pre-warm tenant pools on boot when the
         // app's `TenantPoolsConfig.prewarm_active_tenants` flag
@@ -446,7 +665,7 @@ impl<DB: Database> Builder<DB> {
         );
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
-            resolver: build_resolver(&self.apex),
+            resolver: self.resolver(),
             session_secret: session_secret_for_tenant.clone(),
             operator_secret: operator_secret.clone(),
         });
@@ -491,13 +710,8 @@ impl<DB: Database> Builder<DB> {
         let had_api = self.api.is_some();
         let api = if had_api || self.health_endpoints || !self.static_dirs.is_empty() {
             let mut r = self.api.unwrap_or_default();
-            for (prefix, root) in &self.static_dirs {
-                r = r.nest(
-                    prefix,
-                    crate::static_files::static_router(crate::static_files::StaticFiles::new(
-                        root.clone(),
-                    )),
-                );
+            for (prefix, files) in &self.static_dirs {
+                r = r.nest(prefix, crate::static_files::static_router(files.clone()));
             }
             if self.health_endpoints {
                 r = r.merge(crate::health::health_router(self.registry.clone()));
@@ -550,6 +764,24 @@ impl<DB: Database> Builder<DB> {
         // #1322 — only when the deployment asked for it. See
         // `with_tenant_provisioning` for why creating tenants is not
         // on by default.
+        // Runs are detached tasks; close the ones a stopped process left `running` (#1883).
+        if self.provisioning_dir.is_some() {
+            let registry: crate::sql::Pool = self.registry.clone().into();
+            let after = self.stale_run_after;
+            match crate::tenancy::provision_store::reap_stale_runs(&registry, after).await {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    closed = n,
+                    "closed provisioning/migration runs left running by a stopped process",
+                ),
+                Err(e) => tracing::warn!(
+                    target: "rustango::tenancy::provision",
+                    error = %e,
+                    "could not check for interrupted provisioning runs",
+                ),
+            }
+        }
         let provisioner = self.provisioning_dir.map(|dir| {
             crate::tenancy::provision::Provisioner::new(
                 self.pools.clone(),
@@ -558,8 +790,8 @@ impl<DB: Database> Builder<DB> {
             )
             .erased()
         });
-        let operator_admin = operator_console::router_full(
-            self.registry,
+        let operator_admin = operator_console::router_full_unlogged(
+            self.registry.into(),
             Some(self.pools.clone().into_invalidator()),
             provisioner,
             operator_secret,
@@ -574,6 +806,13 @@ impl<DB: Database> Builder<DB> {
             // console.
             self.routes.impersonation_handoff_url.clone(),
         );
+        // With an outer access log, it logs the console (#1788).
+        let operator_admin = if self.access_log.is_some() {
+            operator_admin
+        } else {
+            use crate::access_log::AccessLogRouterExt as _;
+            operator_admin.access_log(operator_console::access_log_layer())
+        };
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
@@ -584,13 +823,8 @@ impl<DB: Database> Builder<DB> {
                 let mut tenants = tenants.clone();
                 let apex = apex.clone();
                 async move {
-                    let host = req
-                        .headers()
-                        .get(axum::http::header::HOST)
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.split(':').next().unwrap_or(s).to_owned())
-                        .unwrap_or_default();
-                    let response = if host == apex {
+                    let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
+                    let response = if on_apex {
                         operator.as_service().oneshot(req).await
                     } else {
                         tenants.as_service().oneshot(req).await
@@ -602,7 +836,96 @@ impl<DB: Database> Builder<DB> {
             }
         }));
 
+        // Inside the security headers, so a panic's 500 carries them (#1541).
+        let app = crate::panic_guard::catch_panics(app);
+        #[cfg(feature = "admin")]
+        let app = match self.security_headers {
+            Some(layer) => {
+                use crate::security_headers::SecurityHeadersRouterExt as _;
+                app.security_headers(layer)
+            }
+            None => app,
+        };
+        // Same order as the single-tenant router: the Host allowlist is
+        // outermost, so a bad Host is refused, never redirected to.
+        #[cfg(feature = "admin")]
+        let app = match self.ssl_redirect {
+            Some(layer) => {
+                use crate::ssl_redirect::SslRedirectRouterExt as _;
+                app.ssl_redirect(layer)
+            }
+            None => app,
+        };
+        #[cfg(feature = "admin")]
+        let app = match self.allowed_hosts {
+            Some(layer) => {
+                use crate::host_validation::AllowedHostsRouterExt as _;
+                app.allowed_hosts(layer)
+            }
+            None => app,
+        };
+
+        // Observability goes on the OUTERMOST router, after both
+        // branches are behind the Host dispatch, so tenant app, tenant
+        // admin, operator console and the health endpoints all carry
+        // it. Anything layered on the api router before it reached this
+        // builder covered only the api router (#1480).
+        let app = if self.observability {
+            // Resolved here rather than at each setter, so the order
+            // `observability()` and `span_redact()` are called in
+            // cannot change the result and neither can clobber the
+            // other.
+            // It now logs the console too, whose `?next=` holds the attempted URL.
+            let access_log = self.access_log.map(|l| l.redact_additional("next"));
+            let mut redact = resolve_span_redact(self.span_redact.clone(), access_log.as_ref());
+            // The span covers the console in every case, access log or not.
+            if !redact.iter().any(|p| p == "next") {
+                redact.push("next".to_owned());
+            }
+            // One definition, shared with `Cli::mount_observability` —
+            // see `access_log::mount_observability` for the ordering
+            // rules and why they live in one place.
+            crate::access_log::mount_observability(app, access_log, redact)
+        } else {
+            app
+        };
+        #[cfg(feature = "admin")]
+        let app = match self.real_ip {
+            Some(layer) => {
+                use crate::real_ip::RealIpRouterExt as _;
+                app.real_ip(layer)
+            }
+            None => app,
+        };
+
         Ok(app)
+    }
+
+    /// The standard chain, plus the opt-in header fallback.
+    pub(crate) fn resolver(&self) -> ChainResolver {
+        let chain = ChainResolver::standard(self.apex.clone());
+        match &self.header_resolver {
+            Some(h) => chain.push(h.clone()),
+            None => chain,
+        }
+    }
+
+    /// How long [`Self::serve`] lets open connections finish after the
+    /// stop signal. Default [`crate::shutdown::DEFAULT_DRAIN_TIMEOUT`].
+    #[must_use]
+    pub fn drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// A provisioning/migration run `running` with no event for this long
+    /// is closed as failed at boot. Default
+    /// [`crate::tenancy::provision_store::STALE_RUN_AFTER`] (1 h); keep it
+    /// above your slowest silent step.
+    #[must_use]
+    pub fn stale_run_after(mut self, after: std::time::Duration) -> Self {
+        self.stale_run_after = after;
+        self
     }
 
     /// Assemble everything and bind.
@@ -613,29 +936,32 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        let drain = self.drain_timeout;
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        let app = tag_listener_port(app, &listener)?;
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.
         // Without it, `access_log` (and any other middleware that
         // reads the peer address) sees "-".
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        crate::shutdown::serve_until_drained(
+            |stop| {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(stop)
+            },
+            drain,
         )
         .await?;
         Ok(())
     }
 }
 
-fn build_resolver(apex: &str) -> ChainResolver {
-    ChainResolver::new()
-        .push(SubdomainResolver::new(apex.to_owned()))
-        // Extra tenant hostnames (`rustango_org_hosts`). Additive: it only
-        // runs when the base `host_pattern` did not match, and the lookup
-        // fails soft so a not-yet-migrated database behaves as before.
-        .push(RegisteredHostResolver)
-        .push(HeaderResolver::default())
+/// `PortResolver` reads this, never the client-sent URI port (#1856).
+fn tag_listener_port(app: Router, listener: &tokio::net::TcpListener) -> std::io::Result<Router> {
+    Ok(app.layer(Extension(ListenerPort(listener.local_addr()?.port()))))
 }
 
 /// Build the axum router that claims every URL the tenant admin
@@ -658,6 +984,8 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
         move |req: axum::http::Request<axum::body::Body>| {
             let svc = svc.clone();
             async move {
+                // A fresh request drops the outer router's path params,
+                // which the inner `Path` extractors would otherwise see.
                 let (parts, body) = req.into_parts();
                 let mut builder = axum::http::Request::builder()
                     .method(&parts.method)
@@ -665,9 +993,20 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
                 for (k, v) in &parts.headers {
                     builder = builder.header(k, v);
                 }
-                let fresh = builder.body(body).expect("valid request");
-                svc.clone()
-                    .oneshot(fresh)
+                let mut fresh = builder.body(body).expect("valid request");
+                // Keep the client IP the login limits key on.
+                let ext = fresh.extensions_mut();
+                if let Some(ci) = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                {
+                    ext.insert(*ci);
+                }
+                #[cfg(feature = "admin")]
+                if let Some(ip) = parts.extensions.get::<crate::real_ip::TrustedRealIp>() {
+                    ext.insert(*ip);
+                }
+                svc.oneshot(fresh)
                     .await
                     .unwrap_or_else(|_| unreachable!("Router is Infallible"))
             }
@@ -736,4 +1075,149 @@ fn root_has_json_files(root: &std::path::Path) -> bool {
     };
     read.filter_map(Result::ok)
         .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+}
+
+/// The query params the request span redacts.
+///
+/// `explicit` is [`Builder::span_redact`]; `None` derives the list
+/// from the access-log layer, and falls back to the defaults when
+/// there is no layer.
+///
+/// A free function so the rule can be tested without a registry pool,
+/// and so the precedence lives in one place rather than in whichever
+/// setter ran last.
+fn resolve_span_redact(
+    explicit: Option<Vec<String>>,
+    access_log: Option<&crate::access_log::AccessLogLayer>,
+) -> Vec<String> {
+    explicit
+        .or_else(|| access_log.map(|l| l.redact_query_params.clone()))
+        .unwrap_or_else(crate::access_log::default_redact_params)
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) mod resolver_tests {
+    use super::*;
+    use crate::tenancy::{Org, OrgResolver as _};
+
+    /// A SQLite registry holding org `acme`, and its URL.
+    pub(crate) async fn registry() -> (tempfile::TempDir, sqlx::SqlitePool, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let sq = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        crate::testkit::create_tables_for::<Org>(&pool)
+            .await
+            .expect("orgs");
+        let mut org = Org {
+            slug: "acme".into(),
+            display_name: "acme".into(),
+            backend_kind: "sqlite".into(),
+            ..crate::testkit::org()
+        };
+        org.insert_pool(&pool).await.expect("insert org");
+        (tmp, sq, url)
+    }
+
+    /// The slug the builder's chain picks for `X-Org: acme` on an unknown host.
+    pub(crate) async fn x_org_pick(
+        b: &Builder<sqlx::Sqlite>,
+        sq: &sqlx::SqlitePool,
+    ) -> Option<String> {
+        let (parts, ()) = axum::http::Request::builder()
+            .uri("/")
+            .header("host", "shared.localhost")
+            .header("x-org", "acme")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        b.resolver()
+            .resolve(&parts, &pool)
+            .await
+            .expect("resolve")
+            .map(|o| o.slug)
+    }
+
+    /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
+    #[tokio::test]
+    async fn x_org_is_ignored_unless_opted_in() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = registry().await;
+        let plain = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url.clone(), "localhost");
+        assert_eq!(x_org_pick(&plain, &sq).await, None);
+        let opted = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url, "localhost")
+            .header_resolver(HeaderResolver::default());
+        assert_eq!(x_org_pick(&opted, &sq).await.as_deref(), Some("acme"));
+    }
+
+    /// #1856 — handlers see the port the listener accepted on.
+    #[tokio::test]
+    async fn served_router_carries_the_listener_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = Router::new().route(
+            "/",
+            axum::routing::get(|p: Option<Extension<ListenerPort>>| async move {
+                p.map_or(String::new(), |Extension(ListenerPort(n))| n.to_string())
+            }),
+        );
+        let app = tag_listener_port(app, &listener).unwrap();
+        let resp = app
+            .oneshot(axum::http::Request::new(axum::body::Body::empty()))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        let want = listener.local_addr().unwrap().port().to_string();
+        assert_eq!(&body[..], want.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod span_redact_tests {
+    use super::resolve_span_redact;
+    use crate::access_log::{default_redact_params, AccessLogLayer};
+
+    fn layer_with(name: &str) -> AccessLogLayer {
+        let mut l = AccessLogLayer::default();
+        l.redact_query_params.push(name.to_owned());
+        l
+    }
+
+    /// With no explicit list, the span takes the access log's — which
+    /// is what the span did before `span_redact` existed.
+    ///
+    /// Defaulting the field to `default_redact_params()` instead made
+    /// a hand-built `Builder` drop a configured name unless the caller
+    /// also remembered the setter: redacted in the access-log event
+    /// and in clear text on the span, same request (#1610).
+    #[test]
+    fn without_an_explicit_list_the_span_follows_the_access_log() {
+        let got = resolve_span_redact(None, Some(&layer_with("invite_token")));
+        assert!(
+            got.iter().any(|p| p == "invite_token"),
+            "the configured name must reach the span: {got:?}"
+        );
+        assert!(
+            got.iter().any(|p| p == "password"),
+            "and the defaults it extends must survive: {got:?}"
+        );
+    }
+
+    /// No layer at all — `[logging] access_log = false` — still gets
+    /// the defaults rather than an empty list.
+    #[test]
+    fn with_no_access_log_the_span_gets_the_defaults() {
+        assert_eq!(resolve_span_redact(None, None), default_redact_params());
+    }
+
+    /// An explicit list wins over the layer, so the span can redact
+    /// something the access log does not.
+    #[test]
+    fn an_explicit_list_overrides_the_access_log() {
+        let got = resolve_span_redact(
+            Some(vec!["only_this".to_owned()]),
+            Some(&layer_with("invite_token")),
+        );
+        assert_eq!(got, vec!["only_this".to_owned()]);
+    }
 }

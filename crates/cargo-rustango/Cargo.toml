@@ -1,6 +1,6 @@
 [package]
 name = "cargo-rustango"
-description = "`cargo rustango new <name>` — Django-style project scaffolder for the rustango framework."
+description = "`cargo rustango new <name>` — project scaffolder for the rustango web framework."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
-keywords            = ["orm", "django", "scaffolder", "cli", "postgres"]
+keywords            = ["orm", "web-framework", "scaffolder", "cli", "postgres"]
 categories          = ["database", "command-line-utilities", "development-tools"]
 
 [lints]

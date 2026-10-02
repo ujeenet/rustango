@@ -1,4 +1,4 @@
-//! Django-parity #327 — `QuerySet::dates(field, kind)` returns the
+//! Issue #327 — `QuerySet::dates(field, kind)` returns the
 //! distinct truncated date values matching the queryset, ordered.
 
 #![cfg(feature = "sqlite")]

@@ -5,7 +5,7 @@
 //! Live PG tests live in `migrate_runner.rs`.
 
 use rustango::migrate::{
-    detect_changes, render_changes, SchemaChange, SchemaSnapshot, TableSnapshot,
+    detect_changes, invert, render_changes, Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
 };
 
 // ---------------- helpers ----------------
@@ -496,6 +496,7 @@ fn render_alter_column_default_drop_emits_drop_default() {
 }
 
 #[test]
+/// No `USING`: a `::VARCHAR(n)` cast silently truncates (#1878).
 fn render_alter_column_max_length_emits_varchar_or_text() {
     let to_varchar = vec![SchemaChange::AlterColumnMaxLength {
         table: "u".into(),
@@ -506,7 +507,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_varchar, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64) USING "name"::VARCHAR(64)"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64)"#]
     );
 
     let to_text = vec![SchemaChange::AlterColumnMaxLength {
@@ -518,7 +519,7 @@ fn render_alter_column_max_length_emits_varchar_or_text() {
     let ddl = render_changes(&to_text, &empty_snap()).unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT USING "name"::TEXT"#]
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT"#]
     );
 }
 
@@ -745,7 +746,7 @@ fn changing_index_columns_keeps_name_emits_drop_then_create() {
     let changes = detect_changes(&prev, &current);
     let drop_idx = changes
         .iter()
-        .position(|c| matches!(c, SchemaChange::DropIndex { name } if name == "uq"));
+        .position(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "uq"));
     let create_idx = changes.iter().position(|c| {
         matches!(c, SchemaChange::CreateIndex { name, columns, .. }
             if name == "uq" && columns == &vec!["a".to_string(), "c".into()])
@@ -771,10 +772,162 @@ fn flipping_unique_flag_emits_drop_then_create() {
     let changes = detect_changes(&prev, &current);
     assert!(changes
         .iter()
-        .any(|c| matches!(c, SchemaChange::DropIndex { name } if name == "idx")));
+        .any(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "idx")));
     assert!(changes.iter().any(
         |c| matches!(c, SchemaChange::CreateIndex { name, unique, .. } if name == "idx" && *unique)
     ));
+}
+
+/// Dropping a model drops its indexes **first** (#1588, #1598).
+///
+/// This is the shape that broke a live MySQL tenant. `makemigrations`
+/// emitted `DropTable` and then `DropIndex`; MySQL applied the
+/// `DropTable`, failed on the index with 1146, and recorded the
+/// migration as failed — so the table was gone with no ledger row, and
+/// re-running failed differently (1051). Nothing reconciled that
+/// without `migrate --fake`.
+///
+/// The first fix *suppressed* the index drop. That stopped the failure
+/// and broke rollback instead — see
+/// `dropping_a_table_round_trips_through_invert_with_its_indexes`.
+/// Ordering is the fix that does both: every dialect accepts dropping
+/// an index while its table is still there.
+#[test]
+fn dropping_a_table_drops_its_indexes_first() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    // The table goes; so does the index that lived on it.
+    let current = SchemaSnapshot::default();
+
+    let changes = detect_changes(&prev, &current);
+
+    let drop_table = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user"))
+        .expect("control: the table itself must still be dropped");
+    let drop_index = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "uq"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the index was not dropped at all. Suppressing it leaves rollback \
+                 restoring the table without it: {changes:?}"
+            )
+        });
+
+    assert!(
+        drop_index < drop_table,
+        "DropIndex must be emitted before DropTable. After the table is gone MySQL \
+         fails the index drop with 1146, having already auto-committed the DROP TABLE \
+         — schema changed, ledger empty, re-run fails 1051: {changes:?}"
+    );
+}
+
+/// The same ordering for a table-level CHECK (#1598).
+///
+/// #1588's fix reached one of three identical loops. This one and the
+/// EXCLUDE loop below still emitted their drop *after* `DropTable`, so
+/// a model carrying a CHECK reproduced the original failure exactly.
+#[test]
+fn dropping_a_table_drops_its_check_constraints_first() {
+    let mut prev = snap_with_index("uq", &["a", "b"], true);
+    prev.checks = vec![serde_json::from_value(serde_json::json!({
+        "name": "ck_age", "table": "diff_user", "expr": "age > 0"
+    }))
+    .expect("check snapshot")];
+    let current = SchemaSnapshot::default();
+
+    let changes = detect_changes(&prev, &current);
+
+    let drop_table = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user"))
+        .expect("control: the table must still be dropped");
+    let drop_check = changes
+        .iter()
+        .position(
+            |c| matches!(c, SchemaChange::DropCheckConstraint { name, .. } if name == "ck_age"),
+        )
+        .expect("the CHECK must still be dropped");
+
+    assert!(
+        drop_check < drop_table,
+        "DropCheckConstraint must precede DropTable — on MySQL the table drop \
+         auto-commits and `ALTER TABLE t DROP CHECK` then fails 1146, which is #1588 \
+         reproduced through the loop its fix missed: {changes:?}"
+    );
+}
+
+/// Dropping a model is invertible, and the inverse restores the
+/// indexes (#1598).
+///
+/// The suppression fix made this silently false: the forward list
+/// became `[DropTable]` alone, `invert` gave `[CreateTable]`, and
+/// `CreateTable` renders no index DDL — so rolling back *succeeded*
+/// and left the table without its indexes, UNIQUE ones included, while
+/// the predecessor snapshot still listed them. `makemigrations` then
+/// saw no drift, so nothing ever recreated them.
+///
+/// Asserting the round trip rather than the op list: the op list is
+/// what changed, the property is what matters.
+#[test]
+fn dropping_a_table_round_trips_through_invert_with_its_indexes() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = SchemaSnapshot::default();
+
+    let forward: Vec<Operation> = detect_changes(&prev, &current)
+        .into_iter()
+        .map(Operation::Schema)
+        .collect();
+
+    // `invert` walks the forward list in reverse, so the ordering the
+    // forward list established is what puts CreateTable ahead of
+    // CreateIndex here — no second ordering rule to keep in step.
+    let back = invert(&forward, &prev).expect("a drop-model migration must be invertible");
+
+    let creates_table = back.iter().position(
+        |op| matches!(op, Operation::Schema(SchemaChange::CreateTable(t)) if t == "diff_user"),
+    );
+    let creates_index = back
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(SchemaChange::CreateIndex { name, .. }) if name == "uq"));
+
+    let creates_table = creates_table.expect("inverse must recreate the table");
+    let creates_index = creates_index.expect(
+        "inverse must recreate the index. Without it the rollback succeeds and \
+         silently loses every index the table had, while the snapshot still lists them",
+    );
+    assert!(
+        creates_table < creates_index,
+        "the table must be created before its index: {back:?}"
+    );
+}
+
+/// …but an index dropped on a table that *survives* is still emitted,
+/// and now carries the table MySQL needs.
+///
+/// Without this, "suppress DropIndex" could be implemented as "never
+/// emit DropIndex" and the test above would still pass.
+#[test]
+fn dropping_only_the_index_still_emits_drop_index_with_its_table() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = SchemaSnapshot {
+        tables: prev.tables.clone(),
+        indexes: vec![],
+        ..Default::default()
+    };
+
+    let changes = detect_changes(&prev, &current);
+
+    let found = changes.iter().find_map(|c| match c {
+        SchemaChange::DropIndex { name, table } if name == "uq" => Some(table.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        found.as_deref(),
+        Some("diff_user"),
+        "an index dropped from a surviving table must still be dropped, and must \
+         name its table so MySQL can render `DROP INDEX <name> ON <table>`: {changes:?}"
+    );
 }
 
 #[test]
@@ -788,5 +941,170 @@ fn unchanged_index_emits_nothing() {
             SchemaChange::DropIndex { .. } | SchemaChange::CreateIndex { .. }
         )),
         "no index change → no Drop/CreateIndex; got {changes:?}",
+    );
+}
+
+// ---------------- #1877–#1881 review follow-ups ----------------
+
+fn snap(v: serde_json::Value) -> SchemaSnapshot {
+    serde_json::from_value(v).expect("snapshot JSON")
+}
+
+/// Author, book (FK + UNIQUE), a composite FK onto a unique index, a
+/// CHECK, an EXCLUDE and an M2M junction.
+fn full_schema(fk_to: &str, check: &str, exclude_where: &str) -> SchemaSnapshot {
+    let id = serde_json::json!({"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true});
+    let int = |c: &str| serde_json::json!({"name": c, "column": c, "ty": "i64", "nullable": true, "primary_key": false});
+    snap(serde_json::json!({
+        "tables": [
+            {"name": "rv_author", "model": "A", "fields": [id, int("a"), int("b")]},
+            {"name": "rv_other", "model": "O", "fields": [id, int("a"), int("b")]},
+            {"name": "rv_book", "model": "B", "fields": [id, int("a"), int("b"),
+                {"name": "author_id", "column": "author_id", "ty": "i64", "nullable": true,
+                 "primary_key": false, "fk": {"kind": "fk", "to": "rv_author", "on": "id"}},
+                {"name": "isbn", "column": "isbn", "ty": "string", "nullable": true,
+                 "primary_key": false, "max_length": 20, "unique": true}],
+             "composite_fks": [{"name": "rv_book_ab_fk", "to": fk_to, "from": ["a", "b"], "on": ["a", "b"]}]},
+        ],
+        "indexes": [
+            {"name": "rv_author_ab_uq", "table": "rv_author", "columns": ["a", "b"], "unique": true},
+            {"name": "rv_other_ab_uq", "table": "rv_other", "columns": ["a", "b"], "unique": true},
+        ],
+        "checks": [{"name": "rv_book_ck", "table": "rv_book", "expr": check}],
+        "excludes": [{"name": "rv_book_ex", "table": "rv_book", "using": "gist",
+                      "elements": [["a", "="]], "where_clause": exclude_where}],
+        "m2m_tables": [{"through": "rv_book_tags", "src_table": "rv_book", "src_col": "book_id",
+                        "dst_table": "rv_author", "dst_col": "author_id"}],
+    }))
+}
+
+/// `makemigrations` on an unchanged schema writes nothing, for every
+/// object the diff compares whole.
+#[test]
+fn unchanged_schema_with_every_constraint_kind_emits_nothing() {
+    let s = full_schema("rv_author", "a >= 0", "a > 0");
+    assert_eq!(detect_changes(&s, &s.clone()), vec![]);
+}
+
+/// Two models sharing one junction give the same snapshot in either
+/// `inventory` order, so the diff between them is empty.
+#[test]
+fn shared_through_pair_emits_nothing_in_either_order() {
+    use rustango::core::{M2MRelation, ModelSchema};
+    const M2M: &[M2MRelation] = &[M2MRelation::new(
+        "tags",
+        "rv_tag",
+        "rv_shared_tags",
+        "item_id",
+        "tag_id",
+    )];
+    const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+        let mut s = ModelSchema::new(name, table);
+        s.m2m = M2M;
+        s
+    }
+    static POST: ModelSchema = model("Post", "rv_post");
+    static NOTE: ModelSchema = model("Note", "rv_note");
+    let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
+    let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+    assert_eq!(detect_changes(&a, &b), vec![]);
+}
+
+/// Each edited object is dropped and added again with its new shape, and
+/// the recreated composite FK comes after the unique index it needs.
+#[test]
+fn edited_constraints_are_recreated_with_the_new_shape() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let mut cur = full_schema("rv_other", "a > 0", "a > 1");
+    cur.indexes[1].columns = vec!["b".into(), "a".into()];
+    let changes = detect_changes(&prev, &cur);
+    let pos = |f: &dyn Fn(&SchemaChange) -> bool| {
+        changes
+            .iter()
+            .position(f)
+            .unwrap_or_else(|| panic!("missing in {changes:#?}"))
+    };
+    let add_fk = pos(
+        &|c| matches!(c, SchemaChange::AddCompositeFk { to, on, .. } if to == "rv_other" && on == &["a", "b"]),
+    );
+    pos(&|c| matches!(c, SchemaChange::DropCompositeFk { name, .. } if name == "rv_book_ab_fk"));
+    pos(&|c| matches!(c, SchemaChange::AddCheckConstraint { expr, .. } if expr == "a > 0"));
+    pos(
+        &|c| matches!(c, SchemaChange::AddExclusionConstraint { where_clause: Some(w), .. } if w == "a > 1"),
+    );
+    let create_ix =
+        pos(&|c| matches!(c, SchemaChange::CreateIndex { name, .. } if name == "rv_other_ab_uq"));
+    assert!(
+        create_ix < add_fk,
+        "the index must exist before the FK: {changes:#?}"
+    );
+}
+
+/// Dropping everything: dependents before their tables, tables child
+/// first. Checked on the op order, because PG and SQLite `CASCADE` or
+/// skip FK checks and would hide a wrong order.
+#[test]
+fn drops_come_before_what_they_hang_off() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let changes = detect_changes(&prev, &SchemaSnapshot::default());
+    let pos = |f: &dyn Fn(&SchemaChange) -> bool| {
+        changes
+            .iter()
+            .position(f)
+            .unwrap_or_else(|| panic!("missing in {changes:#?}"))
+    };
+    let table = |t: &'static str| pos(&move |c| matches!(c, SchemaChange::DropTable(n) if n == t));
+    let (author, book) = (table("rv_author"), table("rv_book"));
+    assert!(book < author, "child first: {changes:#?}");
+    for dep in [
+        pos(&|c| matches!(c, SchemaChange::DropM2MTable { .. })),
+        pos(&|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "rv_author_ab_uq")),
+        pos(&|c| matches!(c, SchemaChange::DropCheckConstraint { .. })),
+        pos(&|c| matches!(c, SchemaChange::DropExclusionConstraint { .. })),
+    ] {
+        assert!(dep < book && dep < author, "{changes:#?}");
+    }
+}
+
+/// A dropped column goes after its index.
+#[test]
+fn column_drops_after_its_index() {
+    let prev = full_schema("rv_author", "a >= 0", "a > 0");
+    let mut cur = prev.clone();
+    cur.tables[0]
+        .fields
+        .retain(|f| f.column != "a" && f.column != "b");
+    cur.indexes.remove(0);
+    let changes = detect_changes(&prev, &cur);
+    let ix = changes.iter().position(
+        |c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "rv_author_ab_uq"),
+    );
+    let col = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropColumn { table, .. } if table == "rv_author"));
+    assert!(ix.is_some() && ix < col, "{changes:#?}");
+}
+
+/// `i32` → `String(5)`: the type change, then the length, or the TEXT
+/// the type change renders would win (#1878).
+#[test]
+fn type_change_into_a_string_runs_before_its_length() {
+    let t = |ty: &str, len: Option<u32>| {
+        snap(
+            serde_json::json!({"tables": [{"name": "rv_t", "model": "T", "fields": [
+            {"name": "c", "column": "c", "ty": ty, "nullable": true, "primary_key": false,
+             "max_length": len}]}]}),
+        )
+    };
+    let changes = detect_changes(&t("i32", None), &t("string", Some(5)));
+    assert!(
+        matches!(
+            changes.as_slice(),
+            [
+                SchemaChange::AlterColumnType { .. },
+                SchemaChange::AlterColumnMaxLength { to: Some(5), .. }
+            ]
+        ),
+        "{changes:#?}"
     );
 }

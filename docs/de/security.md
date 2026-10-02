@@ -1,6 +1,6 @@
 # Sicherheitsleitfaden
 
-Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt, und wie man sie kombiniert. Wenn du von Django, Laravel oder Rails kommst, werden dir die meisten davon vertraut vorkommen — die Namen unterscheiden sich, aber die Ideen sind dieselben. Jede der folgenden Funktionen benötigt in der Regel eine Zeile Setup. Wenn du bereit bist, in Produktion zu gehen, führe `manage check --deploy` für ein automatisiertes Audit aus.
+Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt, und wie man sie kombiniert. Wenn du schon einmal ein Web-Framework benutzt hast, werden dir die meisten davon vertraut vorkommen — die Namen unterscheiden sich, aber die Ideen sind dieselben. Jede der folgenden Funktionen benötigt in der Regel eine Zeile Setup. Wenn du bereit bist, in Produktion zu gehen, führe `manage check --deploy` für ein automatisiertes Audit aus.
 
 [![Der gehärtete Middleware-Stack in einer Kette verdrahtet: Request-IDs, Zugriffsprotokollierung, Rate Limiting, CORS und Security-Header](../img/security.png)](../img/security.png)
 
@@ -52,7 +52,7 @@ let app = Router::new()
 
 ## Security-Header setzen
 
-Security-Header teilen dem Browser mit, wie er deine Benutzer schützen soll (Clickjacking blockieren, HTTPS erzwingen, Content-Type-Sniffing unterbinden). `SecurityHeadersLayer` setzt das Standardset mit einer Zeile — dieselben Header, die Django standardmäßig mitbringt. (Ein „Layer" ist **Rustango**s Begriff für Middleware; du hängst sie an deinen Router an.)
+Security-Header teilen dem Browser mit, wie er deine Benutzer schützen soll (Clickjacking blockieren, HTTPS erzwingen, Content-Type-Sniffing unterbinden). `SecurityHeadersLayer` setzt das Standardset mit einer Zeile — die gängigen Schutz-Header, ohne dass du sie einzeln benennen musst. (Ein „Layer" ist **Rustango**s Begriff für Middleware; du hängst sie an deinen Router an.)
 
 > Vertiefung: [Middleware](middleware.md) behandelt, wie Layer funktionieren, ihre Reihenfolge, den vollständigen eingebauten Katalog und das Schreiben eigener Layer (locale-, zeitzonenbewusst, Header, CSRF).
 
@@ -66,7 +66,7 @@ let app = router.security_headers(SecurityHeadersLayer::strict());
 
 | Preset | Wann verwenden |
 |---|---|
-| `strict()` | Produktion: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=no-referrer + COOP=same-origin + Permissions-Policy gesperrt |
+| `strict()` | Produktion: HSTS preload + XFO=DENY + nosniff + Referrer-Policy=same-origin + COOP=same-origin + Permissions-Policy gesperrt |
 | `relaxed()` | Einbettbar in iframes: SAMEORIGIN + 1 Jahr HSTS |
 | `dev()` | Lokal: nur nosniff (kein HSTS, um localhost nicht für immer in HTTPS zu sperren) |
 | `empty()` | Von Grund auf aufbauen |
@@ -122,7 +122,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-**Sicherheitshinweis:** Kombiniere niemals `allow_credentials(true)` mit `allow_any_origin()` — der Browser wird die Antwort ablehnen. Mit Credentials MUSST du explizite Origins auflisten.
+**Sicherheitshinweis:** Mit Credentials MUSST du explizite Origins auflisten. `allow_credentials(true)` zusammen mit `allow_any_origin()` ergibt kein „credentialed Wildcard-CORS" — das gibt es nicht, und wer es verlangt, bekommt keine der beiden Hälften.
+
+Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Bis [#1394](https://github.com/ujeenet/rustango/issues/1394) wurde stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
+
+Nutze `.allow_origins([...])` mit den Origins, die du tatsächlich bedienst. Dieser Pfad ist unverändert und sendet weiterhin `Access-Control-Allow-Credentials: true`.
 
 ---
 
@@ -145,7 +149,27 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgreiche Antwort enthält `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Hinter einem Reverse Proxy: kombiniere `per_ip` mit `real_ip`.** `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket und das Limit ist nutzlos. Setze `real_ip::RealIpLayer` (liest `X-Forwarded-For` / `X-Real-IP`) davor, damit die echte Client-IP verwendet wird.
+> **Hinter einem Reverse Proxy: benenne deine Proxys, sonst limitiert `per_ip` nichts Sinnvolles** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket, was hinter einem Proxy die Adresse des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
+>
+> Mounte `RealIpLayer` **und sag ihm, welchen Hops er glauben soll**:
+>
+> ```rust
+> use rustango::real_ip::{HeaderStrategy, RealIpLayer, RealIpRouterExt};
+>
+> app.rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
+>    .real_ip(
+>        RealIpLayer::new(HeaderStrategy::XForwardedFor)
+>            .trust_proxies(["10.0.0.0/8"])?,   // dein Ingress, nicht das Internet
+>    );
+> ```
+>
+> **Die Reihenfolge ist entscheidend und scheitert lautlos.** Layer werden von außen nach innen zuletzt angewandt, `real_ip` muss also *nach* `rate_limit` hinzugefügt werden, um *davor* zu laufen. Andersherum sieht der Limiter keine aufgelöste Adresse und schlüsselt still wieder auf den Socket — er warnt einmal, wenn ein Forwarding-Header ohne aufgelöste Adresse eintrifft.
+>
+> **`trust_proxies` ist keine optionale Dekoration.** `X-Forwarded-For` setzt, wer ihn sendet. Ohne deklarierte Proxy-Liste ist der Header nur eine Behauptung, also ignoriert ihn der Limiter vollständig und schlüsselt auf den Socket — absichtlich. Täte er es nicht, könnte jeder Client durch Variieren eines Headers pro Anfrage einen frischen Bucket erzeugen und aus „das Limit ist zu grob" würde „es gibt kein Limit". `RealIp` (die Behauptung) ist für Logging in Ordnung; nur `TrustedRealIp`, das erscheint, wenn der Peer zu `trust_proxies` passt, schlüsselt einen Limiter.
+>
+> **Eine Regel für jeden IP-Leser.** Rate Limits, ViewSet-Throttles, Login-Limits, Auth-Signale und das Access-Log nutzen dieselbe Adresse: `TrustedRealIp` (`X-Forwarded-For` von rechts nach links lesen, den ersten Hop nehmen, der nicht in `trust_proxies` steht), sonst den Socket. Keiner liest den linken Hop: den schreibt der Client.
+>
+> Benenne die Adressen, von denen dein Ingress tatsächlich verbindet. Einen weiteren Bereich zu vertrauen, reicht den Bypass an jeden darin weiter.
 
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):
 
@@ -211,7 +235,7 @@ Wenn dein Reverse Proxy `X-Forwarded-For` weiterleitet, konfiguriere ihn so, das
 > *tatsächlich* Cookies verwendet, lies das `rustango_csrf`-Cookie und gib es im `X-CSRF-Token`-
 > Header zurück.
 
-CSRF (Cross-Site Request Forgery) liegt vor, wenn eine andere Website den Browser eines eingeloggten Benutzers dazu bringt, eine Anfrage an deine App zu senden. Die Verteidigung ist ein geheimes Token in jedem Formular, genau wie Djangos `{% csrf_token %}`. Die CSRF-Middleware liegt in `rustango::forms::csrf` (hinter dem `csrf`-Feature, das durch das `admin`-Feature automatisch aktiviert wird):
+CSRF (Cross-Site Request Forgery) liegt vor, wenn eine andere Website den Browser eines eingeloggten Benutzers dazu bringt, eine Anfrage an deine App zu senden. Die Verteidigung ist ein geheimes Token in jedem Formular, das der Server bei jedem Schreibvorgang gegenprüft. Die CSRF-Middleware liegt in `rustango::forms::csrf` (hinter dem `csrf`-Feature, das durch das `admin`-Feature automatisch aktiviert wird):
 
 ```rust
 use rustango::forms::csrf;
@@ -221,11 +245,15 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` baut den Layer mit sinnvollen Standardwerten; `csrf::with_config(CsrfConfig)` erlaubt dir, die Cookie-/Header-Namen und das `Secure`-Flag zu überschreiben. In Templates gibt `{{ csrf_token }}` das rohe Token und `{{ csrf_input }}` ein fertiges verstecktes `<input>` — platziere eines in jedem Formular. Es verwendet das Double-Submit-Cookie-Muster: bei unsicheren Methoden (POST, PUT, PATCH, DELETE) prüft der Layer den `X-CSRF-Token`-Header (oder das `_csrf`-Formularfeld) gegen das `rustango_csrf`-Cookie; eine Nichtübereinstimmung gibt `403 Forbidden` zurück.
+`csrf::layer()` baut den Layer mit `secure: true`, das Cookie wird also über reines HTTP abgelehnt — auf `http://localhost` nimm `CsrfConfig::allow_insecure_for_dev()`, sonst scheint der Layer nichts zu tun. `csrf::with_config(CsrfConfig)` überschreibt die Cookie-/Header-Namen und das `Secure`-Flag sowie `trusted_origins` — zusätzliche Origins neben dem eigenen Host der Anfrage. Die Origin-Prüfung läuft auch bei leerer Liste: ein fremder `Origin` bekommt `403`, über TLS auch ein POST ohne `Origin`. In Templates gibt `{{ csrf_token }}` das rohe Token und `{{ csrf_input }}` ein fertiges verstecktes `<input>` — schreib es als `{{ csrf_input | safe }}`, denn Tera escapt `.html`-Templates automatisch: ohne den Filter rendert die Seite ein sichtbares literales `<input …>`, das Formular trägt kein `_csrf`-Feld und jedes POST endet in 403. Beide Variablen liegen nur für die `template_views`-CBVs im Context oder nachdem du `forms::csrf::stamp_into_context` selbst aufgerufen hast — ein handgeschriebener Handler hat keine davon. Es verwendet das Double-Submit-Cookie-Muster: bei unsicheren Methoden (POST, PUT, PATCH, DELETE) prüft der Layer den `X-CSRF-Token`-Header (oder das `_csrf`-Formularfeld) gegen das `rustango_csrf`-Cookie; eine Nichtübereinstimmung gibt `403 Forbidden` zurück.
 
 **Collector-Endpunkte ausnehmen.** `CsrfConfig::exempt_prefix("/path")` (wiederholbar) überspringt die CSRF-Durchsetzung für unsichere Methoden bei Anfragen, deren Pfad mit dem angegebenen Präfix beginnt. Das ist für Append-only-, zustandslose Endpunkte gedacht, die per `navigator.sendBeacon` angesprochen werden — z. B. ein Analytics-Collector — die keinen `X-CSRF-Token`-Header setzen können und, wenn die Seite aus einem CDN-Cache ausgeliefert wird, der `Set-Cookie` entfernt, möglicherweise gar kein CSRF-Cookie mitführen. Halte Präfixe eng und nimm niemals etwas aus, das Auth-Zustand liest oder schreibt.
 
-Der Auto-Admin aktiviert CSRF standardmäßig bei jeder Mutation, und es gibt keine Möglichkeit, sich davon abzumelden.
+**Der Auto-Admin.** Sobald du `.with_session_auth(...)` aufrufst, wird CSRF automatisch auf jede Admin-Mutation gelegt — anlegen, ändern, löschen, Bulk-Aktionen, Audit-Cleanup — und jedes Admin-Formular rendert seinen Token selbst. Es gibt nichts zu verdrahten und keine Möglichkeit, sich davon abzumelden.
+
+Die Bedingung ist Absicht, kein Zufall: CSRF schützt Credentials, die der Browser von sich aus mitschickt, also ist es das Session-Cookie, das es überhaupt sinnvoll macht. Ein Admin ohne `with_session_auth` hat kein von rustango verwaltetes Credential, mit dem sich fälschen ließe, und seine Mutationen sind für jeden direkt erreichbar, der die Route erreicht — das ist eine Authentifizierungslücke, keine CSRF-Lücke, und CSRF würde sie nicht verkleinern. Wer eine eigene Cookie-Auth davorsetzt, hängt `csrf::layer()` selbst ein.
+
+Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser Absatz, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
 
 ---
 
@@ -233,7 +261,7 @@ Der Auto-Admin aktiviert CSRF standardmäßig bei jeder Mutation, und es gibt ke
 
 XSS (Cross-Site Scripting) tritt auf, wenn Benutzereingaben als HTML gerendert werden und als Code im Browser einer anderen Person laufen. Die Lösung ist, jede Benutzereingabe zu escapen, bevor sie die Seite erreicht. **Rustango** löst das auf zwei Wegen:
 
-**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine (wie Django-Templates oder Blade). Jedes `{{ var }}` wird automatisch HTML-escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
+**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine. Jedes `{{ var }}` wird in jedem Template, das das Framework baut, automatisch HTML-escapt, egal welche Endung. Mit `template_extensions::html_tera()` / `html_tera_from_glob(glob)` bekommt deine eigene Engine dasselbe; ein nacktes `Tera::new` escapt nur `.html`, `.htm` und `.xml`. Nur die Klartext-Teile von E-Mails (`EmailRenderer`-Betreff und `.txt`-Body) werden roh gerendert. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
 
 **2. Manueller Escape-Helper** — für den Fall, dass du HTML in Rust-Code statt in einem Template baust:
 
@@ -285,9 +313,9 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 ## Benutzer authentifizieren
 
-Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben — ganz ähnlich wie Djangos Authentifizierungs-Backends. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
+Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben, indem du ein einziges Trait implementierst. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
 
-> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es ist Link-to-existing (die verifizierte IdP-E-Mail muss mit einem Admin-Benutzer übereinstimmen; kein Auto-Provisioning) und verwendet die bestehende Session wieder.
+> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es meldet das Konto an, das mit dem IdP-Subject verknüpft ist (Verknüpfen per E-Mail ist pro Provider optional und gilt nie für Superuser oder Staff; kein Auto-Provisioning) und verwendet die bestehende Session wieder.
 
 ### Drei fertige Backends
 
@@ -302,12 +330,17 @@ let backends = vec![
     Arc::new(JwtBackend::new(secret)) as _,         // Authorization: Bearer <jwt>
 ];
 
+// `require_auth` / `require_perm` are `Router::layer` calls: each wraps the
+// routes registered BEFORE it. Chaining them on one router would put /me
+// behind post.add. Gate the permission on an inner sub-router instead.
+let posts = Router::new()
+    .route("/posts/new", post(create_post))
+    .require_perm("post.add");     // inner: needs the codename
+
 let app = Router::new()
     .route("/me", get(profile))
-    .require_auth(backends.clone(), pool.clone())   // 401 if no backend recognizes
-    .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone())         // gate by codename
-    .require_auth(backends, pool);
+    .merge(posts)
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette.
@@ -435,10 +468,10 @@ Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene
 API-Keys erlauben Skripten und Services die Authentifizierung ohne Benutzername, Passwort oder Session — praktisch für Machine-to-Machine-Zugriff. Du generierst einen Key, zeigst ihn dem Benutzer einmal und speicherst nur seinen Präfix und Hash.
 
 ```rust
-use rustango::api_keys::{generate_key, verify_key, split_token};
+use rustango::api_keys::{generate_key_async, verify_key_async, split_token};
 
 // Issuance
-let (full_token, prefix, hash) = generate_key()?;
+let (full_token, prefix, hash) = generate_key_async().await?;
 // Format: {8-char hex prefix}.{32-char hex secret}
 // Show full_token to the user once. Store prefix + hash in your DB.
 
@@ -446,7 +479,7 @@ let (full_token, prefix, hash) = generate_key()?;
 let (prefix, secret) = split_token(&inbound_header)
     .ok_or(StatusCode::UNAUTHORIZED)?;
 let row = lookup_by_prefix(prefix).await?;
-if !verify_key(secret, &row.hash)? {
+if !verify_key_async(secret, &row.hash).await? {
     return Err(StatusCode::UNAUTHORIZED);
 }
 ```
@@ -475,6 +508,8 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 ```
 
 Funktioniert mit Google Authenticator, Authy, 1Password, Bitwarden und anderen Standard-Authenticator-Apps.
+
+`verify` akzeptiert denselben Code erneut, bis er abläuft. Für Einmal-Codes rufen Sie stattdessen `matched_step` auf, speichern den zurückgegebenen Schritt und akzeptieren einen Code nur, wenn sein Schritt später ist als der gespeicherte. Der eingebaute Admin-Login macht das so.
 
 **Recovery-Codes** (einmalige Backup-Codes für den Fall, dass ein Benutzer sein Telefon verliert) werden noch nicht mitgeliefert. Das gängige Muster ist, 8–10 gehashte Codes pro Benutzer zu speichern und einen bei jeder Verwendung zu verbrauchen.
 
@@ -639,7 +674,7 @@ Immer aktive Prüfungen (laufen mit oder ohne `--deploy`):
 
 Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 - ✅ `RUSTANGO_ENV` ist `prod` oder `production`
-- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter
+- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — seit [#1396](https://github.com/ujeenet/rustango/issues/1396) von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
 - ✅ `DATABASE_URL` gesetzt (und warnt, wenn es auf localhost zeigt)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` Plausibilitätswarnungen für Tenancy + Nicht-Loopback-Binding
 

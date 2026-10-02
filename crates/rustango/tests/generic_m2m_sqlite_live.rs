@@ -76,9 +76,7 @@ async fn fresh_pool() -> Pool {
     // Cache may hold (app, model) → id from a sibling test's pool; this
     // fresh in-memory DB re-seeds with its own ids, so clear it.
     contenttypes::clear_cache();
-    let Pool::Sqlite(ref s) = pool else {
-        unreachable!()
-    };
+    let s = pool.as_sqlite().expect("sqlite pool");
     for ddl in [
         "CREATE TABLE gm2m_post (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
         "CREATE TABLE gm2m_video (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL)",
@@ -196,5 +194,5 @@ async fn m2m_changed_fires_on_add() {
     assert_eq!(events.len(), 1, "expected one m2m_changed event");
     assert!(matches!(events[0].action, M2mAction::Add));
     assert_eq!(events[0].through, "gm2m_taggables");
-    assert_eq!(events[0].dst_pks, vec![42]);
+    assert_eq!(events[0].dst_pks, vec![rustango::core::SqlValue::I64(42)]);
 }

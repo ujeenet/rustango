@@ -1,6 +1,5 @@
 //! Tri-dialect emission tests for `funcs::json_array_length` —
-//! issue #826 (Eloquent `whereJsonLength` / Django `JSONField`
-//! length-lookup parity).
+//! issue #826 (filter on the length of a JSON array column).
 
 use rustango::core::funcs::json_array_length;
 use rustango::core::{Expr, Op, SelectQuery, SqlValue, WhereExpr, F};
@@ -17,14 +16,13 @@ pub struct Doc {
 }
 
 fn compile_with<D: Dialect>(d: D) -> String {
-    let q = SelectQuery {
-        where_clause: WhereExpr::ExprCompare {
+    let q = SelectQuery::new(<Doc as rustango::core::Model>::SCHEMA).where_clause(
+        WhereExpr::ExprCompare {
             lhs: json_array_length(F("data")),
             op: Op::Gt,
             rhs: Expr::Literal(SqlValue::I64(0)),
         },
-        ..SelectQuery::new(<Doc as rustango::core::Model>::SCHEMA)
-    };
+    );
     d.compile_select(&q).unwrap().sql
 }
 

@@ -64,3 +64,8 @@ tower = { version = "0.5", features = ["util"] }
 tera = { version = "1.20", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 base64 = "0.22"
+# Chapter 6b implements `OrgResolver`, which is an `#[async_trait]` trait.
+async-trait = "0.1"
+# ...and builds its `Org` from `testkit::org()`. Test-only, so the feature
+# goes here rather than on the normal dep; the example binary stays without it.
+rustango = { path = "../..", default-features = false, features = ["testkit"] }

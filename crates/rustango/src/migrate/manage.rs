@@ -1,4 +1,4 @@
-//! Django-style `manage.py` analog for rustango projects.
+//! The `manage` command runner for rustango projects.
 //!
 //! [`run`] takes `argv` and dispatches to the right migration
 //! function. Users drop a tiny `src/bin/manage.rs` binary into their
@@ -23,8 +23,8 @@
 //! UX: `cargo run -- migrate`,
 //! `cargo run -- makemigrations [name]`, etc. The
 //! framework owns the dispatcher; the user owns the entrypoint
-//! (which must compile in their models). Same factoring as Django's
-//! `manage.py` adapted for Rust's link-by-binary model.
+//! (which must compile in their models). The split exists because
+//! Rust links models per binary.
 //!
 //! ## Subcommands
 //!
@@ -107,6 +107,8 @@ pub fn run_pool_free<W: Write>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -150,6 +152,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -157,7 +161,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "check" => check_cmd(pool, dir, &args[1..], writer).await,
         "docs" => docs_cmd(writer),
         "version" | "--version" => version_cmd(writer),
-        "db:dump" => db_dump_cmd(&args[1..], writer),
+        "db:dump" => db_dump_cmd(&args[1..]),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
         "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
@@ -173,14 +177,13 @@ pub async fn run_with_writer<W: Write + Send>(
         "flush" => flush_cmd(pool, &args[1..], writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
-        // Django `manage clearsessions` parity — purges expired
-        // entries from a DatabaseCache-backed table. Works for any
+        // Purges expired entries from a DatabaseCache-backed
+        // table. Works for any
         // table written by `cache::DatabaseCache`, including the
         // sessions-backend table.
         #[cfg(feature = "cache")]
         "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
-        // Django `manage createcachetable` parity — idempotent
-        // `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
+        // Idempotent `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
         #[cfg(feature = "cache")]
         "createcachetable" | "create-cache-table" => {
             createcachetable_cmd(pool, &args[1..], writer).await
@@ -197,7 +200,7 @@ pub async fn run_with_writer<W: Write + Send>(
 }
 
 fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
-    writeln!(w, "rustango::manage — Django-style migration runner\n")?;
+    writeln!(w, "rustango::manage — migration and admin command runner\n")?;
     writeln!(w, "USAGE:")?;
     writeln!(w, "  manage <COMMAND> [args]\n")?;
     writeln!(w, "COMMANDS:")?;
@@ -341,20 +344,14 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      Purge expired rows from a DatabaseCache-backed table."
     )?;
-    writeln!(
-        w,
-        "      Default table: rustango_cache. Django parity for clearsessions.\n"
-    )?;
+    writeln!(w, "      Default table: rustango_cache.\n")?;
     writeln!(w, "  createcachetable [--table <name>]")?;
     writeln!(w, "      (alias: create-cache-table)")?;
     writeln!(
         w,
         "      Idempotent CREATE TABLE IF NOT EXISTS for DatabaseCache."
     )?;
-    writeln!(
-        w,
-        "      Default table: rustango_cache. Django parity for createcachetable.\n"
-    )?;
+    writeln!(w, "      Default table: rustango_cache. Safe to re-run.\n")?;
     writeln!(
         w,
         "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
@@ -394,11 +391,11 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      rows with a warning; --fail-fast aborts on the first failure.\n"
     )?;
-    writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
     writeln!(
         w,
-        "      Export every registered model's rows as a Django-shape JSON"
+        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>]"
     )?;
+    writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
         w,
         "      fixture (`[{{\"model\": \"app.Model\", \"pk\": N, \"fields\": {{...}}}}]`)."
@@ -459,6 +456,8 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
     writeln!(w, "  make:job <Name>")?;
+    writeln!(w, "  make:scheduled <Name>")?;
+    writeln!(w, "  make:worker <Name>")?;
     writeln!(w, "  make:notification <Name>")?;
     writeln!(w, "  make:middleware <Name>")?;
     writeln!(w, "  make:test <Name>")?;
@@ -515,20 +514,11 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      source for every base table in `--schema` (default `public`)."
     )?;
-    writeln!(
-        w,
-        "      Pipe to a file the user reviews + edits. Mirrors Django's"
-    )?;
-    writeln!(
-        w,
-        "      `inspectdb` shape — adopts rustango against an existing DB"
-    )?;
+    writeln!(w, "      Pipe to a file the user reviews + edits. Adopts")?;
+    writeln!(w, "      rustango against an existing database")?;
     writeln!(w, "      without rewriting it.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
-    writeln!(
-        w,
-        "      Scaffold a Django-shape app module under src/<name>/"
-    )?;
+    writeln!(w, "      Scaffold an app module under src/<name>/")?;
     writeln!(
         w,
         "      (models.rs + views.rs + urls.rs + mod.rs). Idempotent;"
@@ -867,24 +857,53 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    // The framework's own `rustango_*` tables come from the generated
-    // `system/migrations/` chain. In tenancy mode that chain is applied per
-    // tenant by `tenancy::migrate`; a single-database project has no such
-    // hook, so apply it here — otherwise a non-tenancy project using e.g.
-    // `media` would never get its tables at all (the pre-0.51 `ensure_*`
-    // calls that used to cover this are gone). System migrations run BEFORE
-    // the project's, so user models may FK framework tables (#1171), and go
-    // through the fake-initial runner so a database whose framework tables
-    // predate the chain reconciles instead of colliding (#1167).
-    let system_applied = apply_system_chain(pool, dir, w).await?;
+    migrate_with_framework(pool, dir, w, runner::Signals::Skip, |held| {
+        runner::migrate_pool_locked(held, pool, dir, None)
+    })
+    .await
+}
 
-    let applied = runner::migrate_pool(pool, dir).await?;
-    if applied.is_empty() && system_applied == 0 {
+/// Everything a plain `migrate` does: the framework's system chain and the
+/// project chain via `project`, in [`super::chains::migrate_chains`]'s order, then
+/// the framework bootstrap DDL. The `Cli` auto-migrate shares it (#2056).
+///
+/// In tenancy mode the system chain is applied per tenant by
+/// `tenancy::migrate`; a single-database project gets it here, before its
+/// own migrations so user models may FK framework tables (#1171).
+///
+/// # Errors
+/// As [`super::chains::migrate_chains`], plus the bootstrap DDL.
+pub(crate) async fn migrate_with_framework<W, F, Fut>(
+    pool: &Pool,
+    dir: &Path,
+    w: &mut W,
+    signals: super::Signals,
+    project: F,
+) -> Result<(), MigrateError>
+where
+    W: Write,
+    F: FnOnce(super::LockHeld) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
+{
+    let chain = system_chain(dir)?;
+    let applied = super::chains::migrate_chains(
+        pool,
+        &chain,
+        super::MigrationScope::Tenant,
+        dir,
+        None,
+        signals,
+        project,
+    )
+    .await?;
+    for m in &applied.system {
+        writeln!(w, "  applied {} (system)", m.name)?;
+    }
+    for m in &applied.project {
+        writeln!(w, "  applied {}", m.name)?;
+    }
+    if applied.system.is_empty() && applied.project.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
-    } else {
-        for m in &applied {
-            writeln!(w, "  applied {}", m.name)?;
-        }
     }
     // Framework bootstrap table that isn't model-derived: the audit log
     // is created via idempotent DDL (`CREATE TABLE IF NOT EXISTS`) so any
@@ -892,6 +911,36 @@ async fn migrate<W: Write>(
     // migrations are applied — the user never hand-creates it. Cheap and
     // safe to re-run on every `migrate`.
     crate::audit::ensure_table_pool(pool).await?;
+    // The admin login fails closed on a missing TOTP table (#1644), so a
+    // fresh install needs it before the first login, not at enrollment.
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    crate::admin::totp_store::ensure_table(pool).await?;
+
+    // #1464 — rows written by the pre-fix SQLite default are stored as
+    // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
+    // timestamp bound from Rust. Correcting the DDL fixes new rows and
+    // leaves every existing database silently wrong, so the stored
+    // values are converted here.
+    //
+    // Unconditional rather than behind a repair flag, for the reason
+    // the bug itself demonstrates: an operator does not know to run a
+    // verb they have not heard of, and silence reads exactly like "you
+    // are fine". Runs after the migrations above because it needs the
+    // tables to exist, and it is idempotent — the mask stops matching
+    // once a value is converted — so a second `migrate` updates nothing.
+    #[cfg(feature = "sqlite")]
+    {
+        let fixed = super::sqlite_datetime::normalise_sqlite_datetimes(pool).await?;
+        if !fixed.is_clean() {
+            writeln!(
+                w,
+                "  normalised {} SQLite datetime value(s) in {} — these were written by \
+                 the pre-0.57.11 default and did not compare against a bound timestamp (#1464)",
+                fixed.rows,
+                fixed.columns.join(", "),
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -974,13 +1023,7 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     stamp_replaces(dir, &before, &removed, w)
 }
 
-/// Apply the framework's generated `system/migrations/` chain to a
-/// single-database (non-tenancy) project, returning how many were applied.
-///
-/// Tenancy projects get this per tenant via
-/// `tenancy::migrate::apply_system_migrations`; this is the single-DB
-/// counterpart, so both shapes materialize the framework's own tables the
-/// same way instead of a non-tenancy project silently ending up with none.
+/// The system chain a single-database project applies.
 ///
 /// Only the **tenant**-scope chain runs. The two scopes exist because a
 /// tenancy deployment splits them across different databases, and they
@@ -992,101 +1035,16 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
 /// everything an app actually uses (users, roles, permissions, api keys,
 /// audit log, content types, media, …) is tenant-scoped.
 ///
-/// Generation is best-effort and a no-op once the files exist (they are
-/// normally written by `makemigrations` and committed). A missing
-/// `system/migrations/` directory simply means there is nothing to do.
-async fn apply_system_chain<W: Write>(
-    pool: &Pool,
-    dir: &Path,
-    w: &mut W,
-) -> Result<usize, MigrateError> {
-    // `system/migrations/` is a sibling of the project's `migrations/`.
-    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    };
-    for scope in [
-        crate::core::ModelScope::Registry,
-        crate::core::ModelScope::Tenant,
-    ] {
-        let _ = crate::migrate::make::make_migrations_system(project_root, scope, None);
-    }
-    let system_dir = project_root.join("system").join("migrations");
-    if !system_dir.is_dir() {
-        return Ok(0);
-    }
-
-    let all = file::list_dir(&system_dir)?;
-    let wanted: Vec<&Migration> = all
-        .iter()
-        .filter(|m| m.scope == super::MigrationScope::Tenant)
-        .collect();
-    if wanted.is_empty() {
-        return Ok(0);
-    }
-
-    // Tables the project's OWN pending migrations will create. A project
-    // scaffolded before the system chain existed carries the framework tables
-    // in its `0001_initial` (that is where `makemigrations` used to put them),
-    // so creating them here too would collide the moment that migration runs.
-    // The project's chain wins for anything it declares; the system chain
-    // fills in only what the project does not own (e.g. `media`, added to the
-    // framework later). Modern projects declare none of them, so the system
-    // chain creates the full set as usual.
-    let claimed: Vec<String> = {
-        let project_applied = runner::applied_set_pool(pool).await.unwrap_or_default();
-        file::list_dir(dir)
-            .unwrap_or_default()
-            .iter()
-            .filter(|m| !project_applied.contains(&m.name))
-            .flat_map(|m| {
-                m.forward.iter().filter_map(|op| match op {
-                    Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
-                    _ => None,
-                })
-            })
-            .collect()
-    };
-
-    // Apply from a scratch directory holding just the tenant-scope files (with
-    // project-claimed tables filtered out), so the runner's ledger bookkeeping
-    // stays a plain whole-directory operation.
-    let scratch: Option<std::path::PathBuf> = if wanted.len() == all.len() && claimed.is_empty() {
-        None
-    } else {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "rustango_system_scoped_{}_{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&p)?;
-        for mig in &wanted {
-            let effective = if claimed.is_empty() {
-                (*mig).clone()
-            } else {
-                runner::without_tables(mig, &claimed)
-            };
-            file::write(&p.join(format!("{}.json", effective.name)), &effective)?;
-        }
-        Some(p)
-    };
-    let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
-
-    let applied =
-        runner::migrate_pool_with_ledger_fake_initial(pool, &run_dir, runner::SYSTEM_LEDGER_TABLE)
-            .await;
-    if let Some(p) = &scratch {
-        let _ = std::fs::remove_dir_all(p);
-    }
-    let applied = applied?;
-    for m in &applied {
-        writeln!(w, "  applied {} (system)", m.name)?;
-    }
-    Ok(applied.len())
+/// Generation is a no-op once the files exist (normally written by
+/// `makemigrations` and committed); a generation error fails `migrate` (#2014).
+fn system_chain(dir: &Path) -> Result<super::make::SystemChain, MigrateError> {
+    super::make::SystemChain::for_migrations_dir(
+        dir,
+        &[
+            crate::core::ModelScope::Registry,
+            crate::core::ModelScope::Tenant,
+        ],
+    )
 }
 
 /// Record, on each freshly-generated migration, the names it collapsed.
@@ -1151,9 +1109,8 @@ async fn downgrade<W: Write>(
     Ok(())
 }
 
-/// Django-shape `sqlmigrate <name>` — print the SQL that would run
-/// when the named migration is applied, without touching the database.
-/// Issue #345.
+/// `sqlmigrate <name>` — print the SQL that would run when the named
+/// migration is applied, without touching the database.
 ///
 /// Output format mirrors `migrate --dry-run` per-migration: a comment
 /// header (`-- <name> (atomic|non-atomic)`) followed by every emitted
@@ -1451,11 +1408,14 @@ pub fn append_data_op(
     reverse_sql: Option<&str>,
 ) -> Result<(), MigrateError> {
     let path = file_path(dir, migration_name);
-    let mut mig = file::load(&path).map_err(|_| {
-        MigrateError::Validation(format!(
-            "migration `{migration_name}` not found at {}",
-            path.display()
-        ))
+    let mut mig = file::load(&path).map_err(|e| match e {
+        MigrateError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            MigrateError::Validation(format!(
+                "migration `{migration_name}` not found at {}",
+                path.display()
+            ))
+        }
+        other => other,
     })?;
     mig.forward.push(Operation::Data(DataOp {
         sql: sql.to_owned(),
@@ -1549,7 +1509,7 @@ fn describe_op(op: &Operation) -> String {
     }
 }
 
-/// `startapp <name> [--with-manage-bin]` — scaffold a Django-shape app
+/// `startapp <name> [--with-manage-bin]` — scaffold an app
 /// module under `src/<name>/` (`models.rs` + `views.rs` + `urls.rs` +
 /// `mod.rs`). Idempotent — files that already exist are reported as
 /// skipped. With `--with-manage-bin`, also writes `src/bin/manage.rs`
@@ -1636,7 +1596,7 @@ fn write_startapp_report<W: Write>(
 
 fn usage() -> String {
     "startapp <name> [--with-manage-bin]\n  \
-     Scaffold a Django-shape app module under src/<name>/ (mod.rs +\n  \
+     Scaffold an app module under src/<name>/ (mod.rs +\n  \
      models.rs + views.rs + urls.rs). Idempotent: existing files\n  \
      are left untouched. <name> must be a valid Rust identifier.\n\n  \
      --with-manage-bin\n  \
@@ -1695,6 +1655,42 @@ async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError>
     writeln!(w, "{}", if ok { "ok" } else { "FAILED" })?;
 
     Ok(())
+}
+
+/// Warn when the database's default collation ignores case (#1742).
+async fn collation_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    let Some(sql) = pool.dialect().default_collation_sql() else {
+        return;
+    };
+    match crate::sql::raw_query_pool::<(String,)>(sql, Vec::new(), pool).await {
+        Ok(rows) => {
+            if let Some(w) = rows.first().and_then(|(c,)| collation_warning(c)) {
+                audit.warnings.push(w);
+            }
+        }
+        Err(e) => audit
+            .warnings
+            .push(format!("could not read the database collation: {e}")),
+    }
+}
+
+fn collation_warning(collation: &str) -> Option<String> {
+    const FIX: &str = "create the database with `COLLATE utf8mb4_0900_as_cs` \
+                       (see the MySQL section of docs/getting-started.md)";
+    if collation.ends_with("_ci") {
+        Some(format!(
+            "database default collation `{collation}` ignores case: `=` and `unique` on \
+             text columns differ from PostgreSQL/SQLite — {FIX}"
+        ))
+    } else if collation.ends_with("_bin") {
+        // MySQL flags `_bin` columns BINARY, and sqlx then refuses `String`.
+        Some(format!(
+            "database default collation `{collation}` makes text columns unreadable as \
+             `String` — {FIX}"
+        ))
+    } else {
+        None
+    }
 }
 
 /// `manage check [--deploy]` — run system audits.
@@ -1756,7 +1752,10 @@ async fn check_cmd<W: Write>(
         // Gated by the `config` feature; no-op without it.
         #[cfg(feature = "config")]
         run_settings_audit(&mut audit);
-        // Django-parity `Meta.required_db_vendor` + `required_db_features`
+        #[cfg(feature = "cache")]
+        login_store_audit(crate::account_lockout::shared(), &mut audit);
+        collation_audit(pool, &mut audit).await;
+        // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
         // compared against the active pool's dialect. Mismatches surface
@@ -1934,7 +1933,78 @@ fn parse_name_and_model_as(
         }
         _ => {}
     }
+    // The file becomes `pub mod <snake>;`: `pub mod type;` does not parse (#1913).
+    let module = pascal_to_snake(&name);
+    if name == "Self" || is_reserved_module_name(&module) {
+        return Err(MigrateError::Validation(format!(
+            "`{name}` would make the module `{module}`, which is a Rust keyword or \
+             shadows a built-in crate — pick another name"
+        )));
+    }
     Ok((name, model, crate_root.unwrap_or_else(|| "rustango".into())))
+}
+
+/// Keywords (2015–2024, strict and reserved) plus the crate names a module
+/// may not shadow. `cargo-rustango` keeps its own copy; it links no rustango.
+fn is_reserved_module_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "abstract",
+        "alloc",
+        "as",
+        "async",
+        "await",
+        "become",
+        "box",
+        "break",
+        "const",
+        "continue",
+        "core",
+        "crate",
+        "do",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "final",
+        "fn",
+        "for",
+        "gen",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "macro",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "override",
+        "priv",
+        "proc_macro",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "static",
+        "std",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "unsafe",
+        "unsized",
+        "use",
+        "virtual",
+        "where",
+        "while",
+        "yield",
+    ];
+    RESERVED.contains(&name)
 }
 
 fn is_valid_type_name(name: &str) -> bool {
@@ -1985,11 +2055,18 @@ fn write_generated<W: Write>(
     }
     std::fs::write(&path, contents)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(
-        w,
-        "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)",
-        file_name.trim_end_matches(".rs")
-    )?;
+    // Lead with whichever entry the project actually has. A scaffolded
+    // project keeps its modules in the library so that binaries under
+    // `src/bin/` can reach them — `mod` there would hide it from them.
+    let module = file_name.trim_end_matches(".rs");
+    if std::path::Path::new("src/lib.rs").exists() {
+        writeln!(w, "  add `pub mod {module};` to src/lib.rs")?;
+    } else {
+        writeln!(
+            w,
+            "  add `mod {module};` to src/main.rs (or `pub mod ...;` to src/lib.rs)"
+        )?;
+    }
     Ok(())
 }
 
@@ -2006,8 +2083,8 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
     //      `rustango` dep → tenant template (auto-detected)
     //   4. Otherwise → pool template
     //
-    // The auto-detect path keeps Django-shape "you don't need a flag
-    // for the obvious thing" ergonomics: tenancy projects get
+    // The auto-detect path means you do not need a flag for the
+    // obvious thing: tenancy projects get
     // `tenant_router` without the user having to remember `--tenant`.
     let mut explicit_tenant = false;
     let mut explicit_no_tenant = false;
@@ -2053,6 +2130,8 @@ fn viewset_template_pool(name: &str, model: &str, snake: &str, crate_root: &str)
 
 use {crate_root}::ViewSet;
 
+use crate::models::{model};
+
 #[derive(ViewSet)]
 #[viewset(
     model        = {model},
@@ -2060,6 +2139,9 @@ use {crate_root}::ViewSet;
     filter_fields = "",
     search_fields = "",
     page_size    = 20,
+    // Writes need a guard: add `permissions(create = "...", ...)` behind
+    // an auth layer, then drop `read_only`.
+    read_only,
 )]
 pub struct {name};
 
@@ -2078,8 +2160,7 @@ pub struct {name};
 ///
 /// Since v0.30, `tenant_router` carries the full static-router builder
 /// chain (filter / search / ordering / pagination / permissions) so
-/// the scaffold demonstrates each knob — same shape Django's class-
-/// based admin generators emit, just with `// uncomment to enable`
+/// the scaffold demonstrates each knob, with `// uncomment to enable`
 /// markers next to each one.
 fn viewset_template_tenant(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
     format!(
@@ -2107,14 +2188,14 @@ pub fn router() -> Router<()> {{
         // .ordering(&[("created_at", true)])         // default ORDER BY
         // .ordering_fields(&["name", "created_at"])  // ?ordering=-name allowlist
         // .page_size(20)
-        // .permissions_for_model::<{model}>()        // CRUD codenames
+        .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
 }}
 
 // Mount in your urls.rs:
 //
-//   .merge(crate::viewsets::{snake}::router())
+//   .merge(crate::{snake}::router())
 "#
     )
 }
@@ -2175,6 +2256,49 @@ fn project_uses_tenancy() -> bool {
     has_inline || has_table_block
 }
 
+/// The project's own crate name, as a Rust path segment.
+///
+/// A file under `src/bin/` is its own crate: `crate::jobs::X` written
+/// there names the *binary*, not the project, so a worker reaching into
+/// the app must spell it `my_app::jobs::X`. Falls back to `your_app`
+/// when there is no readable Cargo.toml — an obvious placeholder beats
+/// a plausible-looking wrong path.
+fn project_crate_name() -> String {
+    std::fs::read_to_string("Cargo.toml")
+        .ok()
+        .as_deref()
+        .and_then(package_name_from_cargo_toml)
+        .unwrap_or_else(|| "your_app".to_string())
+}
+
+/// Pure half of [`project_crate_name`]: the `name` key of `[package]`,
+/// hyphens folded to underscores the way cargo derives a crate name.
+fn package_name_from_cargo_toml(src: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // `name = "my-app"`, tolerating whitespace around the `=`.
+        if let Some(value) = trimmed
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            let name = value.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.replace('-', "_"));
+            }
+        }
+    }
+    None
+}
+
 /// `manage make:api_routes <app> [--tenant]` — emit
 /// `src/<app>/api_routes.rs`, the per-app composer that merges
 /// every viewset's router into a single `Router<()>` (#82).
@@ -2227,7 +2351,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             writeln!(w, "  extractor).")?;
             writeln!(
                 w,
-                "  --crate <name> overrides the emitted `use …::sql::sqlx::PgPool;`"
+                "  --crate <name> overrides the emitted `use …::sql::Pool;`"
             )?;
             writeln!(w, "  crate root (default: `rustango`).")?;
             return Ok(());
@@ -2336,16 +2460,21 @@ fn api_routes_template_pool(app: &str, crate_root: &str) -> String {
 //!
 //! API routing for the `{app}` app. Composes per-model viewsets
 //! into a single `Router<()>`. Each viewset captures the supplied
-//! `PgPool` at mount time.
+//! pool at mount time.
+//!
+//! The pool is `sql::Pool`, not a driver-typed one: it dispatches on
+//! the `DATABASE_URL` scheme, so this file compiles and runs on all
+//! three backends. A `PgPool` here would pin the whole app to
+//! Postgres — `ViewSet::router_pool` takes exactly this type.
 //!
 //! Adding a resource:
 //!   1. Run `manage make:viewset <Name> --model <Model>`.
 //!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
-use {crate_root}::sql::sqlx::PgPool;
+use {crate_root}::sql::Pool;
 
-pub fn api(pool: PgPool) -> Router<()> {{
+pub fn api(pool: Pool) -> Router<()> {{
     let _pool = pool;
     Router::new()
         // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
@@ -2358,22 +2487,43 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
-    let body = format!(
+    write_generated(
+        w,
+        &format!("{snake}.rs"),
+        serializer_template(&name, &model, &crate_root),
+    )
+}
+
+fn serializer_template(name: &str, model: &str, crate_root: &str) -> String {
+    format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
+use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
+
+use crate::models::{model};
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
 pub struct {name} {{
-    pub id: i64,
+    // A serializer field must match its model field's type **exactly**.
+    // The scaffolders emit `pub id: Auto<i64>` for a primary key, so
+    // `pub id: i64` here does not compile — it fails inside the derive
+    // with `expected &i64, found &Auto<i64>`, which does not obviously
+    // point back to this line.
+    //
+    // `read_only` keeps it out of the writable set while still
+    // returning it, which is what you want: drop the field entirely and
+    // the API answers a create with no identifier, so the client cannot
+    // address what it just made.
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     // pub title: String,
-    // #[serializer(read_only)]
-    // pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serializer(source = "body")]   // publish under a different name
+    // pub content: String,
 }}
 "#
-    );
-    write_generated(w, &format!("{snake}.rs"), body)
+    )
 }
 
 fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -2396,39 +2546,237 @@ pub struct {name} {{
     write_generated(w, &format!("{snake}.rs"), body)
 }
 
+/// Scaffold a real [`crate::jobs::Job`] (#1455).
+///
+/// This verb used to emit a struct holding a `PgPool` with an inherent
+/// `run(self: Arc<Self>)` and a comment wiring it to
+/// `scheduler::every(..)` — a *scheduler task*, which is a real thing
+/// the framework has, but not the one the verb is named after. Nothing
+/// it produced could be `dispatch`ed, `register`ed, retried, backed off
+/// or dead-lettered, and the hardcoded `PgPool` meant it did not compile
+/// in a `--features sqlite` project at all.
+///
+/// The scheduler shape now lives under `make:scheduled`, which is what
+/// it always was.
 fn make_job_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:job {name}`.
 //!
-//! Background job — run async work outside the request lifecycle.
-//! Pair with `{crate_root}::scheduler::Scheduler` (cron-shape) or your queue layer.
+//! A background job: enqueued from a handler, executed later by a
+//! worker. For work that runs on a timer instead, see
+//! `manage make:scheduled`.
+
+use {crate_root}::jobs::{{Job, JobError}};
+use serde::{{Deserialize, Serialize}};
+
+/// The payload. `run` receives **only this** — no pool, no tenant, no
+/// request context: workers are spawned tasks and inherit no
+/// task-local state. Carry everything the job needs in these fields.
+#[derive(Serialize, Deserialize)]
+pub struct {name} {{
+    pub id: i64,
+}}
+
+#[async_trait::async_trait]        // add `async-trait` to your Cargo.toml
+impl Job for {name} {{
+    /// Globally unique: this is the routing key a worker matches a
+    /// queued row against. Two job types must not share one.
+    const NAME: &'static str = "{snake}";
+
+    /// A ceiling on **total attempts**, not on retries — 5 is one run
+    /// plus four retries. Backoff between them is 1s, 2s, 4s, 8s.
+    const MAX_ATTEMPTS: u32 = 5;
+
+    async fn run(&self) -> Result<(), JobError> {{
+        // Err(JobError::Retryable(..)) to back off and try again;
+        // Err(JobError::Fatal(..)) to dead-letter immediately.
+        let _ = self.id;
+        Ok(())
+    }}
+}}
+
+// Wire up wherever you build the queue — the web process, a worker
+// binary from `make:worker`, or both:
+//
+//   queue.register::<{name}>().await;   // BEFORE start(); every
+//                                       // process that calls start()
+//                                       // must register every type it
+//                                       // might pick up, or the row is
+//                                       // locked and abandoned
+//   queue.start().await;
+//
+// and to enqueue one, from a handler:
+//
+//   queue.dispatch(&{name} {{ id: 42 }}).await?;
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a fixed-interval scheduler task (#1455).
+///
+/// This is the shape `make:job` used to emit, under the name it should
+/// always have had — and routed through `sql::Pool` rather than the
+/// hardcoded `PgPool`, which made the old template uncompilable in a
+/// non-Postgres project.
+fn make_scheduled_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:scheduled {name}`.
+//!
+//! A task that runs on a timer, not in response to a request. For work
+//! enqueued by a handler and executed by a worker, see
+//! `manage make:job`.
 
 use std::sync::Arc;
-use {crate_root}::sql::sqlx::PgPool;
+
+use {crate_root}::sql::Pool;
 
 pub struct {name} {{
-    pub pool: PgPool,
+    pub pool: Pool,
 }}
 
 impl {name} {{
     pub async fn run(self: Arc<Self>) {{
-        // TODO: implement
-        let _ = self.pool.acquire().await;
+        // The scheduler isolates panics per task, but a task that
+        // returns early on error simply skips that tick — log, do not
+        // swallow silently.
+        let _ = &self.pool;
     }}
 }}
 
 // Wire up in main.rs:
 //
-//   let job = Arc::new({name} {{ pool: pool.clone() }});
-//   scheduler.every("{snake}", Duration::from_secs(60), move || {{
-//       let job = job.clone();
-//       async move {{ job.run().await }}
+//   let scheduler = {crate_root}::scheduler::Scheduler::new();
+//   let task = Arc::new({name} {{ pool: pool.clone() }});
+//   scheduler.every("{snake}", std::time::Duration::from_secs(60), move || {{
+//       let task = Arc::clone(&task);
+//       async move {{ task.run().await }}
 //   }});
+//   let handle = scheduler.start();
+//
+// The first run happens after one full interval, not immediately.
 "#
     );
     write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a standalone worker binary.
+///
+/// The shape is three lines long and easy to get wrong in a way that
+/// only shows up in production: a worker that awaits
+/// `tokio::signal::ctrl_c()` handles SIGINT but **not** SIGTERM, which
+/// is what `docker stop`, Kubernetes and systemd actually send — so the
+/// drain never runs, the container is `SIGKILL`ed after its grace period,
+/// and in-flight jobs are lost with nothing logged. `shutdown_signal()`
+/// takes both (#1409). Encoding that once is the whole point of this
+/// verb.
+fn make_worker_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    // `src/bin/*.rs` is its own crate, so job types must be named
+    // through the project's library — `crate::` here would resolve to
+    // the worker binary itself and never compile.
+    let app_crate = project_crate_name();
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:worker {name}`.
+//!
+//! A standalone worker process: it drains the job queue and serves no
+//! HTTP. Run it alongside the web process, or as its own container.
+//!
+//! Put this at `src/bin/{snake}.rs` and run it with `cargo run --bin {snake}`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use {crate_root}::jobs::{{DatabaseJobQueue, JobQueue}};
+use {crate_root}::sql::Pool;
+
+#[{crate_root}::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    {crate_root}::logging::setup();
+    // `std::env::var(..)?` would surface as the bare word `NotPresent`,
+    // which tells an operator nothing about which variable or why.
+    let url = std::env::var("DATABASE_URL").map_err(|_| {{
+        "missing env var 'DATABASE_URL'. Set it in your shell, or copy \
+         '.env.example' to '.env'."
+    }})?;
+    let pool = Pool::connect(&url).await?;
+
+    // The queue is tri-dialect despite the `Database` name — the table
+    // DDL and the row-pickup strategy are chosen from the pool's dialect.
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 4));
+
+    // Register EVERY job type this queue might see, not just the ones
+    // this process dispatches. A worker that picks up a row whose name
+    // is unregistered here logs and returns *without unlocking it* — the
+    // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
+    // it does not show up in `pending_count()`.
+    //
+    // Note the crate name: this file is its own binary crate, so `crate::`
+    // would mean *this* worker. Job types live in the library, and
+    // `manage make:job WelcomeEmail` writes `src/welcome_email.rs`.
+    //
+    //   queue.register::<{app_crate}::welcome_email::WelcomeEmail>().await;
+
+    queue.start().await;
+    tracing::info!("{snake}: draining jobs");
+
+    // SIGINT *and* SIGTERM. `tokio::signal::ctrl_c()` alone is
+    // SIGINT-only, so under `docker stop` the drain below never runs.
+    {crate_root}::shutdown::shutdown_signal().await;
+
+    tracing::info!("{snake}: signal received, draining in-flight jobs");
+    queue.shutdown().await;
+
+    // Rows whose worker died mid-job stay locked. Nothing sweeps them
+    // for you; run this on a scheduler, or at boot as done here.
+    let _ = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await;
+    Ok(())
+}}
+"#
+    );
+    write_generated_bin(w, &snake, body)
+}
+
+/// Like [`write_generated`], but for `src/bin/` — where cargo
+/// auto-discovers the target, so the "add `mod ...`" advice
+/// `write_generated` prints would be wrong.
+fn write_generated_bin<W: Write>(
+    w: &mut W,
+    bin_name: &str,
+    contents: String,
+) -> Result<(), MigrateError> {
+    let path = std::path::PathBuf::from("src")
+        .join("bin")
+        .join(format!("{bin_name}.rs"));
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, contents)?;
+    writeln!(w, "wrote {}", path.display())?;
+    // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
+    writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
+    // A second binary makes plain `cargo run` ambiguous, which breaks the
+    // `cargo run -- migrate` workflow every generated project's README
+    // documents. Cargo's error names the binaries but not the fix.
+    writeln!(
+        w,
+        "  NOTE: a second binary makes plain `cargo run` ambiguous. Add\n  \
+         `default-run = \"<your-app>\"` under [package] in Cargo.toml to keep\n  \
+         `cargo run -- migrate` working."
+    )?;
+    Ok(())
 }
 
 fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -2506,6 +2854,12 @@ use axum::Router;
 use axum::routing::get;
 
 fn app() -> Router {{
+    // This test touches no database. As soon as it does — the moment
+    // `app()` opens a pool from `DATABASE_URL` — uncomment this. A test
+    // in `tests/` is its own crate and never runs `main`, so nothing has
+    // loaded `.env` for it and the variable reads as unset (#1299).
+    // let _ = dotenvy::dotenv();
+
     Router::new().route("/hello", get(|| async {{ "hi" }}))
 }}
 
@@ -2602,7 +2956,13 @@ fn build_pg_dump_argv(parsed: &DbDumpArgs, database_url: &str) -> Vec<String> {
     argv
 }
 
-fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+/// Takes no writer, on purpose. Without `--out`, `pg_dump` inherits our
+/// stdout and *is* the output — so anything we print there lands inside
+/// the user's `.sql` file. `db:dump > backup.sql` is the documented
+/// form, and it used to produce a file whose first line was a status
+/// banner (#1404). The banner goes to stderr, and there is now no
+/// writer here to put it anywhere else.
+fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
     let parsed = parse_db_dump_args(args)?;
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         MigrateError::Validation(
@@ -2612,7 +2972,7 @@ fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError>
         )
     })?;
     let argv = build_pg_dump_argv(&parsed, &url);
-    writeln!(w, "running: pg_dump {}", redact(&argv).join(" "))?;
+    eprintln!("running: pg_dump {}", redact(&argv).join(" "));
     let status = std::process::Command::new("pg_dump")
         .args(&argv)
         .status()
@@ -2770,7 +3130,7 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
 /// `manage dumpdata [--model app.Name] [--indent N]` — fixture
 /// export. Iterates every model registered in `inventory` and
-/// emits a Django-shape JSON array:
+/// emits a JSON array:
 ///
 /// ```json
 /// [
@@ -2793,6 +3153,8 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 struct DumpdataArgs {
     /// Limit to these `app.Model` or `Model` names. Empty = every model.
     model_filters: Vec<String>,
+    /// `--exclude`: models left out, same name forms as `--model`.
+    excludes: Vec<String>,
     /// JSON indent. `0` = compact single-line; otherwise pretty (2-space).
     indent: usize,
     /// `true` when the user passed `--help`; cmd short-circuits to help.
@@ -2816,6 +3178,12 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
                     .next()
                     .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
                 out.model_filters.push(v.clone());
+            }
+            "--exclude" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--exclude expects a value".into()))?;
+                out.excludes.push(v.clone());
             }
             "--indent" => {
                 let v = iter
@@ -2845,11 +3213,14 @@ async fn dumpdata_cmd<W: Write>(
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
     if parsed.help {
-        writeln!(w, "dumpdata [--model app.Name] [--indent N]")?;
+        writeln!(
+            w,
+            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N]"
+        )?;
         writeln!(w)?;
         writeln!(
             w,
-            "  Export every registered model's rows as JSON in Django fixture"
+            "  Export every registered model's rows as JSON in fixture"
         )?;
         writeln!(
             w,
@@ -2871,6 +3242,10 @@ async fn dumpdata_cmd<W: Write>(
         writeln!(
             w,
             "  --indent <N>     JSON indent (default 2; 0 emits compact single-line)."
+        )?;
+        writeln!(
+            w,
+            "  --exclude <name> Leave a model out (repeatable; same forms as --model)."
         )?;
         return Ok(());
     }
@@ -2897,6 +3272,22 @@ async fn dumpdata_cmd<W: Write>(
         {
             continue;
         }
+        if parsed
+            .excludes
+            .iter()
+            .any(|f| f == &dotted_name || f == schema.name)
+        {
+            continue;
+        }
+
+        // These decode as `null`, so a reload would wipe them (#1911).
+        if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: `{dotted_name}.{}` is a {:?} column, which dumpdata cannot \
+                 export yet — leave it out with `--exclude {dotted_name}`",
+                f.name, f.ty
+            )));
+        }
 
         // Identify the PK column for fixture `pk` extraction.
         let pk_field = schema.primary_key();
@@ -2918,8 +3309,8 @@ async fn dumpdata_cmd<W: Write>(
 
         for mut row in rows {
             // Pop the PK column off `fields` into the outer fixture
-            // entry's `pk` slot — Django fixtures separate identity
-            // from payload.
+            // entry's `pk` slot: a fixture separates identity from
+            // payload.
             let pk_value = match pk_field {
                 Some(pk) => row
                     .as_object_mut()
@@ -2999,7 +3390,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 }
 
 /// `manage loaddata <fixture.json> [--fail-fast]` — companion to
-/// `dumpdata`. Reads a Django-shape fixture array and inserts each
+/// `dumpdata`. Reads a fixture array and inserts each
 /// row via [`crate::sql::insert_pool`]. Models are resolved by
 /// `inventory` lookup against the `"app.Model"` name in the fixture.
 ///
@@ -3038,6 +3429,10 @@ async fn loaddata_cmd<W: Write>(
             w,
             "  --fail-fast   Abort on the first error instead of skipping the row."
         )?;
+        writeln!(
+            w,
+            "  A failed or partial load is not rolled back: rows already inserted stay."
+        )?;
         return Ok(());
     }
 
@@ -3059,8 +3454,16 @@ async fn loaddata_cmd<W: Write>(
         schemas.insert(schema.name.to_owned(), schema);
     }
 
+    // Parents first: fixtures come in registration order, and a child
+    // inserted before its parent fails its FK (#1911).
+    let entries = in_fk_order(entries, &schemas);
+
     let mut loaded = 0_usize;
     let mut skipped = 0_usize;
+    let mut touched: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    // `--fail-fast` stops here, but the rows already in still need their
+    // sequences moved, so the error is raised after the reset.
+    let mut abort: Option<String> = None;
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3072,7 +3475,8 @@ async fn loaddata_cmd<W: Write>(
                     schemas.len() / 2, // dotted + bare keys
                 );
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3115,7 +3519,8 @@ async fn loaddata_cmd<W: Write>(
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
             if parsed.fail_fast {
-                return Err(MigrateError::Validation(msg));
+                abort = Some(msg);
+                break;
             }
             tracing::warn!("{msg}");
             skipped += 1;
@@ -3130,11 +3535,17 @@ async fn loaddata_cmd<W: Write>(
             on_conflict: None,
         };
         match crate::sql::insert_pool(pool, &query).await {
-            Ok(()) => loaded += 1,
+            Ok(()) => {
+                loaded += 1;
+                if !touched.iter().any(|t| t.table == schema.table) {
+                    touched.push(schema);
+                }
+            }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
                 if parsed.fail_fast {
-                    return Err(MigrateError::Validation(msg));
+                    abort = Some(msg);
+                    break;
                 }
                 tracing::warn!("{msg}");
                 skipped += 1;
@@ -3142,8 +3553,203 @@ async fn loaddata_cmd<W: Write>(
         }
     }
 
+    reset_sequences(pool, &touched).await?;
+    if let Some(msg) = abort {
+        return Err(MigrateError::Validation(msg));
+    }
+
     writeln!(w, "loaddata: {loaded} loaded, {skipped} skipped")?;
+    if skipped > 0 {
+        // A partial load is a failure; exit 0 read as a clean restore (#1911).
+        return Err(MigrateError::Validation(format!(
+            "loaddata: {skipped} row(s) skipped — see the warnings above"
+        )));
+    }
     Ok(())
+}
+
+/// `false` for the column types `select_rows_as_json` reads back as `null`.
+fn dumpable(ty: crate::core::FieldType) -> bool {
+    use crate::core::FieldType as T;
+    !matches!(
+        ty,
+        T::Array(_) | T::Range(_) | T::HStore | T::Vector(_) | T::Geometry(_)
+    )
+}
+
+/// Stable-sort fixture entries so each model's FK targets load before it,
+/// and a self-FK parent before its child. Best effort: rows in a cycle keep
+/// their fixture order.
+fn in_fk_order(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    use std::collections::HashMap;
+    fn depth(
+        table: &'static str,
+        by_table: &HashMap<&'static str, &'static crate::core::ModelSchema>,
+        memo: &mut HashMap<&'static str, usize>,
+        visiting: &mut Vec<&'static str>,
+    ) -> usize {
+        if let Some(d) = memo.get(table) {
+            return *d;
+        }
+        if visiting.contains(&table) {
+            return 0;
+        }
+        let Some(schema) = by_table.get(table) else {
+            return 0;
+        };
+        visiting.push(table);
+        let d = schema
+            .scalar_fields()
+            .filter_map(|f| match f.relation {
+                Some(
+                    crate::core::Relation::Fk { to, .. } | crate::core::Relation::O2O { to, .. },
+                ) if to != table => Some(1 + depth(to, by_table, memo, visiting)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        visiting.pop();
+        memo.insert(table, d);
+        d
+    }
+    let by_table: HashMap<&'static str, &'static crate::core::ModelSchema> =
+        schemas.values().map(|s| (s.table, *s)).collect();
+    let mut memo = HashMap::new();
+    let mut keyed: Vec<(usize, serde_json::Value)> = entries
+        .into_iter()
+        .map(|e| {
+            let rank = e
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m))
+                .map_or(0, |s| depth(s.table, &by_table, &mut memo, &mut Vec::new()));
+            (rank, e)
+        })
+        .collect();
+    keyed.sort_by_key(|(rank, _)| *rank);
+    let mut out = Vec::with_capacity(keyed.len());
+    let mut group: Vec<serde_json::Value> = Vec::new();
+    let mut current = None;
+    for (rank, e) in keyed {
+        if current != Some(rank) {
+            out.extend(self_parents_first(std::mem::take(&mut group), schemas));
+            current = Some(rank);
+        }
+        group.push(e);
+    }
+    out.extend(self_parents_first(group, schemas));
+    out
+}
+
+/// Within one FK depth: a row whose self-FK names a row not yet emitted
+/// waits for it (tree tables). Rows left in a cycle keep their order.
+fn self_parents_first(
+    entries: Vec<serde_json::Value>,
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> Vec<serde_json::Value> {
+    struct Pending {
+        entry: serde_json::Value,
+        key: Option<(&'static str, String)>,
+        parents: Vec<(&'static str, String)>,
+    }
+    let mut pending: Vec<Pending> = entries
+        .into_iter()
+        .map(|entry| {
+            let schema = entry
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| schemas.get(m));
+            let Some(schema) = schema else {
+                return Pending {
+                    entry,
+                    key: None,
+                    parents: Vec::new(),
+                };
+            };
+            let key = entry
+                .get("pk")
+                .filter(|v| !v.is_null())
+                .map(|pk| (schema.table, pk.to_string()));
+            let parents = schema
+                .scalar_fields()
+                .filter(|f| {
+                    matches!(
+                        f.relation,
+                        Some(crate::core::Relation::Fk { to, .. }
+                            | crate::core::Relation::O2O { to, .. }) if to == schema.table
+                    )
+                })
+                .filter_map(|f| entry.get("fields")?.get(f.name))
+                .filter(|v| !v.is_null())
+                .map(|v| (schema.table, v.to_string()))
+                .filter(|p| Some(p) != key.as_ref())
+                .collect();
+            Pending {
+                entry,
+                key,
+                parents,
+            }
+        })
+        .collect();
+    let mut out = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let waiting: std::collections::HashSet<(&'static str, String)> =
+            pending.iter().filter_map(|p| p.key.clone()).collect();
+        let (ready, rest): (Vec<Pending>, Vec<Pending>) = pending
+            .into_iter()
+            .partition(|p| p.parents.iter().all(|k| !waiting.contains(k)));
+        if ready.is_empty() {
+            out.extend(rest.into_iter().map(|p| p.entry));
+            break;
+        }
+        out.extend(ready.into_iter().map(|p| p.entry));
+        pending = rest;
+    }
+    out
+}
+
+/// Move each loaded model's serial counter past the ids the fixture wrote,
+/// or the next plain insert collides on Postgres (#1911).
+async fn reset_sequences(
+    pool: &Pool,
+    schemas: &[&'static crate::core::ModelSchema],
+) -> Result<(), MigrateError> {
+    for schema in schemas {
+        let Some((sql, binds)) = reset_sequence_stmt(pool.dialect(), schema) else {
+            continue;
+        };
+        crate::sql::raw_execute_pool(pool, &sql, binds)
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "loaddata: resetting `{}`'s id sequence failed: {e}",
+                    schema.table
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+/// The serial-counter reset for `schema`, with its binds; `None` when
+/// the PK is not an auto integer or the dialect needs none.
+pub(crate) fn reset_sequence_stmt(
+    dialect: &dyn crate::sql::Dialect,
+    schema: &crate::core::ModelSchema,
+) -> Option<(String, Vec<crate::core::SqlValue>)> {
+    use crate::core::FieldType as T;
+    let pk = schema.primary_key()?;
+    if !pk.auto || !matches!(pk.ty, T::I16 | T::I32 | T::I64) {
+        return None;
+    }
+    let sql = dialect.reset_sequence_sql(schema.table, pk.column)?;
+    let binds = vec![
+        crate::core::SqlValue::String(dialect.quote_ident(schema.table)),
+        crate::core::SqlValue::String(pk.column.to_owned()),
+    ];
+    Some((sql, binds))
 }
 
 /// Map a JSON value onto an [`crate::core::SqlValue`] using the target
@@ -3153,12 +3759,12 @@ async fn loaddata_cmd<W: Write>(
 /// - Decimal: `rust_decimal::Decimal::from_str`
 /// - Date: `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`
 /// - DateTime: RFC 3339 / `%Y-%m-%dT%H:%M:%S`
-/// - Time: `%H:%M:%S` then `%H:%M`
+/// - Time: `%H:%M:%S%.f` then `%H:%M`
 /// - Uuid: `Uuid::parse_str`
 /// - Binary: lowercase hex
 ///
 /// Object / Array JSON nodes always land as `SqlValue::Json`.
-fn json_to_sql_value(
+pub(crate) fn json_to_sql_value(
     v: &serde_json::Value,
     field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, String> {
@@ -3177,14 +3783,12 @@ fn json_to_sql_value(
             .and_then(|n| i32::try_from(n).ok())
             .map(SqlValue::I32)
             .ok_or_else(|| format!("expected i32, got {v}")),
-        FieldType::I64 => v.as_i64().map(SqlValue::I64).ok_or_else(|| {
-            // Accept integer-shaped strings too (e.g. SQLite NUMERIC).
-            v.as_str()
-                .and_then(|s| s.parse::<i64>().ok())
-                .map(SqlValue::I64)
-                .map(|_| format!("expected i64, got {v}"))
-                .unwrap_or_else(|| format!("expected i64, got {v}"))
-        }),
+        // Integer-shaped strings too (e.g. SQLite NUMERIC).
+        FieldType::I64 => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .map(SqlValue::I64)
+            .ok_or_else(|| format!("expected i64, got {v}")),
         FieldType::F32 => v
             .as_f64()
             .map(|n| SqlValue::F32(n as f32))
@@ -3225,7 +3829,8 @@ fn json_to_sql_value(
             let s = v
                 .as_str()
                 .ok_or_else(|| format!("expected string for Time, got {v}"))?;
-            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
+            // `%.f` too: dumpdata writes `12:34:56.789` (#1911).
+            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
                 .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
                 .map(SqlValue::Time)
                 .map_err(|e| format!("Time parse: {e}"))
@@ -3341,7 +3946,7 @@ fn json_to_sql_value(
 }
 
 /// `manage showurls [--format <plain|json>]` — print every named
-/// URL pattern registered via `register_url!`. Django parity verb.
+/// URL pattern registered via `register_url!`.
 ///
 /// Defaults to plain two-column output (name, pattern). `--format
 /// json` emits a JSON array of `{"name": "...", "pattern": "..."}`
@@ -3609,7 +4214,7 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
 }
 
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
-/// all rows from registered model tables. Django parity verb.
+/// all rows from registered model tables.
 /// Without `--yes`, prints what would happen and exits without
 /// touching the database (dry-run by default — a hand-typed
 /// `manage flush` doesn't accidentally nuke production).
@@ -3642,11 +4247,24 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         writeln!(w, "                     and exits without touching the DB.")?;
         writeln!(w, "  --app <label>      Limit to one app (repeatable).")?;
         writeln!(w, "  --model <name>     Limit to one model (repeatable).")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Postgres runs TRUNCATE … RESTART IDENTITY CASCADE: ids restart, and tables"
+        )?;
+        writeln!(
+            w,
+            "  that reference the targets are cleared too, even outside the filter."
+        )?;
+        writeln!(
+            w,
+            "  MySQL / SQLite delete the rows and keep their id counters."
+        )?;
         return Ok(());
     }
 
     // Collect target tables in inventory order.
-    let mut targets: Vec<&'static str> = Vec::new();
+    let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let app = entry.resolved_app_label().unwrap_or("");
@@ -3666,7 +4284,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         {
             continue;
         }
-        targets.push(schema.table);
+        targets.push(schema);
     }
     if targets.is_empty() {
         writeln!(w, "flush: no tables match the filter (nothing to do)")?;
@@ -3680,7 +4298,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             targets.len()
         )?;
         for t in &targets {
-            writeln!(w, "  - {t}")?;
+            writeln!(w, "  - {}", t.table)?;
         }
         return Ok(());
     }
@@ -3693,7 +4311,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
         let quoted: Vec<String> = targets
             .iter()
-            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
+            .map(|t| pool.dialect().quote_ident(t.table))
             .collect();
         let sql = format!(
             "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
@@ -3704,14 +4322,18 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
         }
     } else {
-        // MySQL / SQLite: per-table DELETE in registration order.
-        // FK constraints from referencing tables may error; caller
-        // can scope with --app / --model.
-        for table in &targets {
-            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
-            match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+        // MySQL / SQLite: per-table DELETE in registration order, through
+        // the dialect's writer — hand-quoted `"t"` is a syntax error on
+        // MySQL (#1912). FK constraints from referencing tables may error;
+        // caller can scope with --app / --model.
+        for schema in &targets {
+            let all = crate::core::DeleteQuery {
+                model: schema,
+                where_clause: crate::core::WhereExpr::And(Vec::new()),
+            };
+            match crate::sql::delete_pool(pool, &all).await {
                 Ok(_) => cleared += 1,
-                Err(e) => failures.push(((*table).to_owned(), e.to_string())),
+                Err(e) => failures.push((schema.table.to_owned(), e.to_string())),
             }
         }
     }
@@ -3784,8 +4406,7 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
 }
 
 // =====================================================================
-// `manage prune` — Eloquent `Prunable` / Django bulk-removal parity.
-// Issue #822.
+// `manage prune` — bulk removal of stale rows from `Prunable` models.
 // =====================================================================
 
 #[derive(Debug, Default, PartialEq)]
@@ -3915,9 +4536,8 @@ async fn prune_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
 }
 
 // =====================================================================
-// `manage clear-cache` / `clearsessions` — DatabaseCache GC.
-// Django parity for `manage clearsessions` (when the session backend
-// is the DB cache) + the broader `manage clearcache` flow.
+// `manage clear-cache` / `clearsessions` — DatabaseCache GC, which
+// also clears sessions when the session backend is the DB cache.
 // =====================================================================
 
 #[cfg(feature = "cache")]
@@ -3963,8 +4583,7 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
 /// table. Pairs with the implicit lazy GC on `get` / `exists` to
 /// reclaim space from keys nobody reads anymore.
 ///
-/// Django parity: `manage clearsessions` (when sessions are backed
-/// by the DB cache) + the broader `manage clearcache` flow.
+/// Also clears sessions when they are backed by the DB cache.
 ///
 /// Defaults the table to `rustango_cache`; pass `--table <name>` for
 /// non-default DatabaseCache tables (`rustango_sessions`, app-
@@ -3998,8 +4617,7 @@ async fn clear_cache_cmd<W: Write>(
 /// `manage createcachetable [--table <name>]` (alias
 /// `create-cache-table`) — idempotently create the
 /// [`crate::cache::DatabaseCache`] table via the dialect's
-/// `CREATE TABLE IF NOT EXISTS` DDL. Django parity for
-/// `manage createcachetable`. Safe to call at every boot.
+/// `CREATE TABLE IF NOT EXISTS` DDL. Safe to call at every boot.
 ///
 /// Defaults the table to `rustango_cache`. Pass `--table <name>` for
 /// non-default DatabaseCache tables (one per app-specific cache, or
@@ -4039,9 +4657,9 @@ async fn createcachetable_cmd<W: Write>(
 }
 
 /// `manage sendtestemail --to <addr>` — send a fixed test email
-/// through the mail backend configured in `[mail]` settings. Django
-/// parity verb for verifying SMTP credentials / mail wiring without
-/// digging into a REPL.
+/// through the mail backend configured in `[mail]` settings. Verifies
+/// SMTP credentials and mail wiring without writing a throwaway
+/// program.
 ///
 /// Requires the `config` feature so settings can be loaded. Without
 /// `--to`, errors with a usage hint. `--from` defaults to the
@@ -4111,7 +4729,8 @@ async fn sendtestemail_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), M
          Sent by `manage sendtestemail`."
         .to_owned();
 
-    let mailer = crate::email::from_settings(&settings.mail);
+    let mailer = crate::email::from_settings(&settings.mail)
+        .map_err(|e| MigrateError::Validation(format!("sendtestemail: {e}")))?;
     let backend = settings.mail.backend.as_deref().unwrap_or("console");
 
     let email = crate::email::Email::new()
@@ -4188,6 +4807,8 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
+    /// An admin was built without session auth (#1627).
+    pub ungated_admin: bool,
 }
 
 fn deploy_audit_env() -> DeployAuditEnv {
@@ -4197,6 +4818,10 @@ fn deploy_audit_env() -> DeployAuditEnv {
         database_url: std::env::var("DATABASE_URL").ok(),
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
+        #[cfg(feature = "admin")]
+        ungated_admin: crate::admin::ungated_admin_built(),
+        #[cfg(not(feature = "admin"))]
+        ungated_admin: false,
     }
 }
 
@@ -4222,9 +4847,17 @@ pub struct DeployAuditFindings {
 /// var (`SECRET_KEY` — never read by the framework). The
 /// framework reads `RUSTANGO_SESSION_SECRET` for HMAC-signing
 /// the operator-console + tenant-admin cookies AND the JWT
-/// payloads issued by `auth_routes::jwt_router` (#81). Same key
+/// payloads issued by `auth_routes::JwtAuth` (#81). Same key
 /// covers both surfaces.
 pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
+    if env.ungated_admin {
+        out.warnings.push(
+            "[admin] the admin router has no authentication — anyone can read and write \
+             every model. Call `admin::Builder::with_session_auth(secret)`, or gate the \
+             route yourself."
+                .into(),
+        );
+    }
     // RUSTANGO_ENV — production should be explicitly tagged.
     match env.rustango_env.as_deref() {
         Some("prod" | "production") => {
@@ -4257,13 +4890,6 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(s) if s.len() < 32 => {
-            out.errors.push(format!(
-                "RUSTANGO_SESSION_SECRET is only {} bytes — need ≥ 32 for HMAC key strength. \
-                 Regenerate with `openssl rand -base64 32`.",
-                s.len()
-            ));
-        }
         Some(s) if s.contains("change-me") || s.contains("placeholder") => {
             out.errors.push(
                 "RUSTANGO_SESSION_SECRET still contains the scaffolder placeholder \
@@ -4271,9 +4897,33 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(_) => {
-            out.info.push("RUSTANGO_SESSION_SECRET length OK".into());
-        }
+        // Decode it the way the runtime does, rather than measuring the
+        // encoded string (#1396). A 32-character base64 secret is 24
+        // bytes of key: the old `s.len() >= 32` reported "length OK" for
+        // a value the cookie layer then refused, so a green check meant
+        // nothing about whether the app would come up with sessions.
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
+        Some(s) => match crate::session::SessionSecret::from_b64(s) {
+            Ok(_) => out
+                .info
+                .push("RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key".into()),
+            Err(e) => out.errors.push(format!(
+                "{e}. This is the same check the runtime applies, so the app would \
+                 fall back to an ephemeral key and sign everyone out on restart."
+            )),
+        },
+        // `session` is gated on `admin` / `tenancy`, and so is the base64
+        // crate it decodes with. In a build with neither there is no
+        // cookie layer and no JWT router, so nothing signs with this
+        // value — reporting it unvalidated is the honest answer, and
+        // asserting a length here would be the encoded-string mistake
+        // #1396 removed.
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        Some(_) => out.info.push(
+            "RUSTANGO_SESSION_SECRET is set but not validated — this build has \
+             neither `admin` nor `tenancy`, so nothing in it signs cookies or JWTs."
+                .into(),
+        ),
     }
 
     // DATABASE_URL — required.
@@ -4320,6 +4970,24 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
         }
         Some(_) | None => {} // either explicit non-loopback or framework default (0.0.0.0)
     }
+}
+
+/// Login security state that each replica keeps to itself (#1534).
+#[cfg(feature = "cache")]
+pub(crate) fn login_store_audit(
+    lockout: &crate::account_lockout::Lockout,
+    out: &mut DeployAuditFindings,
+) {
+    if lockout.stores_nothing() {
+        out.warnings
+            .push(crate::account_lockout::NULL_STORE_WARNING.into());
+    } else if lockout.is_process_local() {
+        out.info
+            .push(crate::account_lockout::CHECK_DEPLOY_NOTE.into());
+    }
+    #[cfg(feature = "admin")]
+    out.info
+        .push(crate::login_throttle::PROCESS_LOCAL_NOTE.into());
 }
 
 /// `manage check --deploy` settings-side audit (#87 slice 4) —
@@ -4489,7 +5157,7 @@ pub fn settings_audit_check(
 
     // [routes] legacy_preset = true is a deliberate choice (#85) but
     // worth surfacing in audit output so operators rationalize the
-    // `/__admin` shape against the current Django-ish default.
+    // `/__admin` shape against the current default.
     if matches!(settings.routes.legacy_preset, Some(true)) {
         out.info.push(
             "[routes] legacy_preset = true — using the pre-v0.29 `__`-prefixed URLs \
@@ -4663,6 +5331,8 @@ mod gen_tests {
             "make:serializer",
             "make:form",
             "make:job",
+            "make:scheduled",
+            "make:worker",
             "make:notification",
             "make:middleware",
             "make:test",
@@ -4825,6 +5495,36 @@ mod gen_tests {
         assert!(r.is_err());
     }
 
+    /// `pub mod type;` / `pub mod std;` do not build (#1913).
+    #[test]
+    fn names_that_make_a_reserved_module_are_refused() {
+        for n in ["Type", "Match", "Std", "Core", "Crate", "Self", "Super"] {
+            assert!(parse_name_and_model(&[n.into()]).is_err(), "{n}");
+        }
+        for n in ["type", "self", "std"] {
+            assert!(
+                parse_name_and_model_as(&[n.into()], NameShape::Identifier).is_err(),
+                "{n}"
+            );
+        }
+        assert!(parse_name_and_model(&["Typed".into()]).is_ok());
+    }
+
+    /// The model must be in scope or the derive can't name it (#1913).
+    #[test]
+    fn pool_templates_import_their_model() {
+        let vs = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        let ser = serializer_template("PostSerializer", "Post", "rustango");
+        for body in [&vs, &ser] {
+            assert!(body.contains("use crate::models::Post;"), "{body}");
+        }
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            tenant.contains(".merge(crate::post_view_set::router())"),
+            "{tenant}"
+        );
+    }
+
     // -------- dumpdata --------
 
     #[test]
@@ -4941,6 +5641,7 @@ mod gen_tests {
             max: None,
             default: None,
             auto: false,
+            auto_now: false,
             unique: false,
             generated_as: None,
             help_text: None,
@@ -4970,6 +5671,23 @@ mod gen_tests {
         // Out of range → Err.
         let r = json_to_sql_value(&serde_json::json!(99999999999_i64), &f);
         assert!(r.is_err());
+    }
+
+    /// Both arms the I64 docs promise, and the fractional time dumpdata writes (#1911).
+    #[test]
+    fn json_to_sql_value_reads_what_dumpdata_writes() {
+        let f = field("x", crate::core::FieldType::I64);
+        let v = json_to_sql_value(&serde_json::json!("42"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::I64(42)), "{v:?}");
+        assert!(json_to_sql_value(&serde_json::json!("4x"), &f).is_err());
+
+        let t = field("t", crate::core::FieldType::Time);
+        let v = json_to_sql_value(&serde_json::json!("12:34:56.789"), &t).unwrap();
+        let want = chrono::NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap();
+        assert!(
+            matches!(v, crate::core::SqlValue::Time(x) if x == want),
+            "{v:?}"
+        );
     }
 
     #[test]
@@ -5005,7 +5723,7 @@ mod gen_tests {
         // From string.
         let v = json_to_sql_value(&serde_json::json!("123.45"), &f).unwrap();
         assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
-        // From number (Django dumpdata emits as string but be forgiving).
+        // From number (dumpdata emits a string, but be forgiving).
         let v = json_to_sql_value(&serde_json::json!(42), &f).unwrap();
         assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
     }
@@ -5224,7 +5942,7 @@ mod gen_tests {
     // backend; the `not(feature = "config")` stub short-circuits with
     // a friendly error and never reaches the parser.
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_defaults_empty() {
         let p = parse_sendtestemail_args(&[]).unwrap();
@@ -5234,7 +5952,7 @@ mod gen_tests {
         assert!(!p.help);
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_collects_to_from_subject() {
         let args: Vec<String> = vec![
@@ -5251,49 +5969,49 @@ mod gen_tests {
         assert_eq!(p.subject.as_deref(), Some("ping"));
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_help_short_circuits() {
         let p = parse_sendtestemail_args(&["--help".into()]).unwrap();
         assert!(p.help);
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_rejects_unknown_flag() {
         let r = parse_sendtestemail_args(&["--bogus".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_rejects_positional() {
         let r = parse_sendtestemail_args(&["unexpected".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_to_requires_value() {
         let r = parse_sendtestemail_args(&["--to".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_from_requires_value() {
         let r = parse_sendtestemail_args(&["--from".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[test]
     fn parse_sendtestemail_args_subject_requires_value() {
         let r = parse_sendtestemail_args(&["--subject".into()]);
         assert!(r.is_err());
     }
 
-    #[cfg(feature = "config")]
+    #[cfg(all(feature = "config", feature = "email"))]
     #[tokio::test]
     async fn sendtestemail_help_short_circuits_without_settings_lookup() {
         let mut buf: Vec<u8> = Vec::new();
@@ -5355,6 +6073,20 @@ mod gen_tests {
         );
     }
 
+    /// A scaffolded ViewSet is not an anonymous CRUD API (#1857).
+    #[test]
+    fn viewset_templates_guard_writes() {
+        let live =
+            |body: &str, needle: &str| body.lines().any(|l| l.trim_start().starts_with(needle));
+        let tenant = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(
+            live(&tenant, ".permissions_for_model::<Post>()"),
+            "{tenant}"
+        );
+        let pool = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
+        assert!(live(&pool, "read_only,"), "{pool}");
+    }
+
     #[test]
     fn viewset_template_pool_threads_renamed_crate_root() {
         // Phase 2b of #145 — passing `"rustango_orm"` produces source
@@ -5389,7 +6121,7 @@ mod gen_tests {
     #[test]
     fn api_routes_template_pool_threads_renamed_crate_root() {
         let body = api_routes_template_pool("blog", "rustango_orm");
-        assert!(body.contains("use rustango_orm::sql::sqlx::PgPool;"));
+        assert!(body.contains("use rustango_orm::sql::Pool;"));
         assert!(!body.contains("use rustango::"));
     }
 
@@ -5453,6 +6185,42 @@ mod gen_tests {
     fn cwd_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// `make:worker` puts this name into the generated binary, so a
+    /// wrong answer is a path that cannot compile.
+    #[test]
+    fn package_name_reads_the_package_table() {
+        let manifest = r#"[package]
+name = "my-shop"
+version = "0.1.0"
+
+[dependencies]
+name = "not-this-one"
+rustango = { version = "0.59", features = ["batteries"] }
+"#;
+        assert_eq!(
+            package_name_from_cargo_toml(manifest).as_deref(),
+            // Hyphens become underscores: cargo's crate name, not the
+            // package name, is what a `use` path needs.
+            Some("my_shop"),
+            "must read [package].name and fold hyphens, ignoring `name` keys \
+             in any other table"
+        );
+    }
+
+    #[test]
+    fn package_name_tolerates_spacing_and_missing_tables() {
+        assert_eq!(
+            package_name_from_cargo_toml("[package]\n  name   =   \"probe\"\n").as_deref(),
+            Some("probe")
+        );
+        assert_eq!(
+            package_name_from_cargo_toml("[dependencies]\nname = \"x\"\n"),
+            None,
+            "no [package] table → no name to report"
+        );
+        assert_eq!(package_name_from_cargo_toml(""), None);
     }
 
     /// `project_uses_tenancy` reads Cargo.toml from CWD and looks for
@@ -5590,25 +6358,37 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// Default template threads `PgPool` so per-model derived
-    /// viewsets have something to capture at mount time.
+    /// Default template threads the dialect-agnostic `sql::Pool` so
+    /// per-model viewsets have something to capture at mount time.
+    ///
+    /// It threaded `PgPool` until 0.57.5, which pinned every generated
+    /// project to Postgres at the one place three backends are meant to
+    /// be interchangeable — `ViewSet::router_pool` takes `sql::Pool`.
     #[test]
-    fn api_routes_template_pool_threads_pgpool() {
+    fn api_routes_template_pool_threads_a_dialect_agnostic_pool() {
         let body = api_routes_template_pool("blog", "rustango");
         assert!(
-            body.contains("pub fn api(pool: PgPool) -> Router<()>"),
+            body.contains("pub fn api(pool: Pool) -> Router<()>"),
             "expected pool-arg api fn, got: {body}"
         );
-        // Phase 2b of #145 — default `--crate` argument keeps emit
-        // bit-identical to the pre-#145 shape so existing call sites
-        // (the api / fullstack scaffolder templates) are unaffected.
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "default crate root must emit `use rustango::sql::sqlx::PgPool;`, got: {body}"
+            body.contains("use rustango::sql::Pool;"),
+            "default crate root must emit `use rustango::sql::Pool;`, got: {body}"
         );
+        // Comments stripped first: the template's own header explains
+        // why a `PgPool` would be wrong here, and a raw substring search
+        // matches that prose rather than the code it warns about.
+        let code: String = body
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "expected PgPool import, got: {body}"
+            !code.contains("PgPool"),
+            "a generated project must not be pinned to Postgres here, got: {code}"
         );
     }
 
@@ -5628,6 +6408,125 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
 
     // -------- run_deploy_audit (`manage check --deploy`) --------
 
+    #[cfg(feature = "cache")]
+    #[test]
+    fn deploy_audit_flags_a_process_local_lockout_only() {
+        use crate::account_lockout::Lockout;
+        use std::sync::Arc;
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(
+            &Lockout::new(Arc::new(crate::cache::InMemoryCache::new())),
+            &mut out,
+        );
+        // Advice, not a warning: the app may install a shared lockout at startup.
+        assert!(
+            out.info.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+        assert!(
+            !out.warnings.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+        let scoped = crate::cache::ScopedCache::for_tenant(
+            Arc::new(crate::cache::InMemoryCache::new()),
+            "acme",
+        );
+        assert!(Lockout::new(Arc::new(scoped)).is_process_local());
+        // A store shared across replicas: nothing to say.
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(SharedStandIn)), &mut out);
+        assert!(
+            !out.info.iter().any(|w| w.contains("account lockout")),
+            "{out:?}"
+        );
+        // NullCache never locks: a warning, not advice (#1809).
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(crate::cache::NullCache)), &mut out);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("stores nothing")),
+            "{out:?}"
+        );
+        // Also behind a tenant scope.
+        let scoped =
+            crate::cache::ScopedCache::for_tenant(Arc::new(crate::cache::NullCache), "acme");
+        let mut out = DeployAuditFindings::default();
+        login_store_audit(&Lockout::new(Arc::new(scoped)), &mut out);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("stores nothing")),
+            "{out:?}"
+        );
+    }
+
+    /// Stands in for Redis/DB: keeps nothing, but claims nothing either.
+    #[cfg(feature = "cache")]
+    struct SharedStandIn;
+
+    #[cfg(feature = "cache")]
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for SharedStandIn {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "cache", feature = "sqlite"))]
+    #[tokio::test]
+    async fn check_deploy_notes_the_default_in_memory_lockout() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deploy".into()],
+            &mut buf,
+        )
+        .await;
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("[info]    account lockout"), "{s}");
+    }
+
+    #[test]
+    fn ci_and_bin_collations_warn() {
+        assert!(collation_warning("utf8mb4_0900_ai_ci").is_some());
+        assert!(collation_warning("utf8mb4_general_ci").is_some());
+        assert!(collation_warning("utf8mb4_0900_as_cs").is_none());
+        assert!(collation_warning("utf8mb4_bin").is_some());
+    }
+
+    /// SQLite compares byte-wise, so there is nothing to read or warn about.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn check_deploy_has_no_collation_warning_on_sqlite() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deploy".into()],
+            &mut buf,
+        )
+        .await;
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("collation"), "{s}");
+    }
+
     fn good_prod_env() -> DeployAuditEnv {
         DeployAuditEnv {
             rustango_env: Some("prod".into()),
@@ -5635,7 +6534,51 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
+            ungated_admin: false,
         }
+    }
+
+    /// #1627 — an admin built without session auth is named.
+    #[test]
+    fn deploy_audit_warns_on_an_ungated_admin() {
+        let env = DeployAuditEnv {
+            ungated_admin: true,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("with_session_auth")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// The flag the audit reads is set by building an ungated admin, and
+    /// only by that: a gated or tenancy-gated one leaves it clear.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn only_an_ungated_admin_reaches_the_deploy_audit() {
+        let _g = crate::admin::ungated_flag_lock().lock().await;
+        crate::admin::reset_ungated_admin_built();
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let secret = crate::session::SessionSecret::from_bytes(vec![7; 32]);
+        let _gated = crate::admin::Builder::new(pool.clone())
+            .with_session_auth(secret)
+            .build();
+        // The public `tenant_mode` hides models; it gates nothing.
+        let gated_clear = !deploy_audit_env().ungated_admin;
+        let _open = crate::admin::Builder::new(pool.clone())
+            .tenant_mode()
+            .build();
+        let flagged = deploy_audit_env().ungated_admin;
+        crate::admin::reset_ungated_admin_built();
+        assert!(gated_clear, "a gated admin set the ungated flag");
+        assert!(
+            flagged,
+            "a `tenant_mode` admin without auth was not flagged"
+        );
     }
 
     fn run(env: &DeployAuditEnv) -> DeployAuditFindings {
@@ -5675,19 +6618,83 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// Gated: without `admin`/`tenancy` the audit cannot decode, and
+    /// reports the secret unvalidated instead of measuring it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     #[test]
     fn deploy_audit_short_session_secret_errors() {
+        // Valid base64, deliberately — decodes to 6 bytes. `"too-short"`
+        // was the old fixture and its hyphen made it a *base64* failure,
+        // so this case never actually reached the length check.
         let env = DeployAuditEnv {
-            session_secret: Some("too-short".into()),
+            session_secret: Some("AAAAAAAA".into()),
             ..good_prod_env()
         };
         let r = run(&env);
         assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 6 bytes")),
+            "expected a decoded-length error, got: {:?}",
             r.errors
-                .iter()
-                .any(|e| e.contains("only") && e.contains("bytes")),
-            "expected length error for short secret, got: {:?}",
+        );
+    }
+
+    /// Gated for the same reason as the two above.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn deploy_audit_non_base64_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: Some("correct-horse-battery-staple-and-then-som".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("not valid base64")),
+            "a long non-base64 value is still not a key, got: {:?}",
             r.errors
+        );
+    }
+
+    /// #1396 — the value that passed this check and broke the runtime.
+    ///
+    /// 32 base64 characters is 24 bytes of key. The audit measured the
+    /// encoded string (`s.len() >= 32`), reported "length OK", and the
+    /// cookie layer then decoded it, saw 24 bytes, and fell back to a
+    /// random per-process key. Passing the check predicted nothing.
+    ///
+    /// Both now call `SessionSecret::from_b64`, so this is the audit and
+    /// the runtime answering with one voice rather than two.
+    ///
+    /// Gated like the code it covers: `session` is `admin`/`tenancy`-only,
+    /// and in a build with neither the audit reports the secret
+    /// unvalidated, so there is nothing here to assert.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn deploy_audit_rejects_a_32_char_base64_secret_the_runtime_refuses() {
+        let trap = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(
+            trap.len(),
+            32,
+            "the premise: 32 characters, so the old check passed"
+        );
+        assert!(
+            crate::session::SessionSecret::from_b64(trap).is_err(),
+            "the premise: the runtime refuses it"
+        );
+
+        let env = DeployAuditEnv {
+            session_secret: Some(trap.into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 24 bytes")),
+            "check --deploy must refuse what the runtime refuses, got: {:?}",
+            r.errors
+        );
+        assert!(
+            !r.info.iter().any(|i| i.contains("SESSION_SECRET")),
+            "and must not also report it OK, got: {:?}",
+            r.info
         );
     }
 

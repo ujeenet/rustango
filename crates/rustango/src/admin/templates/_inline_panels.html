@@ -1,6 +1,6 @@
-{# Admin inlines — Django TabularInline / StackedInline display.
-   Issue #50 slice 1: read-only listing of child rows on the parent
-   detail page. Each panel is one `register_admin_inline!` registration.
+{# Admin inlines — child rows shown on the parent detail page, in a
+   table or a stack depending on `panel.kind`. This file is the
+   read-only listing. Each panel is one `register_admin_inline!` registration.
    Rendered with `{{ value | safe }}` because the cell renderer
    already HTML-escapes its inputs. #}
 {% if inline_panels and inline_panels | length > 0 %}

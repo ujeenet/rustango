@@ -1,10 +1,10 @@
-//! Django-parity #413 — `got_request_exception` signal fires on 5xx
-//! responses passing through [`RequestSignalsLayer`]. Closes the audit
-//! row's PARTIAL gap: pre-#413, the signal was wired only to the
+//! Issue #413 — `got_request_exception` signal fires on 5xx
+//! responses passing through [`RequestSignalsLayer`]. Closes a
+//! partial gap: pre-#413, the signal was wired only to the
 //! `Service::Error` arm, which axum's `Infallible` bound makes
 //! effectively dead code; now 500/502/503 responses also trigger it.
 
-#![cfg(feature = "signals")]
+#![cfg(all(feature = "signals", feature = "_axum", feature = "_tower"))]
 
 use std::sync::Arc;
 

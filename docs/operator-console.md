@@ -5,7 +5,11 @@ A multi-tenant project has two kinds of administrator, and they never mix:
 - **Operators** run the *deployment*. They live in the registry, sign in at the apex domain, and can reach every tenant.
 - **Tenant users** run *one tenant*. They live in that tenant's database and never see the console.
 
-The operator console is the web interface for the first kind — provisioning tenants, binding hostnames, managing operators, reading the audit trail, and taking a tenant out of service. Everything here is also a [`manage` verb](manage.md#tenancy-commands), because an action that exists on only one surface cannot be automated, and one that exists only in a shell cannot be delegated.
+The operator console is the web interface for the first kind — provisioning tenants, binding hostnames, managing operators, reading the audit trail, and taking a tenant out of service. Nearly everything here is also a [`manage` verb](manage.md#tenancy-commands), because an action that exists on only one surface cannot be automated, and one that exists only in a shell cannot be delegated.
+
+The gap worth knowing about: the console can migrate **one** tenant
+(`POST /orgs/{slug}/migrate`), while the CLI's `migrate-tenants` takes no slug
+and runs the whole registry. There is no per-tenant migrate on the command line.
 
 [![The operator console's tenant list — every tenant in the registry, with its storage mode, host pattern and active state, plus actions to provision, migrate and pre-warm](img/operator-console.png)](img/operator-console.png)
 
@@ -27,16 +31,33 @@ The console is a router you mount; how much it can do depends on what you hand i
 
 ```rust
 use rustango::tenancy::operator_console::{router, router_with_pools, router_with_provisioning, SessionSecret};
+use rustango::tenancy::provision::Provisioner;
+
+// `pools` here is an `Arc<TenantPools<_>>`.
 
 // Read-only: browse tenants, operators and the audit log.
 let app = router(registry.clone(), SessionSecret::from_env_or_random());
 
 // …plus editing tenants, managing operators, binding hostnames, pre-warming pools.
-let app = router_with_pools(registry.clone(), pools.clone(), secret);
+let app = router_with_pools(registry.clone(), pools.clone().into_invalidator(), secret);
 
 // …plus provisioning new tenants and running migrations.
-let app = router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret);
+let provisioner = Provisioner::new(pools.clone(), registry_url.clone(), "migrations").erased();
+let app = router_with_provisioning(
+    registry.clone(),
+    pools.clone().into_invalidator(),
+    provisioner,
+    secret,
+);
 ```
+
+Two conversions are doing work there and neither is optional. `pools`
+goes in as `Arc<dyn TenantPoolInvalidator>`, so it needs
+`.into_invalidator()` — the console only ever invalidates pools, and
+taking the narrow trait is what stops it reaching the rest of them.
+`Provisioner::new` closes over the pools, the registry URL and the
+migrations directory, and `.erased()` puts it behind
+`Arc<dyn TenantProvisioner>`.
 
 In a scaffolded `tenant` project this is already wired — `Cli::new().tenancy().with_tenant_provisioning("migrations")` mounts the full version. See [Scaffolding](scaffolding.md).
 
@@ -133,5 +154,22 @@ Which routes exist depends on which constructor you mounted:
 | View provisioning runs | | | ✓ |
 
 Routes that are not mounted return 404 rather than 403 — a read-only console does not advertise what it cannot do.
+
+### Three more constructors, for wiring rather than capability
+
+The three above are the capability levels. The rest take the same
+levels and add wiring, so they are not a fourth and fifth rung:
+
+| Constructor | Level | What else it takes |
+|---|---|---|
+| `router_with_brand_storage` | read-only, or edit if you pass `Some(pools)` | a `BoxedStorage` for branding uploads, when the default `LocalStorage` is not where you want them |
+| `router_with_impersonation` | edit | brand storage, the tenant session secret and a handoff URL, so an operator can enter a tenant |
+| `router_full` | whatever you pass | all of the above as `Option`s — `None` simply does not mount those routes |
+
+`Server::Builder::serve` mounts impersonation for you; a custom mount
+point opts in by using `router_with_impersonation` in place of
+`router_with_pools`. Reach for `router_full` when you need a
+combination the shorthands do not name — it exists so that a new
+pairing does not need a new positional constructor.
 
 **Every operator is fully capable.** There are no per-operator permission gates: an operator can reach every tenant and every action the console offers. The access-control boundary is the operator list itself, which is why deactivating one takes effect on their next request.

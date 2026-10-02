@@ -1,16 +1,14 @@
-//! Trailing-slash redirect middleware — canonicalize URL paths.
+//! Trailing-slash redirect middleware: one canonical form per URL.
 //!
-//! Returns `301 Moved Permanently` (or `308`, configurable) to the
-//! canonical form of the URL when the request path doesn't match it.
-//! Same shape as Django's `APPEND_SLASH` and Rails' `trailing_slash`
-//! routing.
+//! When the path is not in canonical form, the request is redirected to
+//! it with a `301` (or a `308`, if you set one).
 //!
 //! ## Quick start
 //!
 //! ```ignore
 //! use rustango::trailing_slash::{TrailingSlashLayer, TrailingSlashRouterExt, SlashStyle};
 //!
-//! // Force every URL to end with `/` (Django default)
+//! // Force every URL to end with `/`
 //! let app = axum::Router::new()
 //!     .route("/posts/", axum::routing::get(list))
 //!     .trailing_slash(TrailingSlashLayer::new(SlashStyle::Append));
@@ -21,14 +19,15 @@
 //!     .trailing_slash(TrailingSlashLayer::new(SlashStyle::Strip));
 //! ```
 //!
-//! ## What's NOT touched
+//! ## What is left alone
 //!
-//! - The root path `/` is always preserved.
-//! - Non-GET / non-HEAD requests pass through (a 308 from a POST is
-//!   technically allowed but most clients don't replay the body
-//!   reliably — better to surface a 405 from the routing layer).
-//! - Paths that already match the canonical form pass through.
-//! - Query strings are preserved on the redirect target.
+//! - The root path `/`.
+//! - Anything that is not GET or HEAD. A 308 on a POST is legal, but
+//!   many clients do not resend the body, so a 405 from routing is the
+//!   clearer answer.
+//! - Paths that are already canonical.
+//!
+//! The query string is kept on the redirect target.
 
 use std::sync::Arc;
 
@@ -40,7 +39,7 @@ use axum::Router;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashStyle {
-    /// Add `/` to paths that lack one (Django `APPEND_SLASH = True`).
+    /// Add `/` to paths that lack one (common for HTML pages).
     Append,
     /// Remove the trailing `/` (common for REST APIs).
     Strip,
@@ -49,9 +48,9 @@ pub enum SlashStyle {
 #[derive(Clone, Debug)]
 pub struct TrailingSlashLayer {
     pub style: SlashStyle,
-    /// 301 (default — caches the redirect, ideal for SEO) or 308
-    /// (preserves the method + body — only matters for POST/PUT, but
-    /// we don't redirect those by default anyway).
+    /// 301 by default: caches well and is good for SEO. Use 308 to keep
+    /// the method and body, which only matters if you also redirect
+    /// POST or PUT.
     pub status: StatusCode,
     /// Methods that get redirected. Default: `[GET, HEAD]`.
     pub methods: Vec<Method>,
@@ -73,8 +72,7 @@ impl TrailingSlashLayer {
         self
     }
 
-    /// Override the methods that get redirected. Pass an empty vec to
-    /// redirect every method.
+    /// Choose which methods get redirected. An empty vec means all.
     #[must_use]
     pub fn methods(mut self, m: Vec<Method>) -> Self {
         self.methods = m;
@@ -114,10 +112,10 @@ async fn handle(cfg: Arc<TrailingSlashLayer>, req: Request<Body>, next: Next) ->
     redirect(cfg.status, &location)
 }
 
-/// Returns `Some(canonical)` when `path` differs from canonical form,
-/// `None` when it's already canonical.
+/// `Some(canonical)` when `path` needs a redirect, `None` when it is
+/// already canonical. The target always stays on this origin.
 fn canonical_path(path: &str, style: SlashStyle) -> Option<String> {
-    match style {
+    let target = match style {
         SlashStyle::Append => {
             if path.ends_with('/') {
                 None
@@ -132,7 +130,9 @@ fn canonical_path(path: &str, style: SlashStyle) -> Option<String> {
                 None
             }
         }
-    }
+    }?;
+    // Browsers read `//host` and `/\host` as another host (#1869).
+    Some(format!("/{}", target.trim_start_matches(['/', '\\'])))
 }
 
 fn with_query(path: &str, query: Option<&str>) -> String {
@@ -362,5 +362,35 @@ mod tests {
         assert_eq!(with_query("/foo", None), "/foo");
         assert_eq!(with_query("/foo", Some("")), "/foo");
         assert_eq!(with_query("/foo", Some("a=1")), "/foo?a=1");
+    }
+
+    async fn location(app: Router, uri: &str) -> String {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY, "{uri}");
+        resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// `//host` and `/\host` must not leave as another host (#1869).
+    #[tokio::test]
+    async fn append_never_leaves_the_origin() {
+        assert_eq!(location(append_app(), "//evil.com").await, "/evil.com/");
+        assert_eq!(location(append_app(), "/\\evil.com").await, "/evil.com/");
+        assert_eq!(
+            location(append_app(), "///evil.com?x=1").await,
+            "/evil.com/?x=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn strip_never_leaves_the_origin() {
+        assert_eq!(location(strip_app(), "//evil.com/").await, "/evil.com");
+        assert_eq!(location(strip_app(), "/\\/evil.com/").await, "/evil.com");
+        assert_eq!(location(strip_app(), "///").await, "/");
     }
 }

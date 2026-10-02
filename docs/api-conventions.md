@@ -29,9 +29,16 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
 
 ### Functions
 
-- **`save_on(executor)`, `delete_on(executor)`** — write methods take an *executor* (a pool, connection, or transaction — the thing that talks to the database). The `_on` suffix means "run this against the executor I'm handing you."
-- **`fetch_on(executor)`, `count_on(executor)`** — same `_on` suffix, for reads.
-- **`save()`, `fetch()`, `count()`** without `_on` — shorthand that calls the `_on` version with a default `&pool`. Only works where the queryset or model already holds a pool reference (rare in app code).
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — the bare name takes a `rustango::sql::Pool` and is the everyday path. It works on Postgres, MySQL and SQLite, picking the dialect internally. This is what nearly all app code wants.
+- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. **`_on` methods are Postgres-only** (`#[cfg(feature = "postgres")]`).
+- **Writes invert this, and it is the one place the rule does not hold.** `save(&pool)`, `insert(&pool)` and `delete(&pool)` take a driver-specific `sqlx::PgPool`, so on a build without the `postgres` feature they **do not exist at all** — selecting `sqlite` makes the method vanish rather than fail with anything that names the cause. The multi-backend versions carry the `_pool` suffix: `save_pool`, `insert_pool`, `delete_pool`, each taking `rustango::sql::Pool`.
+
+  | | bare name | multi-backend version |
+  |---|---|---|
+  | **Reads** (`QuerySet`) | `fetch(&pool)` — already multi-backend | *is* the bare name |
+  | **Writes** (model) | `save(&pool)` — **Postgres only** | `save_pool(&pool)` |
+
+  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it is tracked in [#1293](https://github.com/ujeenet/rustango/issues/1293) and will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — the minimal constructor. Any arguments it takes are required dependencies (e.g. `RedisCache::new(url)` — you can't build the cache without a URL).
@@ -122,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **One exception:** signals don't take a pool, because they never touch the database. The rule holds: anything that hits the DB takes the pool; anything that doesn't, doesn't.
 
-**Why pass it every time?** Rust prefers dependencies you can see over hidden global state. Django keeps the connection in thread-local storage, but that breaks down in Rust's async world, where a task can hop between threads mid-request. The downside is more typing; the upside is that you can grep for every place that touches the database.
+**Why pass it every time?** Rust prefers dependencies you can see over hidden global state. Keeping the connection in thread-local storage breaks down in Rust's async world, where a task can hop between threads mid-request. The downside is more typing; the upside is that you can grep for every place that touches the database.
 
 If you find yourself passing `&pool` through ten layers of function calls, accept `impl Executor` once at the public entry point and let the internal helpers share that single connection.
 
@@ -145,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Syntax | Use when |
 |---|---|
-| HTTP query | Public API endpoints — the ViewSet parses these for you, like DRF's filter backends |
+| HTTP query | Public API endpoints — the ViewSet parses these out of the query string for you |
 | String-keyed `.filter` | Generic CRUD or admin code, where field names come from config and aren't known at compile time |
 | Typed `.where_` | Your app code — the preferred default. The compiler checks the field exists and the types match |
 
@@ -194,7 +201,9 @@ async fn handler() -> Result<Json<X>, ApiError> {
 }
 ```
 
-`ApiError` implements `IntoResponse`, so returning it produces the standard JSON error shape automatically.
+`ApiError` implements `IntoResponse`, so returning it produces its JSON shape automatically: `{"error": <machine code>, "message": …, "status": …, "details": …}`.
+
+The framework's own JSON errors use the same shape: ViewSets, tenant and `Principal` rejections, media, the admin's JSON endpoints, body limits, rate limits and maintenance mode. A `5xx` logs its cause and sends a generic `message`. See [ViewSets — error response shapes](viewsets.md#error-response-shapes).
 
 ---
 
@@ -255,19 +264,26 @@ Use when:
 
 ## Feature flags
 
-A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a chunk of the crate on or off — similar to Laravel package discovery or Django's `INSTALLED_APPS`, but resolved at compile time. Every module that pulls in an extra dependency sits behind one. The default set is "you almost certainly want these":
+A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a chunk of the crate on or off — the list of parts your build includes, resolved at compile time. Every module that pulls in an extra dependency sits behind one. The default set is "you almost certainly want these":
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver",
+    "template_views",
 ]
 ```
+
+The indirection is deliberate: `batteries` is a single name a downstream
+crate can switch off — `default-features = false, features = ["postgres"]` —
+without having to restate the list. The alternative, spelling all thirty-seven
+into `default`, means anyone opting out has to know all thirty-seven.
 
 **Off by default:** features that pull in heavy dependencies or external services:
 - `tenancy` — adds `argon2`, `hmac`, `sha2`, `cookie`, `tower` (most apps don't need it)
@@ -277,7 +293,7 @@ default = [
 To trim a binary that doesn't need everything, opt out of the defaults and list only what you use:
 
 ```toml
-rustango = { version = "0.44", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.59", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

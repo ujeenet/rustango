@@ -33,11 +33,13 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .ok()
+    Some(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 #[tokio::test]
@@ -80,20 +82,9 @@ async fn brand_asset_url_uses_direct_url_when_storage_has_one() {
     );
 }
 
-#[tokio::test]
-async fn upload_then_serve_round_trip() {
-    let _g = live_lock().lock().await;
-    let Some(pool) = pool().await else {
-        eprintln!("skipping: DATABASE_URL not set");
-        return;
-    };
-    // Each test gets its own brand storage dir (cleaned up at exit
-    // via `tempfile::TempDir`).
-    let tmp = tempfile::tempdir().expect("tempdir");
-    std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
-    rustango::migrate::drop_all(&pool).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
-
+/// Seed an operator + a schema-mode org and log in. Returns
+/// `(app, cookie, slug, username)`.
+async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, String) {
     // Seed an operator + an org. Pre-hashed password = "letmein".
     let username = format!(
         "brand_op_{}",
@@ -108,8 +99,9 @@ async fn upload_then_serve_round_trip() {
         active: true,
         created_at: now(),
         password_changed_at: None,
+        sessions_revoked_at: None,
     };
-    op.insert(&pool).await.unwrap();
+    op.insert(pool).await.unwrap();
 
     let slug = format!(
         "brand_acme_{}",
@@ -128,7 +120,7 @@ async fn upload_then_serve_round_trip() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(pool).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let secret = SessionSecret::from_env_or_random();
@@ -142,6 +134,8 @@ async fn upload_then_serve_round_trip() {
     );
     let login_req = Request::builder()
         .method("POST")
+        .header("cookie", "rustango_csrf=t")
+        .header("x-csrf-token", "t")
         .uri("/login")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(login_form))
@@ -154,6 +148,130 @@ async fn upload_then_serve_round_trip() {
         .and_then(|c| c.split(';').next())
         .map(str::to_owned)
         .expect("login should set a cookie");
+
+    (app, cookie, slug, username)
+}
+
+fn multipart(boundary: &str, parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, ct, bytes) in parts {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{name}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn upload(
+    app: &axum::Router,
+    cookie: &str,
+    slug: &str,
+    body: Vec<u8>,
+) -> axum::http::StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .header("x-csrf-token", "t")
+        .uri(format!("/orgs/{slug}/edit/branding"))
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+        .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+        .body(Body::from(body))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+async fn logo_path(pool: &sqlx::PgPool, slug: &str) -> Option<String> {
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch_on(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("org row exists")
+        .logo_path
+}
+
+async fn serve_status(app: &axum::Router, slug: &str, file: &str) -> axum::http::StatusCode {
+    let req = Request::builder()
+        .uri(format!("/__brand__/{slug}/{file}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+/// A rejected part after a saved one must not delete the file the
+/// unchanged `logo_path` still names (#1933).
+#[tokio::test]
+async fn failed_branding_upload_keeps_the_served_logo() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
+    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::apply_all(&pool).await.unwrap();
+    let (app, cookie, slug, _) = seed_and_login(&pool).await;
+
+    let ok = multipart("b", &[("logo", "image/png", b"png")]);
+    assert_eq!(
+        upload(&app, &cookie, &slug, ok).await,
+        axum::http::StatusCode::SEE_OTHER
+    );
+    assert_eq!(logo_path(&pool, &slug).await.as_deref(), Some("logo.png"));
+
+    let big = vec![0u8; branding::max_brand_bytes() + 1];
+    let bad = multipart(
+        "b",
+        &[
+            ("logo", "image/webp", b"webp"),
+            ("favicon", "image/x-icon", &big),
+        ],
+    );
+    upload(&app, &cookie, &slug, bad).await;
+    assert_eq!(logo_path(&pool, &slug).await.as_deref(), Some("logo.png"));
+    assert_eq!(
+        serve_status(&app, &slug, "logo.png").await,
+        axum::http::StatusCode::OK,
+        "logo_path names a deleted file"
+    );
+
+    // A good re-upload prunes the other extension.
+    let ok = multipart("b", &[("logo", "image/webp", b"webp")]);
+    assert_eq!(
+        upload(&app, &cookie, &slug, ok).await,
+        axum::http::StatusCode::SEE_OTHER
+    );
+    assert_eq!(logo_path(&pool, &slug).await.as_deref(), Some("logo.webp"));
+    assert_eq!(
+        serve_status(&app, &slug, "logo.png").await,
+        axum::http::StatusCode::NOT_FOUND
+    );
+    std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
+#[tokio::test]
+async fn upload_then_serve_round_trip() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    // Each test gets its own brand storage dir (cleaned up at exit
+    // via `tempfile::TempDir`).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
+    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::apply_all(&pool).await.unwrap();
+
+    let (app, cookie, slug, username) = seed_and_login(&pool).await;
 
     // Build a multipart body with a tiny PNG signature so the
     // content-type check accepts it. The branding module doesn't
@@ -172,6 +290,8 @@ async fn upload_then_serve_round_trip() {
 
     let upload_req = Request::builder()
         .method("POST")
+        .header("cookie", "rustango_csrf=t")
+        .header("x-csrf-token", "t")
         .uri(format!("/orgs/{slug}/edit/branding"))
         .header(
             header::CONTENT_TYPE,
@@ -299,9 +419,21 @@ async fn tenant_admin_renders_brand_overrides() {
         "brand_name should render in admin: {body}"
     );
     // Logo URL ends up as an `<img>` source in the sidebar.
+    //
+    // Matched on the path segment rather than `src="/__brand__/`:
+    // #1537 dropped the `| safe` filter that let an operator-supplied
+    // URL inject attributes, so Tera now escapes the value and the
+    // rendered attribute reads `src="&#x2F;__brand__&#x2F;…"`. That is
+    // correct — the HTML parser decodes character references in
+    // attribute values before the URL is resolved — and asserting the
+    // raw spelling made this test fail on a page that works.
     assert!(
-        body.contains(r#"src="/__brand__/"#),
+        body.contains("__brand__"),
         "logo URL should appear in admin: {body}"
+    );
+    assert!(
+        !body.contains(r#"| safe"#),
+        "the template must not be re-marking branding URLs safe",
     );
     // Tagline renders.
     assert!(

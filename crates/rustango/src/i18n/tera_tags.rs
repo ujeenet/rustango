@@ -1,12 +1,9 @@
-//! Tera bindings for `rustango::i18n::Translator` — Django's
-//! `{% translate %}` / `{% blocktranslate %}` template tags.
-//! Issue #18 (partial).
+//! Tera bindings for `rustango::i18n::Translator` — translate strings
+//! from inside a template.
 //!
-//! Tera doesn't support custom block tags (only filters + functions),
-//! so the Django `{% blocktranslate %}…{% endblocktranslate %}` and
-//! `{% language %}…{% endlanguage %}` block shapes can't be a 1:1
-//! port. This module ships the filter/function shape, which covers
-//! the common cases:
+//! Tera only extends with filters and functions, never with custom
+//! block tags, so translation is exposed as a `translate` function and
+//! a `translate` filter. Both cover the common cases:
 //!
 //! ```ignore
 //! use std::sync::Arc;
@@ -33,16 +30,16 @@
 //!
 //! ## Convention: `LANG` / `TIME_ZONE` context keys
 //!
-//! By Django convention rustango uses the context keys `LANG` for
-//! the active locale and `TIME_ZONE` for the active timezone. App
-//! code (or `LocaleMiddleware` once it lands) injects them before
-//! render; templates read them as plain variables — no special tag
-//! needed for `{% get_current_language %}` etc.
+//! The active locale travels in the context key `LANG`, and the
+//! active timezone in `TIME_ZONE`. Handler code inserts them before
+//! render — usually straight from the
+//! [`super::middleware::ActiveLocale`] extractor. Templates then read
+//! them as plain variables.
 //!
 //! ## Pluralization
 //!
-//! CLDR plural rules ship as the `translate_plural` function (#1102) — the
-//! function-form port of `{% blocktranslate count … %}`:
+//! `translate_plural` picks the plural form with the locale's CLDR
+//! rule:
 //!
 //! ```jinja
 //! {{ translate_plural(key="Deleted {count} page(s).", n=num, locale=LANG, count=num) }}
@@ -53,14 +50,11 @@
 //! locale's rule. See [`crate::i18n::plural_category`] /
 //! [`crate::i18n::Translator::translate_plural`].
 //!
-//! ## What's missing vs Django
-//! - `{% blocktranslate %}…{% endblocktranslate %}` block form (Tera
-//!   has no block-tag extension API — use the `translate` / `translate_plural`
-//!   function shapes instead).
-//! - `{% language 'fr' %}…{% endlanguage %}` override blocks.
+//! ## Not supported
 //!
-//! Workaround for blocks: precompute the translated string in
-//! handler code and pass it through the context.
+//! There is no block form that wraps a chunk of template text, and
+//! no block that switches locale for its body. Translate such text in
+//! handler code and pass the result through the context.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -96,7 +90,7 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
         },
     );
 
-    // #1102 — count-aware translation (CLDR plural rules). Selects the plural
+    // Count-aware translation (CLDR plural rules). Selects the plural
     // form for `n` in the active locale, then interpolates the remaining args.
     // Pass the count itself (commonly as `count`) so the chosen form's
     // `{count}` placeholder fills in:
@@ -130,8 +124,7 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
         },
     );
 
-    // #429 — RTL layout support. Django's `{% get_current_language_bidi %}`
-    // returns `True` for RTL; rustango ships two shapes:
+    // RTL layout support — two ways to ask for the locale's direction:
     //
     //   {{ get_text_direction(locale=LANG) }}    → "ltr" / "rtl"
     //   {{ is_rtl(locale=LANG) }}                → true / false
@@ -186,8 +179,7 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
 /// Shared body for the function + filter shapes — extract the locale
 /// arg, collect every other string arg as an interpolation pair, and
 /// dispatch to [`Translator::translate`]. Non-string args are
-/// silently dropped (matches Django: only `string|string` placeholder
-/// substitutions are supported).
+/// silently dropped — only string placeholders are substituted.
 fn do_translate(translator: &Translator, key: &str, args: &HashMap<String, Value>) -> String {
     let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
     let interp_owned = collect_interp(args, &["key", "locale"]);
@@ -202,7 +194,7 @@ fn do_translate(translator: &Translator, key: &str, args: &HashMap<String, Value
 /// control keys in `exclude` (e.g. `key` / `locale` / `n`). Owned strings are
 /// allocated up front so the `&str` slice handed to the translator stays alive.
 /// Numbers / bools render via `Display` so `count=3` interpolates as `"3"`;
-/// other value kinds are dropped (Django-style `string|string` substitution).
+/// other value kinds are dropped.
 fn collect_interp(args: &HashMap<String, Value>, exclude: &[&str]) -> Vec<(String, String)> {
     args.iter()
         .filter(|(k, _)| !exclude.contains(&k.as_str()))

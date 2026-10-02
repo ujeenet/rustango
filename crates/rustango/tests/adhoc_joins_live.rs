@@ -44,7 +44,11 @@ pub struct Comment {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
@@ -111,11 +115,7 @@ async fn inner_join_with_extra_predicate_filters_outer_rows() {
             },
             // Bare Filter — qualifies to `c` because the writer
             // passes `qualify_with: Some(join.alias)`.
-            WhereExpr::Predicate(Filter {
-                column: "is_approved",
-                op: Op::Eq,
-                value: SqlValue::Bool(true),
-            }),
+            WhereExpr::Predicate(Filter::new("is_approved", Op::Eq, SqlValue::Bool(true))),
         ]),
         project: vec![],
     };

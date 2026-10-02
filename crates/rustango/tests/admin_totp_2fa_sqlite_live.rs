@@ -1,4 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "totp"))]
+#![allow(deprecated)] // `confirmed_secret` stays covered until it is removed.
 //! Live SQLite test for the admin TOTP 2FA store + gating logic —
 //! issue #367. Covers the security-critical invariants the login
 //! challenge relies on:
@@ -73,18 +74,107 @@ async fn enroll_confirm_verify_lifecycle() {
         "wrong code rejected"
     );
 
-    // Re-enrollment replaces the device and drops back to pending.
+    // Re-enrollment keeps the old secret active until a code confirms
+    // the new one (#1756).
     let secret2 = TotpSecret::generate();
     totp_store::start_enrollment(&pool, uid, &secret2)
         .await
         .expect("re-enroll");
-    assert!(
-        totp_store::confirmed_secret(&pool, uid).await.is_none(),
-        "re-enrollment is pending until confirmed again"
+    let still = totp_store::confirmed_secret(&pool, uid).await.unwrap();
+    assert_eq!(
+        still.0, secret.0,
+        "the old secret gates login until confirmed"
     );
-    // Exactly one device per user (the old row was replaced, not added).
-    totp_store::confirm(&pool, uid).await.unwrap();
+    let code2 = totp::generate(&secret2, 30, 6);
+    assert!(totp_store::confirm_with_code(&pool, uid, &secret2, &code2)
+        .await
+        .unwrap());
     let got2 = totp_store::confirmed_secret(&pool, uid).await.unwrap();
     assert_eq!(got2.0, secret2.0, "new secret is the active one");
     assert_ne!(got2.0, secret.0, "old secret no longer stored");
+}
+
+/// An unreadable device table is an error, not "this admin has no
+/// second factor" (#1644).
+///
+/// `confirmed_secret` cannot tell the two apart — it returns `None`
+/// either way — and the login gate read that as "no 2FA" and granted
+/// the session on the password alone. `rustango_admin_totp` is
+/// `managed = false`, so a missing table is a reachable state.
+///
+/// The assertion is on the *checked* variant, because the plain one
+/// returns `None` in both cases and so proves nothing.
+#[tokio::test]
+async fn an_unreadable_device_table_is_an_error_not_an_absent_device() {
+    let pool = pool().await;
+    let uid = 7;
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &secret)
+        .await
+        .expect("enroll");
+    totp_store::confirm(&pool, uid).await.expect("confirm");
+
+    // Enrolled and readable: Ok(Some).
+    assert!(
+        totp_store::confirmed_secret_checked(&pool, uid)
+            .await
+            .expect("readable")
+            .is_some(),
+        "an enrolled, confirmed admin must report a second factor"
+    );
+
+    rustango::sql::raw_execute_pool(&pool, "DROP TABLE rustango_admin_totp", Vec::new())
+        .await
+        .expect("drop the device table");
+
+    assert!(
+        totp_store::confirmed_secret_checked(&pool, uid)
+            .await
+            .is_err(),
+        "a missing device table must surface as an error; returning \
+         Ok(None) is what let the login gate skip 2FA entirely"
+    );
+    // And the lossy helper still cannot tell — which is why the gate
+    // must not use it.
+    assert!(totp_store::confirmed_secret(&pool, uid).await.is_none());
+}
+
+/// A confirmed row whose secret won't decode still gates login: it is an
+/// error, not "no second factor" (#1875).
+#[tokio::test]
+async fn an_undecodable_confirmed_secret_is_an_error() {
+    use rustango::sql::UpdaterPool as _;
+    let pool = pool().await;
+    let uid = 9;
+    let secret = TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &secret)
+        .await
+        .expect("enroll");
+    totp_store::confirm(&pool, uid).await.expect("confirm");
+    let dev = totp_store::device(&pool, uid).await.expect("device");
+    assert!(
+        !format!("{dev:?}").contains(&secret.to_base32()),
+        "Debug leaks the secret"
+    );
+    totp_store::AdminTotp::objects()
+        .filter("user_id", uid)
+        .update()
+        .set("secret_base32", "not-base32!")
+        .execute_pool(&pool)
+        .await
+        .expect("corrupt the secret");
+    assert!(totp_store::confirmed_secret_checked(&pool, uid)
+        .await
+        .is_err());
+    // An empty secret decodes as base32 but is no key.
+    totp_store::AdminTotp::objects()
+        .filter("user_id", uid)
+        .update()
+        .set("secret_base32", "")
+        .execute_pool(&pool)
+        .await
+        .expect("empty the secret");
+    assert!(totp_store::confirmed_secret_checked(&pool, uid)
+        .await
+        .is_err());
 }

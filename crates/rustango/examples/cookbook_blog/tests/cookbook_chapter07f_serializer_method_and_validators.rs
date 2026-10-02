@@ -1,4 +1,4 @@
-//! Cookbook Chapter 7f — DRF SerializerMethodField (`method = "..."`)
+//! Cookbook Chapter 7f — computed serializer fields (`method = "..."`)
 //! and per-field validators chain (`validate = "..."`).
 //!
 //! Both are macro extensions to `#[derive(Serializer)]`. No DB needed.
@@ -12,8 +12,7 @@ use rustango::Serializer;
 
 // §7.99c — `method = "fn_name"` calls a Self method on `from_model`.
 //
-// Ergonomics match DRF's `serializers.SerializerMethodField()` +
-// `def get_<field>(self, obj)` — except in Rust the convention is
+// The field is not read off the model: the convention is
 // `fn <method>(model: &T) -> <field type>` defined as an inherent
 // method on the serializer struct.
 #[derive(Serializer, serde::Deserialize, Default, Debug)]
@@ -22,7 +21,7 @@ pub struct AuthorWithMethod {
     pub id: Auto<i64>,
     pub name: String,
     pub email: String,
-    /// Computed from the model — DRF SerializerMethodField shape.
+    /// Computed from the model, not stored on it.
     #[serializer(method = "domain_of_email")]
     pub email_domain: String,
     /// Same shape, returns whatever the method computes.

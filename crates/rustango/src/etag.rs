@@ -13,21 +13,21 @@
 //!
 //! ## How it works
 //!
-//! For every successful (2xx) response with a non-empty body:
-//! 1. Compute a hash of the body bytes (64-bit FNV-1a + length)
-//! 2. Set `ETag: "<base64 hash>"` on the response
-//! 3. If the request's `If-None-Match` matches — a comma-separated list
-//!    of etags, or the wildcard `*` — reply `304 Not Modified` with an
-//!    empty body, carrying the caching headers (`Cache-Control`, `Vary`,
-//!    `Expires`, …) a matching 200 would have sent (RFC 7232 §4.1).
+//! For each 2xx response with a body:
+//! 1. Hash the body (64-bit FNV-1a plus the length).
+//! 2. Set `ETag: "<base64 hash>"`.
+//! 3. If `If-None-Match` matches — a list of etags, or `*` — reply
+//!    `304 Not Modified` with no body, keeping the caching headers a
+//!    200 would have sent (RFC 7232 §4.1).
 //!
-//! Non-2xx responses are passed through untouched.
+//! Non-2xx and `206` responses pass through. A response that already
+//! has an `ETag` keeps it and is not buffered. So does a body whose
+//! size hint is unknown (a stream, SSE) or over `max_body_bytes`.
 //!
 //! ## When to use
 //!
-//! - Read-heavy GET endpoints whose responses repeat across requests
-//! - Skip for personalized responses unless you scope by user in the cache key
-//! - Skip for streaming/large responses (the middleware buffers the body)
+//! Good for read-heavy GET endpoints that return the same bytes again
+//! and again. Skip it for per-user responses.
 
 use std::sync::Arc;
 
@@ -35,18 +35,25 @@ use axum::body::{to_bytes, Body};
 use axum::http::header::{ETAG, IF_NONE_MATCH};
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
+use axum::response::IntoResponse as _;
 use axum::Router;
 
 /// ETag middleware configuration.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EtagLayer {
-    /// Hard cap on response body size for ETag computation. Responses
-    /// larger than this are passed through unmodified. Default: 4 MiB.
+    /// Biggest body to hash. A larger response passes through
+    /// unchanged. Default 4 MiB; `None` means no cap.
     pub max_body_bytes: Option<usize>,
 }
 
+impl Default for EtagLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EtagLayer {
-    /// Default config — hashes responses up to 4 MiB.
+    /// Hash responses up to 4 MiB.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -54,7 +61,8 @@ impl EtagLayer {
         }
     }
 
-    /// Override the maximum body size. `None` means "no cap" (use with care).
+    /// Set the maximum body size. `None` removes the cap; be careful,
+    /// every sized body is then buffered in memory.
     #[must_use]
     pub fn max_body_bytes(mut self, n: Option<usize>) -> Self {
         self.max_body_bytes = n;
@@ -62,7 +70,7 @@ impl EtagLayer {
     }
 }
 
-/// Extension trait — `.etag(layer)` ergonomics on Router.
+/// Adds `.etag(layer)` to `Router`.
 pub trait EtagRouterExt {
     #[must_use]
     fn etag(self, layer: EtagLayer) -> Self;
@@ -81,7 +89,7 @@ impl<S: Clone + Send + Sync + 'static> EtagRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    // Extract client's If-None-Match before consuming the request
+    // Read If-None-Match before the request is consumed.
     let client_etag = req
         .headers()
         .get(IF_NONE_MATCH)
@@ -91,19 +99,31 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     let response = next.run(req).await;
     let (parts, body) = response.into_parts();
 
-    // Don't hash non-2xx responses
-    if !parts.status.is_success() {
+    // Only 2xx responses get an ETag; a 206 body is a slice, not the representation.
+    if !parts.status.is_success() || parts.status == StatusCode::PARTIAL_CONTENT {
+        return Response::from_parts(parts, body);
+    }
+    // The handler's own validator wins (static files): no rehash, no buffering.
+    if let Some(etag) = parts.headers.get(ETAG).and_then(|v| v.to_str().ok()) {
+        if client_etag.is_some_and(|c| if_none_match(&c, etag)) {
+            return not_modified(&Response::from_parts(parts, Body::empty()));
+        }
         return Response::from_parts(parts, body);
     }
 
-    // Buffer the body up to max_body_bytes
+    // Decide from the size hint, before reading: a stream or an
+    // over-cap body passes through intact instead of being blanked.
     let limit = cfg.max_body_bytes.unwrap_or(usize::MAX);
-    let bytes = match to_bytes(body, limit).await {
-        Ok(b) => b,
-        Err(_) => {
-            // Body too large or stream error — pass through with empty body since we already consumed it
-            return Response::from_parts(parts, Body::empty());
-        }
+    let fits = axum::body::HttpBody::size_hint(&body)
+        .upper()
+        .is_some_and(|n| n <= limit as u64);
+    if !fits {
+        return Response::from_parts(parts, body);
+    }
+    let Ok(bytes) = to_bytes(body, limit).await else {
+        // The stream failed mid-body; there is nothing honest to send.
+        tracing::error!(target: "rustango::error", "etag: response body failed");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     if bytes.is_empty() {
@@ -116,51 +136,50 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
         response.headers_mut().insert(ETAG, v);
     }
 
-    if let Some(client) = client_etag {
-        // `If-None-Match` is a comma-separated list, or the wildcard `*`
-        // which matches any current representation (#1258). Weak
-        // comparison applies for a conditional GET (RFC 7232 §3.2).
-        let ours = normalize_etag(&etag);
-        let matched = client.trim() == "*"
-            || client
-                .split(',')
-                .any(|candidate| normalize_etag(candidate) == ours);
-        if matched {
-            // 304 Not Modified — drop the body, but carry the headers a
-            // matching 200 would have sent that govern caching (RFC 7232
-            // §4.1), not just the ETag. Dropping `Cache-Control` / `Vary`
-            // would let a downstream cache apply the wrong freshness or
-            // vary key.
-            let mut not_modified = Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .body(Body::empty())
-                .unwrap();
-            let carry = [
-                ETAG,
-                axum::http::header::CACHE_CONTROL,
-                axum::http::header::VARY,
-                axum::http::header::EXPIRES,
-                axum::http::header::CONTENT_LOCATION,
-                axum::http::header::DATE,
-            ];
-            for (k, v) in response.headers() {
-                if carry.contains(k) {
-                    not_modified.headers_mut().insert(k.clone(), v.clone());
-                }
-            }
-            return not_modified;
-        }
+    if client_etag.is_some_and(|c| if_none_match(&c, &etag)) {
+        return not_modified(&response);
     }
 
     response
 }
 
-/// Compute an ETag for `bytes` — `"<base64 of 64-bit FNV-1a hash + length>"`.
+/// Whether an `If-None-Match` value — a list of etags, or `*` — matches
+/// `etag`. A conditional GET uses weak comparison (RFC 7232 §3.2).
+pub(crate) fn if_none_match(client: &str, etag: &str) -> bool {
+    let ours = normalize_etag(etag);
+    client.trim() == "*"
+        || client
+            .split(',')
+            .any(|candidate| normalize_etag(candidate) == ours)
+}
+
+/// Drop the body but keep the caching headers a 200 would have sent
+/// (RFC 7232 §4.1), so a downstream cache keeps freshness and vary key.
+fn not_modified(response: &Response<Body>) -> Response<Body> {
+    let mut not_modified = Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .body(Body::empty())
+        .unwrap();
+    let carry = [
+        ETAG,
+        axum::http::header::CACHE_CONTROL,
+        axum::http::header::VARY,
+        axum::http::header::EXPIRES,
+        axum::http::header::CONTENT_LOCATION,
+        axum::http::header::DATE,
+    ];
+    for (k, v) in response.headers() {
+        if carry.contains(k) {
+            not_modified.headers_mut().insert(k.clone(), v.clone());
+        }
+    }
+    not_modified
+}
+
+/// ETag for `bytes`: base64 of a 64-bit FNV-1a hash plus the length.
 ///
-/// Not cryptographic — ETag collisions cause false-positive 304s, not security
-/// issues. The combined hash + length is collision-resistant enough for cache
-/// validation. (Crypto-strength ETags would force a sha2 dependency on every
-/// `admin` build.)
+/// Not a cryptographic hash. A collision only means a wrong 304, and
+/// hash plus length is good enough for cache validation.
 fn compute_etag(bytes: &[u8]) -> String {
     use base64::Engine;
     let hash = fnv1a_64(bytes);
@@ -187,7 +206,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Strip surrounding quotes + `W/` weak prefix for comparison purposes.
+/// Drop the quotes and any `W/` prefix so two etags can be compared.
 fn normalize_etag(s: &str) -> &str {
     let s = s.trim();
     let s = s.strip_prefix("W/").unwrap_or(s);
@@ -227,7 +246,7 @@ mod tests {
         r.headers().get(ETAG).unwrap().to_str().unwrap().to_owned()
     }
 
-    /// #1258 — `If-None-Match: *` matches any representation → 304.
+    /// `If-None-Match: *` matches anything, so 304.
     #[tokio::test]
     async fn if_none_match_wildcard_returns_304() {
         let app = app();
@@ -245,8 +264,7 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
     }
 
-    /// #1258 — a comma-separated `If-None-Match` list containing our etag
-    /// must 304, not return a full 200.
+    /// An `If-None-Match` list that contains our etag must 304.
     #[tokio::test]
     async fn if_none_match_list_matches_one_entry() {
         let app = app();
@@ -270,8 +288,7 @@ mod tests {
         );
     }
 
-    /// #1258 — the 304 must carry the caching headers a 200 would
-    /// (RFC 7232 §4.1), not just the ETag.
+    /// The 304 must carry the caching headers, not just the ETag.
     #[tokio::test]
     async fn not_modified_carries_caching_headers() {
         let app = app();
@@ -294,6 +311,50 @@ mod tests {
         );
         assert_eq!(r.headers().get(header::VARY).unwrap(), "Accept-Encoding");
         assert!(r.headers().get(ETAG).is_some());
+    }
+
+    /// The default caps buffering, and a body over the cap or of
+    /// unknown length passes through whole instead of blanked (#1866).
+    #[tokio::test]
+    async fn large_and_streamed_bodies_pass_through_intact() {
+        let big = "x".repeat(64);
+        let big2 = big.clone();
+        let app = Router::new()
+            .route("/big", get(move || async move { big2 }))
+            .route(
+                "/stream",
+                get(|| async { Body::new(Unsized(Some(axum::body::Bytes::from("chunk")))) }),
+            )
+            .etag(EtagLayer::default().max_body_bytes(Some(16)));
+        assert_eq!(
+            EtagLayer::default().max_body_bytes,
+            EtagLayer::new().max_body_bytes
+        );
+        for (uri, want) in [("/big", big.as_str()), ("/stream", "chunk")] {
+            let r = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            assert!(r.headers().get(ETAG).is_none(), "{uri} was hashed");
+            let body = to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], want.as_bytes(), "{uri} body was blanked");
+        }
+    }
+
+    /// A one-chunk body with no size hint, like a stream or SSE.
+    struct Unsized(Option<axum::body::Bytes>);
+
+    impl axum::body::HttpBody for Unsized {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(self.0.take().map(|b| Ok(http_body::Frame::data(b))))
+        }
     }
 
     #[test]

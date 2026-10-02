@@ -55,18 +55,11 @@ fn arithmetic_chains_left_assoc() {
 // ---------- UPDATE: atomic counter increment ----------
 
 fn update_increment_views() -> UpdateQuery {
-    UpdateQuery {
-        model: Counter::SCHEMA,
-        set: vec![Assignment {
-            column: "views",
-            value: (F("views") + 1_i64).into(),
-        }],
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(7),
-        }),
-    }
+    UpdateQuery::new(
+        Counter::SCHEMA,
+        vec![Assignment::new("views", F("views") + 1_i64)],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(7))),
+    )
 }
 
 #[test]
@@ -103,14 +96,11 @@ fn sqlite_emits_views_plus_one() {
 
 #[test]
 fn pg_set_column_to_column_copies_without_param() {
-    let q = UpdateQuery {
-        model: Counter::SCHEMA,
-        set: vec![Assignment {
-            column: "views",
-            value: F("threshold").into(),
-        }],
-        where_clause: WhereExpr::And(vec![]),
-    };
+    let q = UpdateQuery::new(
+        Counter::SCHEMA,
+        vec![Assignment::new("views", F("threshold"))],
+        WhereExpr::And(vec![]),
+    );
     let stmt = Postgres.compile_update(&q).unwrap();
     assert_eq!(stmt.sql, r#"UPDATE "counter" SET "views" = "threshold""#);
     assert!(
@@ -192,14 +182,11 @@ fn pg_where_column_compared_to_arithmetic_expr() {
 // ---------- Bitwise ops: PG `#`, MySQL `^`, SQLite errors out ----------
 
 fn update_xor_threshold() -> UpdateQuery {
-    UpdateQuery {
-        model: Counter::SCHEMA,
-        set: vec![Assignment {
-            column: "views",
-            value: (F("views") ^ 0xff_i32).into(),
-        }],
-        where_clause: WhereExpr::And(vec![]),
-    }
+    UpdateQuery::new(
+        Counter::SCHEMA,
+        vec![Assignment::new("views", F("views") ^ 0xff_i32)],
+        WhereExpr::And(vec![]),
+    )
 }
 
 #[test]

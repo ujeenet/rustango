@@ -1,4 +1,4 @@
-//! Tri-dialect emission tests for Django 3.2 `.alias()` — non-projected
+//! Tri-dialect emission tests for `.alias()` — non-projected
 //! annotation. Issue #268.
 //!
 //! Acceptance:
@@ -170,7 +170,7 @@ fn alias_triggers_group_by_inference_without_annotate() {
         .compile()
         .expect("compile");
 
-    // Django Shape 3 — auto group by every scalar column.
+    // Shape 3 — auto group by every scalar column.
     assert!(!q.group_by.is_empty(), "expected auto-inferred GROUP BY");
     assert_eq!(q.aliases.len(), 1);
     assert!(q.aggregates.is_empty());

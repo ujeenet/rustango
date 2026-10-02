@@ -1,4 +1,4 @@
-//! Django-parity #329 — `.union()` / `.intersection()` / `.difference()`
+//! Issue #329 — `.union()` / `.intersection()` / `.difference()`
 //! exercised against a real (sqlite) DB.
 //!
 //! The IR + writer paths have been in place since the issue-#25 work;

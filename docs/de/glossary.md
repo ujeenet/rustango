@@ -13,6 +13,7 @@ gedacht, während du vorankommst.
 - [Grundlagen der Web-APIs](#grundlagen-der-web-apis) — was eine API ist, in alltäglichen Worten
 - [Rustango-Bausteine](#rustango-bausteine) — die Teile, die du zusammensetzt
 - [Daten und die Datenbank](#daten-und-die-datenbank)
+- [Mandantenfähigkeit (multi-tenancy)](#mandantenfähigkeit-multi-tenancy) — nur wenn du mehrere Kunden aus einem Deployment bedienst
 - [Ein paar Rust-Wörter](#ein-paar-rust-wörter) — damit die Codeblöcke nicht angsteinflößend sind
 - [Frameworks, mit denen wir vergleichen](#frameworks-mit-denen-wir-vergleichen)
 
@@ -111,7 +112,7 @@ Detailseite und Erstellen-/Bearbeiten-/Löschen-Formulare — gerendert durch Te
 statt JSON. Die *HTML-View*. Siehe [HTML-Views](html-views.md).
 
 **Template** — eine Datei mit Platzhaltern (Rustango verwendet [Tera](https://keats.github.io/tera/),
-sehr ähnlich zu Django-Templates oder Jinja), die der Server mit Daten füllt, um eine
+sehr ähnlich zu Jinja), die der Server mit Daten füllt, um eine
 HTML-Seite zu erzeugen. `{{ post.title }}` fügt einen Wert ein; `{% for … %}` schleift.
 
 **Router / Mount (Einhängen)** — der Router bildet eingehende URLs auf den Code ab, der sie
@@ -164,6 +165,44 @@ Datenbank wechseln, ohne deinen Code zu ändern.
 
 ---
 
+## Mandantenfähigkeit (multi-tenancy)
+
+Hinter dem `tenancy`-Feature. Überspringe diesen Abschnitt, wenn du eine
+gewöhnliche App für einen einzelnen Kunden baust — dann trifft nichts davon zu.
+
+**Mandantenfähigkeit (multi-tenancy)** — ein Deployment betreiben, das mehrere
+Kunden bedient, von denen jeder nur die eigenen Daten sieht. Rustango löst aus
+dem Hostnamen auf, zu welchem Kunden eine Anfrage gehört, und leitet sie für den
+Rest der Anfrage auf dessen Daten.
+
+**Mandant / Tenant (oder Org)** — ein Kunde in einem solchen Deployment. Ein
+Mandant hat einen Slug (`acme`), ein Host-Muster (`acme.example.com`) und eigene
+Benutzer. `Org` ist die Registry-Zeile; „Mandant" ist das, was sie beschreibt.
+
+**Registry** — die kleine Datenbank, die die Mandanten auflistet: wer sie sind,
+wo ihre Daten liegen, ob sie aktiv sind. Getrennt von den Daten jedes Mandanten
+und die eine Datenbank, die das Framework immer braucht.
+
+**Storage-Modus** — wie die Daten eines Mandanten von denen der Nachbarn
+getrennt werden: eine eigene Datenbank oder ein eigenes Schema in einer
+gemeinsamen. Pro Mandant beim Provisionieren gewählt.
+
+**Operator** — ein Administrator des *Deployments*, nicht eines Mandanten.
+Operatoren legen Mandanten an und binden Hostnamen; sie sind keine Benutzer
+eines Mandanten und leben in der Registry. Siehe
+[Operator-Konsole](operator-console.md).
+
+**Operator-Konsole** — die Weboberfläche, die Operatoren benutzen: Mandanten
+provisionieren, Hostnamen binden, weitere Operatoren verwalten, den Audit-Trail
+lesen. Fast jede Aktion darin ist auch ein `manage`-Verb, lässt sich also
+skripten.
+
+**Provisionieren (provisioning)** — einen Mandanten anlegen: seine Datenbank
+oder sein Schema erzeugen, Migrationen hineinlaufen lassen und ihn in der
+Registry eintragen.
+
+---
+
 ## Ein paar Rust-Wörter
 
 Du musst kein Rust können, um die meisten Beispiele zu *lesen*, aber diese vier Wörter tauchen
@@ -193,14 +232,6 @@ gib den Fehler zurück".
 
 Diese Dokumentation sagt gelegentlich „wie X", um Leser zu unterstützen, die aus anderen
 Ökosystemen kommen. Die Vergleiche sind ein Bonus — du brauchst sie nie, um einem Leitfaden zu folgen.
-
-**Django** — ein populäres Python-Webframework. Rustango übernimmt viel von seiner Form
-(Modelle, Migrationen, eine Admin-Oberfläche, die `manage`-Befehle).
-
-**DRF (Django REST Framework)** — Djangos Erweiterung zum Bauen von REST-APIs.
-Rustangos Serializer und ViewSets sind daran modelliert, also bedeutet „DRF-Form"
-„so angeordnet, wie DRF es tut" — z. B. Validierungsfehler, die als JSON-Objekt
-mit Feldnamen als Schlüsseln zurückgegeben werden.
 
 **Laravel / Rails** — populäre PHP- und Ruby-Webframeworks, aus demselben
 Grund „wenn du dies verwendet hast, wird sich das vertraut anfühlen" erwähnt.

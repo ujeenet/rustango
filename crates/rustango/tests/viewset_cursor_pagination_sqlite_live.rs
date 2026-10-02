@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet::cursor_pagination("id")` on
-//! SQLite (Django-parity #440). Walks three pages of a 12-row list,
+//! SQLite (issue #440). Walks three pages of a 12-row list,
 //! following the `next` cursor each step, and asserts the
 //! cursor-aware WHERE clause picks up where the previous page left
 //! off and stops returning `next` on the last partial page.

@@ -73,6 +73,9 @@ pub struct Operator {
     /// rejected by `validate_session`. `None` for accounts that
     /// haven't rotated since v0.28.4 — those sessions stay valid.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-tenant user. Lives in the tenant's storage (schema or
@@ -86,7 +89,8 @@ pub struct Operator {
         list_display = "username, is_superuser, active, created_at",
         search_fields = "username",
         ordering = "username",
-        readonly_fields = "password_hash, created_at",
+        readonly_fields = "created_at, password_changed_at, sessions_revoked_at",
+        formfield_overrides = "password_hash: password",
     )
 )]
 #[allow(dead_code)]
@@ -130,6 +134,48 @@ pub struct User {
     /// rotated since v0.28.4 — those sessions stay valid until
     /// they expire normally.
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stamped on logout: sessions issued at or before it are refused, on
+    /// every device (#1855).
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// The admin form's password is hashed here; a change also stamps
+// `password_changed_at`, which ends the user's older sessions.
+#[cfg(feature = "admin")]
+fn admin_hash_password<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    use crate::core::SqlValue;
+    Box::pin(async move {
+        let Some(plain) = crate::admin::derived_fields::take_secret(values, "password_hash") else {
+            return Ok(());
+        };
+        // A model on this table without the password widget echoes the hash.
+        if before.and_then(|r| r.get("password_hash")?.as_str()) == Some(plain.as_str()) {
+            return Ok(());
+        }
+        let hash = password::hash_async(&plain)
+            .await
+            .map_err(|e| e.to_string())?;
+        values.push(("password_hash", SqlValue::String(hash)));
+        if before.is_some() {
+            values.retain(|(c, _)| *c != "password_changed_at");
+            values.push((
+                "password_changed_at",
+                SqlValue::DateTime(chrono::Utc::now()),
+            ));
+        }
+        Ok::<(), String>(())
+    })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_users",
+        derive: admin_hash_password,
+    }
 }
 
 /// Look up an operator by username and verify the password.
@@ -137,14 +183,15 @@ pub struct User {
 /// Returns `Ok(Some(operator))` on success, `Ok(None)` for an unknown
 /// username, a wrong password, OR an inactive (`active = false`)
 /// operator — always the same `Ok(None)`. The unknown-username path
-/// runs a dummy Argon2 verify ([`password::verify_dummy`]) and the
+/// runs a dummy Argon2 verify ([`password::verify_dummy_async`]) and the
 /// active check happens *after* the real verify, so response timing
 /// doesn't reveal whether the account exists (audit H1).
 ///
 /// # Errors
 /// Returns [`TenancyError::Driver`]/[`TenancyError::Exec`] for SQL
-/// failures, or [`TenancyError::Validation`] for malformed stored
-/// hashes (corrupt row).
+/// failures, [`TenancyError::Validation`] for malformed stored
+/// hashes (corrupt row), or [`TenancyError::Busy`] for a known and an
+/// unknown username alike when no hashing slot frees up.
 #[cfg(feature = "postgres")]
 pub async fn authenticate_operator(
     registry: &PgPool,
@@ -172,23 +219,52 @@ pub async fn authenticate_operator_pool(
     username: &str,
     password: &str,
 ) -> Result<Option<Operator>, TenancyError> {
+    let op = find_operator(registry, username).await?;
+    check_operator_password(registry, op, password).await
+}
+
+/// The operator row for `username`, active or not.
+pub(crate) async fn find_operator(
+    registry: &crate::sql::Pool,
+    username: &str,
+) -> Result<Option<Operator>, TenancyError> {
     use crate::sql::FetcherPool as _;
     let rows: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
         .fetch(registry)
         .await?;
-    let Some(op) = rows.into_iter().next() else {
+    Ok(rows.into_iter().next())
+}
+
+/// `Some(op)` when `op` is active and `password` matches; the same work
+/// for a missing row.
+pub(crate) async fn check_operator_password(
+    registry: &crate::sql::Pool,
+    op: Option<Operator>,
+    password: &str,
+) -> Result<Option<Operator>, TenancyError> {
+    let Some(op) = op else {
         // H1: spend a verify's worth of work on the unknown-user path
         // so timing doesn't reveal whether the account exists.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
     // Verify before the active check so active vs inactive accounts
     // take the same time (audit H1).
-    let password_ok = password::verify(password, &op.password_hash)?;
+    let mut op = op;
+    let password_ok = password::verify_async(password, &op.password_hash).await?;
     if !op.active || !password_ok {
         return Ok(None);
     }
+    let id = op.id.get().copied().unwrap_or_default();
+    op.password_hash = crate::passwords::upgrade_stored_hash(
+        registry,
+        <Operator as crate::core::Model>::SCHEMA,
+        id,
+        password,
+        &op.password_hash,
+    )
+    .await;
     Ok(Some(op))
 }
 
@@ -217,44 +293,36 @@ pub async fn authenticate_user(
     username: &str,
     password: &str,
 ) -> Result<Option<User>, TenancyError> {
-    use crate::sql::sqlx::Row;
-    // We can't reuse `User::objects().fetch(&pool)` here because we
-    // have a connection, not a pool. Hand-write the query — small
-    // surface, not a hot path.
-    let user_rows = rustango::sql::sqlx::query(
-        "SELECT id, username, password_hash, is_superuser, active, created_at \
-         FROM rustango_users WHERE username = $1",
-    )
-    .bind(username)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(row) = user_rows else {
+    // Through the ORM, so every column (cut-offs included) decodes or errors.
+    let rows: Vec<User> = User::objects()
+        .where_(User::username.eq(username.to_owned()))
+        .fetch_on(&mut *conn)
+        .await?;
+    let Some(mut user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
-    let user = User {
-        id: Auto::Set(row.try_get::<i64, _>("id")?),
-        username: row.try_get::<String, _>("username")?,
-        password_hash: row.try_get::<String, _>("password_hash")?,
-        // Defensive get — tolerates rows from tenants not yet migrated
-        // to the SSO `email` column (mirrors `data` / `password_changed_at`).
-        #[cfg(feature = "sso")]
-        email: row.try_get::<Option<String>, _>("email").ok().flatten(),
-        is_superuser: row.try_get::<bool, _>("is_superuser")?,
-        active: row.try_get::<bool, _>("active")?,
-        created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?,
-        data: row
-            .try_get::<serde_json::Value, _>("data")
-            .unwrap_or_else(|_| serde_json::json!({})),
-        password_changed_at: row
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("password_changed_at")
-            .ok()
-            .flatten(),
-    };
-    let password_ok = password::verify(password, &user.password_hash)?;
+    let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
+    }
+    if let Some(new) = crate::passwords::rehash_async(password, &user.password_hash).await {
+        let id = user.id.get().copied().unwrap_or_default();
+        let q = crate::passwords::rehash_update(
+            <User as crate::core::Model>::SCHEMA,
+            id,
+            &user.password_hash,
+            &new,
+        );
+        let applied = crate::sql::update_on(&mut *conn, &q).await;
+        user.password_hash = crate::passwords::rehash_applied(
+            applied,
+            <User as crate::core::Model>::SCHEMA,
+            id,
+            &user.password_hash,
+            new,
+        );
     }
     Ok(Some(user))
 }
@@ -289,15 +357,24 @@ pub async fn authenticate_user_pool(
         .where_(User::username.eq(username.to_owned()))
         .fetch(pool)
         .await?;
-    let Some(user) = rows.into_iter().next() else {
+    let Some(mut user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.
-        password::verify_dummy(password);
+        password::verify_dummy_async(password).await?;
         return Ok(None);
     };
-    let password_ok = password::verify(password, &user.password_hash)?;
+    let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
     }
+    let id = user.id.get().copied().unwrap_or_default();
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        pool,
+        <User as crate::core::Model>::SCHEMA,
+        id,
+        password,
+        &user.password_hash,
+    )
+    .await;
     Ok(Some(user))
 }
 

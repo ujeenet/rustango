@@ -1,5 +1,5 @@
-//! Django-parity #333 — `PositiveIntegerField` equivalent via
-//! `#[rustango(min = 0)]` on an integer field. Verifies that the
+//! Issue #333 — a non-negative integer field via
+//! `#[rustango(min = 0)]`. Verifies that the
 //! validation runs model-side at write time and rejects negatives.
 
 #![cfg(feature = "sqlite")]

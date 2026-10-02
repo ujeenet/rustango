@@ -31,16 +31,21 @@
 //!
 //! | Type | Feature | Description |
 //! |------|---------|-------------|
-//! | [`NullCache`] | `cache` | No-op; all reads return `None`. Good for tests. |
-//! | [`InMemoryCache`] | `cache` | Per-process HashMap with TTL. Zero external deps. |
-//! | [`FileCache`] | `cache` | File-system, one file per key (#408). |
-//! | [`DatabaseCache`](db_backend::DatabaseCache) | `cache` + any DB feature | DB table, tri-dialect upsert (#409). |
-//! | [`RedisCache`](redis_backend::RedisCache) | `cache-redis` | Redis-backed via async connection manager. |
+//! | [`NullCache`] | `cache` | Does nothing; every read returns `None`. Good for tests. |
+//! | [`InMemoryCache`] | `cache` | Per-process HashMap with TTL. No external deps. |
+//! | [`FileCache`] | `cache` | On disk, one file per key. |
+//! | [`DatabaseCache`](crate::cache::db_backend::DatabaseCache) | `cache` + any DB feature | A DB table. Works on all three dialects. |
+//! | [`RedisCache`](crate::cache::redis_backend::RedisCache) | `cache-redis` | Redis, via an async connection manager. |
 //!
-//! ## Shared cache type
+//! ## Sharing a cache
 //!
-//! `Arc<dyn Cache>` is the recommended way to share a cache across handlers.
-//! Use [`BoxedCache`] as a convenient alias.
+//! Share one instance as `Arc<dyn Cache>`. [`BoxedCache`] is the alias
+//! for that type.
+//!
+//! [`NullCache`]: crate::cache::NullCache
+//! [`InMemoryCache`]: crate::cache::InMemoryCache
+//! [`FileCache`]: crate::cache::FileCache
+//! [`BoxedCache`]: crate::cache::BoxedCache
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,12 +78,10 @@ pub enum CacheError {
 
 // ------------------------------------------------------------------ Cache trait
 
-/// Pluggable async cache. All methods are async and return `Result`.
+/// Pluggable async cache.
 ///
-/// # Object safety
-///
-/// Implementations are object-safe — store as `Arc<dyn Cache>` to pass
-/// the backend through axum state or `Extension`.
+/// The trait is object-safe, so you can store a backend as
+/// `Arc<dyn Cache>` and pass it through axum state or `Extension`.
 #[async_trait]
 pub trait Cache: Send + Sync + 'static {
     /// Retrieve the value for `key`, or `None` if absent or expired.
@@ -89,6 +92,12 @@ pub trait Cache: Send + Sync + 'static {
     /// `ttl = None` means "no expiry" (store indefinitely).
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
+    /// Store `value` with no expiry, even on a backend built with a
+    /// default TTL. Wrapping caches must forward it.
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        self.set(key, value, None).await
+    }
+
     /// Remove `key` from the cache. No-op if absent.
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
 
@@ -98,18 +107,27 @@ pub trait Cache: Send + Sync + 'static {
     /// Remove all entries from the cache.
     async fn clear(&self) -> Result<(), CacheError>;
 
-    /// Atomically increment the integer counter at `key` by `by` and
-    /// return the new value. The default implementation is a non-atomic
-    /// get + parse + set — fine for single-process use. `RedisCache`
-    /// overrides with `INCRBY` so multi-replica rate limiters can rely
-    /// on it across processes.
+    /// `true` when entries live in this process only, so other replicas
+    /// never see them. `check --deploy` flags security state kept here.
+    fn is_process_local(&self) -> bool {
+        false
+    }
+
+    /// `true` when writes are dropped, so nothing built on this cache
+    /// (a lockout, a limiter) ever counts.
+    fn stores_nothing(&self) -> bool {
+        false
+    }
+
+    /// Add `by` to the integer counter at `key` and return the new
+    /// value. A value that is not an integer counts as 0.
     ///
-    /// `ttl` is applied on every call by the default impl; backends with
-    /// native counters typically only set TTL on first creation. Treat
-    /// `ttl` as a hint, not a guarantee.
+    /// The default is a get-parse-set, which is not atomic. Backends
+    /// with a native counter override it: `RedisCache` uses `INCRBY` and
+    /// `DatabaseCache` one upsert, so counters stay correct across replicas.
     ///
-    /// Non-integer existing values are treated as 0 — the counter is
-    /// overwritten with `by` and the new value is `by` itself.
+    /// Treat `ttl` as a hint. The default applies it on every call;
+    /// native counters usually set it only when the key is created.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let cur = self
             .get(key)
@@ -121,17 +139,14 @@ pub trait Cache: Send + Sync + 'static {
         Ok(new)
     }
 
-    /// Django-parity `cache.add(key, value, timeout)` — set the value
-    /// ONLY if the key is currently absent (or expired). Returns `true`
-    /// when the value was inserted, `false` when an existing entry
-    /// blocked the write.
+    /// Store the value only if the key is absent or expired.
+    /// Returns `true` when the write happened.
     ///
-    /// The default implementation is a non-atomic `exists` + `set`
-    /// pair, which races between processes; backends with a native
-    /// "set if absent" primitive (Redis `SET NX`) should override
-    /// for atomicity. For single-process locks, the default is fine.
+    /// The default is `exists` then `set`, which can race between
+    /// processes. Backends with a native "set if absent" (Redis
+    /// `SET NX`) should override it.
     ///
-    /// Useful as a lightweight inter-process lock primitive:
+    /// Handy as a light cross-process lock:
     ///
     /// ```ignore
     /// if cache.add("import-running", "1", Some(Duration::from_secs(60))).await? {
@@ -146,17 +161,14 @@ pub trait Cache: Send + Sync + 'static {
         Ok(true)
     }
 
-    /// Django-parity `cache.touch(key, timeout)` — extend (or replace)
-    /// the TTL on an existing key without changing the value. Returns
-    /// `true` when the key existed and the TTL was reset, `false`
-    /// when the key was absent or already expired (no-op).
+    /// Replace the TTL on a key without
+    /// changing its value. Returns `true` when the key was there,
+    /// `false` when it was absent or expired.
     ///
-    /// The default implementation is a non-atomic `get` + `set` round-
-    /// trip. Backends with a native `EXPIRE` / `PEXPIRE` primitive
-    /// should override for an O(1) single-RTT path.
+    /// `ttl = None` makes the entry last forever, as `set` does.
     ///
-    /// `ttl = None` makes the entry persist indefinitely (matching
-    /// `set(_, _, None)`).
+    /// The default is a `get` then a `set`. Backends with a native
+    /// `EXPIRE` should override it for a single round trip.
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         match self.get(key).await? {
             Some(value) => {
@@ -167,15 +179,11 @@ pub trait Cache: Send + Sync + 'static {
         }
     }
 
-    /// Django-parity `cache.get_many(keys)` — bulk fetch for a key
-    /// set, returning a map of present-and-not-expired entries.
-    /// Missing keys are omitted (Django's shape). Order of the
-    /// returned map is unspecified.
+    /// Fetch many keys at once. Missing and expired keys are left out
+    /// of the map. The order is not defined.
     ///
-    /// Default implementation issues one `get` per key in sequence.
-    /// Backends with native batch primitives should override:
-    /// * `RedisCache` → `MGET` (one RTT)
-    /// * `DatabaseCache` → `SELECT … WHERE cache_key IN (…)` (one query)
+    /// The default runs one `get` per key. `RedisCache` overrides with
+    /// `MGET` and `DatabaseCache` with a single `IN (…)` query.
     async fn get_many(&self, keys: &[&str]) -> Result<HashMap<String, String>, CacheError> {
         let mut out = HashMap::with_capacity(keys.len());
         for k in keys {
@@ -186,11 +194,9 @@ pub trait Cache: Send + Sync + 'static {
         Ok(out)
     }
 
-    /// Django-parity `cache.set_many(mapping, timeout)` — bulk-set
-    /// many key/value pairs with one shared TTL. Equivalent to
-    /// looping `set` per entry; backends with native pipelines
-    /// (Redis `MSET` + `EXPIRE`, or executor-side `bulk_insert`)
-    /// should override.
+    /// Store many key/value pairs under one shared TTL. The default
+    /// loops over `set`. Backends with a pipeline (Redis `MSET`, or a
+    /// bulk insert) should override it.
     async fn set_many(
         &self,
         entries: &[(&str, &str)],
@@ -202,10 +208,8 @@ pub trait Cache: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Django-parity `cache.delete_many(keys)` — bulk-delete every
-    /// listed key. Missing keys are silently ignored. Default loops
-    /// `delete`; backends with native primitives (`DEL key1 key2`)
-    /// override.
+    /// Delete every listed key. Missing keys are ignored. The default
+    /// loops over `delete`; backends with `DEL k1 k2` override it.
     async fn delete_many(&self, keys: &[&str]) -> Result<(), CacheError> {
         for k in keys {
             self.delete(k).await?;
@@ -213,85 +217,57 @@ pub trait Cache: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Django-parity `cache.has_key(key)` — direct alias for
-    /// [`Self::exists`]. Django spells the membership check as
-    /// `has_key`; rustango shipped `exists` first (Rust convention)
-    /// but the Django method name is the one most users reach for
-    /// when translating from a Django codebase.
-    ///
-    /// Default implementation delegates to `exists`; backends never
-    /// need to override.
+    /// Alias for [`Self::exists`]. Never needs an override.
     async fn has_key(&self, key: &str) -> Result<bool, CacheError> {
         self.exists(key).await
     }
 
-    /// Django-parity `cache.decr(key, delta=1)` — atomically decrement
-    /// the integer counter at `key` by `by` and return the new value.
-    ///
-    /// Equivalent to [`Self::incr`] with a negated `by` — the default
-    /// implementation simply forwards to `incr(-by)`, so backends that
-    /// override `incr` for atomicity (Redis `INCRBY -N`) get the
-    /// matching atomic `decr` for free.
-    ///
-    /// `ttl` semantics mirror `incr` — treat as a hint; backends with
-    /// native counters typically only set TTL on first creation.
+    /// Subtract `by` from the counter at `key` and return the new
+    /// value. Forwards to [`Self::incr`] with a negated `by`, so a
+    /// backend that makes `incr` atomic gets an atomic `decr` too.
+    /// `ttl` is a hint, as it is for `incr`.
     async fn decr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         self.incr(key, by.saturating_neg(), ttl).await
     }
 
-    /// Django-parity `cache.get(key, default)` — returns the stored
-    /// value, or `default` (cloned) when the key is absent or expired.
-    ///
-    /// Direct translation of Django's two-arg form:
-    ///
-    /// ```python
-    /// # Django
-    /// name = cache.get('username', default='anonymous')
-    /// ```
+    /// Return the stored value, or `default` when the key is absent or
+    /// expired.
     ///
     /// ```ignore
-    /// // rustango
     /// let name = cache.get_or("username", "anonymous").await?;
     /// ```
     ///
-    /// `default` is taken by `&str` so callers can pass either string
-    /// literals or borrowed `String`s without an unnecessary allocation
-    /// on the hit path — the allocation only happens on miss.
+    /// `default` is a `&str`, so a hit allocates nothing extra.
     async fn get_or(&self, key: &str, default: &str) -> Result<String, CacheError> {
         Ok(self.get(key).await?.unwrap_or_else(|| default.to_owned()))
     }
 
-    /// Delete every key starting with `prefix`. Powers
-    /// [`ScopedCache::clear`], which must drop one namespace's entries
-    /// without touching anyone else's (#1227).
+    /// Delete every key that starts with `prefix`. This is what
+    /// [`ScopedCache::clear`] calls, so it must drop one namespace's
+    /// entries and leave the rest alone.
     ///
-    /// **The default over-deletes: it clears the whole cache** and logs
-    /// a warning. That is deliberate. A backend that cannot enumerate
-    /// its keys has two options, and only one of them is safe:
-    /// under-deleting leaves stale entries that a *different* namespace
-    /// can then read, which is a correctness bug; over-deleting costs
-    /// other namespaces a cache miss. [`FileCache`] is the concrete
-    /// case — it hashes keys into paths, so the prefix is not
-    /// recoverable from the filename.
+    /// **The default returns an error.** Clearing the whole cache
+    /// instead would let one tenant wipe every other tenant's entries,
+    /// plus rate-limit counters and lock keys. An error gives the
+    /// author of a new backend a loud failure rather than silent data
+    /// loss in someone else's namespace.
     ///
-    /// **Every shipped backend that can enumerate overrides this**, and
-    /// a new backend that can MUST: [`InMemoryCache`] filters its map,
-    /// [`DatabaseCache`] issues a `DELETE … WHERE cache_key LIKE
-    /// 'prefix%'`, `RedisCache` runs `SCAN MATCH` + `DEL`, and
-    /// [`NullCache`] has nothing to delete. Redis is the cautionary
-    /// one: its `clear()` is `FLUSHDB`, so inheriting this default
-    /// would let one tenant's invalidation wipe every other tenant,
-    /// every rate-limit counter and every lock key.
+    /// **Every backend in this crate overrides it, and yours must
+    /// too**, unless it stores nothing. [`InMemoryCache`] filters its
+    /// map, `DatabaseCache` runs an exact-case prefix
+    /// `DELETE`, `RedisCache` runs `SCAN MATCH` then `DEL`, and
+    /// [`FileCache`] scans its directory (the filename is a hash, so
+    /// the key has to be read from inside each file).
+    ///
+    /// `DatabaseCache` matches a prefix over 190 bytes on its first 190
+    /// bytes, so it may delete extra keys, never fewer.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        tracing::warn!(
-            target: "rustango::cache",
-            prefix = %prefix,
-            "this cache backend cannot enumerate keys, so a prefix delete clears \
-             the WHOLE cache — other namespaces will see a cold cache. Use a \
-             backend that overrides `delete_prefix` (memory / database) if that \
-             matters",
-        );
-        self.clear().await
+        Err(CacheError::Connection(format!(
+            "this cache backend does not implement `delete_prefix`, so the prefix \
+             `{prefix}` cannot be deleted without clearing unrelated namespaces. \
+             Implement `delete_prefix` on the backend — clearing everything is not \
+             a safe fallback for a scoped delete."
+        )))
     }
 }
 
@@ -302,17 +278,22 @@ pub type BoxedCache = Arc<dyn Cache>;
 /// [`crate::config::CacheSettings`] section (#87 wiring, v0.29).
 ///
 /// Backend selection from `s.backend`:
-/// - `"memory"` (default) → [`InMemoryCache`]
-/// - `"redis"` → [`redis_backend::RedisCache`] (requires
-///   `cache-redis` feature; falls back to `InMemoryCache` with a
-///   warning when the feature isn't compiled in)
+/// - `"memory"` (default) / unset → [`InMemoryCache`]
 /// - `"null"` / `"none"` → [`NullCache`]
-/// - any other / unset → [`InMemoryCache`] with a warning if the
-///   value was non-empty (typo defense)
+/// - `"file"` → [`FileCache`]. Needs `file_cache_dir`; without it,
+///   warns and uses [`InMemoryCache`], which is colder but gives the
+///   same guarantees.
+/// - `"redis"`, `"db"` / `"database"` → **panics**, see below
+/// - any other value → [`InMemoryCache`] with a warning (typo defense)
 ///
-/// `redis_url` is required when `backend = "redis"` — without it
-/// the resolver falls back to `InMemoryCache` with a warning so
-/// startup doesn't block on a misconfig.
+/// # Panics
+/// On `backend = "redis"` or `"db"`. Both need to connect, which this
+/// sync function cannot do, and quietly substituting another backend
+/// would be worse: a per-process cache is not a weaker shared one.
+/// Rate limits would then scale with the replica count, and
+/// single-use token checks would stop failing closed. Use
+/// [`from_settings_async`] for redis, and build the DB backend where
+/// the `Pool` is.
 ///
 /// ```ignore
 /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -323,65 +304,35 @@ pub type BoxedCache = Arc<dyn Cache>;
 #[must_use]
 pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
     match s.backend.as_deref() {
-        Some("redis") => {
-            #[cfg(feature = "cache-redis")]
-            {
-                if s.redis_url.as_deref().is_some_and(|u| !u.is_empty()) {
-                    // `RedisCache::new` is async (it pings the
-                    // server eagerly to surface bad URLs at boot)
-                    // but `from_settings` is sync — we can't .await
-                    // here without changing the public API. Users
-                    // who want redis must construct it explicitly:
-                    //
-                    //     let cache = RedisCache::new(&url).await?;
-                    //     let boxed: BoxedCache = Arc::new(cache);
-                    //
-                    // We fall back to InMemoryCache + warn rather
-                    // than silently returning the wrong backend.
-                    tracing::warn!(
-                        target: "rustango::cache",
-                        "cache.backend = \"redis\" requires async construction; \
-                         build `RedisCache::new(url).await?` and pass the Arc \
-                         directly. Falling back to InMemoryCache."
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "rustango::cache",
-                        "cache.backend = \"redis\" but redis_url is unset; falling back to InMemoryCache",
-                    );
-                }
-            }
-            #[cfg(not(feature = "cache-redis"))]
-            {
-                tracing::warn!(
-                    target: "rustango::cache",
-                    "cache.backend = \"redis\" but the `cache-redis` feature isn't compiled in; falling back to InMemoryCache",
-                );
-            }
-            Arc::new(InMemoryCache::new())
-        }
+        // `redis` and `db` need to connect, so this sync resolver
+        // cannot build either. Panic rather than pretend: silently
+        // handing back a per-process cache voids every protection that
+        // works only because the cache is shared.
+        Some("redis") => panic!(
+            "cache.backend = \"redis\" cannot be built by `from_settings`, which is \
+             sync — `RedisCache::new(url)` is async because it pings the server to \
+             surface a bad URL at boot.\n\n\
+             Use `from_settings_async(&settings.cache).await?`, or build it yourself:\n\
+             \x20   let cache: BoxedCache = Arc::new(RedisCache::new(&url).await?);\n\n\
+             This used to fall back to an in-memory cache, which silently voided \
+             every protection that depends on the cache being shared across replicas."
+        ),
         Some("null" | "none") => Arc::new(NullCache),
         Some("file") => file_from_settings_or_warn(s),
-        Some("db" | "database") => {
-            // #409 — DatabaseCache needs a runtime Pool and an async
-            // `ensure_table()` step that this sync resolver can't
-            // perform. Apps that want the DB backend must build it
-            // explicitly:
-            //
-            //     let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
-            //     cache.ensure_table().await?;
-            //     let boxed: BoxedCache = Arc::new(cache);
-            //
-            // We fall back to InMemoryCache + warn rather than
-            // silently producing a different backend.
-            tracing::warn!(
-                target: "rustango::cache",
-                "cache.backend = \"db\" requires async construction with a `&Pool`; \
-                 build `DatabaseCache::new(pool, table)` and call `ensure_table().await` \
-                 then pass the Arc directly. Falling back to InMemoryCache."
-            );
-            Arc::new(InMemoryCache::new())
-        }
+        // `DatabaseCache` needs a runtime `Pool` and an async
+        // `ensure_table()`. Settings alone cannot describe it, so even
+        // the async resolver cannot build this one.
+        Some("db" | "database") => panic!(
+            "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` \
+             needs a runtime `&Pool`, which `[cache]` does not carry, plus an async \
+             `ensure_table()` call.\n\n\
+             Build it where the pool exists:\n\
+             \x20   let cache = DatabaseCache::new(pool.clone(), \"rustango_cache\");\n\
+             \x20   cache.ensure_table().await?;\n\
+             \x20   let boxed: BoxedCache = Arc::new(cache);\n\n\
+             This used to fall back to an in-memory cache, which silently voided \
+             every protection that depends on the cache being shared across replicas."
+        ),
         Some("memory") | None => Arc::new(InMemoryCache::new()),
         Some(other) => {
             tracing::warn!(
@@ -394,9 +345,64 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
     }
 }
 
-/// File-backend resolver — needs `[cache].file_cache_dir` set,
-/// otherwise warns and falls back to `InMemoryCache` so the app still
-/// boots on misconfig. Issue #408.
+/// [`from_settings`], but it can also build backends that connect —
+/// today that is only `redis`. Use this one wherever you can `.await`.
+///
+/// `db` still cannot come from settings and returns an error saying
+/// so: `DatabaseCache` needs a runtime `&Pool`, which `[cache]` does
+/// not carry.
+///
+/// ```no_run
+/// # async fn f() -> Result<(), rustango::cache::CacheError> {
+/// let cfg = rustango::config::Settings::load_from_env().unwrap();
+/// let cache: rustango::cache::BoxedCache =
+///     rustango::cache::from_settings_async(&cfg.cache).await?;
+/// # Ok(()) }
+/// ```
+///
+/// # Errors
+/// Returns [`CacheError`] when the configured backend cannot be built:
+/// an unreachable Redis, a missing `redis_url`, or `db`.
+#[cfg(feature = "config")]
+pub async fn from_settings_async(
+    s: &crate::config::CacheSettings,
+) -> Result<BoxedCache, CacheError> {
+    match s.backend.as_deref() {
+        Some("redis") => {
+            #[cfg(feature = "cache-redis")]
+            {
+                let url = s
+                    .redis_url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| {
+                        CacheError::Connection(
+                            "cache.backend = \"redis\" but [cache].redis_url is unset".into(),
+                        )
+                    })?;
+                Ok(Arc::new(redis_backend::RedisCache::new(url).await?))
+            }
+            #[cfg(not(feature = "cache-redis"))]
+            {
+                Err(CacheError::Connection(
+                    "cache.backend = \"redis\" but the `cache-redis` feature is not \
+                     compiled in — enable it, or change the backend"
+                        .into(),
+                ))
+            }
+        }
+        Some("db" | "database") => Err(CacheError::Connection(
+            "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` needs \
+             a runtime `&Pool`. Build it where the pool exists and pass the Arc directly."
+                .into(),
+        )),
+        // Everything else builds synchronously and behaves the same.
+        _ => Ok(from_settings(s)),
+    }
+}
+
+/// Build a [`FileCache`] from `[cache].file_cache_dir`. If that is
+/// unset, warn and fall back to `InMemoryCache` so the app still boots.
 #[cfg(feature = "config")]
 fn file_from_settings_or_warn(s: &crate::config::CacheSettings) -> BoxedCache {
     match s.file_cache_dir.as_deref() {
@@ -479,9 +485,9 @@ where
 
 // ------------------------------------------------------------------ NullCache
 
-/// A no-op cache that stores nothing and returns `None` for every read.
-///
-/// Useful in tests and for disabling caching without changing call sites.
+/// A cache that stores nothing and returns `None` for every read.
+/// Use it in tests, or to turn caching off without touching call
+/// sites.
 ///
 /// ```ignore
 /// let cache: Arc<dyn Cache> = Arc::new(NullCache);
@@ -491,6 +497,10 @@ pub struct NullCache;
 
 #[async_trait]
 impl Cache for NullCache {
+    fn stores_nothing(&self) -> bool {
+        true
+    }
+
     async fn get(&self, _key: &str) -> Result<Option<String>, CacheError> {
         Ok(None)
     }
@@ -516,8 +526,8 @@ impl Cache for NullCache {
         Ok(())
     }
 
-    /// Nothing is stored, so nothing needs deleting — and in particular
-    /// this must not fall through to the warning on the trait default.
+    /// Nothing is stored, so there is nothing to delete. Must not fall
+    /// through to the trait default, which errors.
     async fn delete_prefix(&self, _prefix: &str) -> Result<(), CacheError> {
         Ok(())
     }
@@ -528,12 +538,11 @@ impl Cache for NullCache {
 struct CacheEntry {
     value: String,
     expires_at: Option<Instant>,
-    /// Monotonic access tick for approximate-LRU eviction; bumped on
-    /// every read/write from [`InMemoryCache::tick`]. `AtomicU64` so
-    /// reads (which hold only the read lock) can update it.
+    /// Access tick for approximate LRU, bumped on every read and
+    /// write. Atomic so a read, which holds only the read lock, can
+    /// still update it.
     last_used: AtomicU64,
-    /// `key.len() + value.len()` — this entry's charge against the
-    /// cache's byte budget.
+    /// `key.len() + value.len()`: this entry's share of the byte budget.
     size: usize,
 }
 
@@ -543,79 +552,73 @@ impl CacheEntry {
     }
 }
 
-/// Map plus its running byte total, guarded together so the two can't
-/// drift under concurrent mutation.
+/// The map and its running byte total, behind one lock so they cannot
+/// drift apart.
 struct Store {
     map: HashMap<String, CacheEntry>,
     used_bytes: usize,
 }
 
-/// Default byte budget for [`InMemoryCache::new`] — 256 MiB. Big enough
-/// that normal page / fragment caching never evicts, small enough that
-/// an unauthenticated flood of unique keys (e.g. `?cb=<random>`, which
-/// each create a distinct cache entry) can't drive the process to OOM.
-/// Override — including disabling (`0`) — via
+/// Default byte budget for [`InMemoryCache::new`]: 256 MiB. Large
+/// enough that ordinary page and fragment caching never evicts, small
+/// enough that a flood of unique keys (say `?cb=<random>`) cannot run
+/// the process out of memory. Change or disable it with
 /// [`InMemoryCache::with_max_bytes`].
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
 
-/// Default entry-count cap for [`InMemoryCache::new`] — bounds the
-/// eviction scan (and memory) even when individual entries are tiny.
-/// `0` disables it; see [`InMemoryCache::with_max_entries`].
+/// Default entry-count cap for [`InMemoryCache::new`]. Bounds memory
+/// and the eviction scan even when every entry is tiny. `0` turns it
+/// off; see [`InMemoryCache::with_max_entries`].
 pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
-/// A per-process in-memory cache backed by a `tokio::sync::RwLock<HashMap>`.
+/// Per-process cache over a `tokio::sync::RwLock<HashMap>`. Thread
+/// safe, async friendly, no external dependencies.
 ///
-/// - Thread-safe, async-friendly, zero external dependencies.
-/// - TTL is enforced lazily on reads (no background eviction thread).
-/// - **Size-bounded** (since #_cache_bound): capped at
-///   [`DEFAULT_MAX_BYTES`] / [`DEFAULT_MAX_ENTRIES`] with approximate-LRU
-///   eviction, so a flood of unique keys can't grow the process without
-///   limit. Eviction drops expired entries first, then the
-///   least-recently-used, until both budgets are met. Override or
-///   disable the budgets with [`InMemoryCache::with_max_bytes`] /
-///   [`InMemoryCache::with_max_entries`] (`0` = unbounded — the
-///   pre-#_cache_bound behavior).
-/// - `clear()` removes all entries.
+/// TTLs are checked on read; there is no background reaper.
 ///
-/// # Optional default TTL
+/// Size is bounded by [`DEFAULT_MAX_BYTES`] and
+/// [`DEFAULT_MAX_ENTRIES`], so a flood of unique keys cannot grow the
+/// process without limit. Eviction drops expired entries first, then
+/// the least recently used, until both budgets are met. Change the
+/// budgets with [`InMemoryCache::with_max_bytes`] and
+/// [`InMemoryCache::with_max_entries`]; `0` means unbounded.
 ///
-/// Build with [`InMemoryCache::with_default_ttl`] to apply a TTL to every
-/// `set` call that passes `ttl = None`.
+/// Build with [`InMemoryCache::with_default_ttl`] to give every
+/// `set(_, _, None)` call a TTL.
 pub struct InMemoryCache {
     inner: tokio::sync::RwLock<Store>,
     default_ttl: Option<Duration>,
-    /// Byte budget; `0` = unbounded (opt-out).
+    /// Byte budget; `0` means unbounded.
     max_bytes: usize,
-    /// Entry-count budget; `0` = unbounded.
+    /// Entry-count budget; `0` means unbounded.
     max_entries: usize,
-    /// Monotonic clock feeding each entry's `last_used` (approx-LRU).
+    /// Counter feeding each entry's `last_used`.
     tick: AtomicU64,
 }
 
 impl InMemoryCache {
-    /// Create a cache with no default TTL and the default size budgets
-    /// ([`DEFAULT_MAX_BYTES`] / [`DEFAULT_MAX_ENTRIES`], LRU eviction).
+    /// Cache with no default TTL and the default size budgets.
     #[must_use]
     pub fn new() -> Self {
         Self::build(None, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES)
     }
 
-    /// Create a cache where every `set(key, value, None)` call uses
-    /// `default_ttl` instead of "no expiry". Keeps the default budgets.
+    /// Cache where `set(key, value, None)` uses `default_ttl` instead
+    /// of never expiring. Keeps the default budgets.
     #[must_use]
     pub fn with_default_ttl(default_ttl: Duration) -> Self {
         Self::build(Some(default_ttl), DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES)
     }
 
-    /// Override the byte budget. `0` disables it (unbounded — the old
-    /// behavior). Chainable: `InMemoryCache::new().with_max_bytes(64 << 20)`.
+    /// Set the byte budget; `0` disables it. Chainable:
+    /// `InMemoryCache::new().with_max_bytes(64 << 20)`.
     #[must_use]
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes;
         self
     }
 
-    /// Override the entry-count budget. `0` disables it. Chainable.
+    /// Set the entry-count budget; `0` disables it. Chainable.
     #[must_use]
     pub fn with_max_entries(mut self, max_entries: usize) -> Self {
         self.max_entries = max_entries;
@@ -640,6 +643,27 @@ impl InMemoryCache {
         Some(Instant::now() + effective)
     }
 
+    /// Store `value` expiring at `expires_at` (`None` = never).
+    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>) {
+        let size = key.len() + value.len();
+        let tick = self.next_tick();
+        let mut store = self.inner.write().await;
+        if let Some(old) = store.map.remove(key) {
+            store.used_bytes = store.used_bytes.saturating_sub(old.size);
+        }
+        store.used_bytes += size;
+        store.map.insert(
+            key.to_owned(),
+            CacheEntry {
+                value: value.to_owned(),
+                expires_at,
+                last_used: AtomicU64::new(tick),
+                size,
+            },
+        );
+        self.evict_locked(&mut store);
+    }
+
     fn next_tick(&self) -> u64 {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
@@ -649,10 +673,10 @@ impl InMemoryCache {
             || (self.max_entries > 0 && s.map.len() > self.max_entries)
     }
 
-    /// Evict until both budgets are satisfied — expired entries first
-    /// (free + always correct), then least-recently-used. Caller holds
-    /// the write lock. Always keeps at least one entry, so a single
-    /// value larger than the whole budget still caches.
+    /// Evict until both budgets are met: expired entries first, then
+    /// the least recently used. The caller holds the write lock. One
+    /// entry always survives, so a value bigger than the whole budget
+    /// still caches.
     fn evict_locked(&self, store: &mut Store) {
         if !self.over_budget(store) {
             return;
@@ -694,13 +718,17 @@ impl Default for InMemoryCache {
 
 #[async_trait]
 impl Cache for InMemoryCache {
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let store = self.inner.read().await;
         Ok(store.map.get(key).and_then(|e| {
             if e.is_expired() {
                 None
             } else {
-                // Approx-LRU bump — read lock is enough (atomic field).
+                // LRU bump; the field is atomic, so a read lock is enough.
                 e.last_used.store(self.next_tick(), Ordering::Relaxed);
                 Some(e.value.clone())
             }
@@ -708,34 +736,20 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        let expires_at = self.resolve_ttl(ttl);
-        let size = key.len() + value.len();
-        let tick = self.next_tick();
-        let mut store = self.inner.write().await;
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
-        self.evict_locked(&mut store);
+        self.insert(key, value, self.resolve_ttl(ttl)).await;
         Ok(())
     }
 
-    /// Atomic increment (#1253). The trait default is get-parse-set,
-    /// which races two concurrent callers into a lost update — fatal
-    /// for the counters built on it (account lockout, distributed lock,
-    /// rate limiting). This holds the single write lock across the whole
-    /// read-modify-write, so an in-process increment is atomic. (Across
-    /// replicas you still need `RedisCache`, whose `INCRBY` is atomic on
-    /// the server; a per-process cache cannot help there.)
+    async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        self.insert(key, value, None).await;
+        Ok(())
+    }
+
+    /// Atomic increment. Holds the write lock across the whole
+    /// read-modify-write, so two callers cannot lose an update. The
+    /// counters built on this — account lockout, distributed lock,
+    /// rate limiting — need that. Across replicas you still need
+    /// `RedisCache`; a per-process cache cannot help there.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let tick = self.next_tick();
         let mut store = self.inner.write().await;
@@ -748,9 +762,9 @@ impl Cache for InMemoryCache {
         let new = current.saturating_add(by);
         let value = new.to_string();
         let size = key.len() + value.len();
-        // Preserve the existing expiry when the key is live and no new
-        // TTL is given, matching the fixed-window semantics counters
-        // rely on; a supplied TTL (or a fresh/expired key) resets it.
+        // Keep the existing expiry when the key is live and no TTL is
+        // passed. That is the fixed-window behaviour counters need. A
+        // supplied TTL, or a new or expired key, resets it.
         let expires_at = match store.map.get(key) {
             Some(e) if !e.is_expired() && ttl.is_none() => e.expires_at,
             _ => self.resolve_ttl(ttl),
@@ -772,10 +786,9 @@ impl Cache for InMemoryCache {
         Ok(new)
     }
 
-    /// Atomic set-if-absent (#1254). The trait default is a racy
-    /// `exists` then `set`; this holds the single write lock across the
-    /// check and the insert, so it is a genuine test-and-set — the
-    /// primitive `DistributedLock` acquire is built on.
+    /// Atomic set-if-absent. Holds the write lock across the check and
+    /// the insert, so it is a real test-and-set. `DistributedLock`
+    /// builds its acquire on this.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let tick = self.next_tick();
         let mut store = self.inner.write().await;
@@ -820,10 +833,9 @@ impl Cache for InMemoryCache {
         Ok(())
     }
 
-    /// Exact prefix delete — the map is right here, so there is no need
-    /// to fall back to the trait default's whole-cache clear (#1227).
-    /// `used_bytes` is decremented by what actually left, keeping the
-    /// LRU budget honest.
+    /// Exact prefix delete: the map is right here, so it can be
+    /// filtered. `used_bytes` drops by exactly what was removed, so
+    /// the budget stays honest.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let mut store = self.inner.write().await;
         let mut freed = 0usize;
@@ -842,46 +854,44 @@ impl Cache for InMemoryCache {
 
 // ------------------------------------------------------------------ FileCache
 
-/// File-system cache — one file per key, mirroring Django's
-/// `django.core.cache.backends.filebased.FileBasedCache` (issue #408).
+/// Cache on disk, one file per key.
 ///
-/// Useful when you want process-restart-durable caching without
-/// running Redis, and when the working set fits the local disk.
-/// Keys are SHA-256-hashed to produce filenames that are safe across
-/// platforms (no path-separator surprises, no length limits, no case
-/// folding on macOS). The directory is auto-created on the first
-/// `set`.
+/// Use it when you want a cache that survives a restart without
+/// running Redis, and the working set fits on local disk. Keys are
+/// SHA-256 hashed into filenames, so no key can produce a path
+/// separator, an over-long name, or a case clash on macOS. The
+/// directory is created on the first `set`.
 ///
 /// ## File format
 ///
-/// Each entry is a small binary blob:
-///   `[expires_at_unix_millis: i64 big-endian][value bytes]`
+/// `[magic "RCF1"][expires_at: i64 BE epoch-millis][key_len: u32 BE]
+/// [key bytes][value bytes]`. `expires_at = 0` means no TTL. Expired
+/// entries are removed on the next `get` or `exists`; there is no
+/// background reaper.
 ///
-/// `expires_at_unix_millis` is `0` when the entry has no TTL. Expired
-/// entries are pruned lazily on the next `get` / `exists` call —
-/// there is no background reaper.
+/// ## Limits
 ///
-/// The header held **seconds** before #1233, which made sub-second TTLs
-/// unrepresentable and let a 1-second entry expire immediately. Entries
-/// written by an older build decode as long-past and are treated as
-/// expired, so upgrading costs one cold read per stale key — the safe
-/// direction for a cache.
-///
-/// ## Limitations vs Django
-///
-/// Django's FBC takes a `_lock` file for atomic multi-process writes
-/// + supports MAX_ENTRIES with a cull strategy. This implementation
-/// is the minimal Django-shape primitive: same on-disk semantics,
-/// per-process atomicity via `std::fs::write` (atomic per-call on
-/// most filesystems). Add file locking when a project actually
-/// shares the directory across processes.
+/// `set` writes a temp file and renames it into place, so readers see
+/// the old or the new entry, never a partial one. `set`, `add`, `incr`,
+/// `touch` and removing an expired entry hold an advisory lock (one of
+/// 256 `.lock-XX` files), so `add` has one winner and `incr` loses no
+/// count across processes on the host. `delete` and `clear` don't lock.
+/// Where the filesystem has no locks, they run unlocked after one warning.
+/// Keep the directory private (0700): anyone who can open a lock file
+/// can stall writers for up to 5 seconds per call.
+/// There is no entry cap with a cull strategy. The directory is per host.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }
 
 impl FileCache {
-    /// Build a cache that stores entries under `dir`. The directory
-    /// is auto-created on the first `set` call.
+    /// File-format marker. Bump the digit when the layout changes.
+    /// An unknown magic makes the entry undecodable, and an
+    /// undecodable entry is dropped on next access, so a bump migrates
+    /// a cache directory on its own.
+    const MAGIC: &'static [u8] = b"RCF1";
+
+    /// Store entries under `dir`, which is created on the first `set`.
     #[must_use]
     pub fn new(dir: impl Into<std::path::PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -893,9 +903,8 @@ impl FileCache {
         &self.dir
     }
 
-    /// Hash the key into a stable, filesystem-safe filename. Uses
-    /// SHA-256 (already a workspace dep via `passwords` / `signed_url`)
-    /// hexlified; no separators, no length surprises.
+    /// Hash the key into a stable, filesystem-safe filename: SHA-256
+    /// in hex, so no separators and no length surprises.
     fn key_path(&self, key: &str) -> std::path::PathBuf {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(key.as_bytes());
@@ -908,9 +917,8 @@ impl FileCache {
         self.dir.join(name)
     }
 
-    /// Epoch **milliseconds**. Seconds were too coarse: an entry whose
-    /// TTL was stamped at second granularity could be born already
-    /// expired (#1233).
+    /// Epoch milliseconds. Seconds are too coarse: an entry stamped at
+    /// second granularity can be born already expired.
     fn now_unix_millis() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -919,74 +927,285 @@ impl FileCache {
             .unwrap_or(0)
     }
 
-    /// Encode `[expires_at: i64 BE epoch-millis][value bytes]`.
-    /// `expires_at = 0` means no TTL.
+    /// Write one entry in the format described on [`FileCache`].
     ///
-    /// Milliseconds, not seconds. At second granularity a `set` landing
-    /// at wall-clock `T.999` stamped `expires_at = T + 1`, and the read
-    /// a millisecond later was already at `T+1` — so a 1-second TTL
-    /// could expire in one millisecond, and any sub-second TTL rounded
-    /// to `as_secs() == 0` and was born expired (#1233). The header is
-    /// the same 8 bytes; only its unit changed.
-    fn encode(value: &str, ttl: Option<Duration>) -> Vec<u8> {
+    /// The key itself is stored because the filename is only its
+    /// SHA-256, so nothing about the key can be read back from disk.
+    /// Without the key, `delete_prefix` would be impossible.
+    ///
+    /// Timestamps are in milliseconds. At second granularity a `set`
+    /// at `T.999` stamps `T + 1` and expires a millisecond later, and
+    /// any sub-second TTL rounds to zero and is born expired.
+    fn encode(key: &str, value: &str, ttl: Option<Duration>) -> Vec<u8> {
         let expires_at = ttl
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .map(|ms| Self::now_unix_millis().saturating_add(ms))
             .unwrap_or(0);
-        let mut out = Vec::with_capacity(8 + value.len());
+        Self::encode_at(key, value, expires_at)
+    }
+
+    /// [`Self::encode`] with an absolute expiry (`0` = none).
+    fn encode_at(key: &str, value: &str, expires_at: i64) -> Vec<u8> {
+        let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
+        let mut out = Vec::with_capacity(Self::MAGIC.len() + 12 + key.len() + value.len());
+        out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(&expires_at.to_be_bytes());
+        out.extend_from_slice(&key_len.to_be_bytes());
+        out.extend_from_slice(key.as_bytes());
         out.extend_from_slice(value.as_bytes());
         out
     }
 
-    /// Decode the file body. Returns `Some(value)` if present + not
-    /// expired, else `None`. Caller is responsible for deleting the
-    /// file when this returns `None` due to expiry.
+    /// Decode a file body into `(key, value, expired, expires_at)`.
     ///
-    /// Expiry is `>`, not `>=`: an entry is live for the full duration
-    /// it was promised, rather than dying on the boundary tick.
-    fn decode(buf: &[u8]) -> Option<(String, bool /* expired */)> {
-        if buf.len() < 8 {
+    /// Returns `None` for anything unreadable: a truncated write, an
+    /// older format, a bad length. The caller then removes the file,
+    /// which is how a format change migrates itself.
+    ///
+    /// Expiry uses `>`, not `>=`, so an entry stays live for the whole
+    /// duration it was given.
+    fn decode(buf: &[u8]) -> Option<(String, String, bool /* expired */, i64)> {
+        let rest = buf.strip_prefix(Self::MAGIC)?;
+        if rest.len() < 12 {
             return None;
         }
         let mut ts = [0u8; 8];
-        ts.copy_from_slice(&buf[..8]);
+        ts.copy_from_slice(&rest[..8]);
         let expires_at = i64::from_be_bytes(ts);
-        let value = std::str::from_utf8(&buf[8..]).ok()?.to_owned();
+
+        let mut kl = [0u8; 4];
+        kl.copy_from_slice(&rest[8..12]);
+        let key_len = usize::try_from(u32::from_be_bytes(kl)).ok()?;
+
+        let body = rest.get(12..)?;
+        let key = std::str::from_utf8(body.get(..key_len)?).ok()?.to_owned();
+        let value = std::str::from_utf8(body.get(key_len..)?).ok()?.to_owned();
+
         let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
-        Some((value, expired))
+        Some((key, value, expired, expires_at))
+    }
+
+    /// Write an entry to a fresh temp file in the cache dir, ready to be
+    /// renamed into place. The name has no `.cache` extension.
+    fn write_tmp(&self, bytes: &[u8]) -> Result<std::path::PathBuf, CacheError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let tmp = self
+            .dir
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp, bytes).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CacheError::Connection(format!("write: {e}"))
+        })?;
+        Ok(tmp)
+    }
+
+    /// Longest wait for a stripe lock before the call fails.
+    const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+    /// Lock the stripe that owns `path`. POSIX has no conditional
+    /// unlink, so every replace or removal of an existing entry happens
+    /// under this lock. A held lock is waited for off the async worker,
+    /// via `spawn_blocking`, so that path needs a tokio runtime.
+    async fn lock_entry(&self, path: &std::path::Path) -> Result<EntryLock, CacheError> {
+        use fs4::TryLockError;
+        let file = self.open_lock(path)?;
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => return Ok(EntryLock(Some(file))),
+            Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + Self::LOCK_WAIT;
+            let mut pause = Duration::from_millis(1);
+            loop {
+                match fs4::FileExt::try_lock(&file) {
+                    Ok(()) => return Ok(EntryLock(Some(file))),
+                    Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
+                    Err(TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => {
+                        return Err(CacheError::Connection("lock: timed out".into()));
+                    }
+                    Err(TryLockError::WouldBlock) => {
+                        std::thread::sleep(pause);
+                        pause = (pause * 2).min(Duration::from_millis(5));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| CacheError::Connection(format!("lock: {e}")))?
+    }
+
+    /// Open the stripe's lock file: owner-only, never through a symlink.
+    fn open_lock(&self, path: &std::path::Path) -> Result<std::fs::File, CacheError> {
+        let stripe = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.get(..2))
+            .unwrap_or("00");
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        opts.open(self.dir.join(format!(".lock-{stripe}")))
+            .map_err(|e| CacheError::Connection(format!("open lock: {e}")))
+    }
+
+    /// A lock error: go on unlocked where the filesystem has no locks,
+    /// else fail the call.
+    fn lock_failed(e: &std::io::Error) -> Result<EntryLock, CacheError> {
+        if Self::no_lock_support(e) {
+            Ok(Self::unlocked(e))
+        } else {
+            Err(CacheError::Connection(format!("lock: {e}")))
+        }
+    }
+
+    /// `true` when the error means "this filesystem can't lock", not a fault.
+    fn no_lock_support(e: &std::io::Error) -> bool {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ENOLCK) {
+            return true;
+        }
+        e.kind() == std::io::ErrorKind::Unsupported
+    }
+
+    /// No locks on this filesystem: go on unlocked, and say so once.
+    fn unlocked(e: &std::io::Error) -> EntryLock {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                target: "rustango::cache",
+                error = %e,
+                "FileCache: the filesystem refused a file lock, so racing `add`/`incr` \
+                 calls are not serialized; use a local disk or Redis"
+            );
+        });
+        EntryLock(None)
+    }
+
+    fn read_entry(path: &std::path::Path) -> Result<Entry, CacheError> {
+        match std::fs::read(path) {
+            Ok(b) => Ok(match Self::decode(&b) {
+                Some((_, v, false, at)) => Entry::Live(v, at),
+                _ => Entry::Dead,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Entry::Missing),
+            Err(e) => Err(CacheError::Connection(format!("read: {e}"))),
+        }
+    }
+
+    /// Remove `path` if it is still expired or undecodable once locked,
+    /// and return its value if a racer replaced it with a live one.
+    async fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
+        let _lock = self.lock_entry(path).await?;
+        match Self::read_entry(path)? {
+            Entry::Live(v, _) => Ok(Some(v)),
+            Entry::Dead => {
+                let _ = std::fs::remove_file(path);
+                Ok(None)
+            }
+            Entry::Missing => Ok(None),
+        }
+    }
+
+    /// Lock `path`'s stripe for a write already staged in `tmp`,
+    /// removing `tmp` if the lock can't be had.
+    async fn lock_for(
+        &self,
+        tmp: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Result<EntryLock, CacheError> {
+        self.lock_entry(path).await.inspect_err(|_| {
+            let _ = std::fs::remove_file(tmp);
+        })
+    }
+
+    /// Rename `tmp` onto `path`, removing `tmp` if that fails.
+    fn put(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), CacheError> {
+        std::fs::rename(tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(tmp);
+            CacheError::Connection(format!("rename: {e}"))
+        })
+    }
+}
+
+/// What a key's file holds. `Dead` is expired or undecodable. `Live`
+/// carries the stored expiry (epoch ms, `0` = none).
+enum Entry {
+    Missing,
+    Dead,
+    Live(String, i64),
+}
+
+/// Held stripe lock, released on drop. `None` where the filesystem has no locks.
+struct EntryLock(Option<std::fs::File>);
+
+impl Drop for EntryLock {
+    fn drop(&mut self) {
+        if let Some(f) = &self.0 {
+            let _ = fs4::FileExt::unlock(f);
+        }
     }
 }
 
 #[async_trait]
 impl Cache for FileCache {
+    /// One directory per host: other replicas don't see these entries.
+    fn is_process_local(&self) -> bool {
+        true
+    }
+
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let path = self.key_path(key);
-        let buf = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(CacheError::Connection(format!("read: {e}"))),
-        };
-        match Self::decode(&buf) {
-            Some((_, true)) => {
-                let _ = std::fs::remove_file(&path);
-                Ok(None)
-            }
-            Some((v, false)) => Ok(Some(v)),
-            None => {
-                let _ = std::fs::remove_file(&path);
-                Ok(None)
-            }
+        match Self::read_entry(&path)? {
+            Entry::Missing => Ok(None),
+            Entry::Live(v, _) => Ok(Some(v)),
+            Entry::Dead => self.clear_dead(&path).await,
         }
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
         let path = self.key_path(key);
-        std::fs::write(&path, Self::encode(value, ttl))
-            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
-        Ok(())
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        let _lock = self.lock_for(&tmp, &path).await?;
+        Self::put(&tmp, &path)
+    }
+
+    /// Read, add and write under the stripe lock, so no count is lost.
+    /// A non-integer counts as 0. As in `InMemoryCache`, a live key keeps
+    /// its expiry when `ttl` is `None`; a `ttl`, or a new key, resets it.
+    async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        let path = self.key_path(key);
+        let _lock = self.lock_entry(&path).await?;
+        let (cur, kept) = match Self::read_entry(&path)? {
+            Entry::Live(v, at) => (v.parse::<i64>().unwrap_or(0), Some(at)),
+            Entry::Dead | Entry::Missing => (0, None),
+        };
+        let new = cur.saturating_add(by);
+        let bytes = match (ttl, kept) {
+            (None, Some(at)) => Self::encode_at(key, &new.to_string(), at),
+            _ => Self::encode(key, &new.to_string(), ttl),
+        };
+        let tmp = self.write_tmp(&bytes)?;
+        Self::put(&tmp, &path)?;
+        Ok(new)
+    }
+
+    /// Rewrite a live entry with the new expiry, under the stripe lock.
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let path = self.key_path(key);
+        let _lock = self.lock_entry(&path).await?;
+        let Entry::Live(value, _) = Self::read_entry(&path)? else {
+            return Ok(false);
+        };
+        let tmp = self.write_tmp(&Self::encode(key, &value, ttl))?;
+        Self::put(&tmp, &path).map(|()| true)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -1000,6 +1219,26 @@ impl Cache for FileCache {
 
     async fn exists(&self, key: &str) -> Result<bool, CacheError> {
         Ok(self.get(key).await?.is_some())
+    }
+
+    /// Atomic across processes on the host: the check and the rename
+    /// happen under the entry's stripe lock.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let path = self.key_path(key);
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        let _lock = self.lock_for(&tmp, &path).await?;
+        let live = match Self::read_entry(&path) {
+            Ok(entry) => matches!(entry, Entry::Live(..)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if live {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(false);
+        }
+        Self::put(&tmp, &path).map(|()| true)
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
@@ -1016,14 +1255,53 @@ impl Cache for FileCache {
         }
         Ok(())
     }
+
+    /// Delete only the entries whose key starts with `prefix`.
+    ///
+    /// Filenames are hashes, so the key has to be read from inside
+    /// each file. That makes this a full directory scan with one read
+    /// per file. A prefix delete is a rare admin action, so the cost
+    /// is fine.
+    ///
+    /// Expired and undecodable entries are removed along the way, as
+    /// the scan has already paid for the read.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("cache") {
+                continue;
+            }
+            let Ok(buf) = std::fs::read(&path) else {
+                continue;
+            };
+            match Self::decode(&buf) {
+                // Matching entry: same path means same key, so no re-check.
+                Some((key, ..)) if key.starts_with(prefix) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                // Another namespace's live entry — leave it alone.
+                Some((_, _, false, _)) => {}
+                // Expired, unreadable, or an older format: drop it if still dead.
+                _ => {
+                    let _ = self.clear_dead(&path).await;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "config"))]
 mod settings_tests {
     use super::*;
 
-    /// Unset backend → InMemoryCache. The cache is non-trait-named,
-    /// but we can confirm by writing then reading.
+    /// An unset backend gives an InMemoryCache. The concrete type is
+    /// hidden, so check it by writing and reading back.
     #[tokio::test]
     async fn unset_backend_returns_inmemory() {
         let s = crate::config::CacheSettings::default();
@@ -1042,7 +1320,7 @@ mod settings_tests {
         assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     }
 
-    /// `"null"` / `"none"` map to NullCache — every read returns None.
+    /// `"null"` and `"none"` give a NullCache, so reads return None.
     #[tokio::test]
     async fn null_backend_drops_writes() {
         let mut s = crate::config::CacheSettings::default();
@@ -1052,8 +1330,8 @@ mod settings_tests {
         assert!(cache.get("k").await.unwrap().is_none());
     }
 
-    /// Unknown backend names fall back to InMemoryCache (the writes
-    /// land — different from the null backend).
+    /// An unknown name falls back to InMemoryCache, where writes land
+    /// — unlike the null backend.
     #[tokio::test]
     async fn unknown_backend_falls_back_to_inmemory() {
         let mut s = crate::config::CacheSettings::default();
@@ -1063,33 +1341,173 @@ mod settings_tests {
         assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     }
 
-    /// `"redis"` without `cache-redis` feature falls back to
-    /// InMemoryCache (don't block startup on a misconfig).
-    /// Whether the redis arm runs depends on the feature; both paths
-    /// must yield a working cache.
-    #[tokio::test]
-    async fn redis_without_url_falls_back_to_inmemory() {
+    /// The sync resolver must refuse `redis`, not hand back an
+    /// in-memory cache. A working cache of the wrong kind is exactly
+    /// what the caller cannot detect.
+    #[test]
+    #[should_panic(expected = "cannot be built by `from_settings`")]
+    fn redis_backend_refuses_the_sync_resolver() {
         let mut s = crate::config::CacheSettings::default();
         s.backend = Some("redis".into());
-        // No redis_url — the fallback path should still produce a
-        // usable cache.
-        let cache = from_settings(&s);
-        // Round-trip works only on the in-memory fallback. This
-        // test serves as both the "missing url" and "no feature"
-        // regression: in either case, the resulting cache is
-        // InMemoryCache.
-        #[cfg(not(feature = "cache-redis"))]
-        {
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
-        }
-        #[cfg(feature = "cache-redis")]
-        {
-            // With the feature on, missing url still falls back to
-            // in-memory.
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
-        }
+        let _ = from_settings(&s);
+    }
+
+    /// Same for `db`, which settings cannot describe at all:
+    /// `DatabaseCache` needs a runtime `&Pool`.
+    #[test]
+    #[should_panic(expected = "cannot be built from settings")]
+    fn db_backend_refuses_the_sync_resolver() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("db".into());
+        let _ = from_settings(&s);
+    }
+
+    /// The async resolver errors on a missing url instead of quietly
+    /// swapping in another backend.
+    #[tokio::test]
+    async fn async_resolver_errors_on_redis_without_url() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("redis".into());
+        // `expect_err` needs `BoxedCache: Debug`, which it is not.
+        // Match instead of widening the trait just for a test.
+        let Err(err) = from_settings_async(&s).await else {
+            panic!("missing redis_url must be an error, not a fallback");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("redis"),
+            "the error must name the backend it could not build: {msg}"
+        );
+    }
+
+    /// The sync-buildable backends still work through it, so one
+    /// resolver covers every case.
+    #[tokio::test]
+    async fn async_resolver_still_builds_the_sync_backends() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("memory".into());
+        let cache = from_settings_async(&s).await.expect("memory builds");
+        cache.set("k", "v", None).await.unwrap();
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+}
+
+#[cfg(test)]
+mod file_cache_tests {
+    use super::*;
+
+    /// Each host has its own directory, so replicas don't share entries.
+    #[test]
+    fn file_cache_reports_process_local() {
+        assert!(FileCache::new("unused").is_process_local());
+    }
+
+    fn tmp_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rustango-fc-{label}-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Hold `key`'s stripe lock from outside the cache.
+    fn hold_stripe(cache: &FileCache, key: &str) -> std::fs::File {
+        let f = cache.open_lock(&cache.key_path(key)).unwrap();
+        fs4::FileExt::lock(&f).unwrap();
+        f
+    }
+
+    /// A held stripe must not park the async worker: other tasks keep running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn waiting_for_a_stripe_leaves_the_worker_free() {
+        let dir = tmp_dir("wait");
+        let cache = std::sync::Arc::new(FileCache::new(&dir));
+        let held = hold_stripe(&cache, "k");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let writer = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.set("k", "v", None).await })
+        };
+        let start = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let waited = start.elapsed();
+        writer.await.unwrap().unwrap();
+        release.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            waited < Duration::from_millis(200),
+            "worker blocked {waited:?}"
+        );
+    }
+
+    /// A stripe held past the deadline fails the call and leaves no temp file.
+    #[tokio::test]
+    async fn a_stripe_held_too_long_times_out_cleanly() {
+        let dir = tmp_dir("timeout");
+        let cache = FileCache::new(&dir);
+        let _held = hold_stripe(&cache, "k");
+        assert!(cache.set("k", "v", None).await.is_err());
+        let tmps = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(tmps, 0, "temp file left behind");
+    }
+
+    /// A planted symlink at a lock path is refused, not followed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_lock_file_is_not_followed() {
+        let dir = tmp_dir("link");
+        let cache = FileCache::new(&dir);
+        let lock = cache.open_lock(&cache.key_path("k")).unwrap();
+        drop(lock);
+        let stripe = dir.join(format!(
+            ".lock-{}",
+            &cache.key_path("k").file_name().unwrap().to_str().unwrap()[..2]
+        ));
+        let target = dir.join("victim");
+        std::fs::remove_file(&stripe).unwrap();
+        std::os::unix::fs::symlink(&target, &stripe).unwrap();
+        let res = cache.set("k", "v", None).await;
+        let created = target.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_err());
+        assert!(!created, "the symlink target was created");
+    }
+
+    /// Only "no lock support" errors fall back to unlocked; the rest fail.
+    #[test]
+    fn only_unsupported_lock_errors_go_unlocked() {
+        use std::io::{Error, ErrorKind};
+        assert!(FileCache::no_lock_support(&Error::from(
+            ErrorKind::Unsupported
+        )));
+        #[cfg(unix)]
+        assert!(FileCache::no_lock_support(&Error::from_raw_os_error(
+            libc::ENOLCK
+        )));
+        assert!(!FileCache::no_lock_support(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        #[cfg(unix)]
+        assert!(!FileCache::no_lock_support(&Error::from_raw_os_error(
+            libc::EBADF
+        )));
+    }
+
+    /// Lock files are owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn lock_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tmp_dir("mode");
+        let cache = FileCache::new(&dir);
+        let f = cache.open_lock(&cache.key_path("k")).unwrap();
+        let mode = f.metadata().unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode & 0o077, 0, "mode {mode:o}");
     }
 }
 
@@ -1101,8 +1519,7 @@ mod bound_tests {
         "x".repeat(n)
     }
 
-    /// Byte budget is enforced: flooding unique keys never grows the
-    /// cache past `max_bytes`. This is the unique-key memory-DoS guard.
+    /// A flood of unique keys never grows the cache past `max_bytes`.
     #[tokio::test]
     async fn byte_budget_caps_unique_key_flood() {
         let cache = InMemoryCache::new()
@@ -1124,7 +1541,7 @@ mod bound_tests {
         );
     }
 
-    /// Entry-count budget is enforced independently of the byte budget.
+    /// The entry-count budget works on its own, without the byte one.
     #[tokio::test]
     async fn entry_budget_caps_count() {
         let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(5);
@@ -1134,8 +1551,8 @@ mod bound_tests {
         assert!(cache.inner.read().await.map.len() <= 5);
     }
 
-    /// Eviction is least-recently-used: a key kept warm by reads
-    /// survives a flood that evicts colder keys.
+    /// A key kept warm by reads survives a flood that evicts colder
+    /// keys.
     #[tokio::test]
     async fn lru_keeps_recently_used() {
         let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(3);
@@ -1148,7 +1565,7 @@ mod bound_tests {
         assert_eq!(cache.get("hot").await.unwrap().as_deref(), Some("v"));
     }
 
-    /// `0` budgets restore the pre-fix unbounded behavior (opt-out).
+    /// A budget of `0` means no limit.
     #[tokio::test]
     async fn zero_budget_is_unbounded() {
         let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(0);

@@ -1,24 +1,21 @@
-//! MCP Authorization-spec interop (epic #1013, follow-up #1088).
+//! OAuth discovery, so a standards-compliant MCP client can find the
+//! agent credentials on its own.
 //!
-//! **Additive** over the locked scoped-JWT model (epic decision #4): it does
-//! not replace agent credentials, it makes them discoverable by
-//! spec-compliant MCP clients. Three pieces:
+//! This adds to the scoped-JWT model rather than replacing it. Three
+//! endpoints:
 //!
-//! * **Protected Resource Metadata** (RFC 9728) at
-//!   `{prefix}/.well-known/oauth-protected-resource` — points clients at the
-//!   authorization server.
-//! * **Authorization Server Metadata** (RFC 8414) at
-//!   `{prefix}/.well-known/oauth-authorization-server` — advertises the
-//!   `client_credentials` token endpoint.
-//! * **OAuth 2.1 client-credentials** at `{prefix}/oauth/token` — the agent
-//!   exchanges `client_id`/`client_secret` (its name/secret) for the same
-//!   scoped JWT the bespoke `/token` issues.
+//! * `{prefix}/.well-known/oauth-protected-resource` (RFC 9728)
+//!   points the client at the authorization server.
+//! * `{prefix}/.well-known/oauth-authorization-server` (RFC 8414)
+//!   advertises the token endpoint.
+//! * `{prefix}/oauth/token` trades a `client_id` and
+//!   `client_secret`, which are the agent's name and secret, for the
+//!   same scoped JWT that `/token` issues.
 //!
-//! The advertised URLs track the actual mount prefix via the request's
-//! [`axum::extract::OriginalUri`] (#1094), so they stay correct whether the
-//! MCP router is nested under `/mcp`, `/api/mcp`, or the origin root. Apps that
-//! prefer the strict-RFC origin-root layout can additionally re-serve these
-//! `.well-known/*` documents at `/` themselves.
+//! The URLs in those documents follow the real mount prefix, read
+//! from the request, so they are right whether the router sits at
+//! `/mcp`, `/api/mcp` or the root. If you need the documents at the
+//! origin root, as the RFCs prefer, serve them there yourself too.
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -28,10 +25,10 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::extractors::Tenant;
+use crate::extractors::{Tenant, TenantScope};
 
 use super::auth::{mint_agent_jwt, MintError};
-use super::router::McpState;
+use super::router::AuthedMcpState;
 
 /// RFC 9728 Protected Resource Metadata document.
 #[must_use]
@@ -56,14 +53,20 @@ pub fn authorization_server_metadata(issuer: &str, token_endpoint: &str) -> Valu
     })
 }
 
-/// `GET {prefix}/.well-known/oauth-protected-resource`. URLs track the real
-/// mount prefix via [`OriginalUri`] (#1094): the `resource` is `{origin}{prefix}`
-/// and the authorization server points back under the same prefix.
+/// `GET {prefix}/.well-known/oauth-protected-resource`. The
+/// `resource` is the origin plus the real mount prefix, and the
+/// authorization server points back under that same prefix.
 pub(crate) async fn well_known_protected_resource(
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Response {
-    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-protected-resource");
+    let base = super::auth::mount_base(
+        &headers,
+        &extensions,
+        &uri,
+        "/.well-known/oauth-protected-resource",
+    );
     Json(protected_resource_metadata(
         &base,
         &format!("{base}/.well-known/oauth-authorization-server"),
@@ -71,13 +74,19 @@ pub(crate) async fn well_known_protected_resource(
     .into_response()
 }
 
-/// `GET {prefix}/.well-known/oauth-authorization-server`. URLs track the real
-/// mount prefix via [`OriginalUri`] (#1094).
+/// `GET {prefix}/.well-known/oauth-authorization-server`. The URLs
+/// follow the real mount prefix.
 pub(crate) async fn well_known_authorization_server(
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Response {
-    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-authorization-server");
+    let base = super::auth::mount_base(
+        &headers,
+        &extensions,
+        &uri,
+        "/.well-known/oauth-authorization-server",
+    );
     Json(authorization_server_metadata(
         &base,
         &format!("{base}/oauth/token"),
@@ -88,8 +97,8 @@ pub(crate) async fn well_known_authorization_server(
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthTokenForm {
     pub grant_type: String,
-    // Optional in the body: RFC 6749 §2.3.1 allows the client to authenticate
-    // via HTTP Basic instead (`client_secret_basic`). Required if Basic is absent.
+    // Optional here, because the client may instead authenticate
+    // with HTTP Basic. Required when it does not.
     #[serde(default)]
     pub client_id: Option<String>,
     #[serde(default)]
@@ -99,8 +108,8 @@ pub(crate) struct OAuthTokenForm {
     pub scope: Option<String>,
 }
 
-/// Decode an `Authorization: Basic base64(client_id:client_secret)` header
-/// (RFC 6749 §2.3.1 / RFC 7617). `None` if absent or malformed.
+/// Decode an `Authorization: Basic base64(client_id:client_secret)`
+/// header. `None` when it is missing or malformed.
 fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let b64 = raw.strip_prefix("Basic ")?.trim();
@@ -110,24 +119,27 @@ fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((id.to_owned(), secret.to_owned()))
 }
 
-/// `POST {prefix}/oauth/token` — OAuth 2.1 client-credentials grant. The
-/// `client_id` / `client_secret` are the agent's name / secret, supplied either
-/// via HTTP Basic (`client_secret_basic`, preferred) or form fields
-/// (`client_secret_post`). The issued access token is the same scoped JWT as
-/// the bespoke endpoint.
-pub(crate) async fn oauth_token(
-    t: Tenant,
-    State(state): State<McpState>,
+/// `POST {prefix}/oauth/token`: the OAuth 2.1 client-credentials
+/// grant. The `client_id` and `client_secret` are the agent's name
+/// and secret. Send them in an HTTP Basic header, which is
+/// preferred, or as form fields. The token it returns is the same
+/// scoped JWT as `/token`.
+pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
+    t: Tenant<DB>,
+    State(state): State<AuthedMcpState>,
     headers: HeaderMap,
     Form(form): Form<OAuthTokenForm>,
+) -> impl std::future::Future<Output = Response> + Send {
+    oauth_token_in(t.into(), state, headers, form)
+}
+
+async fn oauth_token_in(
+    t: TenantScope,
+    state: AuthedMcpState,
+    headers: HeaderMap,
+    form: OAuthTokenForm,
 ) -> Response {
-    let Some(jwt) = state.jwt.as_ref() else {
-        return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "auth not configured",
-        );
-    };
+    let jwt = &state.jwt;
     if form.grant_type != "client_credentials" {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -135,7 +147,7 @@ pub(crate) async fn oauth_token(
             "only client_credentials is supported",
         );
     }
-    // HTTP Basic wins over body params (RFC 6749 §2.3.1).
+    // An HTTP Basic header wins over the form fields.
     let creds = basic_auth(&headers).or_else(|| match (form.client_id, form.client_secret) {
         (Some(id), Some(secret)) => Some((id, secret)),
         _ => None,
@@ -165,10 +177,20 @@ pub(crate) async fn oauth_token(
             "server_error",
             "token issuance failed",
         ),
+        Err(MintError::Busy) => {
+            let mut resp = oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "try again",
+            );
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, 1u64.into());
+            resp
+        }
     }
 }
 
-/// RFC 6749 §5.2 OAuth error response.
+/// An OAuth error response, in the shape RFC 6749 defines.
 fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
     (
         status,
@@ -198,7 +220,7 @@ mod tests {
         assert_eq!(asm["issuer"], "https://app.example");
         assert_eq!(asm["token_endpoint"], "https://app.example/oauth/token");
         assert_eq!(asm["grant_types_supported"][0], "client_credentials");
-        // Both client-auth methods are advertised (#1099: Basic + post).
+        // Both client-auth methods are advertised.
         let methods = asm["token_endpoint_auth_methods_supported"]
             .as_array()
             .unwrap();
@@ -209,7 +231,7 @@ mod tests {
     #[test]
     fn basic_auth_decodes_client_credentials() {
         let mut h = HeaderMap::new();
-        // base64("bot:s3cret") = "Ym90OnMzY3JldA=="
+        // The header below is base64 of "bot:s3cret".
         let b64 = base64::engine::general_purpose::STANDARD.encode("bot:s3cret");
         h.insert(
             header::AUTHORIZATION,
@@ -220,7 +242,7 @@ mod tests {
             Some(("bot".to_owned(), "s3cret".to_owned()))
         );
 
-        // Secret may itself contain ':' — only the first split counts.
+        // A secret may contain a colon, so only the first one splits.
         let b64 = base64::engine::general_purpose::STANDARD.encode("bot:a:b");
         h.insert(
             header::AUTHORIZATION,
@@ -228,7 +250,7 @@ mod tests {
         );
         assert_eq!(basic_auth(&h), Some(("bot".to_owned(), "a:b".to_owned())));
 
-        // Missing / non-Basic → None.
+        // A missing header, or one that is not Basic, gives None.
         assert_eq!(basic_auth(&HeaderMap::new()), None);
     }
 }

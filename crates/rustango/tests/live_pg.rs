@@ -725,7 +725,7 @@ async fn count_returns_total_with_no_filter() {
 }
 
 #[tokio::test]
-async fn count_respects_filters_and_ignores_limit() {
+async fn count_respects_filters_and_limit() {
     let _g = live_lock().lock().await;
     let Some(pool) = fresh_pool().await else {
         return;
@@ -738,12 +738,12 @@ async fn count_respects_filters_and_ignores_limit() {
         .unwrap();
     assert_eq!(actives, 2);
 
-    // limit/offset on the queryset don't affect COUNT(*).
+    // limit/offset bound the count (#1885).
     let n = LiveUser::objects()
         .limit(1)
         .offset(0)
         .count_on(&pool)
         .await
         .unwrap();
-    assert_eq!(n, 3);
+    assert_eq!(n, 1);
 }

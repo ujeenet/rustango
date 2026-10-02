@@ -1,11 +1,9 @@
-//! Table-driven HTTP redirects — `django.contrib.redirects`.
+//! Table-driven HTTP redirects for retired URLs.
 //!
-//! Hand-roll a [`RedirectMap`] (or load it from a CSV / hard-coded
-//! list) and mount [`redirects_middleware`] on your axum router.
-//! Matching requests are short-circuited with a `301 Moved Permanently`
-//! or `302 Found` response and the canonical URL in the `Location`
-//! header. Non-matching requests pass through to the rest of the
-//! router untouched.
+//! Build a [`RedirectMap`] (by hand or from a CSV) and mount
+//! [`redirects_middleware`] on your axum router. A matching request gets
+//! a `301 Moved Permanently` or `302 Found` with the new URL in
+//! `Location`. Everything else passes through.
 //!
 //! ```ignore
 //! use axum::Router;
@@ -26,22 +24,25 @@
 //!
 //! ## Match shape
 //!
-//! Matching is on the request path **including trailing slash
-//! variance**. `/old` and `/old/` are distinct entries — register
-//! both if you want both to redirect. Query strings are ignored
-//! during matching but preserved on the redirect:
-//! `/old?ref=ad → /new?ref=ad`. This mirrors Django's behaviour.
+//! Matching is exact on the request path, trailing slash included.
+//! `/old` and `/old/` are separate entries; add both if you need both.
+//! The query string is ignored when matching but kept on the redirect:
+//! `/old?ref=ad → /new?ref=ad`.
+//!
+//! Destinations go into `Location` as written, so build the map only
+//! from values you control. A user-supplied destination is an open
+//! redirect.
 //!
 //! ## Why not 404-fallthrough?
 //!
-//! Django's redirects framework hooks into the 404 handler so a
-//! redirect only fires if no other view matches. The rustango
-//! version runs as middleware *before* routing — same semantic when
-//! the redirect entries are for URLs that don't exist on the new
-//! site (the common case). For overlap-with-live-routes, register
-//! the redirect under a path that doesn't collide.
+//! A 404-fallthrough would fire a redirect only after no route
+//! matches. This middleware runs before routing, which is the same
+//! thing when the old URLs no longer exist on the site. If a
+//! redirect would shadow a live route,
+//! pick a path that does not collide.
 //!
-//! Issue #57 (smaller contrib apps).
+//! [`RedirectMap`]: crate::redirects::RedirectMap
+//! [`redirects_middleware`]: crate::redirects::redirects_middleware
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,8 +65,8 @@ pub struct RedirectRule {
 
 // ------------------------------------------------------------------ RedirectMap
 
-/// Path → [`RedirectRule`] map. Cheaply clonable; share via `Arc`
-/// when mounted as middleware state.
+/// Path → [`RedirectRule`] map. Cheap to clone; share it as `Arc` when
+/// mounted as middleware state.
 #[derive(Debug, Default, Clone)]
 pub struct RedirectMap {
     rules: HashMap<String, RedirectRule>,
@@ -90,8 +91,8 @@ impl RedirectMap {
         self
     }
 
-    /// Add a `301 Moved Permanently` redirect. Use for canonical URL
-    /// changes — search engines treat 301 differently from 302.
+    /// Add a `301 Moved Permanently` redirect. Use it for canonical URL
+    /// changes; search engines treat 301 and 302 differently.
     #[must_use]
     pub fn add_permanent(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.rules.insert(
@@ -121,10 +122,9 @@ impl RedirectMap {
         self.rules.is_empty()
     }
 
-    /// Parse a CSV file with the shape `from,to,permanent` (the
-    /// third field is `"true"`/`"false"`, treated case-insensitive,
-    /// defaulting to `false` when omitted). Lines starting with `#`
-    /// and blank lines are skipped.
+    /// Parse CSV lines of the shape `from,to,permanent`. The third
+    /// field accepts `true`, `1` or `yes` in any case and defaults to
+    /// `false`. Blank lines and `#` comments are skipped.
     pub fn from_csv(csv: &str) -> Self {
         let mut map = Self::new();
         for (line_no, raw) in csv.lines().enumerate() {
@@ -155,9 +155,8 @@ impl RedirectMap {
 
 // ------------------------------------------------------------------ middleware
 
-/// Build a redirect response for the given rule, preserving the
-/// original request's query string. Helper for handler-side use; the
-/// middleware below uses it internally.
+/// Build the redirect response for a rule, keeping the request's query
+/// string. Usable from a handler; the middleware calls it too.
 #[must_use]
 pub fn build_redirect_response(rule: &RedirectRule, query: Option<&str>) -> Response {
     let mut loc = rule.to.clone();
@@ -179,9 +178,8 @@ pub fn build_redirect_response(rule: &RedirectRule, query: Option<&str>) -> Resp
     response
 }
 
-/// axum middleware that consults the [`RedirectMap`] and short-
-/// circuits matching requests with a 301/302. Mount via
-/// `from_fn_with_state(Arc<RedirectMap>, redirects_middleware)`.
+/// axum middleware that answers a matching request with a 301 or 302.
+/// Mount with `from_fn_with_state(Arc<RedirectMap>, redirects_middleware)`.
 pub async fn redirects_middleware(
     State(map): State<Arc<RedirectMap>>,
     req: Request<Body>,

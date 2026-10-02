@@ -21,7 +21,7 @@ use super::ExecError;
 use crate::core::SelectQuery;
 use crate::sql::Pool;
 
-/// Knobs for [`QuerySet::explain_on`]. Defaults render plain
+/// Knobs for [`QuerySet::explain_on`](crate::query::QuerySet). Defaults render plain
 /// `EXPLAIN <stmt>` — safe to call (no execution, no side effects).
 /// Opt into `analyze` / `buffers` / `format = ExplainFormat::Json`
 /// for richer output; `ANALYZE` actually runs the query so it

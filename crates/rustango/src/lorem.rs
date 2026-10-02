@@ -1,11 +1,7 @@
-//! Django-shape lorem ipsum placeholder text — mirrors
-//! `django.utils.lorem_ipsum`.
+//! Lorem ipsum placeholder text.
 //!
-//! Useful for filling demo pages, generating test fixtures, and
-//! scaffolding Tera templates with realistic-looking text. Output
-//! is the same canonical Latin word list Django ships
-//! (`COMMON_P` + `WORDS`), so cross-framework code-review eyes
-//! recognize "lorem ipsum" immediately.
+//! Use it to fill demo pages, build test fixtures, or draft Tera
+//! templates with text that looks real.
 //!
 //! ```ignore
 //! use rustango::lorem::{words, paragraphs, sentence, COMMON_PARAGRAPH_TEXT};
@@ -26,30 +22,30 @@
 //! assert_eq!(p.split("\n\n").count(), 3);
 //! ```
 //!
-//! The `common` flag on [`words`] / [`paragraphs`] mirrors Django's
-//! `common` argument — when `true`, the first paragraph (or first
-//! N words) come from a canonical "Lorem ipsum dolor sit amet…"
-//! opener so the output reads like real placeholder lorem. When
-//! `false`, every word is sampled from the dictionary.
+//! The `common` flag on [`words`] and [`paragraphs`] starts the output
+//! with the canonical "Lorem ipsum dolor sit amet…" opener, so readers
+//! see at once that it is placeholder text. With `common = false`
+//! every word is picked at random.
 //!
 //! ## Determinism
 //!
-//! Output uses [`rand::rngs::ThreadRng`] — re-running the same call
-//! produces different output. For deterministic test fixtures, seed
-//! the RNG yourself or pin a known string via
-//! [`COMMON_PARAGRAPH_TEXT`].
+//! Output is random, so the same call gives different text each time.
+//! For a fixed fixture, use [`COMMON_PARAGRAPH_TEXT`].
+//!
+//! [`words`]: crate::lorem::words
+//! [`paragraphs`]: crate::lorem::paragraphs
+//! [`COMMON_PARAGRAPH_TEXT`]: crate::lorem::COMMON_PARAGRAPH_TEXT
 
 use rand::seq::SliceRandom;
 
-/// The canonical opening paragraph Django ships in
-/// `lorem_ipsum.COMMON_P` — 67 words, "Lorem ipsum dolor sit amet,
-/// …". Use this directly when you want a stable string (e.g.
-/// snapshot tests) instead of a randomized [`paragraphs`] call.
+/// The canonical "Lorem ipsum dolor sit amet, …" opener: 84 words.
+/// Use it when you need
+/// a stable string, such as a snapshot test, instead of a random
+/// [`paragraphs`] call.
 pub const COMMON_PARAGRAPH_TEXT: &str = "Lorem ipsum dolor sit amet, consectetuer adipiscing elit, sed diam nonummy nibh euismod tincidunt ut laoreet dolore magna aliquam erat volutpat. Ut wisi enim ad minim veniam, quis nostrud exerci tation ullamcorper suscipit lobortis nisl ut aliquip ex ea commodo consequat. Duis autem vel eum iriure dolor in hendrerit in vulputate velit esse molestie consequat, vel illum dolore eu feugiat nulla facilisis at vero eros et accumsan et iusto odio dignissim qui blandit praesent luptatum zzril delenit augue duis dolore te feugait nulla facilisi.";
 
-/// The dictionary [`words`] / [`paragraphs`] sample from — 248
-/// Latin-ish lorem-ipsum tokens, alphabetized. Same list Django
-/// ships in `lorem_ipsum.WORDS`.
+/// The word pool [`words`] and [`paragraphs`] draw from: 185
+/// Latin-looking tokens, in alphabetical order.
 const WORDS: &[&str] = &[
     "ac",
     "accumsan",
@@ -238,15 +234,10 @@ const WORDS: &[&str] = &[
     "vulputate",
 ];
 
-/// Django-parity `words(count, common=False)` — return `count`
-/// space-separated lorem-ipsum words. When `common=true`, the
-/// first 19 words match Django's canonical opener "Lorem ipsum
-/// dolor sit amet, consectetuer adipiscing elit, sed diam nonummy
-/// nibh euismod tincidunt ut laoreet dolore magna aliquam erat
-/// volutpat" (no trailing punctuation); remaining words sample
-/// from the dictionary.
+/// `count` words separated by spaces. With `common = true` the first
+/// 19 words are the canonical opener and the rest are random.
 ///
-/// `count = 0` returns the empty string.
+/// `count = 0` returns an empty string.
 ///
 /// ```ignore
 /// use rustango::lorem::words;
@@ -297,9 +288,8 @@ pub fn words(count: usize, common: bool) -> String {
     out.join(" ")
 }
 
-/// Django-parity `sentence()` — return one randomly-shaped lorem
-/// ipsum sentence: 6-12 words, capitalized first letter, period at
-/// the end. Uses up to 2 internal commas to feel less robotic.
+/// One sentence: 6 to 12 words, a capital first letter, a full stop,
+/// and up to two commas inside.
 #[must_use]
 pub fn sentence() -> String {
     use rand::Rng;
@@ -309,20 +299,16 @@ pub fn sentence() -> String {
         .map(|_| WORDS.choose(&mut rng).copied().unwrap_or("lorem"))
         .collect();
 
-    // Maybe sprinkle 1-2 commas (Django uses the same shape, picks
-    // up to 2 indices in the middle).
+    // Maybe add one or two commas somewhere in the middle.
     let comma_count = rng.gen_range(0..=2);
     if comma_count > 0 && len >= 4 {
         for _ in 0..comma_count {
             let idx = rng.gen_range(1..len - 1);
-            // Trim any existing trailing comma so we don't double up.
+            // Skip a word that already ends in a comma.
             if !picks[idx].ends_with(',') {
                 let with_comma = format!("{},", picks[idx]);
-                // Leaking is fine here — `picks` borrows from `WORDS`
-                // (static) plus owned Strings stamped in. We just
-                // build the final string from the indexed slice
-                // below, so the owned String goes via a Vec<String>
-                // path instead.
+                // `picks` holds `&'static str`, so switch to owned
+                // Strings before putting the comma version in.
                 let mut owned: Vec<String> = picks.iter().map(|s| (*s).to_owned()).collect();
                 owned[idx] = with_comma;
                 return format_sentence(&owned);
@@ -339,7 +325,7 @@ pub fn sentence() -> String {
 
 fn format_sentence(words: &[String]) -> String {
     let mut s = words.join(" ");
-    // Capitalize first char.
+    // Capitalize the first char.
     if let Some(c) = s.chars().next() {
         let upper: String = c.to_uppercase().chain(s.chars().skip(1)).collect();
         s = upper;
@@ -352,8 +338,7 @@ fn format_sentence(words: &[String]) -> String {
     s
 }
 
-/// Django-parity `paragraph()` — return one paragraph of 1-5
-/// sentences as a single string.
+/// One paragraph of 1 to 5 sentences.
 #[must_use]
 pub fn paragraph() -> String {
     use rand::Rng;
@@ -362,10 +347,8 @@ pub fn paragraph() -> String {
     (0..count).map(|_| sentence()).collect::<Vec<_>>().join(" ")
 }
 
-/// Django-parity `paragraphs(count, common=False)` — return
-/// `count` paragraphs joined by `"\n\n"`. When `common=true`, the
-/// first paragraph is the canonical [`COMMON_PARAGRAPH_TEXT`]
-/// opener; remaining paragraphs are randomly generated via
+/// `count` paragraphs joined by blank lines. With `common = true` the
+/// first one is [`COMMON_PARAGRAPH_TEXT`] and the rest come from
 /// [`paragraph`].
 ///
 /// ```ignore
@@ -399,17 +382,13 @@ mod tera_fn {
     use std::collections::HashMap;
     use tera::{to_value, Tera, Value};
 
-    /// Register Django's `{% lorem %}` template tag as a Tera function.
-    /// Tera supports zero-arg + kwarg calls but not Django's positional
-    /// `{% lorem 5 w %}` syntax — call shape becomes
-    /// `{{ lorem(count=N, method="w" | "p" | "b") }}`.
+    /// Register a `lorem` Tera function. Tera has no positional args,
+    /// so the call shape is `{{ lorem(count=N, method="w") }}`.
     ///
-    /// * `count` (default 1) — number of words / sentences / paragraphs.
-    /// * `method` (default `"b"`) — `"w"` words, `"p"` HTML-paragraph-
-    ///   wrapped, `"b"` blank-line-separated raw paragraphs.
-    /// * `common` (default `true`) — start with the canonical opener
-    ///   "Lorem ipsum dolor sit amet…" so readers immediately recognize
-    ///   placeholder text. Set `common=false` for fully random output.
+    /// * `count` (default 1): how many words or paragraphs.
+    /// * `method` (default `"b"`): `"w"` words, `"p"` paragraphs
+    ///   wrapped in `<p>` tags, `"b"` paragraphs split by blank lines.
+    /// * `common` (default `true`): start with the canonical opener.
     ///
     /// ```jinja
     /// {{ lorem(count=3, method="p") | safe }}
@@ -485,7 +464,7 @@ mod tera_fn {
             args.insert("method".into(), json!("p"));
             args.insert("common".into(), json!(false));
             let out = lorem(&args).unwrap();
-            // Random output — almost never matches the canonical opener.
+            // Random output, so only the wrapper is checked.
             assert!(out.as_str().unwrap().starts_with("<p>"));
         }
 
@@ -522,11 +501,8 @@ mod tests {
     }
 
     #[test]
-    fn words_common_first_19_match_django_opener() {
-        // common=true should produce the canonical
-        // "Lorem ipsum dolor sit amet, consectetuer adipiscing elit,
-        //  sed diam nonummy nibh euismod tincidunt ut laoreet dolore
-        //  magna aliquam" first 19 tokens.
+    fn words_common_first_19_match_canonical_opener() {
+        // common=true starts with the canonical 19-word opener.
         let w = words(19, true);
         let tokens: Vec<&str> = w.split_whitespace().collect();
         assert_eq!(tokens[0], "lorem");
@@ -548,7 +524,7 @@ mod tests {
     fn words_uncommon_first_word_is_from_dictionary() {
         let w = words(1, false);
         let first = w.split_whitespace().next().unwrap();
-        // Strip any trailing comma the picker may have appended.
+        // Drop a trailing comma the picker may have added.
         let raw = first.trim_end_matches(',');
         assert!(
             WORDS.contains(&raw),
@@ -567,7 +543,7 @@ mod tests {
     #[test]
     fn sentence_has_at_least_six_words() {
         let s = sentence();
-        // Sentence ends with `.` — strip it for word counting.
+        // Drop the full stop before counting words.
         let body = s.trim_end_matches('.');
         let count = body.split_whitespace().count();
         assert!(count >= 6, "sentence too short: `{s}` ({count} words)");
@@ -596,7 +572,7 @@ mod tests {
         let p = paragraphs(3, true);
         assert!(
             p.starts_with("Lorem ipsum dolor sit amet"),
-            "common=true should start with the Django canonical opener; got: `{}`",
+            "common=true should start with the canonical opener; got: `{}`",
             &p[..50.min(p.len())]
         );
         assert_eq!(p.split("\n\n").count(), 3);
@@ -604,8 +580,7 @@ mod tests {
 
     #[test]
     fn common_paragraph_text_word_count_pinned() {
-        // Pin the canonical opener's word count so a future typo
-        // doesn't silently drift the lorem opener.
+        // Pinned so a typo in the constant cannot slip through.
         assert_eq!(COMMON_PARAGRAPH_TEXT.split_whitespace().count(), 84);
     }
 }

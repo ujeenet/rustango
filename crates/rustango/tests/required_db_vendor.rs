@@ -1,4 +1,4 @@
-//! Django parity — `Meta.required_db_vendor` lets a model declare
+//! `Meta.required_db_vendor` lets a model declare
 //! which DB backend it's intended to run against. `manage check
 //! --deploy` flags a mismatch so ops catches "I forgot to switch
 //! DATABASE_URL" at deploy time rather than the first request that
@@ -6,7 +6,7 @@
 //!
 //! rustango spells the attribute as
 //! `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]` on
-//! the model container. Django aliases (`postgresql` / `pg` /
+//! the model container. Common aliases (`postgresql` / `pg` /
 //! `mariadb` / `sqlite3`) accepted; macro normalizes to the canonical
 //! dialect name so the check verb can compare against
 //! `pool.dialect().name()` directly.

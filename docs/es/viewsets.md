@@ -2,9 +2,8 @@
 
 Un ViewSet convierte un modelo en un recurso REST completo — endpoints para
 **listar, crear, leer, actualizar y eliminar** registros — a partir de una sola
-declaración. (Es el equivalente en **Rustango** de un `ModelViewSet` de Django
-REST Framework o de un controlador de recurso de API de Laravel, si has usado
-alguno de esos.)
+declaración. Tú describes el modelo y el contrato que quieres; el enrutado, la
+paginación y la serialización los pone el framework.
 
 > **¿Nuevo en las APIs REST?** Esta guía asume que sabes qué es un *endpoint*, un
 > *verbo HTTP* (GET / POST / …) y una *petición y respuesta JSON*. Si algo de eso
@@ -15,8 +14,8 @@ Empareja un ViewSet con un [serializador](serializers.md) — la pieza que da fo
 a tu JSON — y protege **ambas direcciones** a la vez: el serializador formatea
 cada **respuesta** (renombra, oculta, calcula o anida campos) *y* gobierna cada
 **petición** (valida los datos entrantes e ignora silenciosamente los campos que
-un cliente no debería poder establecer). La entrada rechazada regresa con la
-forma familiar de DRF — un objeto JSON indexado por nombre de campo. Todo
+un cliente no debería poder establecer). La entrada rechazada regresa con una
+forma fácil de leer — un objeto JSON indexado por nombre de campo. Todo
 funciona igual en PostgreSQL, MySQL y SQLite.
 
 Esta guía es ante todo un tutorial: **construimos una API REST de blog completa**
@@ -27,7 +26,7 @@ y luego el resto de la página es una referencia de cada perilla.
 [![Un ViewSet de Rustango conectado a un serializador: un solo bloque #[viewset(serializer = …)] da salida JSON tipada y entrada validada en las seis rutas CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Fuente:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, las opciones
-> `#[viewset(...)]` + el builder `for_model`) — siempre compilado.
+> `#[viewset(...)]` + el builder `for_model`) — condicionado a `admin` **o** `tenancy`. Dentro, `.serializer::<S>()` requiere `serializer`, el `router()` del builder requiere `postgres`, `tenant_router()` / `OwnedBy` requieren `tenancy`, y la acción QUERY requiere `admin`.
 >
 > **Versión ejecutable:** el blog construido aquí refleja el ejemplo probado y
 > compilable [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -70,10 +69,9 @@ El mismo modelo por debajo; lo que difiere es qué sale y quién llama.
 | Devuelve | **datos JSON** | una **página HTML renderizada en el servidor** |
 | Diseñado para | SPAs, móvil, otros servicios | navegadores, sitios renderizados en el servidor, CRUD estilo admin |
 | Un "crear" | `POST` JSON → `201` + el objeto | `POST` de un formulario → redirección `303` (Post/Redirect/Get) |
-| Ante entrada inválida | `400` + un mapa de errores JSON indexado por campo | re-renderiza el formulario con los errores mostrados |
+| Ante entrada inválida | `400` [`ApiError`](#formas-de-respuesta-de-error); errores del serializador `422`, campos en `details` | re-renderiza el formulario con los errores mostrados |
 | Un "listar" es | un sobre JSON paginado | un bucle sobre filas en tu plantilla |
 | Normalmente autenticado por | tokens / JWT / claves de API | cookies de sesión |
-| Análogo en Django | `ModelViewSet` de DRF | vistas genéricas basadas en clases |
 
 Elige por recurso — y puedes montar **ambos sobre el mismo modelo** (una API JSON
 pública *y* páginas CRUD internas). El resto de esta guía es el lado JSON/API;
@@ -94,7 +92,7 @@ y la base de datos). Cada paso es un comando o archivo real.
 
 ### Step 1 — Create the blog app
 
-Las apps son módulos de funcionalidad autocontenidos (el `startapp` de Django):
+Las apps son módulos de funcionalidad autocontenidos:
 
 ```bash
 cargo run -- startapp blog
@@ -155,8 +153,8 @@ cargo run -- migrate
 
 ### Step 4 — Scaffold the serializer
 
-El serializador es lo que hace de esto una API *DRF* — define el contrato de
-petición/respuesta. Genera el esqueleto:
+El serializador define el contrato de petición/respuesta de la API.
+Genera el esqueleto:
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -258,10 +256,10 @@ pasando el pool:
 ```rust
 // src/blog/urls.rs (or your urls::api aggregator)
 use axum::Router;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use crate::blog::post_view_set::PostViewSet;
 
-pub fn api(pool: PgPool) -> Router {
+pub fn api(pool: Pool) -> Router {
     Router::new()
         .merge(PostViewSet::router("/api/posts", pool))
 }
@@ -300,7 +298,7 @@ La respuesta tiene la forma del **serializador**: `body` regresó como `content`
 apareció el `summary` calculado, y `published_at` (de solo lectura, establecido
 por el servidor) está presente.
 
-**La validación rechaza la entrada inválida** con un `400` con forma de DRF —
+**La validación rechaza la entrada inválida** con un `400` —
 arreglos de mensajes indexados por campo:
 
 ```bash
@@ -366,11 +364,11 @@ respuestas HTTP reales sin arrancar un servidor:
 // tests/post_api.rs
 use rustango::test_client::TestClient;
 use myblog::blog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -381,7 +379,7 @@ async fn rejects_short_title() {
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
     assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // DRF field-error shape
+    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -438,7 +436,7 @@ En `create` y `update`, cuando hay un serializador registrado:
 1. **Se ejecuta la validación.** El `validate()` del serializador — cada
    `#[serializer(validate = "fn")]` por campo más el `validate` cruzado a nivel
    de contenedor — corre contra el cuerpo JSON. Ante un fallo, la petición se
-   rechaza con `400 Bad Request` con la forma de error de DRF: un objeto JSON
+   rechaza con `400 Bad Request` con la forma de error indexada por campo: un objeto JSON
    indexado por nombre de campo con arreglos de mensajes, p. ej.
    `{"title":["title must be at least 3 characters"]}`.
 2. **Filtrado de campos escribibles.** Solo se persisten los campos escribibles
@@ -516,9 +514,18 @@ Montar en `/api/posts` conecta las seis operaciones REST:
 | `DELETE` | `/api/posts/{pk}` | **destroy** | 204 | vacío |
 
 Una barra final en el prefijo de montaje es opcional. Solo se conectan estos seis
-verbos — sin `HEAD`/`OPTIONS` automáticos. La **creación masiva** viene gratis:
-haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, validado
-atómicamente (un elemento inválido rechaza todo el lote).
+verbos, más una acción de colección `QUERY` (RFC 10008) cuando la característica
+`admin` está activa. Las rutas se construyen con `axum::routing::get`, así que
+axum responde al `HEAD` desde el handler `GET`; `OPTIONS` no está cableado. La **creación masiva** viene gratis:
+haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, **dentro de una
+transacción**. Un elemento inválido rechaza todo el lote y **no deja nada atrás** — lo
+detecte la validación o la base de datos.
+
+> Esa segunda mitad no era cierta hasta [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> La validación era atómica; las escrituras eran un `INSERT` cada una sin transacción,
+> así que una violación de unicidad o de clave foránea en el elemento 5 confirmaba los
+> elementos 0–4, devolvía `400 bulk entry 5` y no nombraba ninguna de las filas creadas.
+> Esas violaciones son justo la clase que la validación no puede decidir de antemano.
 
 ---
 
@@ -547,7 +554,7 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 | `filter_fields` | `"author_id, status"` | ninguno | Campos filtrables vía `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | ninguno | Campos con los que coincide la caja `?search=` (OR sin distinción de mayúsculas). |
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
-| `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 1000). |
+| `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 100). |
 | `read_only` | *(flag)* | apagado | Expone solo GET (list + retrieve). |
 | `permissions(...)` | `permissions(create = "post.add")` | ninguno | Codenames de permiso por acción. |
 
@@ -560,12 +567,14 @@ Cada método de `ViewSet::for_model(SCHEMA)` (cada uno devuelve `Self`):
 | Método | Propósito |
 |---|---|
 | `serializer::<S>()` | Conecta un serializador para salida + entrada tipadas (tri-dialecto). |
-| `fields(&["…"])` | Lista blanca de proyección por defecto + campos escribibles (cuando no hay serializador). |
+| `fields(&["…"])` | Lista blanca de proyección por defecto + campos escribibles. |
 | `filter_fields(&["…"])` | Habilita el filtrado `?field=value`. |
 | `search_fields(&["…"])` | Habilita `?search=`. |
 | `ordering(&[("field", desc)])` | Orden de clasificación por defecto. |
 | `ordering_fields(&["…"])` | Lista blanca de qué campos puede usar `?ordering=`. |
-| `page_size(n)` | Tamaño de página por defecto (≤ 1000). |
+| `page_size(n)` | Tamaño de página por defecto (≤ 100). |
+| `max_page_size(n)` | Sube o baja el propio tope del cliente (100 por defecto). |
+| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle. |
 | `read_only()` | Solo GET. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Compuertas de codename por acción (la última sobre tenencia). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). |
@@ -584,7 +593,7 @@ Cada método de `ViewSet::for_model(SCHEMA)` (cada uno devuelve `Self`):
 Todo gobernado por parámetros de consulta en el endpoint de **listado**.
 
 **Filtrado** — cada entrada de `filter_fields` acepta `?field=value` (exacto) más
-lookups estilo Django vía un sufijo `__`:
+lookups vía un sufijo `__`:
 
 ```
 ?status=published
@@ -601,8 +610,8 @@ Lookups soportados: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
 **Búsqueda** — `?search=term` coincide con `search_fields` mediante un OR sin
 distinción de mayúsculas.
 
-**Ordenación** — `?ordering=field,-other` (`-` = DESC). Cualquier campo es
-ordenable a menos que establezcas `.ordering_fields([...])` para restringirlo. Sin
+**Ordenación** — `?ordering=field,-other` (`-` = DESC). Cualquier campo que la
+respuesta muestra (con un serializador, los campos que renderiza) es ordenable a menos que establezcas `.ordering_fields([...])` para restringirlo. Sin
 un parámetro, se aplica el `ordering` por defecto. Todos se componen.
 
 ---
@@ -638,22 +647,21 @@ tablas muy grandes. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` se limitan a 1000.
+`page_size` / `limit` se limitan a 100.
 
 ---
 
 ## Validation
 
 Con un **serializador conectado**, la ruta de create/update ejecuta los
-validadores del serializador y devuelve `400`s con forma de DRF — la forma
+validadores del serializador y devuelve `400`s indexados por campo — la forma
 recomendada de validar (ver [el matrimonio](#the-serializer-marriage-input--output)
 y la [guía de serializadores](serializers.md#validación)). Se ejecutan tres capas:
 
 - **Restricciones declarativas** — `max_length` / `min_length` / `min` / `max`, y
   por defecto el campo **hereda del modelo** `max_length` / `min` / `max` /
   `choices`. Así, una columna `#[rustango(max_length = 200)]` se verifica en
-  longitud en la API sin configuración extra (comportamiento del `ModelSerializer`
-  de DRF), convirtiendo los `500`s que serían por restricción de BD en `400`s
+  longitud en la API sin configuración extra, convirtiendo los `500`s que serían por restricción de BD en `400`s
   amigables como `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Por campo** `validate = "fn"` y un hook `validate` **cruzado** — tus reglas
   personalizadas (formatos, entre campos, lógica de negocio).
@@ -672,6 +680,26 @@ Así que incluso sin un serializador obtienes validación de tipo + requerido +
 restricción de BD; conecta un serializador para obtener verificaciones
 declarativas de longitud/rango/choice (heredadas automáticamente) más tus propias
 reglas por campo y entre campos.
+
+### Formas de respuesta de error
+
+Todo error de un ViewSet es un cuerpo [`ApiError`](api-conventions.md), la misma
+forma que envían tus propios handlers (#1193):
+
+```json
+{"error": "<machine code>", "message": "<sentence>", "status": 400}
+```
+
+- `error` es un código estable (`bad_request`, `unauthorized`, `not_found`,
+  `validation_failed`, `rate_limited`, `internal_error`, …). Ramifica según él.
+- La validación del serializador es un `422` `validation_failed`, con el mapa por
+  campo en `details`:
+  `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}`.
+  Los `400` de coerción de tipos y de campo requerido de arriba son
+  `bad_request`, con el motivo en `message`; un `400` de restricción de base de
+  datos oculta el texto del driver.
+- Un `5xx` nunca lleva la causa salvo que `RUSTANGO_DISCLOSE_ERRORS` esté
+  definida. Se registra en el log; `message` es genérico.
 
 ---
 
@@ -712,14 +740,14 @@ ViewSet::for_model(Post::SCHEMA)
 ```
 
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
-proceso; la clave del cliente es la IP de conexión (o `X-Forwarded-For` /
-`X-Real-IP`).
+proceso; la clave del cliente es la IP de cliente de confianza (`TrustedRealIp`,
+si no el socket; ver [security.md](security.md)).
 
 ---
 
 ## Custom actions beyond CRUD
 
-No hay un decorador `@action` de DRF — el ViewSet es estrictamente las seis rutas
+No hay ningún atributo para añadir rutas extra a un ViewSet — es estrictamente las seis rutas
 CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
 
 ```rust
@@ -737,12 +765,20 @@ separada.
 ### Scoping rows to the authenticated principal
 
 Un backend se ejecuta en **cada** acción — `list`, `retrieve`, `update`,
-`destroy` — de modo que se comporta como el `get_queryset()` de DRF. Una fila que
+`destroy` — de modo que acota el queryset base de todas las rutas. Una fila que
 el backend excluye es un **404** en las rutas de ítem, no un 403: un 403
 confirmaría que el id existe.
 
 La identidad debe provenir de la credencial, nunca de la cadena de consulta. Un
 filtro `?owner_id=` no es un ámbito — es un parámetro que el llamador elige.
+
+Un ámbito solo restringe la lectura. Un backend dueño de una columna implementa también
+`write_pins`: la creación guarda el propietario, la actualización no puede cambiarlo, y
+`WritePin::Deny` rechaza la escritura con un 403.
+
+Los ámbitos globales estáticos de un modelo también limitan lo que se lee, no lo que se
+escribe: una creación o actualización puede salir del ámbito (201 sin cuerpo, o 204).
+Para una frontera de seguridad, usa un backend de filtro con `write_pins`.
 
 #### `OwnedBy` — the shipped backend
 
@@ -750,14 +786,14 @@ La mayoría de los recursos con dueño necesitan exactamente una regla: *filas c
 columna de propiedad es el llamador*. Nombra la columna y móntala.
 
 ```rust
+use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
+let auth = JwtAuth::new(Config::default()); // uno solo, que también sirve `auth.router()`
 ViewSet::for_model(Note::SCHEMA)
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
-    .layer(axum::middleware::from_fn(
-        rustango::tenancy::auth_routes::require_bearer,
-    ))
+    .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
 ```
 
 Cualquier columna funciona — `owner_id`, `member_id`, `author_id` — porque el
@@ -765,6 +801,9 @@ backend toma el nombre en lugar de asumir una convención. Falla cerrado en las 
 formas en que puede estar mal: una petición no autenticada y una columna que el
 modelo no tiene coinciden ambas con **nada**, de modo que un error tipográfico al
 montar no puede convertirse en "sin predicados, devuelve la tabla".
+
+`OwnedBy` fija su columna al escribir: la creación guarda al llamador diga lo que diga el
+cuerpo, la actualización nunca mueve la fila, y una escritura sin principal es un 403.
 
 Los superusuarios no son especiales por defecto; `.superuser_sees_all()` lo
 habilita, porque "los admins ven todo" es una decisión de producto, no del
@@ -804,17 +843,20 @@ borrado lógico, una ventana de fechas — implementa el trait y sobrescribe
 `filter_with`, que recibe los `Parts` de la petición:
 
 ```rust
+use std::collections::HashMap;
+
 use axum::http::request::Parts;
+use rustango::core::{Filter, ModelSchema, Op, SqlValue, WhereExpr};
 use rustango::tenancy::Principal;
-use rustango::viewset::ViewSetFilter;
+use rustango::viewset::{match_nothing, ViewSetFilter};
 
 struct OwnerFilter;
 
 impl ViewSetFilter for OwnerFilter {
-    // No principal in hand — fail closed. Returning no predicates here would
-    // widen the query to every row in the table.
+    // No principal in hand — fail closed. `vec![]` here would be *no filter*,
+    // not a filter matching nothing, and would widen the query to every row.
     fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
-        deny_all(schema)
+        vec![match_nothing(schema)]
     }
 
     fn filter_with(
@@ -824,13 +866,13 @@ impl ViewSetFilter for OwnerFilter {
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
         let Some(principal) = Principal::from_parts(parts) else {
-            return deny_all(schema);
+            return vec![match_nothing(schema)];
         };
-        vec![WhereExpr::Predicate(Filter {
-            column: schema.field("owner_id").expect("owner_id").column,
-            op: Op::Eq,
-            value: SqlValue::from(principal.user_id),
-        })]
+        vec![WhereExpr::Predicate(Filter::new(
+            schema.field("owner_id").expect("owner_id").column,
+            Op::Eq,
+            SqlValue::from(principal.user_id),
+        ))]
     }
 }
 
@@ -842,6 +884,13 @@ ViewSet::for_model(Note::SCHEMA)
 `filter_with` recae por defecto en `filter`, de modo que un backend que no
 necesita la petición — incluida la forma de closure simple — implementa solo
 `filter` como antes.
+
+`match_nothing` es la rama de fallo cerrado, y conviene usarla en lugar de
+escribirla a mano: devuelve `col IS NULL AND col IS NOT NULL`, una contradicción
+que no vincula parámetros y se lee igual en todos los backends. La razón de que
+esté exportada es que el sustituto obvio es un `Vec` vacío, y en una API de
+filtros `vec![]` significa *ningún filtro* — lo contrario de para lo que existe
+la rama.
 
 ---
 
@@ -872,8 +921,9 @@ let api = urls::api()
 
 - **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
-- **El `router(prefix, PgPool)` de la macro derive** captura un `PgPool`
-  (PostgreSQL).
+- **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
+  — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de
+  Postgres (#1273).
 - **La entrada + salida del serializador** ahora funciona en **los tres backends**
   (el renderizado por fila es tri-dialecto; la antigua compuerta solo-PG
   desapareció).
