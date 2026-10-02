@@ -511,8 +511,9 @@ the expected outcome, so nothing is logged. Tracked in
 
 ## See also
 
-- [Scheduler](manage.md) — for *time-based* recurring work (cron-style), as
-  opposed to on-demand jobs.
+- [Scheduler](manage.md) — for *time-based* recurring work at a fixed interval
+  (`Scheduler::every` + a `Duration`; there are no cron expressions), as opposed to
+  on-demand jobs.
 - [Email](email.md) — the canonical "do it in a job" workload.
 - [Caching](caching.md) — the other way to keep request handlers fast.
 - [Signals](orm.md) — fire-and-forget hooks that often *dispatch* a job.

@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — docs truth pass (#1680)
+
+`manage check --deploy` no longer reports the CSRF Origin check as disabled; it runs against the request's own Host.
+The Stripe webhook example now verifies Stripe's `t=…,v1=…` signature over `"{t}.{body}"` with a replay window, tested against a fixed vector.
+Corrected false claims across README, `models.md` (attribute reference), `orm.md`, `security.md`, `middleware.md`, `admin.md`, `files.md`, `caching.md`, `html-views.md`, `logging.md`, `jobs.md` and rustdoc, in every locale that carries them.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

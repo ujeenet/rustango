@@ -531,7 +531,8 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dan
 ## Voir aussi
 
 - [Planificateur](manage.md) — pour le travail récurrent *basé sur le temps*
-  (façon cron), par opposition aux tâches à la demande.
+  à intervalle fixe (`Scheduler::every` + `Duration` ; pas d'expressions cron), par
+  opposition aux tâches à la demande.
 - [E-mail](email.md) — la charge de travail canonique du « faites-le dans une
   tâche ».
 - [Mise en cache](caching.md) — l'autre manière de garder les handlers de

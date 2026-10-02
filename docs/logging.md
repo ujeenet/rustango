@@ -442,8 +442,10 @@ code did; both were wrong for the same reason.)
 it does on the tenancy serving paths — the tenant admin and the operator
 console are behind a Host dispatch the api router never sees, so the layers go
 on the outermost router rather than on the one you pass in. Building a
-`server::Builder` entirely by hand mounts nothing until you call
-`.observability(..)`.
+`server::Builder` entirely by hand mounts none of the layers `Cli` adds:
+call `.observability(..)` for the span and access log, and `.security_headers(..)`,
+`.allowed_hosts(..)` and `.ssl_redirect(..)` for the `[security]` layers — each
+is off until you do.
 
 ## Logging in tests
 

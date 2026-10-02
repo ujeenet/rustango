@@ -238,10 +238,15 @@ its own `AuthBackend` trait. It has no HTTP/axum glue; use it when you want
 pluggable auth backends inside your own auth code:
 
 ```rust
-use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};
+use std::sync::Arc;
+use rustango::auth_backends::{
+    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
+};
 
-let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-let principal = chain.authenticate(&Credentials::remote("alice")).await?;
+async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
+    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
+    chain.authenticate(&Credentials::remote(remote_user)).await
+}
 ```
 
 Same "first success wins / first error stops" semantics as the HTTP chain. For

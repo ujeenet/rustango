@@ -167,7 +167,7 @@ Vos handlers et vos modèles ne changent pas ; seul le câblage au démarrage ch
 ## La médiathèque
 
 Lorsque les fichiers sont des enregistrements de première classe — suivis en base de données,
-parcourables dans l'admin, avec des miniatures et une livraison CDN/présignée — tournez-vous vers
+parcourables dans l'admin, avec une livraison CDN/présignée — tournez-vous vers
 `rustango::media` plutôt que vers `Storage` brut. `MediaManager` persiste une ligne `Media` par
 fichier et prend en charge deux flux de téléversement :
 
@@ -189,8 +189,8 @@ let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await e
 ```
 
 Il gère aussi la suppression douce et la purge des orphelins. Le flux complet est mis à l'épreuve
-dans `media_sqlite_live.rs` ; les méthodes présignées/de téléversement direct du manager sont
-orientées PostgreSQL.
+dans `media_sqlite_live.rs` ; les méthodes présignées et de téléversement direct du manager
+fonctionnent sur les trois backends.
 
 ### Servir des médias sur une page publique
 
@@ -317,7 +317,9 @@ jamais créées.
 ## Référence
 
 **Trait `Storage` :** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
-`exists(key)` · `url(key) -> Option<String>`.
+`exists(key)` · `url(key) -> Option<String>`, plus les méthodes par défaut `save_with_content_type`,
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` et `metadata(key)`
+(un backend qui signe surcharge la paire presign ; les défauts renvoient `None`).
 
 **`UploadConfig` :** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (insensible à la casse) · `.randomize_filename(bool)`. Utilisé par

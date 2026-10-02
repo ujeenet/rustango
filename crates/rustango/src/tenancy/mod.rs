@@ -12,15 +12,6 @@
 //! resolved to that slug builds the pool lazily; no restart, no config
 //! change, no redeploy.
 //!
-//! ## Status
-//!
-//! v0.5 Slice 1 (this commit) ships only the [`Org`] registry model
-//! and a [`TenancyError`] type. Resolvers, [`TenantPools`], scoped
-//! migrations, tenant-aware admin, provisioning CLI, and per-tenant
-//! auth land in slices 2-7.
-//!
-//! [`TenantPools`]: pools::TenantPools
-//!
 //! ## Design choices (locked 2026-04-28; revisited 2026-05-12)
 //!
 //! 1. **Operator auth = registry-only.** Two strictly-separated
@@ -29,8 +20,8 @@
 //! 2. **Slug is globally unique.** Globally — not per-host.
 //! 3. **No cross-tenant aggregations.** Out of scope.
 //! 4. **Migration scope default = `tenant`.** `registry` is opt-in.
-//! 5. **Secrets**: registry DB is the boundary today; pluggable
-//!    `SecretsResolver` (slice 3.5) for future vault integrations.
+//! 5. **Secrets**: `Org.database_url` is a reference your
+//!    `SecretsResolver` resolves; the default passes it through as a URL.
 //! 6. **Routing default = subdomain (`acme.app.com`).** Cookie
 //!    isolation by subdomain is the headline win. Apex
 //!    (`app.com`) routes only to `/operator/*`.

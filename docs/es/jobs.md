@@ -523,7 +523,8 @@ rechazado es el resultado esperado, así que no se registra nada. Seguimiento en
 ## Véase también
 
 - [Planificador](manage.md) — para trabajo recurrente *basado en el tiempo*
-  (estilo cron), en contraste con los trabajos bajo demanda.
+  a intervalo fijo (`Scheduler::every` + `Duration`; no hay expresiones cron), en
+  contraste con los trabajos bajo demanda.
 - [Correo](email.md) — la carga de trabajo canónica del «hazlo en un trabajo».
 - [Caché](caching.md) — la otra manera de mantener rápidos los handlers de
   peticiones.

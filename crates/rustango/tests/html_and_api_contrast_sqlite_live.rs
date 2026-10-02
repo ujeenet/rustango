@@ -136,6 +136,12 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, String, Option<Stri
     (status, String::from_utf8(bytes.to_vec()).unwrap(), ctype)
 }
 
+/// `docs/html-views.md`'s `?ordering=` snippet: `for_model`, not `ListView::<T>::new()`.
+#[test]
+fn ordering_fields_snippet_compiles() {
+    let _ = ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"]);
+}
+
 #[tokio::test]
 async fn api_view_returns_json() {
     let (status, body, ctype) = get(&app().await, "/api/posts").await;

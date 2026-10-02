@@ -121,10 +121,21 @@ page {{ page }} / {{ total_pages }}
 {% if has_next %}<a href="?page={{ page + 1 }}">next →</a>{% endif %}
 ```
 
-`?page=`, `?status=`, `?search=` und `?ordering=` funktionieren genauso wie bei einer
+`?page=`, `?status=` und `?search=` funktionieren genauso wie bei einer
 ViewSet-Liste — der Unterschied liegt allein darin, dass das Ergebnis eine gerenderte Seite statt
 einer JSON-Hülle ist. Verwende `.context_object_name("posts")`, falls du lieber über `posts` als
 über `object_list` im Template iterierst.
+
+**`?ordering=` ist die Ausnahme.** Die Allowlist eines `ListView` startet *leer*, also
+wird der Parameter ignoriert, bis du die sortierbaren Spalten selbst nennst:
+
+```rust
+ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+```
+
+Ohne diesen Aufruf fällt die Liste auf das eigene `.order_by(...)` des Builders zurück,
+oder auf PK-ASC, damit die Paginierung deterministisch bleibt. Nur eine Spalte wird
+akzeptiert, mit führendem `-` für absteigend.
 
 ---
 

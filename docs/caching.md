@@ -243,8 +243,9 @@ cache.clear().await?;                            // drops ONLY acme's entries
 `ScopedCache` is itself a `Cache`, so it drops into anything taking a
 `BoxedCache` — `cache_page`, `cache_fragment`, the rate limiters,
 `DistributedLock`. It forwards to the inner backend with mapped keys rather
-than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
-`MGET`) keep their atomicity and batching.
+than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`)
+keep their atomicity. `get_many` / `set_many` / `delete_many` forward too, but no
+shipped backend batches them yet: each is one round trip per key.
 
 **Atomic counters and locks.** `Cache::incr` backs [rate limiting](middleware.md)
 and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
