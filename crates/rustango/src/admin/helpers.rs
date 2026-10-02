@@ -140,7 +140,10 @@ pub(crate) fn chrome_context_with_session(
         "can_view_audit": state.audit_reader().is_some(),
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
-        "change_password_url": &state.config.change_password_url,
+        "change_password_url": state.config.change_password_url.clone().or_else(|| {
+            state.config.session_secret.as_ref()
+                .map(|_| format!("{}/account/password", state.config.admin_prefix))
+        }),
         // Sidebar Logout POST target. Defaults to `{admin_prefix}/logout`
         // (the bare admin's own route); the tenant admin overrides it to
         // its RouteConfig logout_url (handled at the tenancy layer), so
