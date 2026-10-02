@@ -233,10 +233,13 @@ impl SecurityHeadersLayer {
     /// - A larger value rebuilds HSTS with that age and keeps
     ///   `includeSubDomains` and `preload`.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
+    /// # fn wire(app: axum::Router) -> Result<axum::Router, Box<dyn std::error::Error>> {
     /// let cfg = rustango::config::Settings::load_from_env()?;
     /// let layer = SecurityHeadersLayer::from_settings(&cfg.security);
-    /// app.layer(layer.into_layer())
+    /// let app = app.security_headers(layer);
+    /// # Ok(app) }
     /// ```
     #[cfg(feature = "config")]
     #[must_use]

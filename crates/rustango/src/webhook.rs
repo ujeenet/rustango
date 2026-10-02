@@ -1,8 +1,9 @@
 //! Webhook signature checks, using HMAC and constant-time compare.
 //!
-//! Providers such as Stripe, GitHub and Slack sign the request body
-//! and send the signature in a header. Verify it before you act on
-//! the payload, or you will run your handler on forged data.
+//! Providers sign the request and send the signature in a header. Verify
+//! it before you act on the payload, or you will run your handler on
+//! forged data. GitHub signs the body; Stripe and Slack sign a timestamp
+//! plus the body, so build that string first (see `docs/security.md`).
 //!
 //! ## Quick start
 //!

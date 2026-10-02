@@ -176,9 +176,12 @@ impl AccessLogLayer {
     ///
     /// Use [`AccessLogLayer::redact`] to replace the list instead.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use rustango::access_log::{AccessLogLayer, AccessLogRouterExt};
+    /// # fn wire(app: axum::Router) -> Result<axum::Router, Box<dyn std::error::Error>> {
     /// let cfg = rustango::config::Settings::load_from_env()?;
-    /// app.layer(AccessLogLayer::default().with_audit_settings(&cfg.audit).into_layer())
+    /// let app = app.access_log(AccessLogLayer::default().with_audit_settings(&cfg.audit));
+    /// # Ok(app) }
     /// ```
     #[cfg(feature = "config")]
     #[must_use]
