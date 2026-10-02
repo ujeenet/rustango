@@ -878,7 +878,7 @@ async fn migrate_from_a_dir_without_system_restores_the_schema() {
         .unwrap();
     // #2016 — an index of a table that is still there is restored too.
     // Not audit's: its `ensure_table_pool` recreates its own indexes.
-    let index: Option<String> = {
+    let index: String = {
         let sys = first.parent().unwrap().join("system/migrations");
         let migs = rustango::migrate::file::list_dir(&sys).unwrap();
         let live: Vec<String> = sqlx::query_scalar("SELECT indexname::text FROM pg_indexes")
@@ -895,13 +895,12 @@ async fn migrate_from_a_dir_without_system_restores_the_schema() {
             })
             .find(|i| live.contains(&i.name))
             .map(|i| i.name.clone())
+            .expect("a live system index to drop")
     };
-    if let Some(index) = &index {
-        sqlx::query(&format!("DROP INDEX \"{index}\""))
-            .execute(&pg)
-            .await
-            .unwrap();
-    }
+    sqlx::query(&format!("DROP INDEX \"{index}\""))
+        .execute(&pg)
+        .await
+        .unwrap();
 
     let second = fresh_dir("1988b").join("migrations");
     std::fs::create_dir_all(&second).unwrap();
@@ -916,7 +915,7 @@ async fn migrate_from_a_dir_without_system_restores_the_schema() {
     .await
     .unwrap();
     let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1")
-        .bind(index.as_deref().unwrap_or_default())
+        .bind(&index)
         .fetch_one(&pg)
         .await
         .unwrap();
@@ -926,9 +925,5 @@ async fn migrate_from_a_dir_without_system_restores_the_schema() {
         .await;
     result.expect("a second dir migrates the same database");
     assert_eq!(present, (1, 1), "the dropped table or column was skipped");
-    assert_eq!(
-        indexed,
-        i64::from(index.is_some()),
-        "index {index:?} was not restored"
-    );
+    assert_eq!(indexed, 1, "index {index} was not restored");
 }

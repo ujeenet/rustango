@@ -359,42 +359,85 @@ async fn later_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
-/// #2016 — a converged index whose name is taken by one on other columns is reported.
-async fn clashing_index_is_reported(backend: Backend) {
+/// Run `sql` on a new pool: a pooled SQLite connection keeps a stale schema
+/// after another connection's DDL, and then refuses `CREATE INDEX`.
+async fn ddl(url: &str, sql: &str) -> bool {
+    let pool = Pool::connect(url).await.expect("connect");
+    let ok = rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+        .await
+        .is_ok();
+    pool.close().await;
+    ok
+}
+
+/// Migrate `tmp/a`, then drop a live system index not on `id`; returns it.
+async fn drop_a_system_index(
+    backend: Backend,
+    url: &str,
+    tmp: &Path,
+) -> rustango::migrate::IndexSnapshot {
+    let pool = Pool::connect(url).await.expect("connect");
+    manage_migrate(&pool, &tmp.join("a/migrations"))
+        .await
+        .expect("first run");
+    let sys = rustango::migrate::file::list_dir(&tmp.join("a/system/migrations")).unwrap();
+    // Not audit's: its `ensure_table_pool` recreates its own indexes. MySQL
+    // refuses to drop an index an FK needs, so take the first that drops.
+    for idx in sys.iter().flat_map(|m| &m.snapshot.indexes) {
+        if idx.table == "rustango_audit_log"
+            || idx.columns == ["id"]
+            || !has_index(&pool, &idx.name).await
+        {
+            continue;
+        }
+        let sql = match backend {
+            #[cfg(feature = "mysql")]
+            Backend::Mysql => format!("DROP INDEX {} ON {}", idx.name, idx.table),
+            #[allow(unreachable_patterns)]
+            _ => format!("DROP INDEX {}", idx.name),
+        };
+        if ddl(url, &sql).await {
+            pool.close().await;
+            return idx.clone();
+        }
+    }
+    panic!("no live system index to drop");
+}
+
+/// #2016 — a second dir's regenerated system chain restores a dropped index.
+async fn dropped_index_is_restored(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "idxclash").await else {
+    let Some((_, url)) = fresh(backend, tmp.path(), "idxgone").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
-    let root = tmp.path().join("app");
-    system_chain(&root);
-    let first = read(&tenant_file(&root.join("system/migrations")));
-    let idx = first["snapshot"]["indexes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|i| i["columns"] != json!(["id"]))
-        .expect("a tenant index not on `id`")
-        .clone();
-    let (table, index) = (
-        idx["table"].as_str().unwrap(),
-        idx["name"].as_str().unwrap(),
+    let idx = drop_a_system_index(backend, &url, tmp.path()).await;
+    let pool = Pool::connect(&url).await.expect("connect");
+    assert!(
+        !has_index(&pool, &idx.name).await,
+        "{} was not dropped",
+        idx.name
     );
-    let dir = root.join("migrations");
-    let mut clash = idx.clone();
-    clash["columns"] = json!(["id"]);
-    clash["unique"] = json!(false);
-    write_step(
-        &dir,
-        "0001_initial",
-        None,
-        json!({ "tables": [current_table(table, None)], "indexes": [clash] }),
-        vec![
-            json!({ "CreateTable": table }),
-            json!({ "CreateIndex": { "name": index, "table": table, "columns": ["id"],
-                                     "unique": false } }),
-        ],
+    manage_migrate(&pool, &tmp.path().join("b/migrations"))
+        .await
+        .expect("second dir");
+    assert!(
+        has_index(&pool, &idx.name).await,
+        "{} was not restored",
+        idx.name
     );
+}
+
+/// #2016 — a converged index whose name is taken by one on other columns is reported.
+async fn clashing_index_is_reported(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, url)) = fresh(backend, tmp.path(), "idxclash").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let idx = drop_a_system_index(backend, &url, tmp.path()).await;
+    let (table, index) = (&idx.table, &idx.name);
+    assert!(ddl(&url, &format!("CREATE INDEX {index} ON {table} (id)")).await);
     let buf = rustango::testkit::CaptureWriter::default();
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -403,7 +446,10 @@ async fn clashing_index_is_reported(backend: Backend) {
         .with_max_level(tracing::Level::WARN)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
-    manage_migrate(&pool, &dir).await.expect("migrate");
+    let pool = Pool::connect(&url).await.expect("connect");
+    manage_migrate(&pool, &tmp.path().join("b/migrations"))
+        .await
+        .expect("second dir");
     let logged = buf.contents();
     assert!(
         logged.contains(&format!("index `{index}` is on `{table}` (id)")),
@@ -1170,6 +1216,7 @@ per_backend!(
     not_null_column_on_empty_table,
     later_index_on_owned,
     clashing_index_is_reported,
+    dropped_index_is_restored,
     fk_only_step_adds_only_targets,
     nested_lock_is_an_error,
 );
