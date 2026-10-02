@@ -96,6 +96,51 @@ macro_rules! pk_or_404 {
     };
 }
 
+/// The rows a template view may read or write: the model's global
+/// scopes, and only live rows on a soft-delete model (#2082).
+trait Visible {
+    fn visible(self) -> Self;
+}
+
+macro_rules! impl_visible {
+    ($($ty:ty),*) => {$(
+        impl Visible for $ty {
+            fn visible(self) -> Self {
+                let model = self.model;
+                let mut q = self.with_global_scopes();
+                q.where_clause = crate::soft_delete::compose_with_active(model, q.where_clause);
+                q
+            }
+        }
+    )*};
+}
+impl_visible!(
+    SelectQuery,
+    crate::core::CountQuery,
+    crate::core::UpdateQuery,
+    crate::core::DeleteQuery
+);
+
+/// Run `query`; a soft-delete model stamps its column instead, as the admin does (#2082).
+async fn delete_rows(
+    pool: &Pool,
+    query: crate::core::DeleteQuery,
+) -> Result<u64, crate::sql::ExecError> {
+    let query = query.visible();
+    let Some(col) = query.model.soft_delete_column else {
+        return crate::audit::delete(pool, &query).await;
+    };
+    let stamp = crate::core::UpdateQuery::new(
+        query.model,
+        vec![crate::core::Assignment {
+            column: col,
+            value: SqlValue::from(chrono::Utc::now()).into(),
+        }],
+        query.where_clause,
+    );
+    crate::audit::update_as(pool, &stamp, crate::audit::AuditOp::SoftDelete).await
+}
+
 // ============================================================== ListView
 
 // ============================================================== Bulk actions
@@ -758,9 +803,9 @@ async fn handle_list(
         offset: Some(offset),
         ..SelectQuery::new(state.vs.schema)
     }
-    .with_global_scopes();
+    .visible();
     // Search predicates are folded into where_clause by build_list_where.
-    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
+    let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
@@ -1037,8 +1082,8 @@ async fn handle_detail(
     };
     // #562 — use the `SelectQuery::by_pk` constructor instead of
     // spelling out the 11-field literal.
-    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk)).visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1174,8 +1219,8 @@ async fn handle_delete_confirm(
         ));
     };
     // #562 — by_pk constructor for the single-PK-lookup shape.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1204,9 +1249,8 @@ async fn handle_delete_submit(
         state.vs.schema,
         pk_field.column,
         pk_or_404!(pk_field, &pk),
-    )
-    .with_global_scopes();
-    match crate::audit::delete(&state.pool, &delete_q).await {
+    );
+    match delete_rows(&state.pool, delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -1548,7 +1592,7 @@ fn form_fields(
         .fields
         .iter()
         .filter(|f| {
-            if !f.accepts_input(kind) {
+            if !takes_input(schema, f, kind) {
                 return false;
             }
             match explicit {
@@ -1890,15 +1934,15 @@ async fn handle_create_post(
     .await
     {
         Ok(url) => axum::response::Redirect::to(&url).into_response(),
-        Err(InsertFailed::Duplicate(errors)) => {
+        Err(WriteFailed::Duplicate(errors)) => {
             rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers)
         }
-        Err(InsertFailed::Error(resp)) => resp,
+        Err(WriteFailed::Error(resp)) => resp,
     }
 }
 
-/// Why a CreateView INSERT did not redirect.
-enum InsertFailed {
+/// Why a CreateView INSERT or UpdateView UPDATE did not redirect.
+enum WriteFailed {
     /// A unique value is taken: field errors for the form (#2033).
     Duplicate(HashMap<String, String>),
     /// Anything else: an opaque 500.
@@ -1913,11 +1957,11 @@ async fn create_insert(
     success_url: &str,
     columns: Vec<&'static str>,
     values: Vec<SqlValue>,
-) -> Result<String, InsertFailed> {
+) -> Result<String, WriteFailed> {
     // `{column}` placeholders in `success_url` come back via RETURNING;
     // otherwise a plain INSERT saves the round-trip.
     let mut returning = success_url_returning_columns(success_url, schema)
-        .map_err(|e| InsertFailed::Error(template_error(&e)))?;
+        .map_err(|e| WriteFailed::Error(template_error(&e)))?;
     // An audited create needs the new PK for its audit row (#1821).
     let audited_pk = schema
         .primary_key()
@@ -1947,33 +1991,73 @@ async fn create_insert(
     };
     match result {
         Ok(Ok(url)) => Ok(url),
-        Ok(Err(e)) => Err(InsertFailed::Error(template_error(&e))),
-        Err(e) if e.is_unique_violation() => Err(InsertFailed::Duplicate(
-            duplicate_errors(pool, &insert_q).await,
+        Ok(Err(e)) => Err(WriteFailed::Error(template_error(&e))),
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+            duplicate_errors(
+                pool,
+                schema,
+                insert_q.columns.iter().copied().zip(&insert_q.values),
+                None,
+            )
+            .await,
         )),
-        Err(e) => Err(InsertFailed::Error(template_error(&format!(
+        Err(e) => Err(WriteFailed::Error(template_error(&format!(
             "insert row: {e}"
         )))),
     }
 }
 
-/// Blames each submitted unique field whose value is already taken.
-async fn duplicate_errors(
+/// The UpdateView UPDATE shared by the static and tenant routers; returns
+/// the rows changed, `0` when no visible row has `this_row`'s PK.
+async fn update_row(
     pool: &Pool,
-    insert_q: &crate::core::InsertQuery,
-) -> HashMap<String, String> {
-    let schema = insert_q.model;
-    let mut errors = HashMap::new();
-    let unique = insert_q
-        .columns
+    schema: &'static ModelSchema,
+    columns: Vec<&'static str>,
+    values: Vec<SqlValue>,
+    this_row: WhereExpr,
+) -> Result<u64, WriteFailed> {
+    let set = columns
         .iter()
-        .zip(&insert_q.values)
+        .zip(&values)
+        .map(|(column, value)| crate::core::Assignment::new(*column, value.clone()))
+        .collect();
+    let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible();
+    match crate::audit::update(pool, &update_q).await {
+        Ok(n) => Ok(n),
+        // A taken unique value is a form error, as on create (#2073).
+        Err(e) if e.is_unique_violation() => Err(WriteFailed::Duplicate(
+            duplicate_errors(
+                pool,
+                schema,
+                columns.into_iter().zip(&values),
+                Some(&this_row),
+            )
+            .await,
+        )),
+        Err(e) => Err(WriteFailed::Error(template_error(&format!(
+            "update row: {e}"
+        )))),
+    }
+}
+
+/// Blames each written unique field whose value another row holds;
+/// `this_row` is the row an UPDATE writes, which may keep its own value.
+async fn duplicate_errors<'a>(
+    pool: &Pool,
+    schema: &'static ModelSchema,
+    written: impl Iterator<Item = (&'static str, &'a SqlValue)>,
+    this_row: Option<&WhereExpr>,
+) -> HashMap<String, String> {
+    let mut errors = HashMap::new();
+    let unique = written
         .filter_map(|(col, v)| Some((schema.field_by_column(col)?, v)))
         .filter(|(f, _)| f.unique || f.primary_key);
     for (field, value) in unique {
+        let same = WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone()));
+        let other = this_row.map(|w| WhereExpr::Not(Box::new(w.clone())));
         let taken = crate::core::CountQuery::new(
             schema,
-            WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone())),
+            WhereExpr::And(std::iter::once(same).chain(other).collect()),
         );
         if count_rows_pool(pool, &taken).await.unwrap_or(0) > 0 {
             errors.insert(field.name.to_owned(), DUPLICATE_VALUE.to_owned());
@@ -2006,8 +2090,8 @@ async fn handle_update_get(
     };
     // #562 — `SelectQuery::by_pk` replaces the 11-field struct
     // literal.
-    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-        .with_global_scopes();
+    let select_q =
+        SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
@@ -2069,29 +2153,27 @@ async fn handle_update_post(
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
     }
-    let assignments: Vec<crate::core::Assignment> = columns
-        .into_iter()
-        .zip(values)
-        .map(|(column, value)| crate::core::Assignment {
-            column,
-            value: value.into(),
-        })
-        .collect();
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
         op: Op::Eq,
         value: pk_or_404!(pk_field, &pk),
     });
-    let update_q =
-        crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-    match crate::audit::update(&state.pool, &update_q).await {
+    match update_row(&state.pool, state.schema, columns, values, pk_match).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
             axum::response::Redirect::to(&target).into_response()
         }
-        Err(e) => template_error(&format!("update row: {e}")),
+        Err(WriteFailed::Duplicate(errors)) => {
+            rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers)
+        }
+        Err(WriteFailed::Error(resp)) => resp,
     }
+}
+
+/// Whether a form may set `f`; only DeleteView stamps the soft-delete column (#2082).
+fn takes_input(schema: &ModelSchema, f: &FieldSchema, kind: crate::core::WriteKind) -> bool {
+    f.accepts_input(kind) && schema.soft_delete_column != Some(f.column)
 }
 
 /// Walk the form submission and produce `(columns, values, errors)`.
@@ -2109,7 +2191,7 @@ fn parse_form(
     let mut values: Vec<SqlValue> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
     for f in schema.fields {
-        if !f.accepts_input(kind) {
+        if !takes_input(schema, f, kind) {
             continue;
         }
         if let Some(names) = explicit {
@@ -2824,8 +2906,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
         .expect("target table existed when collecting lookups");
     // #810 — IN-list lookup via the `by_pk_in` constructor; a target
     // row its own global scopes hide gets no `_display`.
-    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone())
-        .with_global_scopes()
+    SelectQuery::by_pk_in(target, fk.target_pk_column, fk.distinct_values.clone()).visible()
 }
 
 /// v0.38 — operates on JSON rows from `select_rows_as_json`
@@ -2948,7 +3029,7 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
@@ -2956,7 +3037,7 @@ async fn fetch_pks_as_objects_pool(
     Ok(rows)
 }
 
-/// `pks` narrowed to the rows the model's global scopes let through,
+/// `pks` narrowed to the rows the view can see ([`Visible`]),
 /// in submitted order — what a custom bulk action receives.
 async fn visible_pks_pool(
     schema: &'static ModelSchema,
@@ -2964,10 +3045,10 @@ async fn visible_pks_pool(
     pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<Vec<SqlValue>, String> {
-    if pks.is_empty() || schema.global_scopes.is_empty() {
+    if pks.is_empty() || (schema.global_scopes.is_empty() && schema.soft_delete_column.is_none()) {
         return Ok(pks.to_vec());
     }
-    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).with_global_scopes();
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
     let rows = select_rows_as_json(pool, &q, &[pk_field])
         .await
         .map_err(|e| e.to_string())?;
@@ -2997,9 +3078,8 @@ async fn run_delete_selected_pool(
     pks: &[SqlValue],
 ) -> Result<(), String> {
     // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
-    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec())
-        .with_global_scopes();
-    crate::audit::delete(pool, &q)
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+    delete_rows(pool, q)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3455,9 +3535,8 @@ mod tenant {
             offset: Some(offset),
             ..SelectQuery::new(state.vs.schema)
         }
-        .with_global_scopes();
-        let count_q =
-            crate::core::CountQuery::new(state.vs.schema, where_clause).with_global_scopes();
+        .visible();
+        let count_q = crate::core::CountQuery::new(state.vs.schema, where_clause).visible();
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
@@ -3641,8 +3720,8 @@ mod tenant {
                 Err(e) => return template_error(&e),
             };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk))
-            .with_global_scopes();
+        let select_q =
+            SelectQuery::by_pk(state.vs.schema, lookup.column, pk_or_404!(lookup, &pk)).visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3681,7 +3760,7 @@ mod tenant {
         // #562 — by_pk constructor for single-PK-lookup shape.
         let select_q =
             SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-                .with_global_scopes();
+                .visible();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3711,9 +3790,8 @@ mod tenant {
             state.vs.schema,
             pk_field.column,
             pk_or_404!(pk_field, &pk),
-        )
-        .with_global_scopes();
-        match crate::audit::delete(t.pool(), &delete_q).await {
+        );
+        match delete_rows(t.pool(), delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
@@ -3784,10 +3862,10 @@ mod tenant {
             super::create_insert(t.pool(), state.schema, &state.success_url, columns, values);
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
-            Err(super::InsertFailed::Duplicate(errors)) => {
+            Err(super::WriteFailed::Duplicate(errors)) => {
                 rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &headers)
             }
-            Err(super::InsertFailed::Error(resp)) => resp,
+            Err(super::WriteFailed::Error(resp)) => resp,
         }
     }
 
@@ -3804,8 +3882,8 @@ mod tenant {
             ));
         };
         // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk))
-            .with_global_scopes();
+        let select_q =
+            SelectQuery::by_pk(state.schema, pk_field.column, pk_or_404!(pk_field, &pk)).visible();
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
@@ -3870,28 +3948,21 @@ mod tenant {
                 &state, &form, &errors, /*is_update=*/ true, &headers,
             );
         }
-        let assignments: Vec<crate::core::Assignment> = columns
-            .into_iter()
-            .zip(values)
-            .map(|(column, value)| crate::core::Assignment {
-                column,
-                value: value.into(),
-            })
-            .collect();
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
             value: pk_or_404!(pk_field, &pk),
         });
-        let update_q =
-            crate::core::UpdateQuery::new(state.schema, assignments, pk_match).with_global_scopes();
-        match crate::audit::update(t.pool(), &update_q).await {
+        match super::update_row(t.pool(), state.schema, columns, values, pk_match).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);
                 axum::response::Redirect::to(&target).into_response()
             }
-            Err(e) => template_error(&format!("update row: {e}")),
+            Err(super::WriteFailed::Duplicate(errors)) => {
+                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &headers)
+            }
+            Err(super::WriteFailed::Error(resp)) => resp,
         }
     }
 

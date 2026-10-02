@@ -128,6 +128,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/labels", t.clone(), pool.clone()),
         )
         .merge(
+            UpdateView::for_model(Label::SCHEMA)
+                .template("form.html")
+                .success_url("/labels")
+                .router("/labels", t.clone(), pool.clone()),
+        )
+        .merge(
             CreateView::for_model(Label::SCHEMA)
                 .template("form.html")
                 .success_url("/labels/{id}")
@@ -329,6 +335,33 @@ async fn a_duplicate_create_is_a_form_error(pool: &Pool) {
     assert!(body.contains(r#""code":"a row with this value"#), "{body}");
 }
 
+/// UpdateView answers a taken unique value with a form error, not a 500 (#2073).
+async fn a_duplicate_update_is_a_form_error(pool: &Pool) {
+    for code in ["rs", "go"] {
+        let (status, body) = send(pool, Method::POST, "/labels/new", &format!("code={code}")).await;
+        assert!(status.is_redirection(), "seed {code}: {status} {body}");
+    }
+    let go = Label::objects()
+        .filter("code", "go")
+        .fetch(pool)
+        .await
+        .expect("labels")[0]
+        .id
+        .get()
+        .copied()
+        .expect("pk");
+    let edit = format!("/labels/{go}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "code=rs").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body, r#"form {"code":"a row with this value already exists"}"#,
+        "{body}"
+    );
+    // Keeping its own value is not a duplicate.
+    let (status, body) = send(pool, Method::POST, &edit, "code=go").await;
+    assert!(status.is_redirection(), "own value: {status} {body}");
+}
+
 /// CreateView inserts a natural PK from the form and fills a v7 one (#1725).
 async fn create_view_writes_natural_and_v7_pks(pool: &Pool) {
     let (status, body) = send(pool, Method::POST, "/tags/new", "code=go&name=Go").await;
@@ -349,6 +382,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         a_duplicate_create_is_a_form_error,
+        a_duplicate_update_is_a_form_error,
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,

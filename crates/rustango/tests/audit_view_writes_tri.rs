@@ -165,7 +165,8 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let uri = format!("/docs/{}/delete", pks[0]);
     let status = send(app, Method::POST, &uri, String::new(), true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(ops(pool, "delete").await, 1);
+    // `Doc` is soft-delete, so the template views stamp it (#2082).
+    assert_eq!(ops(pool, "soft_delete").await, 1);
 
     let app =
         ListView::for_model(Doc::SCHEMA)
@@ -174,7 +175,8 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let form = format!("action=delete_selected&_selected_action={}", pks[1]);
     let status = send(app, Method::POST, "/docs", form, true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(ops(pool, "delete").await, 2);
+    assert_eq!(ops(pool, "soft_delete").await, 2);
+    assert_eq!(ops(pool, "delete").await, 0);
 }
 
 /// CreateView, with and without a `{pk}` success URL, and `ModelForm`
