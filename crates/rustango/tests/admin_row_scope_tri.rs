@@ -234,8 +234,9 @@ async fn hidden_rows_are_404_and_uncounted(pool: &Pool) {
 /// An FK facet labels a hidden target by its key, not its title (#2029).
 async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
     let theirs = seed(pool, "secret-title", 77).await;
+    // An id unlike the item's, so a JOIN-ON / WHERE bind swap shows.
     let mut note = Note {
-        id: Auto::default(),
+        id: Auto::Set(7),
         body: "n".into(),
         item_id: theirs,
     };
@@ -253,8 +254,9 @@ async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
 /// A visible target's name still shows in the FK cell (#2080 control).
 async fn fk_cell_shows_a_visible_targets_name(pool: &Pool) {
     let mine = seed(pool, "shown-title", 1).await;
+    // An id unlike the item's, so a JOIN-ON / WHERE bind swap shows.
     let mut note = Note {
-        id: Auto::default(),
+        id: Auto::Set(7),
         body: "n".into(),
         item_id: mine,
     };

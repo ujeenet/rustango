@@ -3067,10 +3067,8 @@ async fn visible_pks_pool(
         .collect())
 }
 
-/// Run the built-in `delete_selected` action: `DELETE FROM <table>
-/// WHERE <pk> IN (...)`. Goes through `crate::core::DeleteQuery` +
-/// `crate::sql::delete{,_on}` so it composes the exact same SQL the
-/// per-row admin DELETE path uses.
+/// Run the built-in `delete_selected` action through [`delete_rows`]:
+/// `DELETE … WHERE <pk> IN (...)`, or a `deleted_at` stamp on a soft-delete model.
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,

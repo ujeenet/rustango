@@ -160,7 +160,7 @@ An admin create of a model with `audit(...)` now fails without `rustango_audit_l
 
 ### Admin `change_password_url` is a full path
 
-`admin::Builder::change_password_url` is linked as given, no longer prefixed with the admin path (#2102).
+`admin::Builder::change_password_url` and the `[routes] change_password_url` settings key are linked as given, no longer prefixed with the admin path (#2102).
 
 ## 0.59.18
 
