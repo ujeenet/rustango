@@ -1219,8 +1219,12 @@ fn endpoint_identity(url: &str) -> String {
     // Drop the query string: `?mode=rwc` does not change which database
     // this is. A Postgres `dbname=` does, and sqlx lets it win over the path.
     let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let scheme = scheme.to_ascii_lowercase();
-    let dbname = if matches!(scheme.as_str(), "postgres" | "postgresql") {
+    // sqlx reads `postgresql://` as `postgres://`.
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
+        "postgresql" => "postgres".to_owned(),
+        other => other.to_owned(),
+    };
+    let dbname = if scheme == "postgres" {
         crate::urls::parse_query_pairs(query)
             .into_iter()
             .rev()
