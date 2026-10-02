@@ -804,8 +804,8 @@ async fn logout_in(
 /// app endpoint.
 ///
 /// Validates the token's `tenant` claim against the resolved
-/// request tenant via [`JwtAuth::verify_for_tenant`] so a JWT minted on
-/// one subdomain can't be replayed against another.
+/// request tenant so a JWT minted on one subdomain can't be replayed
+/// against another, and refuses a token whose session has ended (#2086).
 fn me<DB: Database>(
     State(auth): State<JwtAuth>,
     t: Tenant<DB>,
@@ -815,25 +815,9 @@ fn me<DB: Database>(
 }
 
 async fn me_in(auth: JwtAuth, t: TenantScope, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
-    use crate::core::Column as _;
-    use crate::sql::FetcherPool as _;
-    use crate::tenancy::auth::User;
-
-    let user_id = auth
-        .verify_for_tenant(&bearer.0, &t.org.slug)
-        .await
-        .map_err(|msg| err(StatusCode::UNAUTHORIZED, msg))?;
-
-    let users = User::objects()
-        .where_(User::id.eq(user_id))
-        .fetch(t.pool())
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let user = users
-        .into_iter()
-        .next()
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user not found"))?;
+    let user = session_user(&auth, &bearer.0, &t)
+        .await?
+        .ok_or_else(|| unauthorized("invalid or expired token"))?;
 
     if !user.active {
         return Err(err(StatusCode::FORBIDDEN, "account inactive"));
@@ -857,14 +841,14 @@ async fn me_in(auth: JwtAuth, t: TenantScope, bearer: Bearer) -> Result<Json<Use
 /// `Principal` extractor.
 ///
 /// What it checks, in order:
-/// 1. signature, expiry, `typ = access`, and the JTI revocation list, via
-///    [`JwtAuth::verify_for_tenant`];
+/// 1. signature, expiry, `typ = access`, and the JTI revocation list;
 /// 2. the token's `tenant` claim against the resolved tenant — all tenants
 ///    share one signing key, so this is the only thing standing between a
 ///    token minted on `acme.` and a request to `globex.`;
-/// 3. the user row, **read per request**, so deactivating an account takes
-///    effect immediately rather than whenever the access token happens to
-///    expire.
+/// 3. the user row, **read per request**, so deactivating an account, a
+///    password change or a logout takes effect immediately rather than
+///    whenever the access token happens to expire. Only tokens minted by
+///    `/login` or `/refresh` pass: they carry the session it checks (#2086).
 ///
 /// ```no_run
 /// use axum::{middleware, Router};
@@ -920,20 +904,9 @@ async fn bearer_in(
         return unauthorized("missing Bearer token");
     };
 
-    let user_id = match auth.verify_for_tenant(token, &t.org.slug).await {
-        Ok(id) => id,
-        // The reason is deliberately not echoed: "expired" vs "wrong tenant"
-        // vs "revoked" tells a prober which of those they achieved.
-        Err(_) => return unauthorized("invalid or expired token"),
-    };
-
-    let user = match crate::tenancy::auth::User::objects()
-        .filter("id", user_id)
-        .fetch(t.pool())
-        .await
-    {
-        Ok(rows) => rows.into_iter().next(),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    let user = match session_user(&auth, token, &t).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
     let Some(user) = user.filter(|u| u.active) else {
         // Deleted or deactivated between mint and use. Same body as a bad
@@ -941,7 +914,9 @@ async fn bearer_in(
         return unauthorized("invalid or expired token");
     };
 
-    let id = user.id.get().copied().unwrap_or(user_id);
+    let Some(id) = user.id.get().copied() else {
+        return unauthorized("invalid or expired token");
+    };
     req.extensions_mut()
         .insert(crate::tenancy::AuthenticatedUser {
             id,
@@ -954,6 +929,41 @@ async fn bearer_in(
         Some(t.org.slug.clone()),
     ));
     next.run(req).await
+}
+
+/// The user a tenant access token acts as. `Ok(None)` when the row is gone
+/// or the token's session has ended: a logout or password change (#2086).
+async fn session_user(
+    auth: &JwtAuth,
+    token: &str,
+    t: &TenantScope,
+) -> Result<Option<crate::tenancy::auth::User>, Response> {
+    // The reason is deliberately not echoed: "expired" vs "wrong tenant"
+    // vs "revoked" tells a prober which of those they achieved.
+    let refused = || unauthorized("invalid or expired token");
+    let claims = auth.0.jwt.verify_access(token).await.ok_or_else(refused)?;
+    let user_id = claims
+        .user_id_in(UserTokenScope::Tenant(&t.org.slug))
+        .map_err(|_| refused())?;
+    // Tokens the login route did not mint carry no session: fail closed.
+    let Some(session) = RefreshSession::read(&claims) else {
+        return Ok(None);
+    };
+    let users: Vec<crate::tenancy::auth::User> = crate::tenancy::auth::User::objects()
+        .filter("id", user_id)
+        .fetch(t.pool())
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(users.into_iter().next().filter(|u| {
+        crate::tenancy::session::session_survives(
+            &auth.0.pwf_secret,
+            &session.pwf,
+            session.sat,
+            &u.password_hash,
+            u.password_changed_at,
+            u.sessions_revoked_at,
+        )
+    }))
 }
 
 fn unauthorized(msg: &'static str) -> Response {

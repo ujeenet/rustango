@@ -165,7 +165,8 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let uri = format!("/docs/{}/delete", pks[0]);
     let status = send(app, Method::POST, &uri, String::new(), true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(ops(pool, "delete").await, 1);
+    // `Doc` is soft-delete, so the template views stamp it (#2082).
+    assert_eq!(ops(pool, "soft_delete").await, 1);
 
     let app =
         ListView::for_model(Doc::SCHEMA)
@@ -174,7 +175,8 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let form = format!("action=delete_selected&_selected_action={}", pks[1]);
     let status = send(app, Method::POST, "/docs", form, true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(ops(pool, "delete").await, 2);
+    assert_eq!(ops(pool, "soft_delete").await, 2);
+    assert_eq!(ops(pool, "delete").await, 0);
 }
 
 /// CreateView, with and without a `{pk}` success URL, and `ModelForm`
@@ -684,6 +686,33 @@ mod admin_views {
         let (status, body) = post_page(&pool, &uri, "title=z").await;
         assert!(status.is_redirection(), "{status} {body}");
         assert_eq!(title().await, "z");
+    }
+
+    /// A create whose audit row cannot be written is not saved (#2101).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn admin_create_rolls_back_when_its_audit_fails() {
+        // No audit table here, so the emit fails.
+        let pool = rustango::testkit::matrix::sqlite_file_pool().await;
+        rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
+        let uri = format!("/{TABLE}");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("audit table missing — run `manage migrate`"),
+            "{body}"
+        );
+        let rows = || async { AdminDoc::objects().fetch(&pool).await.unwrap().len() };
+        assert_eq!(
+            rows().await,
+            0,
+            "the create committed without its audit row"
+        );
+
+        audit::ensure_table_pool(&pool).await.expect("audit table");
+        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        assert!(status.is_redirection(), "{status} {body}");
+        assert_eq!(rows().await, 1);
     }
 
     /// No `audit(...)`: the admin still logs edits, best-effort.

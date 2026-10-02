@@ -72,7 +72,7 @@ fn sqlmigrate_preview_emits_runpython_comment() {
     let dir = fresh_dir("preview");
     let mig = callback_migration("0001_runpython", "runpython_test_backfill");
     file::write(&dir.join("0001_runpython.json"), &mig).unwrap();
-    let preview = sqlmigrate_one(&dir, "0001_runpython").expect("preview");
+    let preview = sqlmigrate_one(&dir, "0001_runpython", &rustango::sql::Sqlite).expect("preview");
     let body = preview.statements.join("\n");
     assert!(
         body.contains("-- RunPython: runpython_test_backfill"),

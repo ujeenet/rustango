@@ -1291,6 +1291,28 @@ pub(crate) async fn update_one_with_row_diff(
     })
 }
 
+/// INSERT `query`, then build its entry from the new PK. With
+/// [`DiffEmit::InTx`] the entry commits with the row (#2101); otherwise
+/// it comes back for the caller's best-effort emit.
+#[cfg(feature = "admin")]
+pub(crate) async fn insert_one_with_entry(
+    pool: &crate::sql::Pool,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+    entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
+    emit: DiffEmit,
+) -> Result<(crate::core::SqlValue, Option<PendingEntry>), crate::sql::ExecError> {
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
+    let entry = entry_of(&pk);
+    if emit == DiffEmit::InTx {
+        emit_one_tx(&mut tx, &entry).await?;
+    }
+    tx.commit().await?;
+    Ok((pk, (emit == DiffEmit::AfterCommit).then_some(entry)))
+}
+
 /// Run an `InsertQuery`, write the assigned PK back into `model`, then
 /// emit `entry(model)` in the same transaction, so the audit row carries
 /// the real PK. Used by the generated `Model::insert_pool` for audited
