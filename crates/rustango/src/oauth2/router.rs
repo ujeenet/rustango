@@ -53,6 +53,7 @@ use serde::Deserialize;
 use super::{open_flow, seal_flow, NormalizedUser, OAuth2Registry, OAuthError, TokenResponse};
 
 const FLOW_COOKIE: &str = "rustango_oauth_flow";
+const INVALID_FLOW_COOKIE: &str = "invalid flow cookie — restart at /login";
 
 /// Per-app callback. Receives the resolved user + token bag and returns
 /// the response to send the browser. Typical implementations look up or
@@ -190,7 +191,9 @@ async fn callback_handler(
     let flow = match open_flow(sealed, &state.flow_secret) {
         Ok(f) => f,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}")).into_response()
+            // The reason helps a forger more than the user (#2087).
+            tracing::warn!(error = %e, provider = %provider_name, "oauth2 callback: bad flow cookie");
+            return (StatusCode::BAD_REQUEST, INVALID_FLOW_COOKIE).into_response();
         }
     };
 
@@ -376,10 +379,9 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
             .await
             .unwrap();
-        // A reader that never finds the cookie says "missing" instead.
-        assert!(std::str::from_utf8(&body)
-            .unwrap()
-            .contains("invalid flow cookie"));
+        // A reader that never finds the cookie says "missing" instead;
+        // the open error's text is not echoed (#2087).
+        assert_eq!(std::str::from_utf8(&body).unwrap(), INVALID_FLOW_COOKIE);
     }
 
     /// #1847 — an upstream failure's text (here a blocked address) stays out of the 502.
