@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite keeps CHECKs when a rebuild precedes a RenameTable (#2140)
+
+The rebuild reads the table's CHECKs under the name the migration renames it to.
+
 ### Fixed — a re-created system index on a project-owned table (#2139)
 
 An index a later system step drops and creates again is restored on the project's copy of the table.

@@ -2764,19 +2764,9 @@ fn render_step(
         .map_or(&[][..], |i| &ops[i + 1..]);
     // A rebuild takes the table's shape at this op, not at the end (#2121).
     let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
-        Some(table) if later.iter().any(|op| touches_table(op, table)) => {
-            let mut at = after.clone();
-            let shape =
-                super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
-            at.tables.retain(|t| t.name != table);
-            at.tables.push(shape);
-            at.checks.retain(|c| {
-                !later.iter().any(|op| {
-                    matches!(op, Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
-                })
-            });
-            Some(at)
-        }
+        Some(table) if later.iter().any(|op| touches_table(op, table)) => Some(
+            super::rebuild::snapshot_at(table, later, after).map_err(MigrateError::Validation)?,
+        ),
         _ => None,
     };
     let mut batch = render(at.as_ref().unwrap_or(after)).map_err(MigrateError::Validation)?;
