@@ -40,7 +40,8 @@ pub enum SignatureFormat {
 /// Check `signature` against `body` with HMAC-SHA256 and `secret`.
 ///
 /// Returns `true` only on a match. The compare is constant-time, so
-/// it does not leak the expected signature through timing.
+/// it does not leak the expected signature through timing. An empty
+/// `secret` never verifies: anyone could sign with it (#1850).
 ///
 /// # Example
 ///
@@ -58,7 +59,9 @@ pub fn verify_signature(
     body: &[u8],
     signature: &str,
 ) -> bool {
-    let expected_bytes = compute_hmac(secret, body);
+    let Some(expected_bytes) = compute_hmac(secret, body) else {
+        return false;
+    };
     let provided_bytes = match decode_signature(format, signature) {
         Some(b) => b,
         None => return false,
@@ -70,10 +73,12 @@ pub fn verify_signature(
 }
 
 /// Sign `body` with `secret` in the given format. Use it when you
-/// send webhooks, or in tests.
+/// send webhooks, or in tests. An empty `secret` gives an empty string.
 #[must_use]
 pub fn sign(format: SignatureFormat, secret: &[u8], body: &[u8]) -> String {
-    let bytes = compute_hmac(secret, body);
+    let Some(bytes) = compute_hmac(secret, body) else {
+        return String::new();
+    };
     match format {
         SignatureFormat::HexSha256WithPrefix => format!("sha256={}", to_hex(&bytes)),
         SignatureFormat::HexSha256 => to_hex(&bytes),
@@ -84,10 +89,14 @@ pub fn sign(format: SignatureFormat, secret: &[u8], body: &[u8]) -> String {
     }
 }
 
-fn compute_hmac(secret: &[u8], body: &[u8]) -> Vec<u8> {
+/// `None` for an empty key.
+fn compute_hmac(secret: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+    if secret.is_empty() {
+        return None;
+    }
     let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(body);
-    mac.finalize().into_bytes().to_vec()
+    Some(mac.finalize().into_bytes().to_vec())
 }
 
 fn decode_signature(format: SignatureFormat, signature: &str) -> Option<Vec<u8>> {
@@ -233,6 +242,24 @@ mod tests {
     #[test]
     fn from_hex_rejects_invalid_chars() {
         assert_eq!(from_hex("zzzz"), None);
+    }
+
+    /// HMAC over an empty key is computable by anyone (#1850).
+    #[test]
+    fn empty_secret_never_verifies() {
+        let forged = {
+            use hmac::{Hmac, Mac};
+            let mut mac = <Hmac<Sha256>>::new_from_slice(b"").unwrap();
+            mac.update(BODY);
+            to_hex(&mac.finalize().into_bytes())
+        };
+        assert!(!verify_signature(
+            SignatureFormat::HexSha256,
+            b"",
+            BODY,
+            &forged
+        ));
+        assert_eq!(sign(SignatureFormat::HexSha256, b"", BODY), "");
     }
 
     #[test]
