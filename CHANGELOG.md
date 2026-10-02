@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.59.20] — 2026-10-02
+
 ### Fixed — testkit tables get their indexes (#2120)
 
 `create_tables_for` / `fresh_table` create the model's indexes, `unique_together` included, through the migrate renderer.

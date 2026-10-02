@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.59.20
+
 ### `fresh_table` creates indexes
 
 Test tables now carry the model's indexes (#2120): a test that inserted duplicate `unique_together` rows now gets a unique violation, and MySQL refuses an index over an unbounded `String`, as `migrate` does.
