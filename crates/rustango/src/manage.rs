@@ -112,7 +112,7 @@ pub struct Cli {
     /// nested at `runserver` time as `Router::nest(prefix, static_router(files))`.
     /// Empty by default — projects that already mount their own
     /// `static_files::static_router` keep doing it.
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     static_dirs: Vec<(String, crate::static_files::StaticFiles)>,
     /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
     /// means no CSRF layer mounted — the right default for pure JSON
@@ -165,7 +165,7 @@ impl Cli {
             provisioning_dir: None,
             #[cfg(feature = "tenancy")]
             tenant_pools: None,
-            #[cfg(feature = "admin")]
+            #[cfg(feature = "_http_layers")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
             csrf: None,
@@ -402,7 +402,7 @@ impl Cli {
     /// `static_router` directly on their own router and skip this
     /// shortcut. Mount order is preserved — first registered prefix
     /// is checked first when paths overlap.
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
         let prefix = prefix.into();
@@ -415,7 +415,7 @@ impl Cli {
     /// [`Self::with_static`] for files users uploaded: HTML, SVG and XML
     /// download instead of running on this origin
     /// ([`crate::static_files::StaticFiles::user_content`]).
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[must_use]
     pub fn with_uploads(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
         let files = crate::static_files::StaticFiles::new(root_dir).user_content();
@@ -1025,7 +1025,7 @@ impl Cli {
         } else {
             api
         };
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "csrf")]
         let api = match self.csrf.take() {
@@ -1506,7 +1506,7 @@ fn try_mount_welcome(api: Router) -> Router {
     }
 }
 
-#[cfg(feature = "admin")]
+#[cfg(feature = "_http_layers")]
 fn mount_static_dirs(api: Router, dirs: &[(String, crate::static_files::StaticFiles)]) -> Router {
     let mut r = api;
     for (prefix, files) in dirs {
@@ -2229,7 +2229,7 @@ mod tests {
     /// `Cli::with_static` accumulates `(prefix, root_dir)` entries —
     /// repeating the call mounts more than one directory and the
     /// order is preserved.
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[test]
     fn with_static_accumulates_in_order() {
         let cli = Cli::new()
@@ -2249,7 +2249,7 @@ mod tests {
     }
 
     /// `with_uploads` serves uploaded HTML as a download, `with_static` inline (#1849).
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[tokio::test]
     async fn with_uploads_downloads_html() {
         use tower::ServiceExt as _;
@@ -2367,7 +2367,7 @@ mod tests {
     /// `mount_static_dirs` actually serves a file from the configured
     /// prefix end-to-end. Catches regressions like nesting the wrong
     /// router or forgetting the leading slash on the prefix.
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[tokio::test]
     async fn mount_static_dirs_serves_a_file() {
         use axum::body::Body;
