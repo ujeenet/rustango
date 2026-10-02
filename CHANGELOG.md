@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `AlterColumn*` migrations run on MySQL and SQLite (#1676)
+
+MySQL restates the column with `MODIFY COLUMN` (NULLs filled first; strict mode refuses a truncating shrink) and drops a UNIQUE by its catalog name; SQLite rebuilds the table, copying NULLs as the new default.
+
+### Fixed — a cross-ledger squash no longer skips its other changes (#1676)
+
+When a squash's tables already exist under another ledger, its changes to other tables run instead of being recorded unrun; a squash with data ops there is refused.
+
+### Fixed — a new table's composite FK is created once (#1983)
+
+`makemigrations` no longer adds an `AddCompositeFk` beside the `CreateTable` that already carries it; PG and MySQL failed with "already exists", SQLite refused the op.
+
+### Fixed — a changed `on_delete` reaches an existing database (#1557)
+
+A new `SchemaChange::AlterFkOnDelete` replaces the FK: PG and MySQL drop it by its catalog name and re-add it; SQLite rebuilds the table (create, copy, drop, rename) with FK checks off. The framework's eleven cascading FKs get it through the system chain.
+
+### Fixed — `on_delete` from none to an action is no longer ignored (#1573)
+
+`makemigrations` emits the op for `None → Some`, the case every pre-0.57.7 snapshot is in.
+
+### Fixed — SQLite drops a column in a table-level UNIQUE (#1982)
+
+`DropColumn` on SQLite rebuilds the table. The rebuild keeps rows, indexes, triggers, inbound FKs and the AUTOINCREMENT counter, and refuses to lose a column the snapshot lacks.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)

@@ -143,6 +143,10 @@ impl Dialect for Sqlite {
         true
     }
 
+    fn alters_by_rebuild(&self) -> bool {
+        true
+    }
+
     /// SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so there is no
     /// statement to return. Rebuild the table without the constraint
     /// instead.
