@@ -640,7 +640,7 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none", rename = "$ref")]
     pub ref_: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
-    pub type_: Option<String>,
+    pub type_: Option<SchemaType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,8 +651,9 @@ pub struct Schema {
     pub required: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<Schema>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nullable: Option<bool>,
+    /// Set by [`Schema::nullable`] on a `$ref`, which takes no sibling `type`.
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "anyOf")]
+    pub any_of: Vec<Schema>,
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "enum")]
     pub enum_: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -672,6 +673,39 @@ pub struct Schema {
         rename = "additionalProperties"
     )]
     pub additional_properties: Option<Box<Schema>>,
+}
+
+/// A JSON Schema `type`: one name, or several (`["string", "null"]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaType(Vec<String>);
+
+impl SchemaType {
+    /// The type names, in order.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl From<&str> for SchemaType {
+    fn from(t: &str) -> Self {
+        Self(vec![t.to_owned()])
+    }
+}
+
+impl From<String> for SchemaType {
+    fn from(t: String) -> Self {
+        Self(vec![t])
+    }
+}
+
+impl Serialize for SchemaType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => s.serialize_str(one),
+            many => many.serialize(s),
+        }
+    }
 }
 
 impl Schema {
@@ -807,9 +841,32 @@ impl Schema {
         self
     }
 
+    /// Also accept JSON `null`. OpenAPI 3.1 has no `nullable` keyword:
+    /// this adds `"null"` to `type` (and `enum`), or wraps a `$ref` in `anyOf`.
     #[must_use]
     pub fn nullable(mut self) -> Self {
-        self.nullable = Some(true);
+        if let Some(t) = &mut self.type_ {
+            if !t.0.iter().any(|n| n == "null") {
+                t.0.push("null".into());
+            }
+            if !self.enum_.is_empty() && !self.enum_.contains(&serde_json::Value::Null) {
+                self.enum_.push(serde_json::Value::Null);
+            }
+            return self;
+        }
+        if self.ref_.is_some() {
+            let null = Self {
+                type_: Some("null".into()),
+                ..Self::default()
+            };
+            let description = self.description.take();
+            return Self {
+                any_of: vec![self, null],
+                description,
+                ..Self::default()
+            };
+        }
+        // No `type` and no `$ref`: free-form already admits null.
         self
     }
 
@@ -1057,9 +1114,25 @@ mod tests {
 
     #[test]
     fn nullable_field() {
-        let s = Schema::string().nullable();
-        let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["nullable"], true);
+        // 3.1 has no `nullable` keyword (#1922).
+        let v = serde_json::to_value(Schema::string().nullable().nullable()).unwrap();
+        assert_eq!(v["type"], serde_json::json!(["string", "null"]));
+        assert!(v.get("nullable").is_none());
+    }
+
+    #[test]
+    fn nullable_enum_lists_null() {
+        let v = serde_json::to_value(Schema::string().enum_(["a"]).nullable()).unwrap();
+        assert_eq!(v["enum"], serde_json::json!(["a", null]));
+    }
+
+    #[test]
+    fn nullable_ref_wraps_in_any_of() {
+        let v = serde_json::to_value(Schema::ref_("Post").nullable()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"anyOf": [{"$ref": "#/components/schemas/Post"}, {"type": "null"}]})
+        );
     }
 
     #[test]

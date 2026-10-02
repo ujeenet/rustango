@@ -1421,13 +1421,48 @@ impl AcquiredConn {
     }
 }
 
+impl ViewSet {
+    fn effective_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
+        match &self.fields {
+            Some(names) => names.iter().filter_map(|n| self.schema.field(n)).collect(),
+            None => self.schema.scalar_fields().collect(),
+        }
+    }
+
+    /// The fields a request body may set, before per-request pins.
+    /// [`WriteSet`] and the OpenAPI request schemas both read this (#1922).
+    fn body_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
+        let exposed = self.effective_fields();
+        let serializer = self.serializer.as_ref().map(|b| b.writable_model_fields());
+        self.schema
+            .scalar_fields()
+            .filter(|f| f.primary_key || exposed.iter().any(|e| e.name == f.name))
+            .filter(|f| serializer.map_or(true, |w| w.contains(&f.name)))
+            // Only DELETE stamps the soft-delete column; a body never sets it.
+            .filter(|f| self.schema.soft_delete_column != Some(f.column))
+            .collect()
+    }
+
+    /// The JSON key a client sends for `model_field`: its serializer
+    /// name when a `source` rename gave it one.
+    #[cfg(feature = "openapi")]
+    fn body_key(&self, model_field: &'static str) -> &'static str {
+        self.serializer
+            .as_ref()
+            .and_then(|b| {
+                b.writable_field_names()
+                    .iter()
+                    .zip(b.writable_model_fields())
+                    .find(|(_, m)| **m == model_field)
+                    .map(|(n, _)| *n)
+            })
+            .unwrap_or(model_field)
+    }
+}
+
 impl ViewSetState {
     fn effective_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
-        let schema = self.vs.schema;
-        match &self.vs.fields {
-            Some(names) => names.iter().filter_map(|n| schema.field(n)).collect(),
-            None => schema.scalar_fields().collect(),
-        }
+        self.vs.effective_fields()
     }
 
     /// The fields a response shows: `fields()`, narrowed to what the
@@ -1788,16 +1823,10 @@ impl WriteSet {
                 }
             }
         }
-        let exposed = state.effective_fields();
-        let serializer = state
+        let writable = state
             .vs
-            .serializer
-            .as_ref()
-            .map(|b| b.writable_model_fields());
-        let writable = schema
-            .scalar_fields()
-            .filter(|f| f.primary_key || exposed.iter().any(|e| e.name == f.name))
-            .filter(|f| serializer.map_or(true, |w| w.contains(&f.name)))
+            .body_fields()
+            .into_iter()
             .filter(|f| !pinned.iter().any(|(p, _)| p.name == f.name))
             .collect();
         Ok(Self {
