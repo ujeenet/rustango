@@ -865,7 +865,7 @@ let featured = Author::objects()
 **Mises en garde :**
 
 - **Rétrécissement de projection de `IN (SELECT …)`** : PG requiert strictement que le SELECT interne ne projette qu'une seule colonne pour la forme `<col> IN (…)`. Rétrécissez le queryset interne avec `values_list_flat` : `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` ne projette que `author_id` sur chaque backend. Un `QuerySet::compile()` simple projette chaque colonne du modèle, ne le passez donc que pour un modèle à une seule colonne.
-- **Le `subquery(...)` scalaire requiert un interne une-colonne-une-ligne** : le SQL émis est `SET col = (SELECT …)` — si l'interne produit plus d'une ligne, la base de données génère une erreur à l'exécution. Contraignez via `.limit(1)` et soit rétrécissez la projection (une fois disponible), soit concevez l'interne autour d'un invariant d'unicité.
+- **Le `subquery(...)` scalaire requiert un interne une-colonne-une-ligne** : le SQL émis est `SET col = (SELECT …)` — si l'interne produit plus d'une ligne, la base de données génère une erreur à l'exécution. Contraignez via `.limit(1)` et soit rétrécissez la projection avec `values_list_flat`, soit concevez l'interne autour d'un invariant d'unicité.
 - **La validation à la compilation des sous-requêtes réside sur le queryset interne** : les fautes de frappe de colonne remontent à l'appel `queryset.compile()?` interne, pas au `compile()` de la requête externe. Construisez l'interne en premier et propagez `?`.
 
 ### Quand passer plutôt au SQL brut
@@ -1585,7 +1585,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor réservées à Postgres (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Faire de l'exclusion le comportement par défaut est suivi dans [#820](https://github.com/ujeenet/rustango/issues/820).
+Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor réservées à Postgres (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Pour les exclure par défaut, déclarez un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, où `live_only()` renvoie le filtre `deleted_at IS NULL` — et désactivez-le par requête avec `.without_global_scope("live")`.
 
 ---
 

@@ -133,7 +133,9 @@ than `object_list` in the template.
 the parameter is ignored until you name the sortable columns yourself:
 
 ```rust
-ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
 ```
 
 Without that call the list falls back to the builder's own `.order_by(...)`, or

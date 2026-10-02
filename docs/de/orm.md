@@ -865,7 +865,7 @@ let featured = Author::objects()
 **Vorbehalte:**
 
 - **`IN (SELECT …)`-Projektionsverengung**: PG erfordert strikt, dass der innere SELECT genau eine Spalte für die `<col> IN (…)`-Form projiziert. Verenge das innere Queryset mit `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` projiziert auf jedem Backend nur `author_id`. Ein einfaches `QuerySet::compile()` projiziert jede Model-Spalte, übergib es also nur bei einem einspaltigen Model.
-- **Skalares `subquery(...)` erfordert ein Ein-Spalte-eine-Zeile-Inneres**: das emittierte SQL ist `SET col = (SELECT …)` — produziert das Innere mehr als eine Zeile, wirft die Datenbank zur Laufzeit einen Fehler. Beschränke per `.limit(1)` und entweder verenge die Projektion (sobald sie landet) oder gestalte das Innere um eine Eindeutigkeits-Invariante.
+- **Skalares `subquery(...)` erfordert ein Ein-Spalte-eine-Zeile-Inneres**: das emittierte SQL ist `SET col = (SELECT …)` — produziert das Innere mehr als eine Zeile, wirft die Datenbank zur Laufzeit einen Fehler. Beschränke per `.limit(1)` und entweder verenge die Projektion mit `values_list_flat` oder gestalte das Innere um eine Eindeutigkeits-Invariante.
 - **Kompilierzeit-Validierung der Unterabfrage lebt auf dem inneren Queryset**: Spalten-Tippfehler tauchen beim inneren `queryset.compile()?`-Aufruf auf, nicht beim `compile()` der äußeren Abfrage. Baue das Innere zuerst und propagiere `?`.
 
 ### Wann man stattdessen auf rohes SQL zurückfällt
@@ -1586,7 +1586,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Diese nehmen den `&Pool` und laufen auf allen drei Backends; `soft_delete_on` / `restore_on` sind die Postgres-only-Executor-Formen (für eine Transaktion). Der "Löschen"-Button des Admins soft-löscht jedes Model, das die Spalte hat. Standardabfragen enthalten weiterhin soft-gelöschte Zeilen, aber du musst den Filter nicht mehr selbst schreiben: `.active()` schließt sie aus, `.only_trashed()` liefert nur sie, `.with_trashed()` ist ein Marker, der die Absicht ausdrückt und nichts ändert — ein früheres `.active()` hebt es nicht auf. Den Ausschluss zum Default zu machen wird in [#820](https://github.com/ujeenet/rustango/issues/820) verfolgt.
+Diese nehmen den `&Pool` und laufen auf allen drei Backends; `soft_delete_on` / `restore_on` sind die Postgres-only-Executor-Formen (für eine Transaktion). Der "Löschen"-Button des Admins soft-löscht jedes Model, das die Spalte hat. Standardabfragen enthalten weiterhin soft-gelöschte Zeilen, aber du musst den Filter nicht mehr selbst schreiben: `.active()` schließt sie aus, `.only_trashed()` liefert nur sie, `.with_trashed()` ist ein Marker, der die Absicht ausdrückt und nichts ändert — ein früheres `.active()` hebt es nicht auf. Um sie standardmäßig auszuschließen, deklariere einen Global Scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, wobei `live_only()` den Filter `deleted_at IS NULL` liefert — und schalte ihn pro Query mit `.without_global_scope("live")` ab.
 
 ---
 

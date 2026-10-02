@@ -141,13 +141,13 @@ fn any_v1_entry_may_match_during_secret_rotation() {
 }
 
 #[tokio::test]
-async fn handler_rejects_an_unsigned_request() {
-    // Without the env var the handler fails closed; with it, a bad signature is 401.
-    let status = handle_stripe_webhook(HeaderMap::new(), Bytes::from_static(BODY)).await;
-    assert!(matches!(
-        status,
-        StatusCode::UNAUTHORIZED | StatusCode::INTERNAL_SERVER_ERROR
-    ));
+async fn handler_rejects_a_bad_signature_with_401() {
+    // The only test in this binary that reads the env var.
+    std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_test_secret");
+    let mut headers = HeaderMap::new();
+    headers.insert("stripe-signature", "t=1,v1=00".parse().unwrap());
+    let status = handle_stripe_webhook(headers, Bytes::from_static(BODY)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[test]

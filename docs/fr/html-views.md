@@ -132,7 +132,9 @@ plutôt que sur `object_list` dans le template.
 le paramètre est ignoré tant que vous ne nommez pas vous-même les colonnes triables :
 
 ```rust
-ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
 ```
 
 Sans cet appel, la liste retombe sur le `.order_by(...)` du builder, ou sur PK-ASC pour

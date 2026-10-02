@@ -865,7 +865,7 @@ let featured = Author::objects()
 **Caveats:**
 
 - **`IN (SELECT …)` projection narrowing**: PG strictly requires the inner SELECT to project exactly one column for the `<col> IN (…)` form. Narrow the inner queryset with `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` projects only `author_id` on every backend. A plain `QuerySet::compile()` projects every model column, so pass it only for a single-column model.
-- **Scalar `subquery(...)` requires a one-column-one-row inner**: the SQL emitted is `SET col = (SELECT …)` — if the inner produces more than one row, the database errors at runtime. Constrain via `.limit(1)` and either narrow projection (once it lands) or design the inner around a uniqueness invariant.
+- **Scalar `subquery(...)` requires a one-column-one-row inner**: the SQL emitted is `SET col = (SELECT …)` — if the inner produces more than one row, the database errors at runtime. Constrain via `.limit(1)` and either narrow the projection with `values_list_flat` or design the inner around a uniqueness invariant.
 - **Subquery compile-time validation lives on the inner queryset**: column typos surface at the inner `queryset.compile()?` call, not at the outer query's `compile()`. Build the inner first and propagate `?`.
 
 ### When to drop to raw SQL instead
@@ -1584,7 +1584,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. Making exclusion the default is tracked in [#820](https://github.com/ujeenet/rustango/issues/820).
+These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
 
 ---
 

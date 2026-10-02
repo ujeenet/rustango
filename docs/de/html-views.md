@@ -130,7 +130,9 @@ einer JSON-Hülle ist. Verwende `.context_object_name("posts")`, falls du lieber
 wird der Parameter ignoriert, bis du die sortierbaren Spalten selbst nennst:
 
 ```rust
-ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
 ```
 
 Ohne diesen Aufruf fällt die Liste auf das eigene `.order_by(...)` des Builders zurück,

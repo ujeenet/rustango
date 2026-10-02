@@ -134,7 +134,9 @@ sobre JSON. Usa `.context_object_name("posts")` si prefieres iterar sobre `posts
 que el parámetro se ignora hasta que nombras tú las columnas ordenables:
 
 ```rust
-ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+fn post_list() -> ListView {
+    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+}
 ```
 
 Sin esa llamada la lista vuelve al `.order_by(...)` del builder, o a PK-ASC para que la

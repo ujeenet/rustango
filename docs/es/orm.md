@@ -865,7 +865,7 @@ let featured = Author::objects()
 **Salvedades:**
 
 - **Estrechamiento de proyección de `IN (SELECT …)`**: PG requiere estrictamente que el SELECT interno proyecte exactamente una columna para la forma `<col> IN (…)`. Estrecha el queryset interno con `values_list_flat`: `in_subquery("id", Book::objects().values_list_flat("author_id").compile()?)` proyecta solo `author_id` en cada backend. Un `QuerySet::compile()` simple proyecta todas las columnas del modelo, así que pásalo solo para un modelo de una sola columna.
-- **El `subquery(...)` escalar requiere un interno de una columna y una fila**: el SQL emitido es `SET col = (SELECT …)` — si el interno produce más de una fila, la base de datos da error en tiempo de ejecución. Restríngelo vía `.limit(1)` y o bien estrecha la proyección (una vez que llegue) o diseña el interno en torno a una invariante de unicidad.
+- **El `subquery(...)` escalar requiere un interno de una columna y una fila**: el SQL emitido es `SET col = (SELECT …)` — si el interno produce más de una fila, la base de datos da error en tiempo de ejecución. Restríngelo vía `.limit(1)` y o bien estrecha la proyección con `values_list_flat` o diseña el interno en torno a una invariante de unicidad.
 - **La validación en tiempo de compilación de la subconsulta vive en el queryset interno**: las erratas de columna se exponen en la llamada interna `queryset.compile()?`, no en el `compile()` de la consulta externa. Construye el interno primero y propaga `?`.
 
 ### Cuándo bajar a SQL crudo en su lugar
@@ -1584,7 +1584,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Estos reciben el `&Pool` y funcionan en los tres backends; `soft_delete_on` / `restore_on` son las formas executor solo de Postgres (para pasar una transacción). El botón "Delete" del admin borra en suave cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` es un marcador que expresa la intención y no cambia nada — no deshace un `.active()` previo. Hacer que la exclusión sea el comportamiento por defecto se rastrea en [#820](https://github.com/ujeenet/rustango/issues/820).
+Estos reciben el `&Pool` y funcionan en los tres backends; `soft_delete_on` / `restore_on` son las formas executor solo de Postgres (para pasar una transacción). El botón "Delete" del admin borra en suave cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` es un marcador que expresa la intención y no cambia nada — no deshace un `.active()` previo. Para excluirlas por defecto, declara un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, donde `live_only()` devuelve el filtro `deleted_at IS NULL` — y desactívalo por consulta con `.without_global_scope("live")`.
 
 ---
 
