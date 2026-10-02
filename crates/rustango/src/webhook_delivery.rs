@@ -25,7 +25,7 @@
 //! ## What gets sent
 //!
 //! - `POST <target_url>`
-//! - Body: the payload re-serialized to JSON.
+//! - Body: the payload as JSON, serialized and signed once at dispatch.
 //! - `Content-Type: application/json`
 //! - `User-Agent: rustango-webhook/<crate version>`
 //! - `X-Webhook-Id: <uuid>`, the same on every retry so the receiver
@@ -56,6 +56,9 @@
 //! applies, since a tenant may set the URL.
 //! Only the status code is kept on failure.
 //!
+//! The queued job keeps the target URL and extra headers, so a secret in
+//! either is stored with it; the signing secret is not.
+//!
 //! [`SignatureFormat`]: crate::webhook::SignatureFormat
 //! [`WebhookSubscription::header`]: crate::webhook_delivery::WebhookSubscription::header
 //! [`WebhookSubscription::retry_status_codes`]: crate::webhook_delivery::WebhookSubscription::retry_status_codes
@@ -66,7 +69,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::jobs::{Job, JobError, JobQueue};
@@ -92,9 +94,11 @@ pub struct WebhookEvent {
     pub id: String,
     pub event: String,
     pub target_url: String,
-    pub signing_secret: String,
-    pub signature_format: SignatureFormat,
-    pub payload: Value,
+    /// The JSON body, signed at dispatch: the stored job never holds
+    /// the secret (#1852).
+    pub body: String,
+    /// `X-Webhook-Signature` over `body`.
+    pub signature: String,
     pub headers: HashMap<String, String>,
     pub timeout_secs: u64,
     /// Extra status codes to retry, on top of 408, 429 and 5xx.
@@ -118,16 +122,6 @@ impl Job for WebhookEvent {
 }
 
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
-    let body = serde_json::to_vec(&event.payload).map_err(|e| {
-        // A bad payload will not fix itself.
-        JobError::Fatal(format!("payload serialize: {e}"))
-    })?;
-    let signature = sign_body(
-        event.signature_format,
-        event.signing_secret.as_bytes(),
-        &body,
-    );
-
     // Only the subscription opts in: the operator's allowlist is for SSO
     // and Slack, and a tenant may own this URL.
     let policy = if event.allow_private_targets {
@@ -148,8 +142,8 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(HEADER_ID, &event.id)
         .header(HEADER_EVENT, &event.event)
-        .header(HEADER_SIGNATURE, signature)
-        .body(body);
+        .header(HEADER_SIGNATURE, &event.signature)
+        .body(event.body.clone());
     for (k, v) in &event.headers {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -165,8 +159,12 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            // Transport, DNS or TLS: worth retrying.
-            return Err(JobError::Retryable(format!("transport: {e}")));
+            // Transport, DNS or TLS: worth retrying. No URL: its path
+            // can be the receiver's secret (#1852).
+            return Err(JobError::Retryable(format!(
+                "transport: {}",
+                e.without_url()
+            )));
         }
     };
     let status = resp.status().as_u16();
@@ -266,14 +264,19 @@ impl WebhookSubscription {
         payload: impl Serialize,
     ) -> Result<String, JobError> {
         let id = Uuid::new_v4().to_string();
+        let body = serde_json::to_string(&payload)
+            .map_err(|e| JobError::Queue(format!("payload serialize: {e}")))?;
         let event = WebhookEvent {
             id: id.clone(),
             event: event_name.into(),
             target_url: self.target_url.clone(),
-            signing_secret: self.secret.clone(),
-            signature_format: self.signature_format,
-            payload: serde_json::to_value(&payload)
-                .map_err(|e| JobError::Queue(format!("payload to_value: {e}")))?,
+            signature: sign_body(
+                self.signature_format,
+                self.secret.as_bytes(),
+                body.as_bytes(),
+            )
+            .map_err(|e| JobError::Queue(e.to_string()))?,
+            body,
             headers: self.headers.clone(),
             timeout_secs: self.timeout.as_secs().max(1),
             retry_status_codes: self.retry_status_codes.clone(),
@@ -546,14 +549,70 @@ mod tests {
         assert!(!is_default_retryable(301));
     }
 
+    /// #1852 — the queued job carries a signature, never the secret.
+    #[tokio::test]
+    async fn the_queued_job_does_not_hold_the_secret() {
+        const SECRET: &str = "the-shared-signing-secret";
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (url, srv) = start_server(404, received.clone()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        let dead = Arc::new(Mutex::new(Vec::new()));
+        let d = dead.clone();
+        q.on_dead_letter(move |dl| {
+            let d = d.clone();
+            async move { d.lock().unwrap().push(dl.payload) }
+        })
+        .await;
+        q.start().await;
+        WebhookSubscription::new(url, SECRET)
+            .allow_private_targets(true)
+            .dispatch(&q, "ping", &serde_json::json!({"b": 1, "a": 2}))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while dead.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let stored = dead
+            .lock()
+            .unwrap()
+            .first()
+            .expect("dead-lettered")
+            .to_string();
+        assert!(!stored.contains(SECRET), "{stored}");
+        let recv = received.lock().unwrap();
+        let (_, hdrs, body) = &recv[0];
+        assert!(crate::webhook::verify_signature(
+            SignatureFormat::HexSha256WithPrefix,
+            SECRET.as_bytes(),
+            body,
+            &hdrs["x-webhook-signature"],
+        ));
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    /// #1852 — a transport error does not quote the URL; its path can be a secret.
+    #[tokio::test]
+    async fn a_transport_error_does_not_quote_the_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let url = format!("http://{addr}/services/T0/B0/PATHSECRET");
+        let err = deliver(&event(url, true)).await.unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(matches!(err, JobError::Retryable(_)), "{msg}");
+        assert!(!msg.contains("PATHSECRET"), "{msg}");
+    }
+
     fn event(url: String, allow_private_targets: bool) -> WebhookEvent {
         WebhookEvent {
             id: "id".into(),
             event: "ping".into(),
             target_url: url,
-            signing_secret: "s".into(),
-            signature_format: SignatureFormat::HexSha256WithPrefix,
-            payload: serde_json::json!({}),
+            body: "{}".into(),
+            signature: "sha256=00".into(),
             headers: HashMap::new(),
             timeout_secs: 5,
             retry_status_codes: Vec::new(),

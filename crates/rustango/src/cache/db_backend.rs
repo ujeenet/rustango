@@ -45,19 +45,23 @@
 //! `CREATE TABLE IF NOT EXISTS` at boot; `manage createcachetable`
 //! does the same from the CLI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
 use super::{Cache, CacheError};
 use crate::core::SqlValue;
-use crate::sql::{raw_execute_pool, raw_query_pool, Pool};
+use crate::sql::{raw_execute_pool, raw_query_pool, run_ddl_idempotent, Pool};
 
 /// Longest key stored as-is: MySQL's `VARBINARY(255)` column.
 const MAX_RAW_KEY_BYTES: usize = 255;
 
 /// Bytes of a long key kept ahead of its hash, so prefix deletes still reach it.
 const HASHED_HEAD_BYTES: usize = MAX_RAW_KEY_BYTES - 1 - 64;
+
+/// Most rows one [`DatabaseCache::purge_expired`] statement deletes.
+pub const PURGE_BATCH: u64 = 1000;
 
 /// The `cache_key` column value: the key itself, or `{head}#{sha256 hex}`
 /// when it is longer than [`MAX_RAW_KEY_BYTES`] or already ends like a hash,
@@ -127,8 +131,8 @@ impl DatabaseCache {
     /// boot.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] when the DDL fails, for example on a
-    /// permission problem.
+    /// [`CacheError::Connection`] when the table DDL fails, for example on a
+    /// permission problem. A failed `expires` index only logs a warning.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
@@ -159,7 +163,46 @@ impl DatabaseCache {
         raw_execute_pool(&self.pool, &sql, vec![])
             .await
             .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
+        // `purge_expired` scans by `expires`; existing tables get it too.
+        let index = dialect.quote_ident(&self.expires_index());
+        let guard = if dialect.supports_create_index_if_not_exists() {
+            "IF NOT EXISTS "
+        } else {
+            ""
+        };
+        // Best effort: a non-owner PG role or a MySQL role without INDEX still gets a cache.
+        let ddl = format!("CREATE INDEX {guard}{index} ON {table} (expires)");
+        if let Err(e) = run_ddl_idempotent(&self.pool, &ddl).await {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "rustango::cache",
+                    table = %self.table,
+                    error = %e,
+                    "DatabaseCache: could not create the expires index; purge_expired will scan the table"
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Name of the `expires` index. Postgres index names are per schema, so it carries the table.
+    /// A long table name is cut and hashed to stay under PG's 63 and MySQL's 64 bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn expires_index(&self) -> String {
+        const MAX_IDENT: usize = 63;
+        let plain = format!("{}_expires_idx", self.table);
+        if plain.len() <= MAX_IDENT {
+            return plain;
+        }
+        use sha2::{Digest, Sha256};
+        let mut head = 40;
+        while !self.table.is_char_boundary(head) {
+            head -= 1;
+        }
+        let digest = crate::hex::hex_encode(&Sha256::digest(self.table.as_bytes()));
+        format!("{}_{}_exp", &self.table[..head], &digest[..8])
     }
 
     /// Drop the cache table. Handy in tests. In production, run it
@@ -181,21 +224,56 @@ impl DatabaseCache {
     /// from keys nobody reads.
     ///
     /// Returns the number of rows deleted. Rows with `expires = 0`
-    /// have no TTL and are never touched.
+    /// have no TTL and are never touched. Deletes in batches of
+    /// [`PURGE_BATCH`] rows, so no one statement holds locks on the whole table.
     ///
     /// # Errors
-    /// [`CacheError::Connection`] when the DELETE fails.
+    /// [`CacheError::Connection`] when a DELETE fails.
     pub async fn purge_expired(&self) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
         // Keep no-TTL rows. Use the same clock as `get`/`set` so both
         // agree on what "expired" means.
-        let sql = format!("DELETE FROM {table} WHERE expires != 0 AND expires < {p1}");
+        let expired = format!("expires <> 0 AND expires < {p1}");
+        // MySQL rejects LIMIT inside IN (…); PG has no DELETE … LIMIT.
+        let sql = if dialect.name() == "mysql" {
+            format!("DELETE FROM {table} WHERE {expired} LIMIT {PURGE_BATCH}")
+        } else {
+            format!(
+                "DELETE FROM {table} WHERE cache_key IN \
+                 (SELECT cache_key FROM {table} WHERE {expired} LIMIT {PURGE_BATCH})"
+            )
+        };
         let now = Self::now_unix_ms();
-        raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+        let mut total = 0;
+        loop {
+            let n = raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+                .await
+                .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))?;
+            total += n;
+            if n < PURGE_BATCH {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// Drop `key` only if it is still expired, so a `set` racing the
+    /// read is not lost (#1906).
+    async fn delete_if_expired(&self, key: &str) -> Result<u64, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let (p1, p2) = (dialect.placeholder(1), dialect.placeholder(2));
+        let sql = format!(
+            "DELETE FROM {table} WHERE cache_key = {p1} AND expires <> 0 AND expires < {p2}"
+        );
+        let binds = vec![
+            StoredKey::new(key).into_value(),
+            SqlValue::I64(Self::now_unix_ms()),
+        ];
+        raw_execute_pool(&self.pool, &sql, binds)
             .await
-            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
+            .map_err(|e| CacheError::Connection(format!("get: {e}")))
     }
 
     /// Unix epoch in **milliseconds**. Seconds are too coarse: a
@@ -235,8 +313,7 @@ impl Cache for DatabaseCache {
         // `>`, not `>=`, so an entry lives its full stated duration.
         // The other backends and `purge_expired` use `>` as well.
         if expires != 0 && Self::now_unix_ms() > expires {
-            // Drop the dead row before reporting a miss.
-            let _ = self.delete(key).await;
+            let _ = self.delete_if_expired(key).await;
             return Ok(None);
         }
         Ok(Some(value))
@@ -557,6 +634,29 @@ mod tests {
     #[test]
     fn expires_for_zero_when_no_ttl() {
         assert_eq!(DatabaseCache::expires_for(None), 0);
+    }
+
+    /// The expired-read cleanup must spare a value a racing `set` just wrote (#1906).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn expired_cleanup_spares_a_fresh_value() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let cache = DatabaseCache::new(pool, "c");
+        cache.ensure_table().await.unwrap();
+        cache.set("k", "fresh", None).await.unwrap();
+        assert_eq!(cache.delete_if_expired("k").await.unwrap(), 0);
+        cache
+            .set("k", "fresh", Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+        assert_eq!(cache.delete_if_expired("k").await.unwrap(), 0);
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("fresh"));
+        cache
+            .set("k", "old", Some(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(cache.delete_if_expired("k").await.unwrap(), 1);
     }
 
     #[test]

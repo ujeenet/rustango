@@ -729,7 +729,7 @@ Un par de flujos de extremo a extremo todavía necesitan ensamblarse a partir de
 
 Ya incluido (no recurras a un apaño):
 
-- **Inicio de sesión social OAuth2 / OIDC** — `oauth2::providers` incluye ayudantes para Google, GitHub, Microsoft, GitLab y Discord (además de `OAuth2Provider::from_discovery` para cualquier proveedor OIDC), y `oauth2::router::oauth2_router` monta las rutas de inicio de sesión + callback, crea el registro de usuario y establece la cookie de sesión.
+- **Inicio de sesión social OAuth2 / OIDC** — `oauth2::providers` incluye ayudantes para Google, GitHub, Microsoft, GitLab y Discord (además de `OAuth2Provider::from_discovery` para cualquier proveedor OIDC), y `oauth2::router::oauth2_router` monta las rutas de inicio de sesión + callback; su hook `OnAuthSuccess` busca al usuario por `AuthSuccess::identity_key()` y establece la cookie de sesión.
 - **Bloqueo por cuenta** — `rustango::account_lockout::Lockout` (respaldado por caché; `is_locked` / `record_failure` / `clear`, con `max_attempts` + `lockout_duration` configurables).
 - **Endpoint de informe de CSP** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
 - **Limitación de tasa distribuida** — `rate_limit_cache::CacheRateLimitLayer` (consulta [Limitar la tasa de peticiones](#limitar-la-tasa-de-peticiones)).

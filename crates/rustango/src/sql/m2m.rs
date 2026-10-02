@@ -87,8 +87,8 @@ impl M2MManager {
 
     /// Add `dst_id` to the junction table. No-op if already present.
     /// Tri-dialect: uses `INSERT … ON CONFLICT DO NOTHING` on
-    /// Postgres + SQLite (both support it ≥ SQLite 3.24), and
-    /// `INSERT IGNORE INTO …` on MySQL.
+    /// Postgres + SQLite (both support it ≥ SQLite 3.24), and a no-op
+    /// `ON DUPLICATE KEY UPDATE` on MySQL.
     ///
     /// # Errors
     /// Driver failures.
@@ -96,15 +96,12 @@ impl M2MManager {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let dialect = pool.dialect();
         let src = self.src_key()?;
-        let (insert_kw, suffix) = match dialect.name() {
-            "mysql" => ("INSERT IGNORE INTO", ""),
-            _ => ("INSERT INTO", " ON CONFLICT DO NOTHING"),
-        };
+        let src_q = dialect.quote_ident(self.src_col);
         let sql = format!(
-            "{insert_kw} {through} ({src}, {dst}) VALUES ({p1}, {p2}){suffix}",
+            "INSERT INTO {through} ({src_q}, {dst}) VALUES ({p1}, {p2}) {skip}",
             through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
             dst = dialect.quote_ident(self.dst_col),
+            skip = skip_duplicate(dialect, &src_q),
             p1 = dialect.placeholder(1),
             p2 = dialect.placeholder(2),
         );
@@ -296,6 +293,16 @@ impl M2MManager {
     }
 }
 
+/// Skip an existing link. Untargeted off MySQL: a `through` model need not have a
+/// unique pair. MySQL's `INSERT IGNORE` also hid truncation and FK errors (#1966).
+fn skip_duplicate(dialect: &dyn super::Dialect, pivot: &str) -> String {
+    if dialect.name() == "mysql" {
+        dialect.insert_on_conflict_skip(&[pivot])
+    } else {
+        "ON CONFLICT DO NOTHING".to_owned()
+    }
+}
+
 /// The source PK bound as-is (#1926); an unsaved source has none.
 fn src_key(pk: &SqlValue, through: &'static str) -> Result<SqlValue, ExecError> {
     match pk {
@@ -460,14 +467,11 @@ impl GenericM2MManager {
         let dialect = pool.dialect();
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
-        let (insert_kw, suffix) = match dialect.name() {
-            "mysql" => ("INSERT IGNORE INTO", ""),
-            _ => ("INSERT INTO", " ON CONFLICT DO NOTHING"),
-        };
+        let pk = dialect.quote_ident(self.pk_col);
         let sql = format!(
-            "{insert_kw} {through} ({pk}, {ctc}, {dst}) VALUES ({p1}, {p2}, {p3}){suffix}",
+            "INSERT INTO {through} ({pk}, {ctc}, {dst}) VALUES ({p1}, {p2}, {p3}) {skip}",
             through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
+            skip = skip_duplicate(dialect, &pk),
             ctc = dialect.quote_ident(self.ct_col),
             dst = dialect.quote_ident(self.dst_col),
             p1 = dialect.placeholder(1),

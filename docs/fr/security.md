@@ -727,7 +727,7 @@ Quelques flux de bout en bout ont encore besoin d'être assemblés à partir des
 
 Déjà fournis (n'allez pas chercher un contournement) :
 
-- **Connexion sociale OAuth2 / OIDC** — `oauth2::providers` fournit les helpers Google, GitHub, Microsoft, GitLab et Discord (plus `OAuth2Provider::from_discovery` pour tout fournisseur OIDC), et `oauth2::router::oauth2_router` monte les routes de login + callback, crée l'enregistrement utilisateur et définit le cookie de session.
+- **Connexion sociale OAuth2 / OIDC** — `oauth2::providers` fournit les helpers Google, GitHub, Microsoft, GitLab et Discord (plus `OAuth2Provider::from_discovery` pour tout fournisseur OIDC), et `oauth2::router::oauth2_router` monte les routes de login + callback ; votre hook `OnAuthSuccess` retrouve l'utilisateur via `AuthSuccess::identity_key()` et définit le cookie de session.
 - **Verrouillage par compte** — `rustango::account_lockout::Lockout` (adossé au cache ; `is_locked` / `record_failure` / `clear`, `max_attempts` + `lockout_duration` configurables).
 - **Endpoint de rapport CSP** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
 - **Limitation de débit distribuée** — `rate_limit_cache::CacheRateLimitLayer` (voir [Limiter le débit des requêtes](#limiter-le-débit-des-requêtes)).

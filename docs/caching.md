@@ -155,7 +155,8 @@ whichever it hits first — with approximate-LRU eviction. A flood of unique key
 cannot grow the process without limit, but it does mean **an entry can vanish
 before its TTL expires** if it is the least recently used when the budget is
 reached. Eviction drops already-expired entries first, then the least-recently
-used, until both budgets are met.
+used, until both are 10% under budget. Entries written with `set_forever`
+(feature flags) are outside the budgets and never evicted.
 
 So treat a cache read as "may be absent" even inside the TTL. That is true of
 every cache backend, but here it has a cause you can reason about and tune:

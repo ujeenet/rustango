@@ -143,7 +143,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
-        "sqlmigrate" => sqlmigrate_cmd(dir, &args[1..], writer),
+        "sqlmigrate" => sqlmigrate_cmd(pool, dir, &args[1..], writer),
         "forget-pending" => forget_pending_cmd(pool, dir, &args[1..], writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
@@ -1115,7 +1115,12 @@ async fn downgrade<W: Write>(
 /// Output format mirrors `migrate --dry-run` per-migration: a comment
 /// header (`-- <name> (atomic|non-atomic)`) followed by every emitted
 /// statement, semicolon-terminated, one per line.
-fn sqlmigrate_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+fn sqlmigrate_cmd<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let mut positional: Option<&str> = None;
     for arg in args {
         match arg.as_str() {
@@ -1142,7 +1147,7 @@ fn sqlmigrate_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     }
     let name = positional
         .ok_or_else(|| MigrateError::Validation("sqlmigrate requires a migration name".into()))?;
-    let preview = runner::sqlmigrate_one(dir, name)?;
+    let preview = runner::sqlmigrate_one(dir, name, pool.dialect())?;
     writeln!(
         w,
         "-- {} ({})",

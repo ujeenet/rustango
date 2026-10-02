@@ -28,6 +28,10 @@ pub enum MigrateError {
     /// [`drop_all_pool`]: super::runner::drop_all_pool
     #[error(transparent)]
     Exec(#[from] crate::sql::ExecError),
+    /// Another run held the migrate lock longer than
+    /// [`with_lock_timeout`](super::with_lock_timeout) allowed.
+    #[error("another run held the migrate lock for over {0:?}; nothing was applied")]
+    LockTimeout(std::time::Duration),
 
     /// A migration failed **after** committing DDL that cannot be
     /// rolled back. The schema moved and the ledger did not.

@@ -812,10 +812,17 @@ pub(crate) fn render_changes_split_for_empty(
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
+/// A registry model's table is shared, so it resolves through `search_path` (#1718).
 fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &str) -> String {
+    let shared = || {
+        crate::core::ModelEntry::for_table(table)
+            .is_some_and(|e| e.schema.scope == crate::core::ModelScope::Registry)
+    };
     match schema {
-        Some(s) => format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(table)),
-        None => dialect.quote_ident(table),
+        Some(s) if !shared() => {
+            format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(table))
+        }
+        _ => dialect.quote_ident(table),
     }
 }
 

@@ -135,6 +135,13 @@ impl CsvWriter {
     }
 
     fn write_row(&mut self, row: &[String]) {
+        // A bare CRLF is a blank line readers skip; quote the lone empty cell (#1908).
+        if let [only] = row {
+            if only.is_empty() {
+                self.out.push_str("\"\"\r\n");
+                return;
+            }
+        }
         for (i, field) in row.iter().enumerate() {
             if i > 0 {
                 self.out.push(',');
@@ -245,6 +252,16 @@ mod tests {
         let mut w = CsvWriter::new();
         w.row(&["", "x", ""]);
         assert_eq!(w.as_str(), ",x,\r\n");
+    }
+
+    /// A one-column empty cell is `""`, not a blank line (#1908).
+    #[test]
+    fn single_empty_field_is_quoted() {
+        let mut w = CsvWriter::new();
+        w.headers(["note"]);
+        w.row([""]);
+        w.row(["x"]);
+        assert_eq!(w.as_str(), "note\r\n\"\"\r\nx\r\n");
     }
 
     #[test]
