@@ -594,15 +594,11 @@ async fn signed_in_admin_pages_pass_a_strict_csp() {
 #[tokio::test]
 async fn nested_csrf_layers_keep_one_token() {
     let app = rustango::admin::protect_with_csrf(app_with_session_auth(pool().await));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    // A gated page: both CsrfLayers see it.
+    let gated = app.clone().oneshot(get("/csrf_post")).await.unwrap();
+    assert_eq!(csrf_cookies(&gated).len(), 1, "{:?}", csrf_cookies(&gated));
+    let resp = app.oneshot(get("/login")).await.unwrap();
     let cookies = csrf_cookies(&resp);
     assert_eq!(cookies.len(), 1, "{cookies:?}");
     let html = axum::body::to_bytes(resp.into_body(), usize::MAX)

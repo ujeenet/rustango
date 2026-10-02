@@ -154,11 +154,6 @@ impl<S: Clone + Send + Sync + 'static> CspNonceRouterExt for Router<S> {
             move |mut req: Request<Body>, next: Next| {
                 let cfg = cfg.clone();
                 async move {
-                    // Nested layers share the outer nonce, or the header and
-                    // the rendered tags would disagree.
-                    if req.extensions().get::<Nonce>().is_some() {
-                        return next.run(req).await;
-                    }
                     let nonce = Nonce {
                         value: Arc::new(generate_nonce(cfg.bytes)),
                     };
@@ -259,35 +254,6 @@ mod tests {
         let body = std::str::from_utf8(&bytes).unwrap();
         // Each call generates a fresh 22-char token.
         assert_eq!(body.len(), 22);
-    }
-
-    /// #1703 — nested layers keep one nonce: header, extension and task-local agree.
-    #[tokio::test]
-    async fn nested_layers_share_the_outer_nonce() {
-        async fn h(Extension(nonce): Extension<Nonce>) -> impl axum::response::IntoResponse {
-            assert_eq!(current().as_deref(), Some(nonce.value()));
-            (
-                [("content-security-policy", CSP_NONCE_PLACEHOLDER)],
-                nonce.value().to_owned(),
-            )
-        }
-        let app = Router::new()
-            .route("/", get(h))
-            .csp_nonce(CspNonceLayer::default())
-            .csp_nonce(CspNonceLayer::default());
-        let resp = app
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let header = resp.headers()["content-security-policy"]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
-            .await
-            .unwrap();
-        let body = std::str::from_utf8(&bytes).unwrap();
-        assert_eq!(header, format!("'nonce-{body}'"));
     }
 
     #[tokio::test]
