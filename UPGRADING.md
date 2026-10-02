@@ -160,7 +160,7 @@ An admin edit of a model with `audit(...)` writes its audit row in the UPDATE's 
 
 ### Webhooks with private targets still refuse cloud metadata
 
-`allow_private_targets` no longer reaches `169.254.169.254` and the other metadata addresses (#1821).
+`allow_private_targets` no longer reaches `100.100.100.200`, any `169.254.0.0/16` address or `fd00:ec2::/32` (#1821).
 
 ## 0.59.17
 

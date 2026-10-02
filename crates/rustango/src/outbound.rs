@@ -29,6 +29,8 @@ pub(crate) const ALLOW_ENV: &str = "RUSTANGO_OUTBOUND_ALLOW";
 pub(crate) struct Allowlist {
     hosts: Vec<String>,
     nets: Vec<CidrRange>,
+    /// Never allowed, nor as an IPv6 form carrying one of them.
+    deny: Vec<CidrRange>,
 }
 
 impl Allowlist {
@@ -54,12 +56,14 @@ impl Allowlist {
         list
     }
 
-    /// Every address; metadata endpoints stay refused (#1821).
+    /// Every address but the metadata ranges: all of link-local, where
+    /// providers keep adding endpoints, and AWS's fd00:ec2::/32 (#1821).
     fn any_address() -> Self {
-        let nets = ["0.0.0.0/0", "::/0"].map(|n| CidrRange::parse(n).expect("valid CIDR"));
+        let cidr = |n| CidrRange::parse(n).expect("valid CIDR");
         Self {
             hosts: Vec::new(),
-            nets: nets.into(),
+            nets: vec![cidr("0.0.0.0/0"), cidr("::/0")],
+            deny: vec![cidr("169.254.0.0/16"), cidr("fd00:ec2::/32")],
         }
     }
 
@@ -69,7 +73,12 @@ impl Allowlist {
     }
 
     fn allows_ip(&self, ip: IpAddr) -> bool {
-        self.nets.iter().any(|n| n.contains(ip))
+        let denied = |ip| self.deny.iter().any(|n: &CidrRange| n.contains(ip));
+        let carried = match ip {
+            IpAddr::V6(v6) => embedded_v4(v6).into_iter().any(|v4| denied(IpAddr::V4(v4))),
+            IpAddr::V4(_) => false,
+        };
+        !denied(ip) && !carried && self.nets.iter().any(|n| n.contains(ip))
     }
 }
 
@@ -586,9 +595,25 @@ mod tests {
             let err = check_url(url, &TargetPolicy::AllowPrivate).await.err();
             assert!(matches!(err, Some(TargetError::Blocked)), "{url}: {err:?}");
         }
-        let at = vec![SocketAddr::new("169.254.170.2".parse().unwrap(), 80)];
-        let route = checked_addrs("x", at, &TargetPolicy::AllowPrivate.allowlist());
-        assert!(matches!(route, Err(TargetError::Blocked)));
+        // All of link-local and fd00:ec2::/32, embedded forms too.
+        for ip in [
+            "169.254.170.2",
+            "169.254.0.23",
+            "fd00:ec2::5",
+            "::ffff:169.254.0.23",
+            "2002:a9fe:17::1",
+        ] {
+            let at = vec![SocketAddr::new(ip.parse().unwrap(), 80)];
+            let route = checked_addrs("x", at, &TargetPolicy::AllowPrivate.allowlist());
+            assert!(matches!(route, Err(TargetError::Blocked)), "{ip}");
+        }
+        let err = check_url("http://169.254.0.23/", &TargetPolicy::AllowPrivate).await;
+        assert!(matches!(err, Err(TargetError::Blocked)));
+        assert!(
+            check_url("http://[fd00:1::1]/", &TargetPolicy::AllowPrivate)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
