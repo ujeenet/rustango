@@ -148,14 +148,14 @@ impl std::error::Error for ValidationError {}
 /// # Errors
 /// `ValidationError { code: "invalid_email", ... }` on shape mismatch.
 pub fn validate_email(s: &str) -> Result<(), ValidationError> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
+    // No trimming: the caller stores `s` as given, so it must be valid as given.
+    if s.is_empty() || s.len() > 254 || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(ValidationError::new(
             "invalid_email",
             "Enter a valid email address.",
         ));
     }
-    let (local, domain) = match trimmed.split_once('@') {
+    let (local, domain) = match s.split_once('@') {
         Some(parts) => parts,
         None => {
             return Err(ValidationError::new(
@@ -164,7 +164,8 @@ pub fn validate_email(s: &str) -> Result<(), ValidationError> {
             ))
         }
     };
-    if local.is_empty() || domain.is_empty() {
+    // RFC 5321: a local part is at most 64 octets.
+    if local.is_empty() || domain.is_empty() || local.len() > 64 {
         return Err(ValidationError::new(
             "invalid_email",
             "Enter a valid email address.",
@@ -2317,6 +2318,17 @@ mod tests {
         assert!(validate_email("alice@example.com").is_ok());
         assert!(validate_email("a.b+tag@example.co.uk").is_ok());
         assert!(validate_email("nested.dots+plus_underscore-hyphen@sub.example.org").is_ok());
+    }
+
+    #[test]
+    fn email_rejects_whitespace_controls_and_overlong() {
+        assert!(validate_email("al ice@example.com").is_err());
+        assert!(validate_email(" alice@example.com").is_err());
+        assert!(validate_email("alice@exa\u{7}mple.com").is_err());
+        let long_local = format!("{}@example.com", "a".repeat(65));
+        assert!(validate_email(&long_local).is_err());
+        let long = format!("a@{}.com", "b".repeat(250));
+        assert!(validate_email(&long).is_err());
     }
 
     #[test]

@@ -150,6 +150,78 @@ untouched.
 
 ## Unreleased
 
+## 0.59.17
+
+### Number filters round halves up (#1896)
+
+`floatformat`, `numberformat::format`, `format_number` and `format_currency` round half away from zero on the shortest decimal form, so `2.5` gives `3` (was `2`).
+
+### Stricter email, nullable bools and `timesince` (#1897)
+
+`validate_email` no longer trims: `" a@b.com"` fails, so trim before saving. A missing nullable `Option<bool>` form or JSON key saves `NULL`, not `false`.
+`save` checks every column, so a stored row with a spaced email now fails its next save, even of another field. Trim stored data first: load the rows, set `row.email = row.email.trim().to_owned()`, `save`. `objects().update().set(..)` checks only the set columns.
+`timesince(.., depth)` drops units after an empty one: a year and three days is `"1 year"`.
+
+### `plural_category` can return `"zero"` and `"two"` (#1921)
+
+Arabic, Hebrew and Slovenian now use those CLDR categories; add the forms to plural catalogs (a missing form falls back to `"other"`). `Locale::as_str` turns `_` into `-`.
+
+### `slugify` folds accented Latin letters (#2048)
+
+New slugs for accented titles change (`"Café"` → `"cafe"`, was `"caf"`); stored slugs are untouched. `unique_slug` falls back to `"untitled"`.
+
+### SSO email verification and forwarded hosts (#1842)
+
+**Breaking:** a GitHub login now also calls `/user/emails` (needs the `user:email` scope or
+the app's email permission); a 403 or 404 there means no verified email, any other failure
+fails the login. Facebook emails are never
+verified, so email linking skips them. Behind a proxy, name it in `RealIpLayer::trust_proxies`
+or member SSO builds `redirect_uri` from `Host`. Tenant SSO, admin SSO and the MCP discovery URLs
+read `X-Forwarded-Proto` only from such a proxy too, else assume `https`. A proxy counts as trusted
+only when it also sends the configured client-IP header (`X-Forwarded-For` by default).
+
+### Passkey challenge and counter API (#1841)
+
+**Breaking:** `seal_challenge` takes a `CeremonyPurpose`; `open_challenge` takes the same
+purpose and a cache, and is async. `verify_authentication` returns `AuthenticationOutcome`
+(`.sign_count`, `.user_verified`); `update_sign_count` returns `SignCountUpdate`: refuse the
+login unless `.is_accepted()` (`Stale` is a clone or a lost race). Tokens sealed before
+the upgrade no longer open. The `passkey` feature now enables `cache`.
+A credential whose stored counter is non-zero and which now reports 0 (a reset or cloned
+authenticator) fails with `CounterRegression`. The user removes that passkey and registers it again.
+
+### `[auth] argon2_*` now apply (#1728)
+
+New hashes use `argon2_memory_kib` / `argon2_iterations` / `argon2_parallelism` when set;
+check them before deploying. Existing hashes keep verifying at their own cost.
+Built-in logins store a new hash when the old one is weaker, which also ends that
+user's other sessions. Until every user logs in once, login time differs between old-cost
+and unknown accounts, which tells an attacker which accounts exist. Custom login code can
+call `passwords::upgrade_stored_hash`.
+
+### JWT refresh honours logout (#2036)
+
+A cookie logout now also ends that user's JWT refresh chains; clients must log in again.
+
+### `confirmed_secret_checked` errors on an undecodable secret (#1875)
+
+It returned `Ok(None)` (no second factor); it now returns `Err`, also for a secret under 10 bytes
+(`TotpSecret::from_base32` refuses those). `confirmed_secret` is deprecated: a read error looks like
+no device, so use `confirmed_secret_checked`. `Debug` of `TotpSecret`,
+`AdminTotp` and `Signer` no longer prints the secret.
+
+### `runserver` auto-migrate and the registry run apply the system chain first (#2056)
+
+`runserver` now applies the system chain like `manage migrate`. `migrate_registry` applies it before the project's registry migrations, not after.
+
+### Framework tables a project's own migrations create get new columns (#2052)
+
+`migrate` adds missing framework columns to them after the project chain; a NOT NULL column without a default on a table with rows fails until added by hand (an empty table is fine, #2066).
+
+### A migrate inside a running migrate is an error (#2055)
+
+A callback or observer that migrates while the outer run holds the lock now gets an error, not a hang. Migrate from `post_migrate` instead: it fires after the lock is released.
+
 ## 0.59.16
 
 ### Custom admin views need `change` for writes

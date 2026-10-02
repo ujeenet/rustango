@@ -132,6 +132,29 @@ async fn admin_created_user_can_log_in(pool: &Pool) {
     assert!(!detail.contains(&user.password_hash), "{detail}");
 }
 
+/// A login over a hash weaker than today's cost stores a fresh one.
+async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
+    use rustango::passwords::needs_rehash;
+    use rustango::sql::UpdaterPool as _;
+    // argon2id m=8,t=1,p=1 of "pw-weak-hash".
+    const WEAK: &str = "$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$Tk2Yd9kayx5c9Zj6ox/S6WGhYHdSHI6LCO1srlux3Ns";
+    let name = unique("weak");
+    let (status, body) = create_user(pool, &name, "pw-weak-hash").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    User::objects()
+        .where_(User::username.eq(name.clone()))
+        .update()
+        .set("password_hash", WEAK)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    assert!(logs_in(pool, &name, "pw-weak-hash").await);
+    let new = user_named(pool, &name).await.password_hash;
+    assert_ne!(new, WEAK, "the weak hash is still stored");
+    assert!(!needs_rehash(&new), "{new}");
+    assert!(logs_in(pool, &name, "pw-weak-hash").await);
+}
+
 async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
     let name = unique("edt");
     create_user(pool, &name, "pw-1763-old").await;
@@ -233,6 +256,7 @@ tri_dialect_test! {
     scenarios: [
         new_user_form_does_not_block_submit,
         admin_created_user_can_log_in,
+        a_login_upgrades_a_weak_hash,
         editing_a_user_keeps_or_rotates_the_password,
         admin_created_provider_secret_is_encrypted,
         api_keys_are_not_added_through_the_admin,

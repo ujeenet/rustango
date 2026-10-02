@@ -98,9 +98,10 @@ pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
     axum::extract::State(state): axum::extract::State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> impl std::future::Future<Output = Response> + Send {
     let t = t.into();
-    async move { sse_in(t, &state.jwt, uri, headers).await }
+    async move { sse_in(t, &state.jwt, uri, headers, extensions).await }
 }
 
 async fn sse_in(
@@ -108,16 +109,17 @@ async fn sse_in(
     jwt: &JwtLifecycle,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let Some(token) = super::auth::bearer(&headers) else {
-        return super::auth::unauthorized(&headers, &uri);
+        return super::auth::unauthorized(&headers, &extensions, &uri);
     };
     // Accept both bearer shapes the JSON-RPC POST accepts. See
     // `auth::authenticate_bearer` for why this stream must not be
     // stricter than the endpoint next to it.
     let agent = match super::auth::authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
         Ok(agent) => agent,
-        Err(e) => return e.into_response(&headers, &uri),
+        Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
     let tenant = agent.tenant.clone();
     let agent_id = agent.agent_id;

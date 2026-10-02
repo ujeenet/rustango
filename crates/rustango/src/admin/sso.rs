@@ -59,14 +59,15 @@ fn login_path(state: &AppState) -> String {
 
 /// Per-provider callback URL built from the request host:
 /// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
-/// comes from `X-Forwarded-Proto`, or `https` when that is absent.
-fn derive_bare_redirect(headers: &HeaderMap, state: &AppState, slug: &str) -> Option<String> {
+/// comes from `X-Forwarded-Proto` sent by a trusted proxy, else `https`.
+fn derive_bare_redirect(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    state: &AppState,
+    slug: &str,
+) -> Option<String> {
     let host = headers.get(header::HOST)?.to_str().ok()?;
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim())
-        .filter(|s| !s.is_empty())
+    let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .unwrap_or("https");
     Some(format!(
         "{scheme}://{host}{}/sso/{slug}/callback",
@@ -93,11 +94,12 @@ async fn sso_begin(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
-    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
     let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {
@@ -134,6 +136,7 @@ async fn sso_callback(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Query(params): Query<CallbackParams>,
 ) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
@@ -153,7 +156,7 @@ async fn sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
-    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
     let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {

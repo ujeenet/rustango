@@ -261,8 +261,9 @@ async fn the_enrollment_code_cannot_sign_in() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        totp_store::confirmed_secret(&pool, carol_id)
+        totp_store::confirmed_secret_checked(&pool, carol_id)
             .await
+            .unwrap()
             .is_some(),
         "enrollment confirmed"
     );
@@ -412,8 +413,9 @@ async fn an_unfinished_reenroll_keeps_the_old_code() {
     let device = totp_store::device(&pool, id).await.expect("device");
     assert!(device.pending_secret_base32.is_some(), "nothing staged");
     assert_eq!(
-        totp_store::confirmed_secret(&pool, id)
+        totp_store::confirmed_secret_checked(&pool, id)
             .await
+            .unwrap()
             .map(|s| s.to_base32()),
         Some(secret.to_base32()),
         "the unfinished re-enroll replaced the factor"
@@ -479,8 +481,9 @@ async fn a_pending_reenroll_key_is_shown_once_and_promotes() {
 
     // The old codes in the window are spent, so check the store.
     assert_eq!(
-        totp_store::confirmed_secret(&pool, id)
+        totp_store::confirmed_secret_checked(&pool, id)
             .await
+            .unwrap()
             .map(|s| s.to_base32()),
         Some(pending.clone()),
         "the old factor is still the confirmed one"

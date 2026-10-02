@@ -61,7 +61,7 @@ use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::http::{Request, Response};
 
-use super::negotiate_language;
+use super::{negotiate_language, Locale};
 
 const DEFAULT_COOKIE: &str = "django_language";
 
@@ -111,9 +111,9 @@ impl<S: Send + Sync> FromRequestParts<S> for ActiveLocale {
 
 #[derive(Clone)]
 struct LocaleConfig {
-    /// Lowercase locale identifiers the app supports.
+    /// Supported locales, normalised by [`Locale::new`].
     available: Vec<String>,
-    /// Fallback locale when nothing matches. Always lowercased.
+    /// Fallback locale when nothing matches, normalised the same way.
     default: String,
     /// Cookie name to read; `None` to disable cookie lookup.
     cookie_name: Option<String>,
@@ -131,7 +131,7 @@ impl LocaleMiddleware {
     /// [`Self::default`].
     #[must_use]
     pub fn new(available: &[&str]) -> Self {
-        let avail: Vec<String> = available.iter().map(|s| s.to_lowercase()).collect();
+        let avail: Vec<String> = available.iter().map(|s| Locale::new(*s).0).collect();
         let default = avail.first().cloned().unwrap_or_else(|| "en".into());
         Self {
             config: Arc::new(LocaleConfig {
@@ -145,7 +145,7 @@ impl LocaleMiddleware {
     /// Override the fallback locale.
     #[must_use]
     pub fn default(mut self, locale: &str) -> Self {
-        Arc::make_mut(&mut self.config).default = locale.to_lowercase();
+        Arc::make_mut(&mut self.config).default = Locale::new(locale).0;
         self
     }
 
@@ -165,9 +165,10 @@ impl LocaleMiddleware {
         // 1. Cookie
         if let Some(name) = cfg.cookie_name.as_deref() {
             if let Some(value) = crate::cookies::cookie_from_headers(req.headers(), name) {
-                let lower = value.to_lowercase();
-                if cfg.available.iter().any(|a| *a == lower) {
-                    return lower;
+                // Same form as the Accept-Language path: `pt_BR` ≡ `pt-BR`.
+                let locale = Locale::new(value).0;
+                if cfg.available.contains(&locale) {
+                    return locale;
                 }
             }
         }
@@ -307,6 +308,22 @@ mod tests {
         let mw = LocaleMiddleware::new(&["en", "fr"]).default("en");
         let r = req("/", Some("ja"), None);
         assert_eq!(mw.pick(&r), "en");
+    }
+
+    #[test]
+    fn cookie_and_header_agree_on_underscore_locales() {
+        let mw = LocaleMiddleware::new(&["en", "pt_BR"]).default("EN");
+        assert_eq!(
+            mw.pick(&req("/", None, Some("django_language=pt_BR"))),
+            "pt-br"
+        );
+        assert_eq!(
+            mw.pick(&req("/", None, Some("django_language=pt-BR"))),
+            "pt-br"
+        );
+        assert_eq!(mw.pick(&req("/", Some("pt-BR"), None)), "pt-br");
+        let mw = LocaleMiddleware::new(&["pt-BR"]).default("pt_BR");
+        assert_eq!(mw.pick(&req("/", None, None)), "pt-br");
     }
 
     #[test]

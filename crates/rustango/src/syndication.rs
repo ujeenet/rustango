@@ -135,8 +135,15 @@ pub fn render_rss(feed: &Feed) -> String {
         if let Some(ts) = item.pub_date {
             push_text_element(&mut out, "pubDate", &format_rfc822(ts), 6);
         }
-        let guid = item.guid.as_deref().unwrap_or(&item.link);
-        push_text_element(&mut out, "guid", guid, 6);
+        // RSS reads a bare <guid> as a permalink URL; a custom id is not one.
+        match &item.guid {
+            Some(guid) => {
+                out.push_str("      <guid isPermaLink=\"false\">");
+                escape_xml_text(&mut out, guid);
+                out.push_str("</guid>\n");
+            }
+            None => push_text_element(&mut out, "guid", &item.link, 6),
+        }
         out.push_str("    </item>\n");
     }
     out.push_str("  </channel>\n");
@@ -302,7 +309,7 @@ mod tests {
         f.items[0] = FeedItem::new("Pinned", "https://example.com/articles/pinned")
             .with_guid("urn:my-app:pinned-42");
         let xml = render_rss(&f);
-        assert!(xml.contains("<guid>urn:my-app:pinned-42</guid>"));
+        assert!(xml.contains(r#"<guid isPermaLink="false">urn:my-app:pinned-42</guid>"#));
     }
 
     #[test]

@@ -384,10 +384,11 @@ impl RefreshSession {
     const SAT: &'static str = "sat";
     const FAM: &'static str = "fam";
 
-    fn start(auth: &JwtAuth, password_hash: &str) -> Self {
+    fn start(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> Self {
         Self {
-            pwf: crate::session::PasswordFingerprint::of(&auth.0.pwf_secret, password_hash),
-            sat: chrono::Utc::now().timestamp(),
+            pwf: crate::session::PasswordFingerprint::of(&auth.0.pwf_secret, &user.password_hash),
+            // After the last logout, so a login in that second still refreshes (#2036).
+            sat: crate::session::issued_at(user.sessions_revoked_at),
             fam: crate::tenancy::jwt_lifecycle::random_jti(),
         }
     }
@@ -438,7 +439,7 @@ fn issue_login_pair(
             kind.to_owned(),
         ));
     }
-    RefreshSession::start(auth, &user.password_hash).write(&mut custom);
+    RefreshSession::start(auth, user).write(&mut custom);
     auth.lifecycle().issue_pair_with(user_id, custom)
 }
 
@@ -523,7 +524,7 @@ async fn login_in(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let Some(user) = users.into_iter().next() else {
+    let Some(mut user) = users.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
         crate::tenancy::password::verify_dummy_async(&body.password)
@@ -563,6 +564,14 @@ async fn login_in(
     }
 
     attempt.succeeded().await;
+    user.password_hash = crate::passwords::upgrade_stored_hash(
+        t.pool(),
+        <User as crate::core::Model>::SCHEMA,
+        uid,
+        &body.password,
+        &user.password_hash,
+    )
+    .await;
 
     let user_id = uid;
     send_user_logged_in(UserLoggedInContext {
@@ -660,14 +669,14 @@ async fn refresh_in(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let still_valid = users.into_iter().next().is_some_and(|u| {
             u.active
-                // Refresh chains have their own revocation; cookie logout leaves them.
+                // A logout anywhere ends chains started before it (#2036).
                 && crate::tenancy::session::session_survives(
                     &auth.0.pwf_secret,
                     &session.pwf,
                     session.sat,
                     &u.password_hash,
                     u.password_changed_at,
-                    None,
+                    u.sessions_revoked_at,
                 )
         });
         if !still_valid {
@@ -1178,6 +1187,31 @@ mod tests {
         user.save_pool(&pool).await.unwrap();
 
         assert_eq!(rotate(&auth, &pool, &second).await, None);
+    }
+
+    /// #2036 — a logout's cut-off ends refresh chains started before it.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_logout_ends_the_refresh_chain() {
+        let (auth, pool, mut user) = refresh_env(3600).await;
+        let first = login(&auth, &user);
+        let second = rotate(&auth, &pool, &first).await.expect("rotates before");
+
+        let id = user.id.get().copied().unwrap();
+        crate::session::revoke_sessions::<crate::tenancy::auth::User>(&pool, id, None, 0)
+            .await
+            .unwrap();
+        assert_eq!(rotate(&auth, &pool, &second).await, None, "chain ended");
+
+        // A login right after the logout, even in its second, refreshes.
+        user = crate::tenancy::auth::User::objects()
+            .filter("id", id)
+            .fetch(&pool)
+            .await
+            .unwrap()
+            .remove(0);
+        let fresh = login(&auth, &user);
+        assert!(rotate(&auth, &pool, &fresh).await.is_some());
     }
 
     /// #1854 — the cap counts from login, not from the last rotation.
