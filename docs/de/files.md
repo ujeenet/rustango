@@ -166,7 +166,7 @@ Deine Handler und Modelle ändern sich nicht; nur die Verdrahtung beim Start.
 ## Die Mediathek
 
 Wenn Dateien erstklassige Datensätze sind — in der Datenbank nachverfolgt, im Admin durchstöberbar,
-mit Thumbnails und CDN-/vorsignierter Auslieferung — greife zu `rustango::media` statt zu rohem
+mit CDN-/vorsignierter Auslieferung — greife zu `rustango::media` statt zu rohem
 `Storage`. `MediaManager` persistiert eine `Media`-Zeile pro Datei und
 unterstützt zwei Upload-Abläufe:
 
@@ -188,8 +188,8 @@ let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await e
 ```
 
 Er kümmert sich außerdem um Soft-Delete und das Bereinigen von Waisen. Der vollständige Ablauf wird
-in `media_sqlite_live.rs` erprobt; die vorsignierten/Direct-Upload-Methoden des Managers sind
-PostgreSQL-orientiert.
+in `media_sqlite_live.rs` erprobt; die vorsignierten und Direct-Upload-Methoden des Managers
+laufen auf allen drei Backends.
 
 ### Medien auf einer öffentlichen Seite ausliefern
 
@@ -312,7 +312,9 @@ Schritt „beim ersten Gebrauch anlegen"; ist das Feature aus, werden die Tabell
 ## Referenz
 
 **`Storage`-Trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
-`exists(key)` · `url(key) -> Option<String>`.
+`exists(key)` · `url(key) -> Option<String>`, dazu mit Default `save_with_content_type`,
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` und `metadata(key)`
+(ein signierendes Backend überschreibt das Presign-Paar; die Defaults liefern `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitiv) · `.randomize_filename(bool)`. Verwendet von

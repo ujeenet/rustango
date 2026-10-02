@@ -442,6 +442,13 @@ mod admin_views {
 
     /// Admin signals are process-global.
     static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Held for every admin request: a racing receiver fires on any test's request.
+    struct Signals(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+
+    async fn signals() -> Signals {
+        Signals(SIGNALS.lock().await)
+    }
     /// The stamp the racing receiver wrote.
     static RACED: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>> =
         std::sync::Mutex::new(None);
@@ -477,7 +484,7 @@ mod admin_views {
         pks
     }
 
-    async fn post(pool: &Pool, uri: &str, form: String) -> StatusCode {
+    async fn post(_: &Signals, pool: &Pool, uri: &str, form: String) -> StatusCode {
         let app = rustango::admin::Builder::new(pool.clone())
             .admin_prefix("")
             .build();
@@ -529,19 +536,20 @@ mod admin_views {
     }
 
     async fn noop_admin_edit_writes_no_update_row(pool: &Pool) {
+        let g = signals().await;
         let pks = seed(pool).await;
         let uri = format!("/{TABLE}/{}", pks[0]);
-        let status = post(pool, &uri, "title=a".into()).await;
+        let status = post(&g, pool, &uri, "title=a".into()).await;
         assert!(status.is_redirection(), "{status}");
         assert_eq!(count(pool, "update").await, 0, "a no-op edit was audited");
-        post(pool, &uri, "title=z".into()).await;
+        post(&g, pool, &uri, "title=z".into()).await;
         assert_eq!(count(pool, "update").await, 1);
     }
 
     /// A stale form that undoes a concurrent edit is audited: the diff
     /// reads the row the UPDATE overwrites, not the earlier read.
     async fn stale_admin_edit_is_audited(pool: &Pool) {
-        let _g = SIGNALS.lock().await;
+        let g = signals().await;
         let pks = seed(pool).await;
         let target = pks[0].to_string();
         let p = pool.clone();
@@ -566,7 +574,7 @@ mod admin_views {
                 rustango::sql::update_pool(&p, &q).await.expect("race");
             }
         });
-        let status = post(pool, &format!("/{TABLE}/{}", pks[0]), "title=a".into()).await;
+        let status = post(&g, pool, &format!("/{TABLE}/{}", pks[0]), "title=a".into()).await;
         sig::disconnect_admin_pre_save(id);
         assert!(status.is_redirection(), "{status}");
         let doc = AdminDoc::objects().filter("id", pks[0]).fetch(pool).await;
@@ -575,10 +583,16 @@ mod admin_views {
     }
 
     async fn delete_view_keeps_a_concurrent_stamp(pool: &Pool) {
-        let _g = SIGNALS.lock().await;
+        let g = signals().await;
         let pks = seed(pool).await;
         let ids = race(pool, pks[0], false);
-        let status = post(pool, &format!("/{TABLE}/{}/delete", pks[0]), String::new()).await;
+        let status = post(
+            &g,
+            pool,
+            &format!("/{TABLE}/{}/delete", pks[0]),
+            String::new(),
+        )
+        .await;
         unrace(ids);
         assert!(status.is_redirection(), "{status}");
         let raced = *RACED.lock().unwrap();
@@ -588,12 +602,18 @@ mod admin_views {
     }
 
     async fn bulk_actions_skip_rows_marked_since_the_read(pool: &Pool) {
-        let _g = SIGNALS.lock().await;
+        let g = signals().await;
         let pks = seed(pool).await;
         let form =
             |action: &str| format!("action={action}&_selected={}&_selected={}", pks[0], pks[1]);
         let ids = race(pool, pks[0], false);
-        let status = post(pool, &format!("/{TABLE}/__action"), form("delete_selected")).await;
+        let status = post(
+            &g,
+            pool,
+            &format!("/{TABLE}/__action"),
+            form("delete_selected"),
+        )
+        .await;
         unrace(ids);
         assert!(status.is_redirection(), "{status}");
         assert_eq!(count(pool, "soft_delete").await, 2, "row 1 audited twice");
@@ -602,6 +622,7 @@ mod admin_views {
 
         let ids = race(pool, pks[0], true);
         let status = post(
+            &g,
             pool,
             &format!("/{TABLE}/__action"),
             form("restore_selected"),
@@ -623,7 +644,7 @@ mod admin_views {
     }
 
     /// POST a form to the admin; the status and the page body.
-    async fn post_page(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
+    async fn post_page(_: &Signals, pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
         let app = rustango::admin::Builder::new(pool.clone())
             .admin_prefix("")
             .build();
@@ -660,12 +681,13 @@ mod admin_views {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn admin_edit_rolls_back_when_its_audit_fails() {
+        let g = signals().await;
         // No audit table here, so the emit fails.
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
         let pk = seed_one(&pool, AdminDoc::SCHEMA).await;
         let uri = format!("/{TABLE}/{pk}");
-        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        let (status, body) = post_page(&g, &pool, &uri, "title=z").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
             body.contains("audit table missing — run `manage migrate`"),
@@ -683,7 +705,7 @@ mod admin_views {
         );
 
         audit::ensure_table_pool(&pool).await.expect("audit table");
-        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        let (status, body) = post_page(&g, &pool, &uri, "title=z").await;
         assert!(status.is_redirection(), "{status} {body}");
         assert_eq!(title().await, "z");
     }
@@ -692,11 +714,12 @@ mod admin_views {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn admin_create_rolls_back_when_its_audit_fails() {
+        let g = signals().await;
         // No audit table here, so the emit fails.
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<AdminDoc>(&pool).await;
         let uri = format!("/{TABLE}");
-        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        let (status, body) = post_page(&g, &pool, &uri, "title=z").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
             body.contains("audit table missing — run `manage migrate`"),
@@ -710,7 +733,7 @@ mod admin_views {
         );
 
         audit::ensure_table_pool(&pool).await.expect("audit table");
-        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        let (status, body) = post_page(&g, &pool, &uri, "title=z").await;
         assert!(status.is_redirection(), "{status} {body}");
         assert_eq!(rows().await, 1);
     }
@@ -730,11 +753,12 @@ mod admin_views {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn unaudited_admin_edit_saves_without_the_audit_table() {
+        let g = signals().await;
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<PlainDoc>(&pool).await;
         let pk = seed_one(&pool, PlainDoc::SCHEMA).await;
         let uri = format!("/audit2060_plain_doc/{pk}");
-        let (status, body) = post_page(&pool, &uri, "title=z").await;
+        let (status, body) = post_page(&g, &pool, &uri, "title=z").await;
         assert!(status.is_redirection(), "{status} {body}");
         let docs = PlainDoc::objects().fetch(&pool).await.unwrap();
         assert_eq!(docs[0].title, "z");

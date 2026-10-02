@@ -189,12 +189,9 @@ where
     writer.flush()?;
 
     // --- Serve until Ctrl-C ---
-    crate::shutdown::serve_until_drained(
-        |stop| axum::serve(listener, app).with_graceful_shutdown(stop),
-        crate::shutdown::DEFAULT_DRAIN_TIMEOUT,
-    )
-    .await
-    .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
+    crate::shutdown::serve_until_drained(listener, app, crate::shutdown::DEFAULT_DRAIN_TIMEOUT)
+        .await
+        .map_err(|e| TenancyError::Validation(format!("server error: {e}")))?;
     Ok(())
 }
 

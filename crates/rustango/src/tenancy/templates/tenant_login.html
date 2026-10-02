@@ -11,12 +11,12 @@
   <link rel="icon" href="{{ static_url | default(value='/__static__') }}/rustango.png">
   {% endif %}
   {# No-flash theme application — same shape as op_layout.html. #}
-  <script>
+  <script nonce="{{ csp_nonce }}">
   (function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
   </script>
   {% include "_theme_tokens.html" %}
-  {% if brand_css %}<style>:root { {{ brand_css | safe }} }</style>{% endif %}
-  <style>
+  {% if brand_css %}<style nonce="{{ csp_nonce }}">:root { {{ brand_css | safe }} }</style>{% endif %}
+  <style nonce="{{ csp_nonce }}">
     body {
       margin: 0;
       font: 14px/1.45 var(--font-family-base);

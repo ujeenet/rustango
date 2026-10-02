@@ -256,9 +256,12 @@ impl<'a> Reporter<'a> {
         let Some(store) = &self.store else {
             return;
         };
-        if let Err(e) =
-            super::provision_store::attach_org(store.registry, store.run_id, org_id).await
-        {
+        let attach = || super::provision_store::attach_org(store.registry, store.run_id, org_id);
+        // One retry: this is the run's only org link (#2061).
+        if let Err(e) = match attach().await {
+            Err(_) => attach().await,
+            ok => ok,
+        } {
             tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
         }
     }
@@ -565,11 +568,7 @@ where
         },
         Err(e) => (RunState::Failed, Some(e.to_string())),
     };
-    if let Ok(outcome) = &result {
-        if let Err(e) = store::attach_org(&registry, run_id, outcome.org_id).await {
-            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
-        }
-    }
+    // No `attach_org` here: `Reporter::registered` linked the org already.
     if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
         tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
     }
@@ -636,29 +635,11 @@ where
         return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
 
-    // Every free-text field, not just the slug. Returns the request
-    // back with `host_pattern` normalized — see `validate_fields`.
-    let normalized = match validate_fields(request) {
+    let normalized = match checked_request(&registry, request).await {
         Ok(r) => r,
-        Err(msg) => {
-            return rep
-                .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
-                .await;
-        }
+        Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
     };
     let request = &normalized;
-
-    if let Some(clash) = match routing_clash(&registry, request).await {
-        Ok(c) => c,
-        Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
-    } {
-        return rep
-            .fail(
-                ProvisionStep::Validate,
-                TenancyError::Validation(format!("{clash} is already used by another tenant")),
-            )
-            .await;
-    }
 
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
@@ -1081,6 +1062,21 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Every free-text field, then the routing clash check. Returns the
+/// request with `host_pattern` normalized; shared with `api::create_tenant` (#2097).
+pub(crate) async fn checked_request(
+    registry: &crate::sql::Pool,
+    request: &ProvisionRequest,
+) -> Result<ProvisionRequest, TenancyError> {
+    let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
+    if let Some(clash) = routing_clash(registry, &normalized).await? {
+        return Err(TenancyError::Validation(format!(
+            "{clash} is already used by another tenant"
+        )));
+    }
+    Ok(normalized)
 }
 
 /// The host, path prefix or port of `request` another tenant routes on.

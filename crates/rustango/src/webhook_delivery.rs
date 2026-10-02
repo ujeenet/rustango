@@ -112,8 +112,8 @@ pub struct WebhookEvent {
 impl Job for WebhookEvent {
     const NAME: &'static str = "rustango.webhook_delivery";
     /// 8 attempts in total, so 7 retries. With the queue's
-    /// `1s * 2^attempt` backoff that spans about two minutes. Raise it
-    /// to 11 for roughly 17 minutes.
+    /// `1s * 2^attempt` backoff that spans about two minutes. Not
+    /// configurable: `WebhookSubscription` has no attempts setting.
     const MAX_ATTEMPTS: u32 = 8;
 
     async fn run(&self) -> Result<(), JobError> {

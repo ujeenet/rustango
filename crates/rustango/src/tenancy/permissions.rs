@@ -1248,62 +1248,19 @@ pub fn model_codenames(table: &str) -> [String; 4] {
     ]
 }
 
-/// Seed the `rustango_permissions` catalog with the four standard CRUD
-/// codenames for every model that carries `#[rustango(permissions)]`.
-///
-/// Idempotent — uses `ON CONFLICT DO NOTHING`. Call once at startup after
-/// [`ensure_tables_pool`] so the catalog reflects the current model set.
+/// [`auto_create_permissions_pool`] on a `PgPool`: the same reserved,
+/// extra and CRUD codenames (it used to seed CRUD only).
 ///
 /// # Errors
 /// Driver / SQL failures.
 #[cfg(feature = "postgres")]
 pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
-    use crate::core::{inventory, ModelEntry};
-
-    let action_names = [
-        ("add", "Can add"),
-        ("change", "Can change"),
-        ("delete", "Can delete"),
-        ("view", "Can view"),
-    ];
-
-    let mut tables: Vec<&str> = Vec::new();
-    let mut codenames: Vec<String> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
-
-    for entry in inventory::iter::<ModelEntry> {
-        if !entry.schema.permissions {
-            continue;
-        }
-        let table = entry.schema.table;
-        let model_name = entry.schema.name;
-        let allowed_actions = entry.schema.default_permissions;
-        for (action, verb) in &action_names {
-            if !allowed_actions.is_empty() && !allowed_actions.contains(action) {
-                continue;
-            }
-            tables.push(table);
-            codenames.push(format!("{table}.{action}"));
-            names.push(format!("{verb} {model_name}"));
-        }
-    }
-
-    if tables.is_empty() {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"INSERT INTO "rustango_permissions" (table_name, codename, name)
-           SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])
-           ON CONFLICT (table_name, codename) DO NOTHING"#,
-    )
-    .bind(&tables)
-    .bind(&codenames)
-    .bind(&names)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    auto_create_permissions_pool(&crate::sql::Pool::from(pool.clone()))
+        .await
+        .map_err(|e| match e {
+            TenancyError::Driver(e) => e,
+            other => sqlx::Error::Protocol(other.to_string()),
+        })
 }
 
 /// v0.38 — tri-dialect counterpart of [`auto_create_permissions`].

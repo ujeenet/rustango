@@ -438,11 +438,12 @@ provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
 Verfolgt in
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
 
-**Auch kein ambienter Kontext.** Worker werden per `tokio::spawn` gestartet,
-und Task-Locals überqueren keinen Spawn — ein Job läuft also mit der
-Audit-Quelle auf `AuditSource::System` und der Default-Zeitzone, egal was der
-dispatchende Request gesetzt hatte. Nimm mit, was du brauchst, im Payload, oder
-betritt den Scope in `run()` erneut mit `audit::with_source`. Verfolgt in
+**Ambienter Kontext: nur Audit-Quelle und Zeitzone.** `InMemoryJobQueue`
+erfasst sie bei `dispatch`, der Scheduler bei `every()`, und beide setzen sie
+um den Lauf wieder ein. `PgJobQueue` noch nicht: seine Jobs laufen als
+`AuditSource::System` mit der Default-Zeitzone — nimm den Akteur im Payload mit
+und betritt den Scope in `run()` mit `audit::with_source`. Keine Queue trägt
+eine Session oder einen Tenant. Verfolgt in
 [#1229](https://github.com/ujeenet/rustango/issues/1229).
 
 ---
@@ -527,8 +528,9 @@ nichts geloggt. Verfolgt in
 
 ## Siehe auch
 
-- [Scheduler](manage.md) — für *zeitbasierte* wiederkehrende Arbeit (cron-artig),
-  im Gegensatz zu On-Demand-Jobs.
+- [Scheduler](manage.md) — für *zeitbasierte* wiederkehrende Arbeit in festem
+  Intervall (`Scheduler::every` + `Duration`; keine Cron-Ausdrücke), im Gegensatz zu
+  On-Demand-Jobs.
 - [E-Mail](email.md) — die kanonische „mach es in einem Job"-Workload.
 - [Caching](caching.md) — der andere Weg, Request-Handler schnell zu halten.
 - [Signals](orm.md) — Fire-and-Forget-Hooks, die oft einen Job *dispatchen*.

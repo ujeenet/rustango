@@ -859,3 +859,60 @@ async fn purge_pending_stops_at_one_batch() {
          sweep that never finishes is the wedge this shape exists to avoid"
     );
 }
+
+/// #1677: a deleted collection kept its `unique` slug, so recreating
+/// the folder failed forever.
+#[tokio::test]
+async fn a_deleted_collections_slug_can_be_reused() {
+    let mgr = manager().await;
+    let old = mgr
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("create");
+    let Auto::Set(old_id) = old.id else {
+        panic!("no id")
+    };
+    mgr.delete_collection(old_id).await.expect("delete");
+    let new = mgr
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("recreate");
+    assert_ne!(new.id, old.id);
+    let live = mgr
+        .get_collection_by_slug("docs")
+        .await
+        .expect("get")
+        .expect("live");
+    assert_eq!(live.id, new.id);
+    // A live slug still collides.
+    assert!(mgr
+        .create_collection("Again", "docs", None, "")
+        .await
+        .is_err());
+}
+
+/// A deleted subtree frees every slug in it, and the new folders resolve.
+#[tokio::test]
+async fn a_deleted_subtrees_slugs_can_be_reused() {
+    let mgr = manager().await;
+    let id = |c: rustango::media::MediaCollection| match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let root = id(mgr.create_collection("R", "root", None, "").await.unwrap());
+    id(mgr
+        .create_collection("C", "child", Some(root), "")
+        .await
+        .unwrap());
+    mgr.delete_collection(root).await.expect("delete subtree");
+
+    let root = id(mgr
+        .create_collection("R", "root", None, "")
+        .await
+        .expect("root"));
+    let child = id(mgr
+        .create_collection("C", "child", Some(root), "")
+        .await
+        .expect("child"));
+    assert_eq!(mgr.collection_path(child).await.unwrap(), "root/child");
+}

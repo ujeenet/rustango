@@ -129,9 +129,10 @@ Consecuencias prácticas:
 
 ## El catálogo integrado
 
-Cada entrada es un `tower::Layer` con un one-liner `…RouterExt` correspondiente,
-salvo que se indique lo contrario. Trae el trait `…RouterExt` del módulo al scope
-para obtener el método.
+La mayoría de las entradas son structs de configuración que se instalan con su
+one-liner `…RouterExt`, no `tower::Layer` — los pocos que aceptan `.layer(…)`
+están en la sección de arriba. Trae el trait `…RouterExt` del módulo al scope para
+obtener el método.
 
 | Preocupación | Layer | Cablealo con |
 | --- | --- | --- |
@@ -388,9 +389,9 @@ formulario. El `| safe` es obligatorio: Tera autoescapa `.html`, y sin él el
 formulario no lleva campo `_csrf` y cada POST devuelve 403. El propio formulario
 de login del admin hace exactamente esto — mira
 `crates/rustango/src/admin/templates/login.html`. Sobrescribe los nombres de cookie/cabecera o el flag `Secure` con
-`csrf::with_config(CsrfConfig)`; para configuraciones SPA, añade
-`.with_trusted_origins([...])` para habilitar la comprobación de defensa en
-profundidad de la cabecera Origin además del token. Para endpoints colectores
+`csrf::with_config(CsrfConfig)`; la comprobación de la
+cabecera Origin siempre se ejecuta y acepta el propio Host de la petición; una SPA
+servida desde otro origen se añade con `.with_trusted_origins([...])`. Para endpoints colectores
 append-only alcanzados vía `navigator.sendBeacon` (p. ej. analítica) que no
 pueden enviar una cabecera de token, `CsrfConfig::exempt_prefix("/path")` omite la
 aplicación para un prefijo de ruta estrecho. El auto-admin habilita CSRF en cada

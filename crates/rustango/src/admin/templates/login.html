@@ -8,7 +8,7 @@
 <title>{{ title }} — {{ admin_title }}</title>
 {% include "_theme_tokens.html" %}
 {% include "_admin_styles.html" %}
-<style>
+<style nonce="{{ csp_nonce }}">
   body.admin-login {
     display: flex;
     align-items: center;

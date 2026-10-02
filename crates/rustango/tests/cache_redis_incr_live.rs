@@ -150,3 +150,27 @@ async fn set_forever_ignores_the_default_ttl() {
     assert!(redis.exists("kept").await.unwrap());
     assert!(!redis.exists("lapses").await.unwrap());
 }
+
+/// #1677: a sub-second-precision TTL was cut to whole seconds, so a
+/// 2900 ms entry was gone at 2 s while `InMemoryCache` still had it.
+#[tokio::test]
+async fn ttl_keeps_millisecond_precision() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+
+    let ttl = Some(Duration::from_millis(2900));
+    redis.set("set", "1", ttl).await.unwrap();
+    assert!(redis.add("add", "1", ttl).await.unwrap());
+    redis.incr("incr", 1, ttl).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2400)).await;
+    for key in ["set", "add", "incr"] {
+        assert!(redis.exists(key).await.unwrap(), "{key} expired early");
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    for key in ["set", "add", "incr"] {
+        assert!(!redis.exists(key).await.unwrap(), "{key} outlived its TTL");
+    }
+}

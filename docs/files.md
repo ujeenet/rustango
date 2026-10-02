@@ -166,7 +166,7 @@ Your handlers and models don't change; only the wiring at startup does.
 ## The media library
 
 When files are first-class records — tracked in the database, browsable in the
-admin, with thumbnails and CDN/presigned delivery — reach for `rustango::media`
+admin, with CDN/presigned delivery — reach for `rustango::media`
 instead of raw `Storage`. `MediaManager` persists a `Media` row per file and
 supports two upload flows:
 
@@ -192,8 +192,8 @@ let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await e
 ```
 
 It also handles soft-delete and orphan purging. The full flow is dogfooded in
-`media_sqlite_live.rs`; the manager's presigned/direct-upload methods are
-PostgreSQL-oriented.
+`media_sqlite_live.rs`; the manager's presigned and direct-upload methods
+run on all three backends.
 
 ### Serving media on a public page
 
@@ -324,7 +324,9 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 ## Reference
 
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
-`exists(key)` · `url(key) -> Option<String>`.
+`exists(key)` · `url(key) -> Option<String>`, plus defaulted `save_with_content_type`,
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` and `metadata(key)`
+(a signing backend overrides the presign pair; the defaults return `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitive) · `.randomize_filename(bool)`. Used by

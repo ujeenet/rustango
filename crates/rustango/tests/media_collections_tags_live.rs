@@ -932,3 +932,27 @@ async fn paging_a_collection_partitions_it() {
         "the pages did not cover the set"
     );
 }
+
+/// #1677: a deleted collection kept its `unique` slug, so recreating
+/// the folder failed forever.
+#[tokio::test]
+async fn a_deleted_collections_slug_can_be_reused() {
+    let _g = live_lock().lock().await;
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let old = manager
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("create");
+    let rustango::sql::Auto::Set(old_id) = old.id else {
+        panic!("no id")
+    };
+    manager.delete_collection(old_id).await.expect("delete");
+    let new = manager
+        .create_collection("Docs", "docs", None, "")
+        .await
+        .expect("recreate");
+    assert_ne!(new.id, old.id);
+}

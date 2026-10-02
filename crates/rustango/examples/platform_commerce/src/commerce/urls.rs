@@ -337,7 +337,7 @@ async fn confirm_order(
             order_id: id,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     st.queue
         .dispatch(&FlakyPaymentCapture {
             tenant: st.slug.clone(),
@@ -345,7 +345,7 @@ async fn confirm_order(
             fail_ratio_pct: st.fail_ratio_pct,
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     if id % 50 == 0 {
         st.queue
             .dispatch(&jobs::FatalProbe {
@@ -353,7 +353,7 @@ async fn confirm_order(
                 order_id: id,
             })
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(rustango::server_error)?;
     }
     tracing::info!(order = id, tenant = %st.slug, "order queued for fulfilment");
     Ok((

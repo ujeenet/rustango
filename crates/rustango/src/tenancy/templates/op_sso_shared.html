@@ -30,7 +30,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <td>{{ p.label }}</td>
       <td>{{ p.kind }}</td>
       <td>
-        {% if p.issuer_url %}<div style="color:#888;font-size:.85em">{{ p.issuer_url }}</div>{% endif %}
+        {% if p.issuer_url %}<div class="issuer-url">{{ p.issuer_url }}</div>{% endif %}
         <code>{{ p.client_id }}</code>
       </td>
       <td>{% if p.enabled %}✓{% else %}—{% endif %}</td>
@@ -44,7 +44,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
           <button type="submit" class="btn-row-action">{% if p.allow_email_link %}Stop email linking{% else %}Allow email linking{% endif %}</button>
         </form>
         <form method="post" action="/sso-shared/{{ p.id }}/delete"
-              onsubmit="return confirm('Delete shared provider {{ p.slug }}?');">
+              data-confirm="Delete shared provider {{ p.slug }}?">
           {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
         </form>

@@ -353,6 +353,15 @@ impl SystemChain {
         Ok(Self { dir, origin })
     }
 
+    /// A shipped chain in `dir`, as is: no catch-up step from today's models.
+    #[cfg(test)]
+    pub(crate) fn shipped(dir: std::path::PathBuf) -> Self {
+        Self {
+            dir,
+            origin: super::runner::ChainOrigin::OnDisk,
+        }
+    }
+
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
@@ -568,6 +577,9 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
         }
         [SchemaChange::AlterColumnMaxLength { table, column, .. }] => {
             format!("alter_max_length_of_{column}_on_{table}")
+        }
+        [SchemaChange::AlterFkOnDelete { table, column, .. }] => {
+            format!("alter_on_delete_of_{column}_on_{table}")
         }
         [SchemaChange::RenameTable { old_name, new_name }] => {
             format!("rename_{old_name}_to_{new_name}")

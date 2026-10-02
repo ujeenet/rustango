@@ -72,13 +72,26 @@ tokio::task_local! {
     pub static AUDIT_SOURCE: AuditSource;
 }
 
+tokio::task_local! {
+    /// Tenant whose user the active source names; `None` when unbound.
+    static SOURCE_TENANT: Option<String>;
+    /// Tenant the current writes go to, where the framework knows it.
+    static WRITE_TENANT: String;
+}
+
 /// Read the active audit source. Returns [`AuditSource::System`] when no
-/// [`with_source`] scope is active.
+/// [`with_source`] scope is active, and when the source belongs to one
+/// tenant but the writes are not known to go to that tenant (#1229).
 #[must_use]
 pub fn current_source() -> AuditSource {
-    AUDIT_SOURCE
+    let source = AUDIT_SOURCE
         .try_with(Clone::clone)
-        .unwrap_or(AuditSource::System)
+        .unwrap_or(AuditSource::System);
+    match SOURCE_TENANT.try_with(Clone::clone).ok().flatten() {
+        None => source,
+        Some(bound) if WRITE_TENANT.try_with(|w| *w == bound).unwrap_or(false) => source,
+        Some(_) => AuditSource::System,
+    }
 }
 
 /// Run `fut` with `source` as the active audit source. Every audit entry
@@ -90,7 +103,62 @@ pub async fn with_source<F, T>(source: AuditSource, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    AUDIT_SOURCE.scope(source, fut).await
+    AUDIT_SOURCE
+        .scope(source, SOURCE_TENANT.scope(None, fut))
+        .await
+}
+
+/// [`with_source`] for a tenant request: `source` names a user of the
+/// tenant with slug `tenant`. Work handed off from here (a job, a
+/// `for_each_tenant` pass) records it only on that tenant's writes.
+#[cfg(feature = "tenancy")]
+pub async fn with_tenant_source<F, T>(source: AuditSource, tenant: String, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let writes = WRITE_TENANT.scope(tenant.clone(), fut);
+    AUDIT_SOURCE
+        .scope(source, SOURCE_TENANT.scope(Some(tenant), writes))
+        .await
+}
+
+/// Run `fut` with its writes going to `tenant`, as a per-tenant sweep does.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn writing_to_tenant<F, T>(tenant: String, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    WRITE_TENANT.scope(tenant, fut).await
+}
+
+/// An explicitly set source and the tenant it belongs to, for deferred
+/// work. Where the writes go is not captured: the work decides that.
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedSource {
+    source: AuditSource,
+    tenant: Option<String>,
+}
+
+impl CapturedSource {
+    /// `None` outside any [`with_source`] scope.
+    pub(crate) fn capture() -> Option<Self> {
+        let source = AUDIT_SOURCE.try_with(Clone::clone).ok()?;
+        let tenant = SOURCE_TENANT.try_with(Clone::clone).ok().flatten();
+        Some(Self { source, tenant })
+    }
+
+    pub(crate) fn source(&self) -> &AuditSource {
+        &self.source
+    }
+
+    pub(crate) async fn scope<F, T>(self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        AUDIT_SOURCE
+            .scope(self.source, SOURCE_TENANT.scope(self.tenant, fut))
+            .await
+    }
 }
 
 /// One pending audit log entry. The generated write paths build these in
@@ -1895,6 +1963,20 @@ pub fn __bind_value_sqlite<'q>(
     crate::sql::bind_query_sqlite(q, value)
 }
 
+/// The BEFORE read of an audited update: `columns` of the row at `pk_value`.
+#[doc(hidden)]
+#[must_use]
+pub fn before_image_query(
+    schema: &'static crate::core::ModelSchema,
+    pk_column: &'static str,
+    pk_value: crate::core::SqlValue,
+    columns: &[&'static str],
+) -> crate::core::SelectQuery {
+    let mut q = crate::core::SelectQuery::by_pk(schema, pk_column, pk_value);
+    q.projection = Some(columns.to_vec());
+    q
+}
+
 /// Per-row audited save with a field-level diff, on any backend. All of
 /// it runs in one transaction:
 ///
@@ -1914,14 +1996,10 @@ pub fn __bind_value_sqlite<'q>(
 pub async fn save_one_with_diff<F1, F2, F3>(
     pool: &crate::sql::Pool,
     update_query: &crate::core::UpdateQuery,
-    pk_column: &'static str,
-    pk_value: crate::core::SqlValue,
+    before_query: &crate::core::SelectQuery,
     entity_table: &'static str,
     entity_pk: String,
     after_pairs: Vec<(&'static str, serde_json::Value)>,
-    select_cols_pg: &str,
-    select_cols_my: &str,
-    select_cols_sqlite: &str,
     decode_before_pg: F1,
     decode_before_my: F2,
     decode_before_sqlite: F3,
@@ -1932,9 +2010,9 @@ where
     F3: FnOnce(&crate::sql::SqliteReturningRow) -> Vec<(&'static str, serde_json::Value)>,
 {
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
-    let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
     update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
+    let before = pool.dialect().compile_select(before_query)?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own
     // `decode_before_*`. The UPDATE, emit and commit are shared by
@@ -1943,12 +2021,11 @@ where
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut tx = pg.begin().await?;
-            let select_sql = format!(
-                r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
-                select_cols_pg, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)
@@ -1970,12 +2047,11 @@ where
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut tx = my.begin().await?;
-            let select_sql = format!(
-                "SELECT {} FROM `{}` WHERE `{}` = ?",
-                select_cols_my, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query_my(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query_my);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)
@@ -1997,12 +2073,11 @@ where
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let mut tx = sq.begin().await?;
-            let select_sql = format!(
-                r#"SELECT {} FROM "{}" WHERE "{}" = ?"#,
-                select_cols_sqlite, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query_sqlite(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)

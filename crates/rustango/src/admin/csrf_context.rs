@@ -28,6 +28,11 @@ use super::session::CURRENT_CSRF_TOKEN;
 /// runs for every admin page, read pages included. A GET must seed the cookie, or the first POST from
 /// a fresh browser has nothing to match against.
 pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response {
+    // Nested (tenant admin around the bare admin): the outer token wins,
+    // or the page would render one token and set another cookie (#2131).
+    if super::session::current_csrf_token().is_some() {
+        return next.run(request).await;
+    }
     let (token, set_cookie) =
         crate::forms::csrf::ensure_token(request.headers(), crate::forms::csrf::CSRF_COOKIE);
 

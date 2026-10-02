@@ -261,8 +261,8 @@ impl<DB: Database> Builder<DB> {
     /// up with the two surfaces that most need attribution being the
     /// two that had none (#1480).
     ///
-    /// `Cli` calls this for you from `[logging]`; call it directly only
-    /// when building the server by hand.
+    /// `Cli` calls this for you from `[logging]`. A hand-built server also
+    /// needs `security_headers`, `allowed_hosts` and `ssl_redirect`.
     #[must_use]
     pub fn observability(mut self, access_log: Option<crate::access_log::AccessLogLayer>) -> Self {
         self.observability = true;
@@ -417,11 +417,13 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Swap the tenant user model used by [`Builder::migrate`]. Same
-    /// semantics as [`crate::manage::Cli::user_model`].
+    /// Check a custom tenant user model at startup. Same as
+    /// [`crate::manage::Cli::user_model`].
     #[must_use]
-    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
-        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(self) -> Self {
+        if let Err(e) = crate::tenancy::validate_tenant_user_schema(U::SCHEMA) {
+            panic!("Builder::user_model: {e}");
+        }
         self
     }
 
@@ -841,8 +843,12 @@ impl<DB: Database> Builder<DB> {
         #[cfg(feature = "admin")]
         let app = match self.security_headers {
             Some(layer) => {
+                use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _};
                 use crate::security_headers::SecurityHeadersRouterExt as _;
+                // Outside the headers, so it fills their nonce placeholder;
+                // the bundled pages nonce their inline tags (#1703).
                 app.security_headers(layer)
+                    .csp_nonce(CspNonceLayer::default())
             }
             None => app,
         };
@@ -940,21 +946,7 @@ impl<DB: Database> Builder<DB> {
         let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let app = tag_listener_port(app, &listener)?;
-        // v0.30.16 — `into_make_service_with_connect_info` is what
-        // populates `ConnectInfo<SocketAddr>` in request extensions.
-        // Without it, `access_log` (and any other middleware that
-        // reads the peer address) sees "-".
-        crate::shutdown::serve_until_drained(
-            |stop| {
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .with_graceful_shutdown(stop)
-            },
-            drain,
-        )
-        .await?;
+        crate::shutdown::serve_until_drained(listener, app, drain).await?;
         Ok(())
     }
 }

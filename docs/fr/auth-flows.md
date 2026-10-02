@@ -92,14 +92,11 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Utilisez cette forme pour `rustango_users`.** Elle horodate aussi
-> `password_changed_at`, ce qui met fin aux sessions émises avant la
-> réinitialisation ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
-> `_into` accepte une table arbitraire et ne peut pas supposer l'existence d'une
-> colonne de rotation : elle n'écrit donc que le mot de passe — une
-> réinitialisation par ce biais laisse valide toute session existante, y compris
-> celle d'un attaquant. C'est précisément ce qui compte, puisqu'on réinitialise
-> son mot de passe quand on pense son compte compromis.
+> **Utilisez cette forme pour `rustango_users`.** Les sessions du framework portent
+> une empreinte du hash du mot de passe ([#1338](https://github.com/ujeenet/rustango/issues/1338)), donc le nouveau
+> hash met fin à toute session émise avant la réinitialisation, y compris celle
+> d'un attaquant. Elle horodate aussi `password_changed_at`, qui enregistre le
+> changement mais n'est pas ce qui termine les sessions.
 
 L'assistant de confirmation applique la [politique de mots de passe](auth-passwords.md#contrôles-de-robustesse),
 hache le nouveau mot de passe avec argon2id et l'écrit — en rejetant les entrées faibles, expirées,
@@ -114,10 +111,10 @@ altérées ou au mauvais secret sans toucher à la ligne :
 C'est le même `passwords::strength_score` que le reste du framework utilise : un mot de passe
 refusé à l'inscription ne peut donc pas être défini via une réinitialisation (#1399).
 
-> `_into` pointe vers votre propre table/colonnes — un `app_users` de locataire,
-> par exemple. Si elle possède un équivalent de `password_changed_at`,
-> horodatez-le vous-même dans la même transaction, sinon la réinitialisation ne
-> mettra fin à aucune session existante.
+> `_into` pointe vers votre propre table/colonnes — un `app_users` de locataire, par
+> exemple. Il n'écrit que le hash. Les sessions émises par le framework prennent fin
+> avec ce nouveau hash ; une vérification de session écrite par votre application
+> doit aussi comparer le hash, ou horodater sa propre colonne dans la même transaction.
 
 ### Rendre le lien à usage unique
 

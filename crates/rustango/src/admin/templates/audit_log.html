@@ -18,18 +18,18 @@
 {% endif %}
 
 {% if can_clean_audit %}
-<form method="post" action="{{ admin_prefix }}{{ audit_url }}/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
+<form method="post" action="{{ admin_prefix }}{{ audit_url }}/cleanup" class="audit-cleanup" data-confirm="Apply audit cleanup? This is irreversible.">
   {{ csrf_input | safe }}
   <label>
     <input type="radio" name="mode" value="older_than" checked>
     Older than
-    <input type="number" name="days" value="90" min="0" step="1" style="width: 5rem;">
+    <input type="number" name="days" value="90" min="0" step="1" class="num-input">
     days
   </label>
   <label>
     <input type="radio" name="mode" value="keep_last">
     Keep last
-    <input type="number" name="keep" value="50" min="0" step="1" style="width: 5rem;">
+    <input type="number" name="keep" value="50" min="0" step="1" class="num-input">
     per row
   </label>
   <button type="submit" class="btn btn-secondary">Apply cleanup</button>

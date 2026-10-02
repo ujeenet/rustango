@@ -437,6 +437,9 @@ where
             // An outer layer's names win (#1722). If it verified the token,
             // defer; if it skipped an exempt path, check here without them.
             let active = req.extensions().get::<ActiveCsrf>().cloned();
+            // The outer layer seeds the cookie; a second one here would not
+            // match the token the page rendered (#2131).
+            let nested = active.is_some();
             let cfg = match active {
                 Some(a) if a.checked => return inner.call(req).await,
                 Some(a) => Arc::new(CsrfConfig {
@@ -524,6 +527,7 @@ where
             // a 403. Reloading masked it, which is why it survived: only
             // brand-new visitors ever saw it.
             if cookie_value.is_none()
+                && !nested
                 && !sets_cookie(&response, &cfg.cookie_name)
                 && !is_publicly_cacheable(response.headers())
             {

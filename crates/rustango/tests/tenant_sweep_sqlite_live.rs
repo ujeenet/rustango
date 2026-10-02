@@ -150,3 +150,92 @@ async fn one_broken_tenant_does_not_stop_the_sweep() {
     ran.sort_unstable();
     assert_eq!(ran, vec!["good_a_sweep", "good_b_sweep"]);
 }
+
+#[cfg(feature = "jobs")]
+mod job_source {
+    use super::*;
+    use rustango::audit::{self, with_tenant_source, AuditSource};
+    use rustango::jobs::{InMemoryJobQueue, Job, JobError, JobQueue as _};
+    use rustango::Model;
+    use std::sync::OnceLock;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "sweep1229_note", app = "sweep1229", audit(track = "title"))]
+    #[allow(dead_code)]
+    pub struct Note {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 32)]
+        pub title: String,
+    }
+
+    static POOLS: OnceLock<TenantPools<sqlx::Sqlite>> = OnceLock::new();
+    static DONE: Mutex<bool> = Mutex::new(false);
+
+    /// Writes one audited row into every tenant.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TouchEveryTenant;
+
+    #[async_trait::async_trait]
+    impl Job for TouchEveryTenant {
+        const NAME: &'static str = "sweep1229_touch";
+        async fn run(&self) -> Result<(), JobError> {
+            let sweep = for_each_tenant(POOLS.get().unwrap(), |org, pool| async move {
+                let mut note = Note {
+                    id: Auto::default(),
+                    title: org.slug.clone(),
+                };
+                note.insert_pool(&pool).await
+            })
+            .await
+            .map_err(|e| JobError::Fatal(e.to_string()))?;
+            assert_eq!(sweep.failed(), 0);
+            *DONE.lock().unwrap() = true;
+            Ok(())
+        }
+    }
+
+    /// #1229 — a job a tenant-A user dispatched writes `user:<id>` on A's
+    /// rows only: in tenant B that id is someone else, so B gets `system`.
+    #[tokio::test]
+    async fn a_tenant_users_job_does_not_stamp_other_tenants() {
+        let a = db_org("a_1229", &shared_mem("sweep1229_a"), true);
+        let b = db_org("b_1229", &shared_mem("sweep1229_b"), true);
+        let registry = registry_with(&[a.clone(), b.clone()]).await;
+        let pools = POOLS.get_or_init(|| TenantPools::new(registry));
+        for org in [&a, &b] {
+            let pool = pools.scoped_pool_dyn(org).await.expect("tenant pool");
+            rustango::testkit::matrix::fresh_table::<Note>(&pool).await;
+            audit::ensure_table_pool(&pool).await.expect("audit table");
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<TouchEveryTenant>().await;
+        q.start().await;
+        with_tenant_source(
+            AuditSource::User { id: "42".into() },
+            "a_1229".into(),
+            async {
+                q.dispatch(&TouchEveryTenant).await.unwrap();
+            },
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !*DONE.lock().unwrap() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+        assert!(*DONE.lock().unwrap(), "the job did not finish");
+
+        let mut sources = Vec::new();
+        for org in [&a, &b] {
+            let pool = pools.scoped_pool_dyn(org).await.expect("tenant pool");
+            let rows = audit::fetch_for_entity_pool(&pool, "sweep1229_note", "1")
+                .await
+                .expect("audit rows");
+            sources.push(rows.first().map(|e| e.source.clone()));
+        }
+        assert_eq!(sources[0].as_deref(), Some("user:42"), "tenant A");
+        assert_eq!(sources[1].as_deref(), Some("system"), "tenant B");
+    }
+}

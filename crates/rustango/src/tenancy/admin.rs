@@ -368,17 +368,14 @@ where
     };
 
     // A path-prefix tenant's admin lives under its prefix (#2059).
+    // Cookies are scoped the same way, so they keep apart too (#2098).
+    let cookie_path = super::routes::cookie_path(&org, parts.uri.path());
     let prefixed;
-    let routes = match org
-        .path_prefix
-        .as_deref()
-        .filter(|p| super::routes::path_is_under(parts.uri.path(), p))
-    {
-        Some(p) => {
-            prefixed = routes.under_prefix(p);
-            &prefixed
-        }
-        None => routes,
+    let routes = if cookie_path == "/" {
+        routes
+    } else {
+        prefixed = routes.under_prefix(cookie_path);
+        &prefixed
     };
 
     // A schema-mode PG tenant gets a short-lived pool with
@@ -429,6 +426,7 @@ where
                 &org,
                 cfg,
                 routes,
+                cookie_path,
                 parts.uri.query(),
                 &pools.registry_pool(),
             )
@@ -453,6 +451,7 @@ where
                         &pool,
                         &registry_pool,
                         routes,
+                        cookie_path,
                         &parts,
                     )
                     .await;
@@ -464,6 +463,7 @@ where
                         &pool,
                         &registry_pool,
                         routes,
+                        cookie_path,
                         &parts,
                     )
                     .await;
@@ -508,6 +508,7 @@ where
                         cfg,
                         &pool,
                         routes,
+                        cookie_path,
                         &parts.extensions,
                         parts.headers,
                         body,
@@ -565,7 +566,7 @@ where
                 request: meta,
             })
             .await;
-            return logout_response(routes);
+            return logout_response(routes, cookie_path);
         }
         // v0.27.8 (#78) — end-impersonation routes. Recognized
         // both with and without the configurable admin prefix
@@ -576,7 +577,7 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
-            return end_impersonation_response(routes);
+            return end_impersonation_response(cookie_path);
         }
 
         // Private surface — require a valid session cookie.
@@ -707,10 +708,13 @@ where
     };
     let audited = async {
         if let Some(uid) = session_user_id {
-            crate::audit::with_source(
+            // The id is this tenant's user: bind it, so work this
+            // request hands off does not stamp it on other tenants' rows.
+            crate::audit::with_tenant_source(
                 crate::audit::AuditSource::User {
                     id: uid.to_string(),
                 },
+                org.slug.clone(),
                 dispatch,
             )
             .await
@@ -990,6 +994,10 @@ async fn login_form(
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
+    ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     let html = axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -1031,6 +1039,7 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     extensions: &axum::http::Extensions,
     headers: HeaderMap,
     body: Body,
@@ -1170,7 +1179,7 @@ async fn login_submit(
     payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
-        .path("/")
+        .path(cookie_path.to_owned())
         .http_only(true)
         .same_site(SameSite::Lax)
         // Secure in production; off in dev so plain-HTTP login works.
@@ -1193,9 +1202,9 @@ async fn login_submit(
     resp
 }
 
-fn logout_response(routes: &super::routes::RouteConfig) -> Response {
+fn logout_response(routes: &super::routes::RouteConfig, cookie_path: &str) -> Response {
     let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
-        .path("/")
+        .path(cookie_path.to_owned())
         .http_only(true)
         .same_site(SameSite::Lax)
         // Match the Secure flag used when setting it, or the browser
@@ -1221,6 +1230,7 @@ async fn redeem_impersonation_handoff(
     org: &super::Org,
     cfg: &TenantSessionConfig,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     query: Option<&str>,
     registry: &crate::sql::Pool,
 ) -> Response {
@@ -1293,7 +1303,7 @@ async fn redeem_impersonation_handoff(
     session.iat = payload.iat;
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
-        .path("/")
+        .path(cookie_path.to_owned())
         .http_only(true)
         .same_site(SameSite::Lax)
         // Secure in production; off in dev so plain-HTTP login works.
@@ -1345,16 +1355,27 @@ fn extract_token_param(query: &str) -> Option<String> {
 /// The apex URL comes from `RUSTANGO_APEX_DOMAIN`,
 /// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
 /// them set it falls back to `/`, which still clears the cookie.
-fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response {
-    let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        // Match the Secure flag used when setting it, or the browser
-        // may not clear it.
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(0))
-        .build();
+fn end_impersonation_response(cookie_path: &str) -> Response {
+    // Also the legacy `Path=/` one: impersonation has no server-side revoke.
+    let mut paths = vec![cookie_path];
+    if cookie_path != "/" {
+        paths.push("/");
+    }
+    let clears: Vec<String> = paths
+        .into_iter()
+        .map(|path| {
+            Cookie::build((tenant_console::COOKIE_NAME, ""))
+                .path(path.to_owned())
+                .http_only(true)
+                .same_site(SameSite::Lax)
+                // Match the Secure flag used when setting it, or the browser
+                // may not clear it.
+                .secure(crate::session::secure_cookies())
+                .max_age(CookieDuration::seconds(0))
+                .build()
+                .to_string()
+        })
+        .collect();
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
     let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
@@ -1364,10 +1385,12 @@ fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response 
         .unwrap_or_default();
     let target = format!("{scheme}://{apex}{port_suffix}/orgs");
     let mut resp = Redirect::to(&target).into_response();
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
-    );
+    for clear in clears {
+        resp.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&clear).expect("cookie is ascii"),
+        );
+    }
     resp
 }
 
@@ -1436,6 +1459,10 @@ fn change_password_form(
     if let Some(token) = crate::admin::session::current_csrf_token() {
         ctx.insert("csrf_token", &token);
     }
+    ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
         Ok(html) => html,
         Err(e) => {

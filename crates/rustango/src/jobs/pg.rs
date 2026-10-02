@@ -63,7 +63,7 @@
 //! above that. `attempt` counts at pickup: a job that crashes its
 //! process still spends an attempt.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,9 +72,11 @@ use serde_json::Value;
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
 
-use super::{DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue};
+use super::{
+    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Running, StopSignal,
+    DEFAULT_SHUTDOWN_GRACE,
+};
 use crate::sql::Pool;
 
 /// Database-backed job queue over [`crate::sql::Pool`] (PostgreSQL,
@@ -85,11 +87,11 @@ use crate::sql::Pool;
 pub struct PgJobQueue {
     pool: Pool,
     registry: Arc<Mutex<HandlerRegistry>>,
-    workers: Mutex<Vec<JoinHandle<()>>>,
+    run: Mutex<Option<Running>>,
     worker_count: usize,
     dead_letter: Arc<Mutex<Option<DeadLetterFn>>>,
     poll_interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown_grace: Duration,
     /// Used by `dispatch` to nudge workers out of their poll sleep so
     /// new jobs run with sub-second latency under low load.
     notify: Arc<Notify>,
@@ -170,11 +172,11 @@ impl PgJobQueue {
         Self {
             pool: pool.into(),
             registry: Arc::new(Mutex::new(HandlerRegistry::default())),
-            workers: Mutex::new(Vec::new()),
+            run: Mutex::new(None),
             worker_count,
             dead_letter: Arc::new(Mutex::new(None)),
             poll_interval: Duration::from_secs(1),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             notify: Arc::new(Notify::new()),
             worker_id_prefix: id_prefix,
             heartbeat_interval: Duration::from_secs(10),
@@ -218,6 +220,14 @@ impl PgJobQueue {
     pub fn heartbeat_interval(mut self, d: Duration) -> Self {
         // `tokio::time::interval` panics on zero.
         self.heartbeat_interval = d.max(Duration::from_millis(1));
+        self
+    }
+
+    /// How long `shutdown` waits for running jobs before aborting them
+    /// and unlocking their rows. Default: [`DEFAULT_SHUTDOWN_GRACE`].
+    #[must_use]
+    pub fn shutdown_grace(mut self, grace: Duration) -> Self {
+        self.shutdown_grace = grace;
         self
     }
 
@@ -356,15 +366,16 @@ impl JobQueue for PgJobQueue {
     }
 
     async fn start(&self) {
-        let mut workers = self.workers.lock().await;
-        if !workers.is_empty() {
+        let mut slot = self.run.lock().await;
+        if slot.is_some() {
             return;
         }
+        let (mut run, stop) = Running::new();
         for n in 0..self.worker_count {
             let pool = self.pool.clone();
             let registry = self.registry.clone();
             let dead_letter = self.dead_letter.clone();
-            let shutdown = self.shutdown.clone();
+            let stop = stop.clone();
             let notify = self.notify.clone();
             let poll = self.poll_interval;
             let worker = Worker {
@@ -372,28 +383,19 @@ impl JobQueue for PgJobQueue {
                 heartbeat: self.heartbeat_interval,
             };
             let h = tokio::spawn(async move {
-                worker_loop(pool, registry, dead_letter, shutdown, notify, poll, worker).await;
+                worker_loop(pool, registry, dead_letter, stop, notify, poll, worker).await;
             });
-            workers.push(h);
+            run.push(h);
         }
+        *slot = Some(run);
     }
 
     async fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        // Wake every worker so they all observe the shutdown flag and exit.
-        self.notify.notify_waiters();
-        let mut workers = self.workers.lock().await;
-        for (n, mut h) in workers.drain(..).enumerate() {
-            // Give in-flight jobs ~5 seconds to finish, then abort.
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
-                .await
-                .is_err()
-            {
-                h.abort();
-                let _ = h.await;
-                // Hand the aborted job back now rather than at the next reclaim.
-                release_worker_rows(&self.pool, &self.worker_id(n)).await;
-            }
+        let mut slot = self.run.lock().await;
+        let Some(run) = slot.take() else { return };
+        for n in run.stop(self.shutdown_grace).await {
+            // Hand the aborted job back now rather than at the next reclaim.
+            release_worker_rows(&self.pool, &self.worker_id(n)).await;
         }
     }
 
@@ -419,13 +421,15 @@ async fn worker_loop(
     pool: Pool,
     registry: Arc<Mutex<HandlerRegistry>>,
     dead_letter: Arc<Mutex<Option<DeadLetterFn>>>,
-    shutdown: Arc<AtomicBool>,
+    mut stop: StopSignal,
     notify: Arc<Notify>,
     poll_interval: Duration,
     worker: Worker,
 ) {
-    while !shutdown.load(Ordering::SeqCst) {
+    while !stop.is_set() {
         match pick_one(&pool, &worker.id).await {
+            // Stop fired during the pick: hand the row back unrun.
+            Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
                 run_one(&pool, &registry, &dead_letter, &worker, row).await;
                 // Loop again immediately — there might be more.
@@ -435,11 +439,15 @@ async fn worker_loop(
                 tokio::select! {
                     () = tokio::time::sleep(poll_interval) => {}
                     () = notify.notified() => {}
+                    () = stop.wait() => {}
                 }
             }
             Err(e) => {
                 tracing::error!(error = %e, "job queue pickup failed");
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    () = tokio::time::sleep(poll_interval) => {}
+                    () = stop.wait() => {}
+                }
             }
         }
     }
@@ -717,6 +725,22 @@ async fn release_worker_rows(pool: &Pool, worker_id: &str) {
     let binds = vec![SqlValue::String(worker_id.to_owned())];
     if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
         tracing::error!(worker = worker_id, error = %e, "releasing an aborted job failed");
+    }
+}
+
+/// Unlock a row this worker picked but did not run, refunding the attempt.
+async fn unpick(pool: &Pool, worker: &Worker, id: i64) {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = NULL, locked_by = NULL, attempt = attempt - 1 \
+         WHERE id = {} AND locked_by = {}",
+        d.placeholder(1),
+        d.placeholder(2),
+    );
+    let binds = vec![SqlValue::I64(id), SqlValue::String(worker.id.clone())];
+    if let Err(e) = crate::sql::raw_execute_pool(pool, &sql, binds).await {
+        tracing::error!(id, worker = %worker.id, error = %e, "releasing an unrun job failed");
     }
 }
 

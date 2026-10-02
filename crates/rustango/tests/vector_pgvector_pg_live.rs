@@ -100,3 +100,49 @@ async fn vector_column_round_trip_and_knn() {
         .unwrap();
     assert_eq!(cos_first[0].title, "A");
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "vec_note_live")]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(vector(dims = 3))]
+    pub embedding: Option<Vector>,
+}
+
+/// #1970: an all-NULL vector column in a bulk_update reached PG as text.
+#[tokio::test]
+async fn bulk_update_sets_a_vector_column_to_null() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping pgvector live test");
+        return;
+    };
+    let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
+    if sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
+        .execute(&pg)
+        .await
+        .is_err()
+    {
+        eprintln!("`vector` extension unavailable — skipping pgvector live test");
+        return;
+    }
+    let pool: Pool = pg.into();
+    rustango::testkit::matrix::fresh_table::<Note>(&pool).await;
+    for _ in 0..2 {
+        let mut n = Note {
+            id: Auto::default(),
+            embedding: Some(Vector::new(vec![1.0, 0.0, 0.0])),
+        };
+        n.save_pool(&pool).await.unwrap();
+    }
+    let mut rows = Note::objects().fetch(&pool).await.unwrap();
+    for r in &mut rows {
+        r.embedding = None;
+    }
+    let n = Note::bulk_update(&rows, &["embedding"], &pool)
+        .await
+        .expect("bulk_update to NULL");
+    assert_eq!(n, 2);
+    let after = Note::objects().fetch(&pool).await.unwrap();
+    assert!(after.iter().all(|r| r.embedding.is_none()), "{after:?}");
+}

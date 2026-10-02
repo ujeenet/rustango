@@ -47,6 +47,16 @@ pub struct Coupon {
     pub name: String,
 }
 
+/// A plain integer PK with a DB default: not AUTO_INCREMENT (#1986).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pk1986_ticket", app = "pk1894")]
+pub struct Ticket {
+    #[rustango(primary_key, default = "7")]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
 /// Integer PK beside a generated `f64`, which joins RETURNING.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "pk1978_line", app = "pk1894")]
@@ -94,6 +104,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Token>(pool).await;
     rustango::testkit::matrix::fresh_table::<Coupon>(pool).await;
     rustango::testkit::matrix::fresh_table::<Line>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Ticket>(pool).await;
     rustango::testkit::matrix::drop_table(pool, V7Line::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<V7Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<V7Line>(pool).await;
@@ -209,6 +220,33 @@ async fn db_default_pk_is_read_or_refused_before_the_insert(pool: &Pool) {
     }
 }
 
+/// #1986: MySQL took `LAST_INSERT_ID()` (0) as a DB-default integer PK.
+async fn db_default_integer_pk_is_read_or_refused(pool: &Pool) {
+    let q = rustango::core::InsertQuery::new(Ticket::SCHEMA, vec!["name"], vec!["T".into()])
+        .returning(vec!["id"]);
+    let inserted = rustango::sql::insert_returning_pool(pool, &q).await;
+    let rows = Ticket::objects().count(pool).await.expect("count");
+    if pool.dialect().name() == "mysql" {
+        assert!(inserted.is_err(), "{inserted:?}");
+        assert_eq!(rows, 0, "refused before the INSERT");
+    } else {
+        inserted.expect("insert");
+        let ids: Vec<i64> = rustango::sql::FetcherPool::fetch(Ticket::objects(), pool)
+            .await
+            .expect("fetch")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        // SQLite's INTEGER PRIMARY KEY is the rowid, which skips the default.
+        let want = if pool.dialect().name() == "sqlite" {
+            1
+        } else {
+            7
+        };
+        assert_eq!(ids, [want]);
+    }
+}
+
 /// Only the PK decides the refusal: non-PK RETURNING columns still insert.
 async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
     let mut line = Line {
@@ -280,6 +318,7 @@ tri_dialect_test! {
         model_form_returns_the_written_pk,
         admin_create_redirects_to_the_new_pk,
         db_default_pk_is_read_or_refused_before_the_insert,
+        db_default_integer_pk_is_read_or_refused,
         integer_pk_inserts_beside_non_integer_returning_columns,
         admin_create_fills_a_v7_pk,
         model_form_fills_a_v7_pk,

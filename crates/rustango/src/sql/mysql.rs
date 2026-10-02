@@ -8,7 +8,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -313,10 +313,37 @@ impl Dialect for MySql {
     /// `CAST AS CHAR`: information_schema columns decode as binary otherwise.
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         Some(
-            "SELECT CAST(CONSTRAINT_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE \
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? \
-             AND REFERENCED_TABLE_NAME IS NOT NULL",
+            "SELECT CAST(k.CONSTRAINT_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE k \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ? AND k.COLUMN_NAME = ? \
+             AND k.REFERENCED_TABLE_NAME IS NOT NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
+             WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
         )
+    }
+
+    fn modifies_whole_column(&self) -> bool {
+        true
+    }
+
+    /// `PRIMARY` and multi-column indexes are left out.
+    fn unique_index_names_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.INDEX_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.COLUMN_NAME = ? \
+             AND s.NON_UNIQUE = 0 AND s.INDEX_NAME <> 'PRIMARY' AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.INDEX_NAME = s.INDEX_NAME AND o.SEQ_IN_INDEX > 1)",
+        )
+    }
+
+    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP INDEX {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
     }
 
     /// MySQL has no `ON CONFLICT`, so this writes
@@ -588,10 +615,7 @@ impl Dialect for MySql {
                     write_my_ident(sql, col);
                     sql.push(')');
                 }
-                let auto_int = |f: &&FieldSchema| {
-                    f.auto && matches!(f.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
-                };
-                if let Some(pk) = model.primary_key().filter(auto_int) {
+                if let Some(pk) = model.primary_key().filter(|f| f.is_serial()) {
                     sql.push_str(", ");
                     write_my_ident(sql, pk.column);
                     sql.push_str(" = LAST_INSERT_ID(");

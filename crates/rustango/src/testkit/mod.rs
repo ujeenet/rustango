@@ -112,6 +112,29 @@ pub async fn create_tables_in_schema(
         let sql = bare.replacen(&quoted, &qualified_target, 1);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
+    emit_indexes(pool, models, Some(schema)).await
+}
+
+/// The models' indexes, `unique_together` among them, as the migrate
+/// renderer emits them (#2120). `None` is the current schema.
+async fn emit_indexes(
+    pool: &Pool,
+    models: &[&'static ModelSchema],
+    schema: Option<&str>,
+) -> Result<(), MigrateError> {
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(models);
+    let indexes: Vec<crate::migrate::SchemaChange> =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
+            .into_iter()
+            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateIndex { .. }))
+            .collect();
+    match schema {
+        Some(s) => {
+            crate::migrate::ensure::apply_changes_idempotent_in(pool, &snapshot, &indexes, Some(s))
+                .await?;
+        }
+        None => crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &indexes).await?,
+    }
     Ok(())
 }
 
@@ -144,7 +167,7 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
-    Ok(())
+    emit_indexes(pool, models, None).await
 }
 
 /// Generate the framework's system-app migrations from the current
@@ -255,6 +278,86 @@ pub fn admin_user() -> crate::admin::AdminUser {
         active: true,
         created_at: chrono::Utc::now(),
         sessions_revoked_at: None,
+    }
+}
+
+/// `router` behind a CSP with no `'unsafe-inline'`: scripts and styles
+/// run only with the per-request nonce (#1703).
+#[cfg(feature = "admin")]
+#[must_use]
+pub fn with_strict_csp(router: axum::Router) -> axum::Router {
+    use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _, CSP_NONCE_PLACEHOLDER};
+    use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
+    let csp = format!(
+        "default-src 'self'; script-src {CSP_NONCE_PLACEHOLDER}; style-src {CSP_NONCE_PLACEHOLDER}"
+    );
+    router
+        .security_headers(SecurityHeadersLayer::strict().csp(csp))
+        .csp_nonce(CspNonceLayer::default())
+}
+
+/// Assert a 200 page under [`with_strict_csp`] runs as rendered: every
+/// inline `<script>`/`<style>` carries the header's nonce, and no inline
+/// `on*` handler or `style` attribute is left. Returns the body.
+///
+/// # Panics
+/// On any of those, naming `what`.
+#[cfg(feature = "admin")]
+pub async fn assert_strict_csp_page(resp: axum::response::Response, what: &str) -> String {
+    assert_eq!(resp.status(), axum::http::StatusCode::OK, "{what}");
+    let csp = resp.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let nonce = csp
+        .split("'nonce-")
+        .nth(1)
+        .and_then(|s| s.split('\'').next())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !nonce.is_empty() && !nonce.contains("RUSTANGO"),
+        "{what}: no nonce in {csp}"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body).into_owned();
+    assert_strict_csp_html(&html, &nonce, what);
+    html
+}
+
+/// The body half of [`assert_strict_csp_page`].
+///
+/// # Panics
+/// When `html` has an un-nonced inline tag, an `on*` handler or a `style` attribute.
+#[cfg(feature = "admin")]
+pub fn assert_strict_csp_html(html: &str, nonce: &str, what: &str) {
+    assert!(
+        html.contains("<script") || html.contains("<style"),
+        "{what}: nothing to check"
+    );
+    for tag in ["<script", "<style"] {
+        for (i, _) in html.match_indices(tag) {
+            let open = &html[i..i + html[i..].find('>').unwrap_or(0)];
+            if open.contains("application/json") {
+                continue;
+            }
+            assert!(
+                open.contains(&format!(r#"nonce="{nonce}""#)),
+                "{what}: {open}"
+            );
+        }
+    }
+    for bad in [
+        " onclick=",
+        " onsubmit=",
+        " onchange=",
+        " oninput=",
+        " onload=",
+        " style=\"",
+    ] {
+        assert!(!html.contains(bad), "{what}: {bad} survives a strict CSP");
     }
 }
 

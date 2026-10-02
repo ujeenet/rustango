@@ -626,7 +626,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.59.19
+rustango 0.60.0
 ```
 
 ### `about`
@@ -638,7 +638,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.59.19
+  version:        0.60.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -768,7 +768,7 @@ cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 Ältere Versionen schrieben hier `0001_rustango_*_initial.json`; dieser
 hartkodierte Fluss ist verschwunden. **Zum Bereitstellen führen Sie einfach
 `cargo run -- migrate` aus.** Ein eigenes Benutzermodell
-(`.user_model::<AppUser>()`) fließt durch dieselben generierten
+(auf `rustango_users` deklariert) fließt durch dieselben generierten
 `system/migrations/` — siehe
 [Eigenes Benutzermodell](#eigenes-benutzermodell-zusätzliche-spalten-auf-rustango_users).
 
@@ -1216,7 +1216,8 @@ generierten `CREATE TABLE rustango_users` landen.
 
 **Schritt 1.** Definieren Sie Ihr Modell. Es muss jede vom Framework geforderte
 Spalte exakt deklarieren (`id`, `username`, `password_hash`, `is_superuser`,
-`active`, `created_at`, `data`), plus Ihre Extras. Jede zusätzliche Spalte muss
+`active`, `created_at`, `data`,
+`password_changed_at`, `sessions_revoked_at`), plus Ihre Extras. Jede zusätzliche Spalte muss
 entweder `NULL` erlauben oder einen `default = "…"` haben.
 
 ```rust
@@ -1232,6 +1233,8 @@ pub struct AppUser {
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     // extras —
     #[rustango(max_length = 128, default = "''")] pub display_name: String,
     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
@@ -1251,6 +1254,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run().await
 }
 ```
+
+`user_model` prüft das Modell beim Start und bricht ab, wenn eine Pflichtspalte
+fehlt; ausgewählt wird es dadurch, dass es auf `rustango_users` deklariert ist.
 
 **Schritt 3.** Registrieren Sie `AppUser` **anstelle** des Framework-`User` —
 nur ein Modell darf `table = "rustango_users"` beanspruchen. Der Scaffolder
@@ -1275,7 +1281,7 @@ cargo run -- migrate              # creates rustango_users with your extras
   registrieren Sie `AppUser` allein. Das ist der Hauptgrund, warum Option 2 nur
   für frische Projekte ist; bei einem bestehenden Projekt vermeidet Option 1 das
   Problem.
-- Framework-Auth- und Admin-Code liest die sieben Kernspalten namentlich; Ihre
+- Framework-Auth- und Admin-Code liest die neun Kernspalten namentlich; Ihre
   zusätzlichen Spalten sind nur über `AppUser::objects().fetch(...)` erreichbar.
 
 `Builder::user_model::<AppUser>()` macht dasselbe für Code, der den

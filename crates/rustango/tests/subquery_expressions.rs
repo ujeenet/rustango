@@ -146,6 +146,25 @@ fn in_subquery_emits_with_outer_column_and_subselect() {
     );
 }
 
+/// `docs/orm.md` teaches `values_list_flat` as the one-column inner query.
+#[test]
+fn in_subquery_over_values_list_flat_projects_one_column() {
+    let inner = Book::objects()
+        .where_(Book::status.eq("published"))
+        .values_list_flat("author_id")
+        .compile()
+        .unwrap();
+    let q = update_against_author(
+        Expr::Literal(SqlValue::String("touched".into())),
+        in_subquery("id", inner),
+    );
+    for d in [&Postgres as &dyn Dialect, &MySql, &Sqlite] {
+        let sql = d.compile_update(&q).unwrap().sql;
+        let want = format!("IN (SELECT {} FROM", d.quote_ident("author_id"));
+        assert!(sql.contains(&want), "{}: {sql}", d.name());
+    }
+}
+
 #[test]
 fn not_in_subquery_emits_with_not_keyword() {
     let inner = Book::objects()

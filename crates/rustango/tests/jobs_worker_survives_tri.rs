@@ -1,6 +1,7 @@
 //! #1843 — a panicking job does not kill its worker and counts as a run;
 //! a long job is not run twice by a reclaim, and a worker that lost its
 //! lease does not finish the row for the worker that holds it now.
+//! #1677: a queue restarts after `shutdown`.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -371,7 +372,9 @@ async fn a_lost_lease_fires_no_dead_letter(pool: &Pool) {
 
 async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     let tok = token(pool, "abort");
-    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let q = queue(pool, 1, Duration::from_secs(60))
+        .await
+        .shutdown_grace(Duration::from_millis(200));
     q.dispatch(&Slow {
         token: tok.clone(),
         first_ms: 30_000,
@@ -381,12 +384,53 @@ async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     .unwrap();
     q.start().await;
     wait_for("the run to start", || counts(&tok).0 == 1).await;
+    let began = Instant::now();
     q.shutdown().await;
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "shutdown_grace bounds the wait: {:?}",
+        began.elapsed()
+    );
     assert_eq!(
         the_row(pool).await,
         (1, false),
         "unlocked for the next worker"
     );
+}
+
+/// #1677: `start` after `shutdown` runs jobs again; the stop flag was never reset.
+async fn start_after_shutdown_runs_jobs(pool: &Pool) {
+    let tick = token(pool, "restart");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.start().await;
+    q.shutdown().await;
+    q.start().await;
+    q.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    wait_for("the job after a restart", || counts(&tick).1 == 1).await;
+    q.shutdown().await;
+}
+
+/// A queue dropped without `shutdown` stops its workers instead of
+/// spinning on the closed stop signal.
+async fn a_dropped_queue_stops_its_workers(pool: &Pool) {
+    let tick = token(pool, "dropped");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.start().await;
+    drop(q);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let idle = queue(pool, 0, Duration::from_secs(60)).await;
+    idle.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(counts(&tick), (0, 0), "no worker left to run it");
+    assert_eq!(the_row(pool).await, (0, false), "nor to lock it");
 }
 
 tri_dialect_test! {
@@ -401,5 +445,7 @@ tri_dialect_test! {
         a_job_without_a_handler_spends_no_attempts,
         a_lost_lease_fires_no_dead_letter,
         shutdown_releases_an_aborted_job,
+        start_after_shutdown_runs_jobs,
+        a_dropped_queue_stops_its_workers,
     ],
 }

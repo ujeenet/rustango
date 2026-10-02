@@ -669,3 +669,85 @@ async fn legacy_project_table_gets_the_later_system_column_on_a_fresh_db() {
         .await
         .expect("second run is a no-op");
 }
+
+/// #1557 — a database built from a system chain written before 0.57.7,
+/// which had no `on_delete`, gets the framework's cascades on the next
+/// `migrate`. SQLite rebuilds each table and keeps its rows.
+#[tokio::test]
+async fn migrate_gives_an_old_database_its_cascades() {
+    use rustango::sql::Pool;
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.remove("on_delete");
+                m.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let sys = root.join("system").join("migrations");
+    rustango::migrate::make_migrations_system(&root, ModelScope::Tenant, None).unwrap();
+    for entry in std::fs::read_dir(&sys).unwrap() {
+        let path = entry.unwrap().path();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        strip(&mut v);
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+    let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+    let pool = Pool::connect(&url).await.unwrap();
+    rustango::migrate::migrate_pool_with_ledger(&pool, &sys, "__rustango_system_migrations__")
+        .await
+        .expect("the old chain applies");
+    let t = "rustango_role_permissions";
+    exec(
+        &pool,
+        "INSERT INTO rustango_roles (id, name, description) VALUES (1, 'r', 'd')",
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("INSERT INTO {t} (id, role_id, codename) VALUES (1, 1, 'x.y')"),
+    )
+    .await;
+    let action = || async {
+        let sq = pool.as_sqlite().expect("sqlite pool");
+        rustango::sql::sqlx::query_scalar::<_, String>(
+            "SELECT on_delete FROM pragma_foreign_key_list(?)",
+        )
+        .bind(t)
+        .fetch_one(sq)
+        .await
+        .unwrap()
+    };
+    assert_eq!(action().await, "NO ACTION");
+    const INDEXES: &str = "SELECT COUNT(*) FROM sqlite_master \
+                           WHERE type = 'index' AND tbl_name = 'rustango_role_permissions'";
+    let count = |sql: &'static str| async {
+        let sq = pool.as_sqlite().expect("sqlite pool");
+        rustango::sql::sqlx::query_scalar::<_, i64>(sql)
+            .fetch_one(sq)
+            .await
+            .unwrap()
+    };
+    let indexes = count(INDEXES).await;
+    assert!(indexes > 0);
+
+    manage_migrate(&pool, root.join("migrations"))
+        .await
+        .expect("migrate upgrades the old database");
+    assert_eq!(action().await, "CASCADE");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM rustango_role_permissions").await,
+        1
+    );
+    assert_eq!(count(INDEXES).await, indexes, "the indexes came back");
+    exec(&pool, "DELETE FROM rustango_roles").await;
+    assert_eq!(
+        count("SELECT COUNT(*) FROM rustango_role_permissions").await,
+        0
+    );
+}

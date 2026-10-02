@@ -1,7 +1,7 @@
 //! `Org` — the registry-level tenant record.
 //!
 //! Lives in the **registry database** (the one configured at boot via
-//! `RUSTANGO_REGISTRY_URL`). Every other database the application
+//! `DATABASE_URL`). Every other database the application
 //! reaches is discovered through this table. Adding a tenant is
 //! `INSERT INTO rustango_orgs (...)`, no config edit and no restart.
 //!
@@ -21,17 +21,12 @@
 //! | `active`         | Soft-disable without dropping data.                         |
 //! | `created_at`     | Set on insert.                                              |
 //!
-//! ## What's missing in Slice 1
+//! ## Notes
 //!
 //! * `slug` carries `#[rustango(unique)]` so the DDL writer emits the
-//!   `UNIQUE` constraint inline; the bootstrap migration uses a plain
-//!   `CreateTable` op with no separate `DataOp`.
-//! * `storage_mode` is a raw `String` because rustango models can't
-//!   carry custom enums yet. The [`StorageMode`] helper enum in this
-//!   module wraps the conversion.
-//! * `database_url` carries plaintext for now. v0.5 Slice 3.5 adds the
-//!   `SecretsResolver` indirection so the value can be a vault
-//!   reference instead of a literal URL.
+//!   `UNIQUE` constraint inline.
+//! * `storage_mode` is a raw `String`; the [`StorageMode`] helper enum
+//!   in this module wraps the conversion.
 
 use crate::Model;
 

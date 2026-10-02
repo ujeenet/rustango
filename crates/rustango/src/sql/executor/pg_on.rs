@@ -147,9 +147,7 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     let stmt = Postgres.compile_select(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    Ok(q.fetch_all(executor).await?)
+    Ok(super::pg_on_query(&stmt.sql, stmt.params)
+        .fetch_all(executor)
+        .await?)
 }

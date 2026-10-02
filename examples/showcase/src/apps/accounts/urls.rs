@@ -93,7 +93,7 @@ async fn register(
         ));
     }
     let password_hash = passwords::hash(&input.password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
 
     let mut u = User {
         id: Auto::Unset,
@@ -119,7 +119,7 @@ async fn register(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let stored = rows.pop().ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "could not re-fetch user".into(),
@@ -148,13 +148,13 @@ async fn login(
         .filter_op("username", Op::Eq, input.username.clone())
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let user = rows
         .pop()
         .ok_or((StatusCode::UNAUTHORIZED, "invalid credentials".into()))?;
 
     let ok = passwords::verify(&input.password, &user.password_hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     if !ok {
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
     }
@@ -169,7 +169,7 @@ async fn login(
         .issuer("rustango-showcase")
         .ttl(Duration::from_secs(3600));
     let token = encode(&claims, &jwt_secret())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
 
     Ok(Json(LoginOut {
         token,
@@ -203,7 +203,7 @@ async fn me(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let user = rows
         .pop()
         .ok_or((StatusCode::UNAUTHORIZED, "user no longer exists".into()))?;
