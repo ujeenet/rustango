@@ -56,7 +56,8 @@ impl ConfigError {
 
     /// Where loading failed, without the error text: a TOML error
     /// quotes the offending line, which can hold a secret.
-    pub(crate) fn location(&self) -> String {
+    #[must_use]
+    pub fn location(&self) -> String {
         match self {
             Self::Io { path, source } => format!("{path} ({})", source.kind()),
             Self::Parse { path, source } => {
