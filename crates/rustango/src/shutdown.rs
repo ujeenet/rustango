@@ -57,39 +57,45 @@ pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// The signal a graceful server stops accepting on.
 pub type StopSignal = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-/// Serve until [`shutdown_signal`], then give open connections `drain`
-/// to finish. SSE and long-poll never finish on their own, so without a
-/// deadline SIGTERM waited for SIGKILL (#1883).
+/// Serve `app` until [`shutdown_signal`], then give open connections
+/// `drain` to finish. SSE and long-poll never finish on their own, so
+/// without a deadline SIGTERM waited for SIGKILL (#1883). This is the
+/// crate's only `axum::serve`, so no serve path can skip the drain (#1948).
 ///
 /// ```ignore
-/// serve_until_drained(|stop| axum::serve(listener, app).with_graceful_shutdown(stop), drain).await?;
+/// serve_until_drained(listener, app, drain).await?;
 /// ```
 ///
 /// # Errors
 /// What the server returns.
-pub async fn serve_until_drained<F, S>(serve: F, drain: std::time::Duration) -> std::io::Result<()>
-where
-    F: FnOnce(StopSignal) -> S,
-    S: std::future::IntoFuture<Output = std::io::Result<()>>,
-{
-    drain_on(Box::pin(shutdown_signal()), serve, drain).await
+#[cfg(feature = "_axum")]
+pub async fn serve_until_drained(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    drain: std::time::Duration,
+) -> std::io::Result<()> {
+    drain_on(Box::pin(shutdown_signal()), listener, app, drain).await
 }
 
-async fn drain_on<F, S>(
+#[cfg(feature = "_axum")]
+async fn drain_on(
     signal: StopSignal,
-    serve: F,
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
     drain: std::time::Duration,
-) -> std::io::Result<()>
-where
-    F: FnOnce(StopSignal) -> S,
-    S: std::future::IntoFuture<Output = std::io::Result<()>>,
-{
+) -> std::io::Result<()> {
     let (stopped, on_stop) = tokio::sync::oneshot::channel::<()>();
-    let serve = serve(Box::pin(async move {
-        signal.await;
-        let _ = stopped.send(());
-    }))
-    .into_future();
+    // `ConnectInfo` feeds `access_log`, IP filters and per-IP limits.
+    let serve = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            signal.await;
+            let _ = stopped.send(());
+        }),
+    );
     tokio::pin!(serve);
     tokio::select! {
         r = &mut serve => r,
@@ -110,7 +116,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "_axum"))]
 mod tests {
     use super::*;
 
@@ -133,7 +139,8 @@ mod tests {
             Box::pin(async move {
                 let _ = on_stop.await;
             }),
-            move |sig| axum::serve(listener, app).with_graceful_shutdown(sig),
+            listener,
+            app,
             std::time::Duration::from_millis(200),
         ));
 

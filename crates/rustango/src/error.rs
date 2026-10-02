@@ -146,6 +146,14 @@ pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
     }
 }
 
+/// A logged `500` that withholds the cause, for handlers that return
+/// `(StatusCode, String)`: `.map_err(rustango::server_error)?` (#2032).
+#[cfg(feature = "_axum")]
+pub fn server_error(e: impl fmt::Display) -> (axum::http::StatusCode, String) {
+    let body = server_error_body("handler", &e);
+    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, body)
+}
+
 /// Body text for a request the **client** got wrong. It withholds
 /// the cause the same way [`server_error_body`] does.
 ///
@@ -849,6 +857,18 @@ mod tests {
                     assert_eq!(body, OPAQUE_SERVER_ERROR);
                 });
             });
+        });
+    }
+
+    /// #2032: the public helper withholds the driver text too.
+    #[cfg(feature = "_axum")]
+    #[test]
+    fn public_server_error_withholds_the_cause() {
+        let _g = test_env::lock();
+        test_env::with(DISCLOSE_ENV, None, || {
+            let (status, body) = server_error(DRIVER_ERROR);
+            assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body, OPAQUE_SERVER_ERROR);
         });
     }
 

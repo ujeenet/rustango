@@ -597,6 +597,8 @@ pub mod permissions;
 /// Unified `RustangoError` enum + `From` impls for every framework error type.
 /// Use in handlers: `async fn handler() -> RustangoResult<Json<X>> { ... }`.
 mod error;
+#[cfg(feature = "_axum")]
+pub use error::server_error;
 pub use error::{RustangoError, RustangoResult};
 
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.

@@ -17,9 +17,9 @@
 //! `manage server` subcommand, and not of the path `Cli::run` actually
 //! takes. Close enough to be convincing, and wrong.
 //!
-//! So this recomputes it from the source instead: find every
-//! `axum::serve` and require `.with_graceful_shutdown` in the same
-//! expression. Prose and call-site counting both failed here.
+//! `shutdown::serve_until_drained` now takes the listener and router and
+//! is the one `axum::serve` in the crate, so any other serve is a bypass
+//! of the drain, even one with its own `with_graceful_shutdown` (#1948).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,32 +63,21 @@ fn no_bare_axum_serve_in_the_crate() {
             if line_prefix.starts_with("//") {
                 continue;
             }
-            // The serve expression runs to its terminating `.await`;
-            // `with_graceful_shutdown` has to appear inside it. Bounded
-            // so a *later* serve in the same file cannot vouch for this
-            // one.
-            let tail = &text[idx..];
-            let end = tail
-                .find(".await")
-                .map_or(tail.len(), |e| e + ".await".len());
-            if !tail[..end].contains("with_graceful_shutdown") {
-                let line = text[..idx].lines().count();
-                offenders.push(format!(
-                    "{}:{}",
-                    path.strip_prefix(&src).unwrap_or(path).display(),
-                    line
-                ));
+            let rel = path.strip_prefix(&src).unwrap_or(path);
+            // The wrapper itself, and the test harness that stops on its own signal.
+            if rel == Path::new("shutdown.rs") || rel == Path::new("test_server.rs") {
+                continue;
             }
+            let line = text[..idx].lines().count();
+            offenders.push(format!("{}:{}", rel.display(), line));
         }
     }
 
     offenders.sort();
     assert!(
         offenders.is_empty(),
-        "{} bare `axum::serve` call(s) — SIGTERM kills the process outright there, so \
-         anything meant to run on shutdown (a job-queue drain, a metrics flush) never \
-         does, and nothing logs (#1409). Wrap it in \
-         `crate::shutdown::serve_until_drained`.\n  {}",
+        "{} `axum::serve` call(s) outside `shutdown::serve_until_drained` — they skip \
+         the drain deadline or SIGTERM handling (#1409, #1948). Call the wrapper.\n  {}",
         offenders.len(),
         offenders.join("\n  ")
     );

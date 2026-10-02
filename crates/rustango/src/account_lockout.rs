@@ -383,7 +383,8 @@ pub(crate) fn warn_once_on_weak_store(lockout: &Lockout) {
 }
 
 /// The `[auth]` settings lockout; `false` if app code already set one.
-#[cfg(feature = "config")]
+// Only `manage` applies settings (#1948).
+#[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_from_settings(lockout: Lockout) -> bool {
     SHARED_LOCKOUT.set_from_settings(lockout)
 }

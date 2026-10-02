@@ -409,7 +409,8 @@ pub fn configure_shared(throttle: LoginThrottle) -> bool {
 }
 
 /// The `[auth] login_*` gate; `false` if app code already set one.
-#[cfg(feature = "config")]
+// Only `manage` applies settings (#1948).
+#[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn configure_from_settings(throttle: LoginThrottle) -> bool {
     SHARED.set_from_settings(throttle)
 }

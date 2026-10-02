@@ -789,6 +789,8 @@ jobs:
           - sqlite,signals
           - sqlite,config
           - sqlite,manage,config
+          # `config` without `manage` left the settings setters dead (#1948).
+          - mysql,tenancy,config,email
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88

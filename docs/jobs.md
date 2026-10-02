@@ -101,6 +101,14 @@ queue.start().await;
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
 
+`shutdown()` gives running jobs a grace period (`shutdown_grace`, default 5s),
+then aborts and re-queues them. Queued jobs and parked retries stay queued, and
+`start()` again picks them up.
+
+Jobs are **at-least-once**. No stop signal reaches a running job, and an aborted
+job runs again from the start (the DB queue releases its row even if the job had
+just finished). The abort spends an attempt. Make every job idempotent.
+
 Keep the `Arc<InMemoryJobQueue>` in your app state so handlers can reach it.
 
 > **In-memory means in-memory.** Jobs queued or in-flight are **lost on
@@ -504,7 +512,7 @@ the expected outcome, so nothing is logged. Tracked in
 | `Queue(String)` | internal queue error (serialization/registration) |
 
 **`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. The `DatabaseJobQueue` adds
+`shutdown()` · `pending_count()`. Both queues have `shutdown_grace`. The `DatabaseJobQueue` adds
 `ensure_table_pool`, `with_workers_pool`, `poll_interval`, and
 `reclaim_stuck_jobs_pool`.
 

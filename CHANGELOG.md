@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — job queues drain on shutdown (#1255)
+
+`shutdown()` lets running jobs finish within `shutdown_grace` (default 5s), then aborts and re-queues them. Parked retries are kept, so `pending_count()` returns to 0.
+
+### Fixed — a job queue restarts after `shutdown()` (#1677)
+
+`start()` after `shutdown()` panicked on `InMemoryJobQueue` and ran nothing on `DatabaseJobQueue`. Each start now gets fresh workers.
+
+### Fixed — every server drains through one wrapper (#1948)
+
+`shutdown::serve_until_drained` takes the listener and router and is the crate's only `axum::serve`. A `config` build without `manage` no longer has dead settings setters.
+
+### Fixed — `rustango::server_error` for handler 500s (#2032)
+
+It logs the error and sends a fixed body. The examples use it instead of `(500, e.to_string())`.
+
 ### Fixed — docs truth pass (#1680)
 
 `manage check --deploy` no longer reports the CSRF Origin check as disabled; it runs against the request's own Host.

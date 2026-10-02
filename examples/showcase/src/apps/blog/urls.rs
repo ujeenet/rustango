@@ -87,7 +87,7 @@ async fn list_posts(
         .order_by(&[("id", false)]) // ASC — natural list order
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     Ok(Json(posts.into_iter().map(PostOut::from).collect()))
 }
 
@@ -100,7 +100,7 @@ async fn retrieve_post(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     if let Some(p) = rows.pop() {
         Ok(Json(PostOut::from(p)))
     } else {
@@ -122,7 +122,7 @@ async fn create_post(
     };
     p.insert_pool(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
 
     // The macro-emitted `insert_pool` populates the `Auto<T>` PK on
     // every backend but only fills `auto_now_add` fields when the
@@ -142,7 +142,7 @@ async fn create_post(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let stored = rows.pop().ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "could not re-fetch inserted row".into(),
