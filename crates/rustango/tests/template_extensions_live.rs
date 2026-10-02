@@ -4,7 +4,7 @@
 //! `template_extensions::apply_to_tera` walks the registry and
 //! attaches everything to a Tera instance at construction time.
 
-#![cfg(feature = "sqlite")]
+#![cfg(feature = "_tera")]
 
 use std::collections::HashMap;
 

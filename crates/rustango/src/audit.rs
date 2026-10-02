@@ -1963,6 +1963,20 @@ pub fn __bind_value_sqlite<'q>(
     crate::sql::bind_query_sqlite(q, value)
 }
 
+/// The BEFORE read of an audited update: `columns` of the row at `pk_value`.
+#[doc(hidden)]
+#[must_use]
+pub fn before_image_query(
+    schema: &'static crate::core::ModelSchema,
+    pk_column: &'static str,
+    pk_value: crate::core::SqlValue,
+    columns: &[&'static str],
+) -> crate::core::SelectQuery {
+    let mut q = crate::core::SelectQuery::by_pk(schema, pk_column, pk_value);
+    q.projection = Some(columns.to_vec());
+    q
+}
+
 /// Per-row audited save with a field-level diff, on any backend. All of
 /// it runs in one transaction:
 ///
@@ -1982,14 +1996,10 @@ pub fn __bind_value_sqlite<'q>(
 pub async fn save_one_with_diff<F1, F2, F3>(
     pool: &crate::sql::Pool,
     update_query: &crate::core::UpdateQuery,
-    pk_column: &'static str,
-    pk_value: crate::core::SqlValue,
+    before_query: &crate::core::SelectQuery,
     entity_table: &'static str,
     entity_pk: String,
     after_pairs: Vec<(&'static str, serde_json::Value)>,
-    select_cols_pg: &str,
-    select_cols_my: &str,
-    select_cols_sqlite: &str,
     decode_before_pg: F1,
     decode_before_my: F2,
     decode_before_sqlite: F3,
@@ -2000,9 +2010,9 @@ where
     F3: FnOnce(&crate::sql::SqliteReturningRow) -> Vec<(&'static str, serde_json::Value)>,
 {
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
-    let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
     update_query.validate()?;
     let stmt = pool.dialect().compile_update(update_query)?;
+    let before = pool.dialect().compile_select(before_query)?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own
     // `decode_before_*`. The UPDATE, emit and commit are shared by
@@ -2011,12 +2021,11 @@ where
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut tx = pg.begin().await?;
-            let select_sql = format!(
-                r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
-                select_cols_pg, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)
@@ -2038,12 +2047,11 @@ where
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut tx = my.begin().await?;
-            let select_sql = format!(
-                "SELECT {} FROM `{}` WHERE `{}` = ?",
-                select_cols_my, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query_my(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query_my);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)
@@ -2065,12 +2073,11 @@ where
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let mut tx = sq.begin().await?;
-            let select_sql = format!(
-                r#"SELECT {} FROM "{}" WHERE "{}" = ?"#,
-                select_cols_sqlite, entity_table, pk_column,
-            );
-            let pk_q = sqlx::query(&select_sql);
-            let pk_q = crate::sql::bind_query_sqlite(pk_q, pk_value);
+            let pk_q = before
+                .params
+                .iter()
+                .cloned()
+                .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 // A failed pre-read must not let the UPDATE commit unaudited.
                 pk_q.fetch_optional(&mut *tx)

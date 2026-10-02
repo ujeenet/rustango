@@ -34,6 +34,7 @@ mod range;
 mod sqlite;
 mod vector;
 mod writers;
+pub(crate) use writers::{compile_date_buckets, DateBucket};
 
 pub use array::Array;
 pub use auto::Auto;
@@ -100,9 +101,9 @@ pub use executor::row_to_json;
 /// today, and the guard in `macro_internals_stays_internal` walks only
 /// `tests/` and `examples/`, so it cannot see it (#1519, #1516).
 ///
-/// The macro never emitted `fetch_aggregate_on`,
-/// `annotate_count_children{,_on}` or `select_rows_on` at all — they
-/// were filed as codegen support and were never that.
+/// The macro never emits `fetch_aggregate_on` or
+/// `annotate_count_children{,_on}`. Audited `save_on` calls
+/// `select_rows_on` for its BEFORE read.
 ///
 /// **PostgreSQL only.** They are typed `E: sqlx::Executor<Database =
 /// Postgres>`, so unlike the rest of the query surface they are not

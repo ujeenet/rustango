@@ -4,6 +4,28 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the ORM covers the media sweeps' anti-join delete (#1578)
+
+Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_exists` + `outer_ref` delete is now tested on all three backends.
+
+### Fixed — media sweeps and deletes go through the ORM (#1571)
+
+`delete`, `purge`, `purge_orphans`, `purge_pending` and `delete_collection` no longer build SQL or bind order by hand.
+
+### Fixed — the `ModelForm` unique_together check goes through the ORM (#2011)
+
+It runs as `CountQuery::exists`, and skips partial unique indexes, which used to reject a legal duplicate.
+
+### Fixed — `.dates()` / `.datetimes()` SQL comes from the dialect emitter (#2030)
+
+### Fixed — `ChainResolver` docs name `standard()`, not the empty `default()` (#2044)
+
+`template_extensions_live` is gated on Tera, so `--features sqlite,manage --tests` builds.
+
+### Fixed — audited saves pre-read through the emitter; legacy permission seeding is complete (#2061)
+
+`save_pool` / `save_on` read the "before" row with a compiled `SelectQuery`. `auto_create_permissions(&PgPool)` seeds what `auto_create_permissions_pool` seeds. A provision run attaches its org once.
+
 ### Fixed — in-memory jobs and scheduled tasks keep the caller's audit source and timezone (#1229)
 
 `InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. A tenant user's id stays on its own tenant's rows. `PgJobQueue` still runs as `system`.

@@ -4361,38 +4361,6 @@ pub enum DateKind {
     Day,
 }
 
-impl DateKind {
-    /// Emit the dialect-portable SQL fragment that truncates the
-    /// column to this granularity. `col_quoted` must already be a
-    /// quoted identifier (`"name"` / `\`name\``).
-    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
-        match (dialect_name, self) {
-            ("postgres", DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})::date"),
-            ("postgres", DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})::date"),
-            ("postgres", DateKind::Day) => format!("DATE({col_quoted})"),
-            ("mysql", DateKind::Year) => {
-                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-01-01'))")
-            }
-            ("mysql", DateKind::Month) => {
-                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-%m-01'))")
-            }
-            ("mysql", DateKind::Day) => format!("DATE({col_quoted})"),
-            ("sqlite", DateKind::Year) => {
-                format!("date(strftime('%Y-01-01', {col_quoted}))")
-            }
-            ("sqlite", DateKind::Month) => {
-                format!("date(strftime('%Y-%m-01', {col_quoted}))")
-            }
-            ("sqlite", DateKind::Day) => format!("date({col_quoted})"),
-            // Unknown dialect: fall back to PG-shape DATE_TRUNC. The
-            // driver reports a clear syntax error if it is unsupported.
-            (_, DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})"),
-            (_, DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})"),
-            (_, DateKind::Day) => format!("DATE({col_quoted})"),
-        }
-    }
-}
-
 /// Builder returned by [`QuerySet::dates`]. Run it with
 /// [`crate::sql::fetch_dates_pool`], which emits
 /// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`.
@@ -4493,53 +4461,6 @@ pub enum DateTimeKind {
     Hour,
     Minute,
     Second,
-}
-
-impl DateTimeKind {
-    /// Dialect-portable SQL fragment that truncates a `TIMESTAMP` /
-    /// `DATETIME` column to this granularity, returning a value
-    /// shaped to decode as `DateTime<Utc>`.
-    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
-        match dialect_name {
-            "postgres" => {
-                let unit = match self {
-                    DateTimeKind::Year => "year",
-                    DateTimeKind::Month => "month",
-                    DateTimeKind::Day => "day",
-                    DateTimeKind::Hour => "hour",
-                    DateTimeKind::Minute => "minute",
-                    DateTimeKind::Second => "second",
-                };
-                format!("DATE_TRUNC('{unit}', {col_quoted})")
-            }
-            "mysql" => {
-                let fmt = match self {
-                    DateTimeKind::Year => "%Y-01-01 00:00:00",
-                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
-                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
-                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
-                    DateTimeKind::Minute => "%Y-%m-%d %H:%i:00",
-                    DateTimeKind::Second => "%Y-%m-%d %H:%i:%s",
-                };
-                // CAST back to DATETIME so the decoder sees the right
-                // type.
-                format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
-            }
-            _ => {
-                // SQLite and anything else: format with strftime so
-                // the value comes back in the standard ISO-8601 shape.
-                let fmt = match self {
-                    DateTimeKind::Year => "%Y-01-01 00:00:00",
-                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
-                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
-                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
-                    DateTimeKind::Minute => "%Y-%m-%d %H:%M:00",
-                    DateTimeKind::Second => "%Y-%m-%d %H:%M:%S",
-                };
-                format!("strftime('{fmt}', {col_quoted})")
-            }
-        }
-    }
 }
 
 /// Builder returned by [`QuerySet::datetimes`]. Like

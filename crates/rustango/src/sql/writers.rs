@@ -4522,3 +4522,93 @@ pub(crate) fn compile_where_order_tail(
     write_order_limit_offset(&mut b, order_by, limit, offset, qualify_with)?;
     Ok(b.finish())
 }
+
+/// Granularity of a `.dates()` / `.datetimes()` bucket.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DateBucket {
+    Date(crate::query::DateKind),
+    DateTime(crate::query::DateTimeKind),
+}
+
+/// `SELECT DISTINCT <bucket(column)> FROM (<select>) ORDER BY 1`, the
+/// statement behind `.dates()` / `.datetimes()`.
+pub(crate) fn compile_date_buckets(
+    d: &dyn Dialect,
+    select: &SelectQuery,
+    column: &'static str,
+    bucket: DateBucket,
+    descending: bool,
+) -> Result<CompiledStatement, SqlError> {
+    let mut b = Sql::new(d);
+    b.sql.push_str("SELECT DISTINCT ");
+    let col = d.quote_ident(column);
+    b.sql.push_str(&match bucket {
+        DateBucket::Date(kind) => date_trunc_sql(kind, d.name(), &col),
+        DateBucket::DateTime(kind) => datetime_trunc_sql(kind, d.name(), &col),
+    });
+    b.sql.push_str(" AS ");
+    b.write_ident("rs_bucket");
+    b.sql.push_str(" FROM (");
+    write_select(&mut b, select)?;
+    b.sql.push_str(") AS ");
+    b.write_ident("rs_bucket_sub");
+    b.sql.push_str(" ORDER BY ");
+    b.write_ident("rs_bucket");
+    b.sql.push_str(if descending { " DESC" } else { " ASC" });
+    Ok(b.finish())
+}
+
+/// Truncate `col_quoted` to a date bucket, typed as a `DATE`.
+fn date_trunc_sql(kind: crate::query::DateKind, dialect_name: &str, col_quoted: &str) -> String {
+    use crate::query::DateKind;
+    match (dialect_name, kind) {
+        ("postgres", DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})::date"),
+        ("postgres", DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})::date"),
+        ("mysql", DateKind::Year) => format!("DATE(DATE_FORMAT({col_quoted}, '%Y-01-01'))"),
+        ("mysql", DateKind::Month) => format!("DATE(DATE_FORMAT({col_quoted}, '%Y-%m-01'))"),
+        ("postgres" | "mysql", DateKind::Day) => format!("DATE({col_quoted})"),
+        (_, DateKind::Year) => format!("date(strftime('%Y-01-01', {col_quoted}))"),
+        (_, DateKind::Month) => format!("date(strftime('%Y-%m-01', {col_quoted}))"),
+        (_, DateKind::Day) => format!("date({col_quoted})"),
+    }
+}
+
+/// Truncate `col_quoted` to a timestamp bucket that decodes as `DateTime<Utc>`.
+fn datetime_trunc_sql(
+    kind: crate::query::DateTimeKind,
+    dialect_name: &str,
+    col_quoted: &str,
+) -> String {
+    use crate::query::DateTimeKind as K;
+    if dialect_name == "postgres" {
+        let unit = match kind {
+            K::Year => "year",
+            K::Month => "month",
+            K::Day => "day",
+            K::Hour => "hour",
+            K::Minute => "minute",
+            K::Second => "second",
+        };
+        return format!("DATE_TRUNC('{unit}', {col_quoted})");
+    }
+    // MySQL spells minutes `%i` and seconds `%s`; SQLite `%M` / `%S`.
+    let (min, sec) = if dialect_name == "mysql" {
+        ("%i", "%s")
+    } else {
+        ("%M", "%S")
+    };
+    let fmt = match kind {
+        K::Year => "%Y-01-01 00:00:00".to_owned(),
+        K::Month => "%Y-%m-01 00:00:00".to_owned(),
+        K::Day => "%Y-%m-%d 00:00:00".to_owned(),
+        K::Hour => "%Y-%m-%d %H:00:00".to_owned(),
+        K::Minute => format!("%Y-%m-%d %H:{min}:00"),
+        K::Second => format!("%Y-%m-%d %H:{min}:{sec}"),
+    };
+    if dialect_name == "mysql" {
+        // CAST back so the decoder sees a DATETIME.
+        format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
+    } else {
+        format!("strftime('{fmt}', {col_quoted})")
+    }
+}

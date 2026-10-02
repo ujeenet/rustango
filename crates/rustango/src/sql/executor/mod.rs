@@ -2065,22 +2065,18 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DatesQuerySet<T>,
 ) -> Result<Vec<chrono::NaiveDate>, ExecError> {
-    let descending = qs.descending;
-    let kind = qs.kind;
     let column = qs.resolve_column()?;
-    // The inner SELECT keeps WHERE / JOINs / LIMIT. Its ORDER BY is
-    // overridden below: `.dates()` orders by the truncated bucket.
-    let select_query = qs.qs.compile()?;
-    let dialect = pool.dialect();
-    let inner = dialect.compile_select(&select_query)?;
-    let col_quoted = dialect.quote_ident(column);
-    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
-    let order_dir = if descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT DISTINCT {trunc_sql} AS rs_dates_bucket FROM ({inner_sql}) AS rs_dates_sub ORDER BY rs_dates_bucket {order_dir}",
-        inner_sql = inner.sql,
-    );
-    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&sql, inner.params, pool).await?;
+    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
+    let bucket = crate::sql::DateBucket::Date(qs.kind);
+    let descending = qs.descending;
+    let stmt = crate::sql::compile_date_buckets(
+        pool.dialect(),
+        &qs.qs.compile()?,
+        column,
+        bucket,
+        descending,
+    )?;
+    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&stmt.sql, stmt.params, pool).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -2094,21 +2090,18 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DateTimesQuerySet<T>,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
-    let descending = qs.descending;
-    let kind = qs.kind;
     let column = qs.resolve_column()?;
-    let select_query = qs.qs.compile()?;
-    let dialect = pool.dialect();
-    let inner = dialect.compile_select(&select_query)?;
-    let col_quoted = dialect.quote_ident(column);
-    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
-    let order_dir = if descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT DISTINCT {trunc_sql} AS rs_datetimes_bucket FROM ({inner_sql}) AS rs_datetimes_sub ORDER BY rs_datetimes_bucket {order_dir}",
-        inner_sql = inner.sql,
-    );
+    let bucket = crate::sql::DateBucket::DateTime(qs.kind);
+    let descending = qs.descending;
+    let stmt = crate::sql::compile_date_buckets(
+        pool.dialect(),
+        &qs.qs.compile()?,
+        column,
+        bucket,
+        descending,
+    )?;
     let rows: Vec<(chrono::DateTime<chrono::Utc>,)> =
-        raw_query_pool(&sql, inner.params, pool).await?;
+        raw_query_pool(&stmt.sql, stmt.params, pool).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
