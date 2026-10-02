@@ -366,22 +366,14 @@ pub(crate) async fn audit_cleanup_submit(
 }
 
 /// Diff-shaped audit entry for an admin UPDATE: `{ "field": { "before": v,
-/// "after": v } }` from the row `update_submit` read before the write.
-/// A snapshot when `before_row` is `None`; `None` when nothing changed.
+/// "after": v } }` from the row `update_submit` locked before the write.
+/// `None` when nothing changed.
 pub(crate) fn admin_audit_diff_entry(
     model: &'static crate::core::ModelSchema,
     pk_str: &str,
-    before_row: Option<&serde_json::Value>,
+    row: &serde_json::Value,
     form: &HashMap<String, String>,
 ) -> Option<crate::audit::PendingEntry> {
-    let Some(row) = before_row else {
-        return Some(admin_audit_entry(
-            model,
-            pk_str,
-            crate::audit::AuditOp::Update,
-            form,
-        ));
-    };
     // Both sides use typed JSON (numbers as numbers, bools as bools),
     // so an app-code write and an admin form POST produce the same
     // diff. `before` reads the SELECTed row; `after` coerces the form

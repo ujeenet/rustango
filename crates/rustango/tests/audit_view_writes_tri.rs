@@ -536,6 +536,44 @@ mod admin_views {
         assert_eq!(count(pool, "update").await, 1);
     }
 
+    /// A stale form that undoes a concurrent edit is audited: the diff
+    /// reads the row the UPDATE overwrites, not the earlier read.
+    async fn stale_admin_edit_is_audited(pool: &Pool) {
+        let _g = SIGNALS.lock().await;
+        let pks = seed(pool).await;
+        let target = pks[0].to_string();
+        let p = pool.clone();
+        let id = sig::connect_admin_pre_save(move |c| {
+            let (p, target) = (p.clone(), target.clone());
+            async move {
+                if c.pk != target {
+                    return;
+                }
+                let q = rustango::core::UpdateQuery {
+                    model: AdminDoc::SCHEMA,
+                    set: vec![rustango::core::Assignment {
+                        column: "title",
+                        value: SqlValue::String("other".into()).into(),
+                    }],
+                    where_clause: rustango::core::WhereExpr::Predicate(
+                        rustango::core::Filter::new(
+                            "id",
+                            rustango::core::Op::Eq,
+                            SqlValue::I64(c.pk.parse().unwrap()),
+                        ),
+                    ),
+                };
+                rustango::sql::update_pool(&p, &q).await.expect("race");
+            }
+        });
+        let status = post(pool, &format!("/{TABLE}/{}", pks[0]), "title=a".into()).await;
+        sig::disconnect_admin_pre_save(id);
+        assert!(status.is_redirection(), "{status}");
+        let doc = AdminDoc::objects().filter("id", pks[0]).fetch(pool).await;
+        assert_eq!(doc.unwrap()[0].title, "a");
+        assert_eq!(count(pool, "update").await, 1, "the undo left no audit row");
+    }
+
     async fn delete_view_keeps_a_concurrent_stamp(pool: &Pool) {
         let _g = SIGNALS.lock().await;
         let pks = seed(pool).await;
@@ -613,6 +651,7 @@ mod admin_views {
         setup: setup,
         scenarios: [
             noop_admin_edit_writes_no_update_row,
+            stale_admin_edit_is_audited,
             delete_view_keeps_a_concurrent_stamp,
             bulk_actions_skip_rows_marked_since_the_read,
         ],

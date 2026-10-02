@@ -11,6 +11,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — an admin edit commits with its audit row (#2060)
 
 The diff entry is written in the UPDATE's transaction; if it fails, the edit is not saved.
+Its "before" side is read under lock in that transaction, so a stale form that undoes a concurrent edit is audited.
 
 ### Fixed — test assertions that passed when they should fail (#1960)
 

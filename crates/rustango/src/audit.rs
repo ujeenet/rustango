@@ -1232,6 +1232,61 @@ pub async fn save_one_with_audit(
     Ok(affected)
 }
 
+/// When an admin-style row-diff write emits its audit entry.
+#[cfg(feature = "admin")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffEmit {
+    /// In the UPDATE's transaction: a failed emit undoes the write.
+    InTx,
+    /// After commit; the caller emits [`RowDiffWrite::Written::deferred`] best-effort.
+    AfterCommit,
+}
+
+/// Outcome of [`update_one_with_row_diff`].
+#[cfg(feature = "admin")]
+#[derive(Debug)]
+pub(crate) enum RowDiffWrite {
+    /// The locked read found no row: nothing was written.
+    Gone,
+    /// The UPDATE ran; `deferred` is the entry left for the caller.
+    Written { deferred: Option<PendingEntry> },
+}
+
+/// Lock the row `before` selects in the UPDATE's transaction, build the
+/// entry from that row, then UPDATE. A concurrent edit cannot slip
+/// between the diff's read and the write.
+#[cfg(feature = "admin")]
+pub(crate) async fn update_one_with_row_diff(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+    mut before: crate::core::SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+    entry_of: impl FnOnce(&serde_json::Value) -> Option<PendingEntry>,
+    emit: DiffEmit,
+) -> Result<RowDiffWrite, crate::sql::ExecError> {
+    query.validate()?;
+    let stmt = pool.dialect().compile_update(query)?;
+    before.lock_mode = Some(crate::core::LockMode {
+        silent_on_sqlite: true,
+        ..crate::core::LockMode::default()
+    });
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let Some(row) = crate::sql::select_one_row_as_json_tx(&mut tx, &before, fields).await? else {
+        tx.rollback().await?;
+        return Ok(RowDiffWrite::Gone);
+    };
+    let entry = entry_of(&row);
+    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    let entry = entry.filter(|_| affected > 0);
+    if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
+        emit_one_tx(&mut tx, entry).await?;
+    }
+    tx.commit().await?;
+    Ok(RowDiffWrite::Written {
+        deferred: entry.filter(|_| emit == DiffEmit::AfterCommit),
+    })
+}
+
 /// Run an `InsertQuery`, write the assigned PK back into `model`, then
 /// emit `entry(model)` in the same transaction, so the audit row carries
 /// the real PK. Used by the generated `Model::insert_pool` for audited
