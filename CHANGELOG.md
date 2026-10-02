@@ -4,6 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `DatabaseCache` keeps a racing write; `InMemoryCache` evicts to a low-water mark; purge is batched (#1906)
+
+An expired read deletes only a still-expired row. Eviction stops at 90% of each budget, so the next sets skip the scan. `purge_expired` deletes 1000 rows per statement over a new `expires` index; a role that cannot create the index gets a warning, not an error. A long table name gets a hashed index name under 63 bytes.
+
+### Fixed — feature flags on `InMemoryCache` are never evicted (#2009)
+
+`set_forever` entries sit outside the byte and entry budgets, under their own caps (16 MiB, 10 000 entries); past them they are stored evictable, with a warning.
+
+### Fixed — CSV: a one-column row with an empty cell writes `""` (#1908)
+
+A bare CRLF read as a blank line, so Python and pandas dropped the row.
+
+### Fixed — `Cli::with_static` / `with_uploads` on manage-only builds (#2042)
+
+`static_files` and `etag` are gated on the HTTP layers `manage` already enables, not on `admin`.
+
+### Fixed — derive: char lengths in `Form`, raw idents, field-index column, misplaced attrs (#1937)
+
+`derive(Form)` length checks count chars; `r#type` fields no longer panic and an `r#ref` FK loads as `ref`; `index` uses the field's real column;
+`citext`/`vector`/`geometry` on the wrong type are errors; a skipped or failed `insert_or_ignore` resets Rust-filled ids and timestamps to `Unset`.
+
+### Fixed — `M2MManager::add` on MySQL no longer uses `INSERT IGNORE` (#1966)
+
+A too-long key or a bad FK is an error, as on Postgres, instead of a silent truncation.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

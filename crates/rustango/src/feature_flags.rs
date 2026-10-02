@@ -39,7 +39,8 @@
 //! - `flag:<name>:pct` — rollout percentage, 0..=100
 //!
 //! Entries never expire by default: flag state is durable. Opt in to
-//! expiry with [`FeatureFlags::ttl`]. Use a cache that does not evict.
+//! expiry with [`FeatureFlags::ttl`]. Without a TTL flags are written with
+//! `set_forever`, which `InMemoryCache` never evicts; with one they can be.
 //!
 //! [`FeatureFlags::ttl`]: crate::feature_flags::FeatureFlags::ttl
 
