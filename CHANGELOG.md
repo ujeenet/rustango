@@ -18,7 +18,7 @@ A system step no longer drops an index the project's own copy of a framework tab
 
 ### Fixed — a recreated framework table gets its M2M tables and FKs back (#2084)
 
-When the project dropped a framework table, `migrate` now also recreates its junction tables and re-adds the FKs PG's `DROP TABLE … CASCADE` took from other tables.
+When the project dropped a framework table, `migrate` now also recreates its junction tables and re-adds the FKs PG's `DROP TABLE … CASCADE` took from other tables; an FK whose rows point at the old table is logged, not added.
 
 ### Fixed — a project FK to a table a waiting system step creates (#2083)
 

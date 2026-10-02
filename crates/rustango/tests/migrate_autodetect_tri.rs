@@ -632,6 +632,14 @@ async fn composite_fk_drops_before_its_parent(pool: &Pool) {
         .step(pool, json!({"tables": [kid(false)]}))
         .await
         .expect("the FK drops before its index and table");
+    // With the FK left, SQLite would refuse this: its parent table is gone.
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 9, 9)",
+        &[child, "id", "a", "b"],
+    )
+    .await
+    .expect("the composite FK is gone");
 }
 
 // ---------------------------------------------------------------- #1878

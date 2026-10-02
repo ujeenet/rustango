@@ -253,6 +253,11 @@ pub(crate) async fn converge_groups(
             render(group, snapshot)
         };
         let batch = match rendered {
+            // Only the runner can rebuild a table; say so rather than skip it.
+            Ok(b) if b.rebuild.is_some() => {
+                failed.push(format!("{label}: needs a table rebuild"));
+                continue;
+            }
             Ok(b) => b,
             Err(e) => {
                 failed.push(format!("{label}: {e}"));
@@ -283,9 +288,20 @@ pub(crate) async fn converge_groups(
 
 /// Whether `table` has no rows.
 async fn is_empty(pool: &Pool, table: &str) -> Result<bool, sqlx::Error> {
+    has_no_values(pool, table, None).await
+}
+
+/// Whether `table` has no rows, or none with `column` set.
+pub(super) async fn has_no_values(
+    pool: &Pool,
+    table: &str,
+    column: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let q = |n: &str| pool.dialect().quote_ident(n);
+    let filter = column.map_or(String::new(), |c| format!(" WHERE {} IS NOT NULL", q(c)));
     let sql = format!(
-        "SELECT COUNT(*) FROM (SELECT 1 AS one FROM {} LIMIT 1) AS probe",
-        pool.dialect().quote_ident(table)
+        "SELECT COUNT(*) FROM (SELECT 1 AS one FROM {}{filter} LIMIT 1) AS probe",
+        q(table)
     );
     let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool)
         .await

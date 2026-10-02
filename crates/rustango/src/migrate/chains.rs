@@ -330,7 +330,7 @@ impl Run<'_> {
             return Ok(pass);
         }
 
-        let skip: Vec<String> = live.iter().chain(&absent).chain(&early).cloned().collect();
+        let skip: Vec<String> = live.iter().chain(&absent).cloned().collect();
         // Missing tables block any reference; a live owned one only its writes.
         let missing: Vec<&String> = absent
             .iter()
@@ -352,7 +352,7 @@ impl Run<'_> {
         for m in &wanted {
             let mut step = runner::without_tables(m, &skip);
             if !ledger.contains(&m.name) {
-                drop_absent_indexes(self.pool, &mut step, &live).await?;
+                without_made(self.pool, &mut step, &live, &early).await?;
                 let blocked = schema_ops(&step).find_map(|c| waits(c, &m.snapshot, &held));
                 if let Some(t) = blocked {
                     pass.waiting.get_or_insert(t);
@@ -485,21 +485,26 @@ fn early_creations(
         return Vec::new();
     }
     let snap = &step.snapshot;
-    let mut waiting: Vec<&SchemaChange> = Vec::new();
-    let mut ready: Vec<&SchemaChange> = Vec::new();
-    for c in schema_ops(step) {
-        let creates = matches!(
-            c,
-            SchemaChange::CreateTable(_)
-                | SchemaChange::CreateM2MTable { .. }
-                | SchemaChange::CreateIndex { .. }
-        );
-        let stuck = blocked(c) || waiting.iter().any(|d| conflicts(c, snap, d, snap));
-        if creates && !stuck {
-            ready.push(c);
-        } else {
-            waiting.push(c);
+    let (mut waiting, mut ready): (Vec<&SchemaChange>, Vec<&SchemaChange>) = schema_ops(step)
+        .partition(|c| {
+            let creates = matches!(
+                c,
+                SchemaChange::CreateTable(_)
+                    | SchemaChange::CreateM2MTable { .. }
+                    | SchemaChange::CreateIndex { .. }
+            );
+            !creates || blocked(c)
+        });
+    // To a fixpoint: a child may come before the parent it waits on.
+    loop {
+        let (stuck, free): (Vec<&SchemaChange>, Vec<&SchemaChange>) = ready
+            .iter()
+            .partition(|c| waiting.iter().any(|d| conflicts(c, snap, d, snap)));
+        if stuck.is_empty() {
+            break;
         }
+        waiting.extend(stuck);
+        ready = free;
     }
     let tables = ready.iter().filter_map(|c| match c {
         SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => Some(t),
@@ -517,28 +522,42 @@ fn early_creations(
         .collect()
 }
 
-/// `step` without its drops of indexes `tables` lack: `without_tables` never
-/// created them, and MySQL has no `DROP INDEX IF EXISTS` (#2094).
-async fn drop_absent_indexes(
+/// `step` without what the database already shows: a drop of an index the
+/// owned tables `live` lack, as `without_tables` never made it and MySQL has
+/// no `DROP INDEX IF EXISTS` (#2094); and the `early` tables a waiting step
+/// made, with their indexes that exist. A later index on them still runs.
+async fn without_made(
     pool: &Pool,
     step: &mut Migration,
-    tables: &BTreeSet<String>,
+    live: &BTreeSet<String>,
+    early: &BTreeSet<String>,
 ) -> Result<(), MigrateError> {
     let schema = ensure::creation_schema(pool).await?.unwrap_or_default();
-    let mut absent = BTreeSet::new();
-    for c in schema_ops(step) {
-        if let SchemaChange::DropIndex { name, table } = c {
-            if tables.contains(table)
-                && super::inspectdb::index_columns(pool, &schema, table, name)
-                    .await?
-                    .is_empty()
-            {
-                absent.insert(name.clone());
+    let mut made = BTreeSet::new();
+    for (i, c) in schema_ops(step).enumerate() {
+        let skip = match c {
+            SchemaChange::DropIndex { name, table } if live.contains(table) => {
+                !super::inspectdb::index_exists(pool, &schema, table, name).await?
             }
+            SchemaChange::CreateIndex { name, table, .. } if early.contains(table) => {
+                super::inspectdb::index_exists(pool, &schema, table, name).await?
+            }
+            SchemaChange::CreateTable(t) | SchemaChange::CreateM2MTable { through: t, .. } => {
+                early.contains(t)
+            }
+            _ => false,
+        };
+        if skip {
+            made.insert(i);
         }
     }
+    let mut i = 0;
     step.forward.retain(|op| {
-        !matches!(op, Operation::Schema(SchemaChange::DropIndex { name, .. }) if absent.contains(name))
+        let Operation::Schema(_) = op else {
+            return true;
+        };
+        i += 1;
+        !made.contains(&(i - 1))
     });
     Ok(())
 }
@@ -569,6 +588,9 @@ async fn lost_fks(
                 f.fk.as_ref()
                     .filter(|r| into(&r.to) && !has(&f.column, &r.to))
             {
+                if !orphans_allow(pool, &t.name, &f.column, &r.to).await? {
+                    continue;
+                }
                 // Rendered as the FK it adds; the live column has none to drop.
                 groups.push(vec![SchemaChange::AlterFkOnDelete {
                     table: t.name.clone(),
@@ -579,12 +601,36 @@ async fn lost_fks(
             }
         }
         for c in &t.composite_fks {
-            if into(&c.to) && !c.from.first().is_some_and(|col| has(col, &c.to)) {
+            let Some(first) = c.from.first() else {
+                continue;
+            };
+            if into(&c.to)
+                && !has(first, &c.to)
+                && orphans_allow(pool, &t.name, first, &c.to).await?
+            {
                 groups.push(vec![super::diff::add_composite_fk(&t.name, c)]);
             }
         }
     }
     Ok(groups)
+}
+
+/// Whether an FK on `table.column` into the just-recreated, empty `to` can be
+/// added: rows that point at the old table would make it fail on every run.
+async fn orphans_allow(
+    pool: &Pool,
+    table: &str,
+    column: &str,
+    to: &str,
+) -> Result<bool, MigrateError> {
+    if ensure::has_no_values(pool, table, Some(column)).await? {
+        return Ok(true);
+    }
+    tracing::warn!(
+        target: "rustango::migrate",
+        "`{table}.{column}` points at rows the recreated `{to}` lacks; its FK is not restored"
+    );
+    Ok(false)
 }
 
 /// An AddColumn for each column `snapshot` gives `tables` and the database lacks.
@@ -664,5 +710,94 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn mig(name: &str, prev: Option<&str>, snapshot: Value, ops: Vec<Value>) -> Migration {
+        let forward: Vec<Value> = ops.into_iter().map(|op| json!({ "schema": op })).collect();
+        serde_json::from_value(json!({
+            "name": name, "created_at": "2026-01-01T00:00:00Z", "prev": prev,
+            "snapshot": snapshot, "forward": forward,
+        }))
+        .unwrap()
+    }
+
+    fn table(name: &str, fk_to: Option<&str>) -> Value {
+        let mut fields = vec![json!({ "name": "id", "column": "id", "ty": "i64",
+                                      "nullable": false, "primary_key": true })];
+        if let Some(to) = fk_to {
+            fields.push(json!({ "name": "p_id", "column": "p_id", "ty": "i64", "nullable": true,
+                                "primary_key": false, "fk": { "kind": "fk", "to": to, "on": "id" } }));
+        }
+        json!({ "name": name, "model": name, "fields": fields })
+    }
+
+    /// A child listed before the waiting parent it references waits too.
+    #[test]
+    fn early_creations_wait_for_a_later_parent() {
+        let step = mig(
+            "0001",
+            None,
+            json!({ "tables": [table("a_child", Some("z_parent")), table("z_parent", None)] }),
+            vec![
+                json!({ "CreateTable": "a_child" }),
+                json!({ "CreateTable": "z_parent" }),
+            ],
+        );
+        let parent = SchemaChange::CreateTable("z_parent".into());
+        assert!(early_creations(&step, |c| *c == parent).is_empty());
+    }
+
+    fn write(dir: &Path, m: &Migration) {
+        std::fs::create_dir_all(dir).unwrap();
+        file::write(&dir.join(format!("{}.json", m.name)), m).unwrap();
+    }
+
+    /// #2084 — a framework junction the project created and dropped comes back.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dropped_junction_is_recreated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+        let pool = Pool::connect(&url).await.unwrap();
+        let m2m = json!({ "through": "sc_links", "src_table": "sc_parent", "src_col": "from_id",
+                          "dst_table": "sc_parent", "dst_col": "to_id" });
+        let snap = json!({ "tables": [table("sc_parent", None)], "m2m_tables": [m2m.clone()] });
+        let ops = vec![
+            json!({ "CreateTable": "sc_parent" }),
+            json!({ "CreateM2MTable": m2m }),
+        ];
+        let sys = tmp.path().join("system/migrations");
+        write(&sys, &mig("0001_sys", None, snap.clone(), ops.clone()));
+        let dir = tmp.path().join("migrations");
+        write(&dir, &mig("0001_initial", None, snap, ops));
+        let chain = SystemChain::shipped(sys);
+        let run = |pool: Pool, dir: PathBuf, chain: SystemChain| async move {
+            migrate_chains(
+                &pool,
+                &chain,
+                MigrationScope::Tenant,
+                &dir,
+                None,
+                Signals::Skip,
+                |held| runner::migrate_pool_locked(held, &pool, &dir, None),
+            )
+            .await
+            .map(drop)
+        };
+        run(pool.clone(), dir.clone(), chain.clone()).await.unwrap();
+        let drop_links = json!({ "DropM2MTable": { "through": "sc_links" } });
+        let after = json!({ "tables": [table("sc_parent", None)] });
+        write(
+            &dir,
+            &mig("0002_drop", Some("0001_initial"), after, vec![drop_links]),
+        );
+        run(pool.clone(), dir, chain).await.unwrap();
+        assert!(runner::table_exists_here(&pool, "sc_links").await);
     }
 }

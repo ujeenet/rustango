@@ -722,24 +722,14 @@ pub fn render_changes(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
 ) -> Result<Vec<String>, String> {
-    let (mut immediate, mut deferred) = (Vec::new(), Vec::new());
-    for change in changes {
-        // The runner drops a UNIQUE by its live name; offline, the usual one.
-        if let SchemaChange::AlterColumnUnique {
-            table,
-            column,
-            unique: false,
-        } = change
-        {
-            let name = super::ddl::unique_constraint_name(table, column);
-            immediate.push(format!(r#"ALTER TABLE "{table}" DROP CONSTRAINT "{name}""#));
-        }
+    let RenderedBatch {
+        mut immediate,
+        deferred_fks,
+        warnings: _,
         // Postgres never rebuilds.
-        let batch = render_changes_split(std::slice::from_ref(change), current)?;
-        immediate.extend(batch.immediate);
-        deferred.extend(batch.deferred_fks);
-    }
-    immediate.extend(deferred);
+        rebuild: _,
+    } = render_changes_split(changes, current)?;
+    immediate.extend(deferred_fks);
     Ok(immediate)
 }
 
@@ -818,7 +808,7 @@ pub fn render_changes_split_with_dialect(
     current: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, None, false)
+    render_changes_split_inner(changes, current, dialect, None, false, false)
 }
 
 /// As [`render_changes_split_with_dialect`], but every FK target is
@@ -830,7 +820,7 @@ pub(crate) fn render_changes_split_in_schema(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, false)
+    render_changes_split_inner(changes, current, dialect, schema, false, true)
 }
 
 /// As [`render_changes_split_in_schema`] for tables with no rows, where a
@@ -841,7 +831,7 @@ pub(crate) fn render_changes_split_for_empty(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<RenderedBatch, String> {
-    render_changes_split_inner(changes, current, dialect, schema, true)
+    render_changes_split_inner(changes, current, dialect, schema, true, true)
 }
 
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
@@ -1021,6 +1011,8 @@ fn render_changes_split_inner(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
     empty_tables: bool,
+    // The runner drops a UNIQUE by its catalog name; offline, the usual one.
+    by_catalog: bool,
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
@@ -1259,11 +1251,17 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
-                // A drop goes by the name the runner finds in the catalog (#2133).
+                // The runner drops the name it finds in the catalog (#2133).
                 if *unique {
                     let name = unique_names.get(table, column)?;
                     out.immediate
                         .push(dialect.add_unique_constraint_sql(table, &name, column));
+                } else if !by_catalog {
+                    out.immediate.push(format!(
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(&unique_names.get(table, column)?),
+                    ));
                 }
             }
             // Both renames are genuinely portable — MySQL and SQLite
@@ -1416,6 +1414,14 @@ fn render_changes_split_inner(
             | SchemaChange::DropCompositeFk { table, .. }
                 if dialect.alters_by_rebuild() =>
             {
+                // A drop on a table this migration drops goes with the table.
+                let dropped = matches!(
+                    change,
+                    SchemaChange::DropCheckConstraint { .. } | SchemaChange::DropCompositeFk { .. }
+                ) && current.table(table).is_none();
+                if dropped {
+                    continue;
+                }
                 if let Some(rebuild) = super::rebuild::TableRebuild::needed(dialect, current, table)
                 {
                     out.set_rebuild(rebuild?)?;
@@ -2579,6 +2585,25 @@ mod sql_type_tests {
         );
     }
 
+    /// Offline renders drop a UNIQUE by its usual name; the runner's by the catalog's (#2133).
+    #[test]
+    fn unique_drop_is_rendered_offline_only() {
+        let drop = vec![SchemaChange::AlterColumnUnique {
+            table: "t".into(),
+            column: "c".into(),
+            unique: false,
+        }];
+        let snap = alter_snap();
+        let offline = render_changes(&drop, &snap).unwrap();
+        assert_eq!(
+            offline,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT "t_c_key""#.to_string()]
+        );
+        let runner =
+            render_changes_split_in_schema(&drop, &snap, &crate::sql::Postgres, None).unwrap();
+        assert!(runner.immediate.is_empty(), "{:?}", runner.immediate);
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn check_constraints_rebuild_on_sqlite() {
@@ -2613,6 +2638,10 @@ mod sql_type_tests {
             .expect("a rebuild")
             .statements(&crate::sql::Sqlite);
         assert!(!sql[0].contains("CHECK"), "{sql:?}");
+        // Its table is dropped in the same migration: nothing to rebuild.
+        let gone =
+            render_changes_split_with_dialect(&drop, &empty_snap(), &crate::sql::Sqlite).unwrap();
+        assert!(gone.rebuild.is_none() && gone.immediate.is_empty());
     }
 
     /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
