@@ -4,6 +4,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — OpenAPI 3.1 nulls and ViewSet request bodies (#1922)
+
+`Schema::nullable` emits `type: [T, "null"]` (or `anyOf` for a `$ref`); 3.1 has no `nullable`.
+ViewSet POST/PUT/PATCH bodies list only the fields the ViewSet writes: no `Auto` id, `read_only` or soft-delete column, `write_only` included, and PATCH requires nothing.
+
+### Fixed — a deleted media collection's slug can be reused (#1677)
+
+`create_collection` drops a soft-deleted collection holding the slug instead of failing on the unique key.
+
+### Fixed — `RedisCache` keeps millisecond TTLs (#1677)
+
+`set`, `add` and `incr` use `PX`/`PEXPIRE`, so a 1500 ms TTL no longer expires at 1 s.
+
 ## [0.59.18] — 2026-10-02
 
 ### Security — template-view and `ModelForm` creates are audited; webhooks never reach metadata (#1821)

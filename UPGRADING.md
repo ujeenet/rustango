@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### OpenAPI `Schema` has no `nullable` field
+
+**Breaking:** `Schema.nullable` is gone and `Schema.type_` is a `SchemaType`; call `.nullable()` instead (#1922). A new `any_of` field holds a nullable `$ref`. ViewSet request bodies are now inline schemas, not `$ref`s to the item schema.
+
+### Re-creating a deleted media collection
+
+`create_collection` hard-deletes a soft-deleted collection with the same slug (#1677).
+
 ## 0.59.18
 
 ### `with_rollback` hands the closure an `AtomicTx`
