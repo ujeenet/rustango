@@ -28,7 +28,7 @@
                                     <td>
                                         {% if row.pk %}
                                             <a class="btn-row-action"
-                                               href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">View</a>
+                                               href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk_path }}">View</a>
                                         {% endif %}
                                     </td>
                                 </tr>
@@ -42,7 +42,7 @@
                             <legend>
                                 {% if row.pk %}
                                     <a class="btn-row-action"
-                                       href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">#{{ row.pk }}</a>
+                                       href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk_path }}">#{{ row.pk }}</a>
                                 {% else %}
                                     Row
                                 {% endif %}

@@ -681,7 +681,7 @@ pub(crate) async fn table_view(
                     }
                 })
                 .collect();
-            serde_json::json!({ "cells": cells, "pk": pk })
+            serde_json::json!({ "cells": cells, "pk": pk, "url": detail_href })
         })
         .collect();
 
