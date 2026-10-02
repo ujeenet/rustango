@@ -502,7 +502,10 @@ pub(crate) async fn migrate_locked(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signals {
     /// The PG `migrate` runner's contract.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "postgres", any(feature = "manage", feature = "tenancy"))),
+        allow(dead_code)
+    )]
     Fire,
     Skip,
 }

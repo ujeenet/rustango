@@ -74,6 +74,11 @@ pub struct TrustedRealIp(pub IpAddr);
 
 /// The first value of forwarding header `name`, only when the peer is a
 /// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
+#[cfg(any(
+    all(feature = "tenancy", feature = "sso"),
+    feature = "admin-sso",
+    feature = "mcp"
+))]
 pub(crate) fn trusted_forwarded<'a>(
     headers: &'a axum::http::HeaderMap,
     extensions: &axum::http::Extensions,
