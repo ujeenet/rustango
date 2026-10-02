@@ -592,6 +592,10 @@ impl Builder {
     /// selected rows. Use it for publish, archive, recompute and
     /// anything else that runs over a batch of rows.
     ///
+    /// It is gated like an edit: `{table}.change` plus the object hook
+    /// named after the action, never the `delete` one. An action that
+    /// deletes must refuse in that hook itself (#1818).
+    ///
     /// ```ignore
     /// use rustango::sql::sqlx::PgPool;
     /// use rustango::core::SqlValue;

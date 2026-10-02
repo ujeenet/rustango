@@ -133,7 +133,8 @@ impl AccessLogLayer {
     }
 
     /// Replace the redaction list with `params`. An empty list turns
-    /// redaction off, which will log credentials in plain text.
+    /// redaction off, which will log credentials in plain text; the
+    /// framework's own `token` param stays redacted.
     #[must_use]
     pub fn redact(mut self, params: Vec<String>) -> Self {
         self.redact_query_params = params;
@@ -425,6 +426,10 @@ pub(crate) fn default_redact_params() -> Vec<String> {
     ]
 }
 
+/// Params the framework itself puts credentials in (the console's
+/// impersonation `?token=`), so a custom `redact` list cannot drop them (#1818).
+const ALWAYS_REDACTED: &[&str] = &["token"];
+
 /// Replace the values of redacted params with `[redacted]` in a raw
 /// query string.
 ///
@@ -436,7 +441,8 @@ pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
     // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
     let hidden = |k: &str| {
         let key = crate::url_codec::url_decode(k);
-        redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
+        ALWAYS_REDACTED.iter().any(|r| r.eq_ignore_ascii_case(&key))
+            || redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
     };
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
@@ -582,6 +588,13 @@ mod tests {
     fn redact_query_passes_through_when_no_match() {
         let r = redact_query("a=1&b=2", &["password".to_owned()]);
         assert_eq!(r, "a=1&b=2");
+    }
+
+    /// #1818 — a custom list without `token` still hides the handoff token.
+    #[test]
+    fn a_custom_list_still_redacts_the_framework_token() {
+        let r = redact_query("token=handoff&page=2", &["only_this".to_owned()]);
+        assert_eq!(r, "token=[redacted]&page=2");
     }
 
     #[test]

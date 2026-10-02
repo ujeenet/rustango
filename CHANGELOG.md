@@ -24,6 +24,10 @@ The tenant session cookie is scoped to the tenant's path prefix, so signing in t
 
 It runs the provisioner's checks: slug, host pattern, path prefix, port, and that no other tenant routes on them.
 
+### Security — a custom `redact` list keeps `?token=` hidden (#1818)
+
+`token` is always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
+
 ## [0.59.19] — 2026-10-02
 
 ### Security — a logout or password change ends JWT access tokens (#2086)
