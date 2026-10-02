@@ -10,7 +10,7 @@ An expired read deletes only a still-expired row. Eviction stops at 90% of each 
 
 ### Fixed — feature flags on `InMemoryCache` are never evicted (#2009)
 
-`set_forever` entries sit outside the byte and entry budgets.
+`set_forever` entries sit outside the byte and entry budgets, under their own caps (16 MiB, 10 000 entries); past them they are stored evictable, with a warning.
 
 ### Fixed — CSV: a one-column row with an empty cell writes `""` (#1908)
 

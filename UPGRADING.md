@@ -152,7 +152,7 @@ untouched.
 
 ### Cache and derive behaviour
 
-- `InMemoryCache::set_forever` entries are no longer evicted and do not count toward the budgets; do not store unbounded data with it.
+- `InMemoryCache::set_forever` entries are not evicted and do not count toward the budgets, up to `DEFAULT_MAX_PINNED_BYTES`/`_ENTRIES` (`with_max_pinned_bytes`/`_entries`); past them they are stored evictable.
 - `DatabaseCache::ensure_table` now also creates the `expires` index (best effort); run it once on existing tables.
 - `#[derive(Model)]`: `citext`, `vector(dims)` and `geometry(srid)` on a field of another type are now compile errors.
 - A field `index` on a non-snake_case field now indexes its real column (`userName`, not `user_name`).

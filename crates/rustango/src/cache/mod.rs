@@ -48,7 +48,7 @@
 //! [`BoxedCache`]: crate::cache::BoxedCache
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -545,7 +545,7 @@ struct CacheEntry {
     last_used: AtomicU64,
     /// `key.len() + value.len()`: this entry's share of the byte budget.
     size: usize,
-    /// Written by `set_forever`: outside both budgets, never evicted (#2009).
+    /// Written by `set_forever` within the pinned budget: never evicted (#2009).
     pinned: bool,
 }
 
@@ -573,12 +573,19 @@ struct Store {
     used_bytes: usize,
     /// Count of the non-pinned entries.
     evictable: usize,
+    /// Bytes of the pinned entries.
+    pinned_bytes: usize,
+    /// Count of the pinned entries.
+    pinned: usize,
 }
 
 impl Store {
     fn put(&mut self, key: String, entry: CacheEntry) {
         self.take(&key);
-        if !entry.pinned {
+        if entry.pinned {
+            self.pinned_bytes += entry.size;
+            self.pinned += 1;
+        } else {
             self.used_bytes += entry.size;
             self.evictable += 1;
         }
@@ -587,7 +594,10 @@ impl Store {
 
     fn take(&mut self, key: &str) -> Option<CacheEntry> {
         let e = self.map.remove(key)?;
-        if !e.pinned {
+        if e.pinned {
+            self.pinned_bytes = self.pinned_bytes.saturating_sub(e.size);
+            self.pinned = self.pinned.saturating_sub(1);
+        } else {
             self.used_bytes = self.used_bytes.saturating_sub(e.size);
             self.evictable = self.evictable.saturating_sub(1);
         }
@@ -595,10 +605,13 @@ impl Store {
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&str, &CacheEntry) -> bool) {
-        let (mut bytes, mut count) = (0usize, 0usize);
+        let (mut bytes, mut count, mut pbytes, mut pcount) = (0usize, 0usize, 0usize, 0usize);
         self.map.retain(|k, e| {
             let kept = keep(k, e);
-            if !kept && !e.pinned {
+            if !kept && e.pinned {
+                pbytes += e.size;
+                pcount += 1;
+            } else if !kept {
                 bytes += e.size;
                 count += 1;
             }
@@ -606,6 +619,18 @@ impl Store {
         });
         self.used_bytes = self.used_bytes.saturating_sub(bytes);
         self.evictable = self.evictable.saturating_sub(count);
+        self.pinned_bytes = self.pinned_bytes.saturating_sub(pbytes);
+        self.pinned = self.pinned.saturating_sub(pcount);
+    }
+
+    /// Whether `key` can be pinned with `size` bytes without passing either pinned cap.
+    fn pinned_fits(&self, key: &str, size: usize, max_bytes: usize, max_entries: usize) -> bool {
+        let (old_bytes, old_count) = match self.map.get(key) {
+            Some(e) if e.pinned => (e.size, 1),
+            _ => (0, 0),
+        };
+        (max_bytes == 0 || self.pinned_bytes - old_bytes + size <= max_bytes)
+            && (max_entries == 0 || self.pinned - old_count < max_entries)
     }
 }
 
@@ -626,6 +651,12 @@ pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// off; see [`InMemoryCache::with_max_entries`].
 pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
+/// Default byte cap for `set_forever` entries; past it they are stored as ordinary entries.
+pub const DEFAULT_MAX_PINNED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default entry cap for `set_forever` entries; see [`DEFAULT_MAX_PINNED_BYTES`].
+pub const DEFAULT_MAX_PINNED_ENTRIES: usize = 10_000;
+
 /// Per-process cache over a `tokio::sync::RwLock<HashMap>`. Thread
 /// safe, async friendly, no external dependencies.
 ///
@@ -637,7 +668,8 @@ pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 /// the least recently used, until both are 10% under budget. Change the
 /// budgets with [`InMemoryCache::with_max_bytes`] and
 /// [`InMemoryCache::with_max_entries`]; `0` means unbounded.
-/// Entries written with `set_forever` sit outside both budgets and are never evicted.
+/// Entries written with `set_forever` sit outside both budgets and are never evicted,
+/// up to their own caps ([`InMemoryCache::with_max_pinned_bytes`] / `_entries`).
 ///
 /// Build with [`InMemoryCache::with_default_ttl`] to give every
 /// `set(_, _, None)` call a TTL.
@@ -648,6 +680,12 @@ pub struct InMemoryCache {
     max_bytes: usize,
     /// Entry-count budget; `0` means unbounded.
     max_entries: usize,
+    /// Pinned byte cap; `0` means unbounded.
+    max_pinned_bytes: usize,
+    /// Pinned entry cap; `0` means unbounded.
+    max_pinned_entries: usize,
+    /// Set once the first `set_forever` overflowed the pinned caps.
+    pinned_full_warned: AtomicBool,
     /// Counter feeding each entry's `last_used`.
     tick: AtomicU64,
 }
@@ -681,16 +719,35 @@ impl InMemoryCache {
         self
     }
 
+    /// Set the byte cap for `set_forever` entries; `0` disables it. Chainable.
+    #[must_use]
+    pub fn with_max_pinned_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_pinned_bytes = max_bytes;
+        self
+    }
+
+    /// Set the entry cap for `set_forever` entries; `0` disables it. Chainable.
+    #[must_use]
+    pub fn with_max_pinned_entries(mut self, max_entries: usize) -> Self {
+        self.max_pinned_entries = max_entries;
+        self
+    }
+
     fn build(default_ttl: Option<Duration>, max_bytes: usize, max_entries: usize) -> Self {
         Self {
             inner: tokio::sync::RwLock::new(Store {
                 map: HashMap::new(),
                 used_bytes: 0,
                 evictable: 0,
+                pinned_bytes: 0,
+                pinned: 0,
             }),
             default_ttl,
             max_bytes,
             max_entries,
+            max_pinned_bytes: DEFAULT_MAX_PINNED_BYTES,
+            max_pinned_entries: DEFAULT_MAX_PINNED_ENTRIES,
+            pinned_full_warned: AtomicBool::new(false),
             tick: AtomicU64::new(0),
         }
     }
@@ -704,10 +761,28 @@ impl InMemoryCache {
     async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>, pinned: bool) {
         let size = key.len() + value.len();
         let mut entry = CacheEntry::new(value.to_owned(), expires_at, self.next_tick(), size);
-        entry.pinned = pinned;
         let mut store = self.inner.write().await;
+        if pinned {
+            entry.pinned =
+                store.pinned_fits(key, size, self.max_pinned_bytes, self.max_pinned_entries);
+            if !entry.pinned {
+                self.warn_pinned_full();
+            }
+        }
         store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
+    }
+
+    /// Warn once that `set_forever` is past the pinned caps; the entry is stored evictable.
+    fn warn_pinned_full(&self) {
+        if !self.pinned_full_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "rustango::cache",
+                max_bytes = self.max_pinned_bytes,
+                max_entries = self.max_pinned_entries,
+                "InMemoryCache: set_forever is past the pinned caps; new entries can be evicted"
+            );
+        }
     }
 
     fn next_tick(&self) -> u64 {
@@ -779,7 +854,7 @@ impl Cache for InMemoryCache {
         Ok(())
     }
 
-    /// Pinned: no TTL, outside both budgets, never evicted (feature flags, #2009).
+    /// Pinned: no TTL, outside both budgets, never evicted while within the pinned caps (#2009).
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.insert(key, value, None, true).await;
         Ok(())
@@ -1611,6 +1686,28 @@ mod bound_tests {
         cache.delete("flag:x").await.unwrap();
         let store = cache.inner.read().await;
         assert_eq!(store.map.len(), store.evictable);
+        assert_eq!((store.pinned, store.pinned_bytes), (0, 0));
+    }
+
+    /// Past the pinned caps `set_forever` stores an evictable entry, so pinned memory stays bounded.
+    #[tokio::test]
+    async fn set_forever_past_the_pinned_cap_is_evictable() {
+        let cache = InMemoryCache::new()
+            .with_max_bytes(0)
+            .with_max_entries(10)
+            .with_max_pinned_entries(2);
+        for i in 0..50 {
+            cache.set_forever(&format!("flag:{i}"), "on").await.unwrap();
+        }
+        // Re-pinning a pinned key does not count twice.
+        cache.set_forever("flag:0", "off").await.unwrap();
+        let store = cache.inner.read().await;
+        assert_eq!(store.pinned, 2);
+        assert!(store.map.len() <= 12, "{}", store.map.len());
+        assert!(store.map["flag:0"].pinned && store.map["flag:1"].pinned);
+        drop(store);
+        assert_eq!(cache.get("flag:0").await.unwrap().as_deref(), Some("off"));
+        assert_eq!(cache.get("flag:49").await.unwrap().as_deref(), Some("on"));
     }
 
     /// Deleting an entry returns its bytes to the budget.
