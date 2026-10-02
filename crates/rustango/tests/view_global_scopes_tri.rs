@@ -1,7 +1,8 @@
 //! `ViewSet` and the template views apply the model's global scopes:
 //! a row every `QuerySet` hides is not listed, counted, read or written (#1746).
 //! The ViewSet list follows `default_order` (#2047).
-//! The ViewSet soft-deletes on `DELETE` and hides soft-deleted rows (#1998).
+//! The ViewSet soft-deletes on `DELETE` and hides soft-deleted rows (#1998);
+//! so do the template views (#2082).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -208,6 +209,29 @@ fn app(pool: &Pool) -> axum::Router {
                 .router_pool("/api/owners", pool.clone()),
         )
         .merge(ViewSet::for_model(Memo::SCHEMA).router_pool("/api/memos", pool.clone()))
+        .merge(
+            ListView::for_model(Memo::SCHEMA)
+                .template("list.html")
+                .bulk_actions(true)
+                .router("/memos", t.clone(), pool.clone()),
+        )
+        .merge(
+            DetailView::for_model(Memo::SCHEMA)
+                .template("detail.html")
+                .router("/memos", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Memo::SCHEMA)
+                .template("form.html")
+                .success_url("/memos")
+                .router("/memos", t.clone(), pool.clone()),
+        )
+        .merge(
+            DeleteView::for_model(Memo::SCHEMA)
+                .template("confirm.html")
+                .success_url("/memos")
+                .router("/memos", t.clone(), pool.clone()),
+        )
         .merge(ViewSet::for_model(Ranked::SCHEMA).router_pool("/api/ranked", pool.clone()))
         .merge(
             DetailView::for_model(Note::SCHEMA)
@@ -605,6 +629,120 @@ async fn viewset_soft_deletes_and_hides_deleted_rows(pool: &Pool) {
     assert_eq!(row.tag, "a", "a deleted row is not updated");
 }
 
+async fn seed_memos(pool: &Pool, tags: &[&str]) -> Vec<i64> {
+    let mut pks = Vec::new();
+    for tag in tags {
+        let mut m = Memo {
+            id: Auto::default(),
+            tag: (*tag).into(),
+            deleted_at: None,
+        };
+        m.insert_pool(pool).await.expect("seed memo");
+        pks.push(*m.id.get().expect("pk"));
+    }
+    pks
+}
+
+async fn memo(pool: &Pool, pk: i64) -> Memo {
+    memos(pool)
+        .await
+        .into_iter()
+        .find(|m| *m.id.get().unwrap() == pk)
+        .expect("memo row")
+}
+
+/// A request body cannot stamp or clear `deleted_at` (#2074).
+async fn viewset_body_cannot_set_deleted_at(pool: &Pool) {
+    let pks = seed_memos(pool, &["a"]).await;
+    let uri = format!("/api/memos/{}", pks[0]);
+    let stamp = r#"{"tag":"x","deleted_at":"2020-01-01T00:00:00Z"}"#;
+    for method in [Method::PATCH, Method::PUT] {
+        let (status, body) = send(pool, method.clone(), &uri, JSON, stamp).await;
+        assert!(status.is_success(), "{method}: {status} {body}");
+        let row = memo(pool, pks[0]).await;
+        assert_eq!(row.tag, "x", "{method}: the rest of the body is written");
+        assert!(row.deleted_at.is_none(), "{method} soft-deleted the row");
+    }
+    let (status, body) = send(pool, Method::POST, "/api/memos", JSON, stamp).await;
+    assert!(status.is_success(), "create: {status} {body}");
+    assert!(
+        memos(pool).await.iter().all(|m| m.deleted_at.is_none()),
+        "create stamped deleted_at"
+    );
+}
+
+/// DeleteView and `delete_selected` soft-delete; the other template views hide the row (#2082).
+async fn template_views_soft_delete_and_hide_deleted_rows(pool: &Pool) {
+    let pks = seed_memos(pool, &["a", "b", "c"]).await;
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        &format!("/memos/{}/delete", pks[0]),
+        FORM,
+        "",
+    )
+    .await;
+    assert!(status.is_redirection(), "DeleteView: {status} {body}");
+    let pick = format!(
+        "action=delete_selected&_selected_action={}&confirmed=true",
+        pks[1]
+    );
+    let (status, body) = send(pool, Method::POST, "/memos", FORM, &pick).await;
+    assert!(status.is_redirection(), "delete_selected: {status} {body}");
+
+    let rows = memos(pool).await;
+    assert_eq!(rows.len(), 3, "rows are kept, not deleted");
+    assert!(
+        memo(pool, pks[0]).await.deleted_at.is_some(),
+        "DeleteView stamped"
+    );
+    assert!(
+        memo(pool, pks[1]).await.deleted_at.is_some(),
+        "bulk stamped"
+    );
+
+    let (_, body) = get(pool, "/memos").await;
+    assert_eq!(body, "rows=1 total=1", "list");
+    let gone = pks[0];
+    for uri in [
+        format!("/memos/{gone}"),
+        format!("/memos/{gone}/edit"),
+        format!("/memos/{gone}/delete"),
+    ] {
+        let (status, _) = get(pool, &uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {uri}");
+    }
+    let (status, _) = send(
+        pool,
+        Method::POST,
+        &format!("/memos/{gone}/edit"),
+        FORM,
+        "tag=x",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "UpdateView POST");
+    assert_eq!(
+        memo(pool, gone).await.tag,
+        "a",
+        "a deleted row is not updated"
+    );
+
+    // The form cannot set `deleted_at` on a live row.
+    let live = pks[2];
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        &format!("/memos/{live}/edit"),
+        FORM,
+        "tag=y&deleted_at=2020-01-01T00:00",
+    )
+    .await;
+    assert!(status.is_redirection(), "UpdateView: {status} {body}");
+    let row = memo(pool, live).await;
+    assert_eq!(row.tag, "y");
+    assert!(row.deleted_at.is_none(), "UpdateView soft-deleted the row");
+}
+
 /// The list follows the model's `default_order`, ties broken by the PK (#2047).
 async fn viewset_lists_in_default_order(pool: &Pool) {
     // Explicit PKs, inserted out of order, so a tie shows the tiebreak.
@@ -654,6 +792,8 @@ tri_dialect_test! {
         fk_display_skips_scoped_out_targets,
         search_narrows_an_or_scope,
         viewset_soft_deletes_and_hides_deleted_rows,
+        viewset_body_cannot_set_deleted_at,
+        template_views_soft_delete_and_hide_deleted_rows,
         viewset_lists_in_default_order,
     ],
 }

@@ -104,11 +104,34 @@ impl Default for UrlPolicy {
     }
 }
 
+/// An HMAC key of at least [`WebhookSecret::MIN_LEN`] bytes, so an unset
+/// env var read as `""` can't become a key anyone can sign with (#1850).
+#[derive(Clone)]
+pub struct WebhookSecret(Arc<Vec<u8>>);
+
+impl WebhookSecret {
+    /// Shortest key accepted: the HMAC-SHA256 output size.
+    pub const MIN_LEN: usize = 32;
+
+    /// `None` when `bytes` is shorter than [`Self::MIN_LEN`].
+    #[must_use]
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Option<Self> {
+        let bytes = bytes.into();
+        (bytes.len() >= Self::MIN_LEN).then(|| Self(Arc::new(bytes)))
+    }
+}
+
+impl AsRef<[u8]> for WebhookSecret {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// How the endpoint authenticates and what it is allowed to create.
 #[derive(Clone)]
 pub struct WebhookConfig {
     /// HMAC key. Shared with the caller out of band.
-    pub secret: Arc<Vec<u8>>,
+    pub secret: WebhookSecret,
     /// Which signature encoding the caller sends.
     pub format: SignatureFormat,
     /// Header carrying the signature. Providers disagree
@@ -133,10 +156,19 @@ pub struct WebhookConfig {
 impl WebhookConfig {
     /// The safe shape: derive URLs from `template`, reject anything the
     /// caller tries to say about hosts.
+    ///
+    /// # Panics
+    /// If `secret` is shorter than [`WebhookSecret::MIN_LEN`] bytes.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>, database_url_template: impl Into<String>) -> Self {
+        let secret = WebhookSecret::new(secret).unwrap_or_else(|| {
+            panic!(
+                "WebhookConfig::new: the secret must be at least {} bytes",
+                WebhookSecret::MIN_LEN
+            )
+        });
         Self {
-            secret: Arc::new(secret.into()),
+            secret,
             format: SignatureFormat::HexSha256WithPrefix,
             signature_header: "x-signature-256".to_owned(),
             url_policy: UrlPolicy::Template(database_url_template.into()),
@@ -252,7 +284,12 @@ async fn handle(
     else {
         return Err(Refusal::BadSignature);
     };
-    if !verify_signature(state.config.format, &state.config.secret, body, signature) {
+    if !verify_signature(
+        state.config.format,
+        state.config.secret.as_ref(),
+        body,
+        signature,
+    ) {
         return Err(Refusal::BadSignature);
     }
 
@@ -465,8 +502,21 @@ mod tests {
     fn config(policy: UrlPolicy) -> WebhookConfig {
         WebhookConfig {
             url_policy: policy,
-            ..WebhookConfig::new(b"secret".to_vec(), "")
+            ..WebhookConfig::new([7u8; WebhookSecret::MIN_LEN].to_vec(), "")
         }
+    }
+
+    /// An unset env var read as `""` must not become a usable key (#1850).
+    #[test]
+    #[should_panic(expected = "at least 32 bytes")]
+    fn an_empty_secret_is_refused() {
+        let _ = WebhookConfig::new(Vec::new(), "");
+    }
+
+    #[test]
+    fn a_short_secret_is_refused() {
+        assert!(WebhookSecret::new(vec![1; WebhookSecret::MIN_LEN - 1]).is_none());
+        assert!(WebhookSecret::new(vec![1; WebhookSecret::MIN_LEN]).is_some());
     }
 
     #[test]

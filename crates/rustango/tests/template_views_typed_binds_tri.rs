@@ -58,6 +58,39 @@ pub struct Label {
     pub code: String,
 }
 
+/// A composite UNIQUE: no single field to blame for a clash.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv2073_slot", app = "tv1915", unique_together = "day, hour")]
+pub struct Slot {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 16)]
+    pub day: String,
+    pub hour: i64,
+}
+
+/// `fresh_table` skips composite-unique indexes, so render Slot's here.
+async fn slot_unique_index(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
+    let change = SchemaChange::CreateIndex {
+        name: "uq_tv2073_slot_day_hour".into(),
+        table: Slot::SCHEMA.table.into(),
+        columns: vec!["day".into(), "hour".into()],
+        unique: true,
+        method: "btree".into(),
+        where_clause: None,
+        include: Vec::new(),
+    };
+    let snap = SchemaSnapshot::from_models(&[]);
+    let sql = render_changes_split_with_dialect(&[change], &snap, pool.dialect())
+        .expect("render the slot index");
+    for stmt in sql.immediate {
+        rustango::sql::raw_execute_pool(pool, &stmt, Vec::new())
+            .await
+            .expect("create the slot index");
+    }
+}
+
 /// A Rust-filled v7 PK (#1725).
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "tv1725_doc", app = "tv1915")]
@@ -78,6 +111,8 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     rustango::testkit::matrix::fresh_table::<Pin>(pool).await;
     rustango::testkit::matrix::fresh_table::<Label>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Slot>(pool).await;
+    slot_unique_index(pool).await;
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
 }
 
@@ -123,6 +158,24 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             CreateView::for_model(Label::SCHEMA)
+                .template("form.html")
+                .success_url("/labels")
+                .router("/labels", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Slot::SCHEMA)
+                .template("form.html")
+                .success_url("/slots")
+                .router("/slots", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Slot::SCHEMA)
+                .template("form.html")
+                .success_url("/slots")
+                .router("/slots", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Label::SCHEMA)
                 .template("form.html")
                 .success_url("/labels")
                 .router("/labels", t.clone(), pool.clone()),
@@ -329,6 +382,58 @@ async fn a_duplicate_create_is_a_form_error(pool: &Pool) {
     assert!(body.contains(r#""code":"a row with this value"#), "{body}");
 }
 
+/// UpdateView answers a taken unique value with a form error, not a 500 (#2073).
+async fn a_duplicate_update_is_a_form_error(pool: &Pool) {
+    for code in ["rs", "go"] {
+        let (status, body) = send(pool, Method::POST, "/labels/new", &format!("code={code}")).await;
+        assert!(status.is_redirection(), "seed {code}: {status} {body}");
+    }
+    let go = Label::objects()
+        .filter("code", "go")
+        .fetch(pool)
+        .await
+        .expect("labels")[0]
+        .id
+        .get()
+        .copied()
+        .expect("pk");
+    let edit = format!("/labels/{go}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "code=rs").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body, r#"form {"code":"a row with this value already exists"}"#,
+        "{body}"
+    );
+    // Keeping its own value is not a duplicate.
+    let (status, body) = send(pool, Method::POST, &edit, "code=go").await;
+    assert!(status.is_redirection(), "own value: {status} {body}");
+}
+
+/// A composite-UNIQUE clash is a form-wide error on create and update (#2033, #2073).
+async fn a_composite_unique_clash_is_a_form_wide_error(pool: &Pool) {
+    let all = r#"form {"__all__":"a row with this value already exists"}"#;
+    for form in ["day=mon&hour=9", "day=mon&hour=10"] {
+        let (status, body) = send(pool, Method::POST, "/slots/new", form).await;
+        assert!(status.is_redirection(), "seed {form}: {status} {body}");
+    }
+    let (status, body) = send(pool, Method::POST, "/slots/new", "day=mon&hour=9").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "create: {body}");
+    assert_eq!(body, all, "create");
+    let ten = Slot::objects()
+        .filter("hour", 10_i64)
+        .fetch(pool)
+        .await
+        .expect("slots")[0]
+        .id
+        .get()
+        .copied()
+        .expect("pk");
+    let edit = format!("/slots/{ten}/edit");
+    let (status, body) = send(pool, Method::POST, &edit, "day=mon&hour=9").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "update: {body}");
+    assert_eq!(body, all, "update");
+}
+
 /// CreateView inserts a natural PK from the form and fills a v7 one (#1725).
 async fn create_view_writes_natural_and_v7_pks(pool: &Pool) {
     let (status, body) = send(pool, Method::POST, "/tags/new", "code=go&name=Go").await;
@@ -349,6 +454,8 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         a_duplicate_create_is_a_form_error,
+        a_duplicate_update_is_a_form_error,
+        a_composite_unique_clash_is_a_form_wide_error,
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
         fk_display_binds_the_target_pk_type,

@@ -247,6 +247,28 @@ async fn impersonating_a_port_routed_org_lands_on_its_port() {
     );
 }
 
+/// The handoff token is a live login: the info log names the URL, not it (#2107).
+#[tokio::test]
+async fn the_handoff_token_is_not_logged() {
+    let env = boot().await;
+    let out = rustango::testkit::CaptureWriter::default();
+    let writer = out.clone();
+    let sub = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(sub);
+    let (_, location) = start_impersonation(&env).await;
+    let token = location.split("token=").nth(1).expect("token in redirect");
+    let logged = out.contents();
+    assert!(
+        logged.contains("minted impersonation handoff token"),
+        "{logged}"
+    );
+    assert!(!logged.contains(token), "{logged}");
+}
+
 /// A path-prefix tenant's admin and handoff live under its prefix (#2059).
 #[tokio::test]
 async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
@@ -287,9 +309,16 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
             .unwrap(),
         "/acme/__admin/"
     );
-    assert_eq!(
-        env.get("/acme/__admin/", &cookie).await.status(),
-        StatusCode::OK
+    let page = env.get("/acme/__admin/", &cookie).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    // The sidebar link is the full route, not `{admin_prefix}{route}` (#2102).
+    assert!(
+        html.contains(r#"href="&#x2F;acme&#x2F;__change-password""#),
+        "sidebar change-password link: {html}"
     );
 
     // Anonymous: the login redirect keeps the prefix.

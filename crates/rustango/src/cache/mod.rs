@@ -48,7 +48,7 @@
 //! [`BoxedCache`]: crate::cache::BoxedCache
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -93,7 +93,8 @@ pub trait Cache: Send + Sync + 'static {
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
     /// Store `value` with no expiry, even on a backend built with a
-    /// default TTL. Wrapping caches must forward it.
+    /// default TTL. A bounded backend must not evict it either. Wrapping
+    /// caches must forward it.
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.set(key, value, None).await
     }
@@ -544,19 +545,98 @@ struct CacheEntry {
     last_used: AtomicU64,
     /// `key.len() + value.len()`: this entry's share of the byte budget.
     size: usize,
+    /// Written by `set_forever` within the pinned budget: never evicted (#2009).
+    pinned: bool,
 }
 
 impl CacheEntry {
+    fn new(value: String, expires_at: Option<Instant>, tick: u64, size: usize) -> Self {
+        Self {
+            value,
+            expires_at,
+            last_used: AtomicU64::new(tick),
+            size,
+            pinned: false,
+        }
+    }
+
     fn is_expired(&self) -> bool {
         self.expires_at.map_or(false, |t| Instant::now() > t)
     }
 }
 
-/// The map and its running byte total, behind one lock so they cannot
-/// drift apart.
+/// The map and the totals of its evictable entries, behind one lock so
+/// they cannot drift apart. Change the map only through `put`/`take`/`retain`.
 struct Store {
     map: HashMap<String, CacheEntry>,
+    /// Bytes of the non-pinned entries.
     used_bytes: usize,
+    /// Count of the non-pinned entries.
+    evictable: usize,
+    /// Bytes of the pinned entries.
+    pinned_bytes: usize,
+    /// Count of the pinned entries.
+    pinned: usize,
+}
+
+impl Store {
+    fn put(&mut self, key: String, entry: CacheEntry) {
+        self.take(&key);
+        if entry.pinned {
+            self.pinned_bytes += entry.size;
+            self.pinned += 1;
+        } else {
+            self.used_bytes += entry.size;
+            self.evictable += 1;
+        }
+        self.map.insert(key, entry);
+    }
+
+    fn take(&mut self, key: &str) -> Option<CacheEntry> {
+        let e = self.map.remove(key)?;
+        if e.pinned {
+            self.pinned_bytes = self.pinned_bytes.saturating_sub(e.size);
+            self.pinned = self.pinned.saturating_sub(1);
+        } else {
+            self.used_bytes = self.used_bytes.saturating_sub(e.size);
+            self.evictable = self.evictable.saturating_sub(1);
+        }
+        Some(e)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&str, &CacheEntry) -> bool) {
+        let (mut bytes, mut count, mut pbytes, mut pcount) = (0usize, 0usize, 0usize, 0usize);
+        self.map.retain(|k, e| {
+            let kept = keep(k, e);
+            if !kept && e.pinned {
+                pbytes += e.size;
+                pcount += 1;
+            } else if !kept {
+                bytes += e.size;
+                count += 1;
+            }
+            kept
+        });
+        self.used_bytes = self.used_bytes.saturating_sub(bytes);
+        self.evictable = self.evictable.saturating_sub(count);
+        self.pinned_bytes = self.pinned_bytes.saturating_sub(pbytes);
+        self.pinned = self.pinned.saturating_sub(pcount);
+    }
+
+    /// Whether `key` can be pinned with `size` bytes without passing either pinned cap.
+    fn pinned_fits(&self, key: &str, size: usize, max_bytes: usize, max_entries: usize) -> bool {
+        let (old_bytes, old_count) = match self.map.get(key) {
+            Some(e) if e.pinned => (e.size, 1),
+            _ => (0, 0),
+        };
+        (max_bytes == 0 || self.pinned_bytes - old_bytes + size <= max_bytes)
+            && (max_entries == 0 || self.pinned - old_count < max_entries)
+    }
+}
+
+/// Eviction stops at 90% of a budget, so the sets after it skip the scan (#1906).
+fn low_water(limit: usize) -> usize {
+    limit - limit / 10
 }
 
 /// Default byte budget for [`InMemoryCache::new`]: 256 MiB. Large
@@ -571,6 +651,12 @@ pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// off; see [`InMemoryCache::with_max_entries`].
 pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
+/// Default byte cap for `set_forever` entries; past it they are stored as ordinary entries.
+pub const DEFAULT_MAX_PINNED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default entry cap for `set_forever` entries; see [`DEFAULT_MAX_PINNED_BYTES`].
+pub const DEFAULT_MAX_PINNED_ENTRIES: usize = 10_000;
+
 /// Per-process cache over a `tokio::sync::RwLock<HashMap>`. Thread
 /// safe, async friendly, no external dependencies.
 ///
@@ -579,9 +665,11 @@ pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 /// Size is bounded by [`DEFAULT_MAX_BYTES`] and
 /// [`DEFAULT_MAX_ENTRIES`], so a flood of unique keys cannot grow the
 /// process without limit. Eviction drops expired entries first, then
-/// the least recently used, until both budgets are met. Change the
+/// the least recently used, until both are 10% under budget. Change the
 /// budgets with [`InMemoryCache::with_max_bytes`] and
 /// [`InMemoryCache::with_max_entries`]; `0` means unbounded.
+/// Entries written with `set_forever` sit outside both budgets and are never evicted,
+/// up to their own caps ([`InMemoryCache::with_max_pinned_bytes`] / `_entries`).
 ///
 /// Build with [`InMemoryCache::with_default_ttl`] to give every
 /// `set(_, _, None)` call a TTL.
@@ -592,6 +680,12 @@ pub struct InMemoryCache {
     max_bytes: usize,
     /// Entry-count budget; `0` means unbounded.
     max_entries: usize,
+    /// Pinned byte cap; `0` means unbounded.
+    max_pinned_bytes: usize,
+    /// Pinned entry cap; `0` means unbounded.
+    max_pinned_entries: usize,
+    /// Set once the first `set_forever` overflowed the pinned caps.
+    pinned_full_warned: AtomicBool,
     /// Counter feeding each entry's `last_used`.
     tick: AtomicU64,
 }
@@ -625,15 +719,35 @@ impl InMemoryCache {
         self
     }
 
+    /// Set the byte cap for `set_forever` entries; `0` disables it. Chainable.
+    #[must_use]
+    pub fn with_max_pinned_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_pinned_bytes = max_bytes;
+        self
+    }
+
+    /// Set the entry cap for `set_forever` entries; `0` disables it. Chainable.
+    #[must_use]
+    pub fn with_max_pinned_entries(mut self, max_entries: usize) -> Self {
+        self.max_pinned_entries = max_entries;
+        self
+    }
+
     fn build(default_ttl: Option<Duration>, max_bytes: usize, max_entries: usize) -> Self {
         Self {
             inner: tokio::sync::RwLock::new(Store {
                 map: HashMap::new(),
                 used_bytes: 0,
+                evictable: 0,
+                pinned_bytes: 0,
+                pinned: 0,
             }),
             default_ttl,
             max_bytes,
             max_entries,
+            max_pinned_bytes: DEFAULT_MAX_PINNED_BYTES,
+            max_pinned_entries: DEFAULT_MAX_PINNED_ENTRIES,
+            pinned_full_warned: AtomicBool::new(false),
             tick: AtomicU64::new(0),
         }
     }
@@ -644,68 +758,68 @@ impl InMemoryCache {
     }
 
     /// Store `value` expiring at `expires_at` (`None` = never).
-    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>) {
+    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>, pinned: bool) {
         let size = key.len() + value.len();
-        let tick = self.next_tick();
+        let mut entry = CacheEntry::new(value.to_owned(), expires_at, self.next_tick(), size);
         let mut store = self.inner.write().await;
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
+        if pinned {
+            entry.pinned =
+                store.pinned_fits(key, size, self.max_pinned_bytes, self.max_pinned_entries);
+            if !entry.pinned {
+                self.warn_pinned_full();
+            }
         }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
+        store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
+    }
+
+    /// Warn once that `set_forever` is past the pinned caps; the entry is stored evictable.
+    fn warn_pinned_full(&self) {
+        if !self.pinned_full_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "rustango::cache",
+                max_bytes = self.max_pinned_bytes,
+                max_entries = self.max_pinned_entries,
+                "InMemoryCache: set_forever is past the pinned caps; new entries can be evicted"
+            );
+        }
     }
 
     fn next_tick(&self) -> u64 {
         self.tick.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn over_budget(&self, s: &Store) -> bool {
-        (self.max_bytes > 0 && s.used_bytes > self.max_bytes)
-            || (self.max_entries > 0 && s.map.len() > self.max_entries)
+    fn over(s: &Store, max_bytes: usize, max_entries: usize) -> bool {
+        (max_bytes > 0 && s.used_bytes > max_bytes)
+            || (max_entries > 0 && s.evictable > max_entries)
     }
 
-    /// Evict until both budgets are met: expired entries first, then
-    /// the least recently used. The caller holds the write lock. One
-    /// entry always survives, so a value bigger than the whole budget
-    /// still caches.
+    /// Once over budget, evict to the low-water mark: expired entries
+    /// first, then the least recently used. The caller holds the write
+    /// lock. The newest entry always survives, so a value bigger than
+    /// the whole budget still caches.
     fn evict_locked(&self, store: &mut Store) {
-        if !self.over_budget(store) {
+        if !Self::over(store, self.max_bytes, self.max_entries) {
             return;
         }
-        let expired: Vec<String> = store
+        let (bytes, entries) = (low_water(self.max_bytes), low_water(self.max_entries));
+        store.retain(|_, e| !e.is_expired());
+        if !Self::over(store, bytes, entries) {
+            return;
+        }
+        let mut lru: Vec<(u64, String)> = store
             .map
             .iter()
-            .filter(|(_, e)| e.is_expired())
-            .map(|(k, _)| k.clone())
+            .filter(|(_, e)| !e.pinned)
+            .map(|(k, e)| (e.last_used.load(Ordering::Relaxed), k.clone()))
             .collect();
-        for k in expired {
-            if let Some(e) = store.map.remove(&k) {
-                store.used_bytes = store.used_bytes.saturating_sub(e.size);
+        lru.sort_unstable_by_key(|(tick, _)| *tick);
+        lru.pop();
+        for (_, k) in lru {
+            if !Self::over(store, bytes, entries) {
+                break;
             }
-        }
-        while self.over_budget(store) && store.map.len() > 1 {
-            let victim = store
-                .map
-                .iter()
-                .min_by_key(|(_, e)| e.last_used.load(Ordering::Relaxed))
-                .map(|(k, _)| k.clone());
-            match victim {
-                Some(k) => {
-                    if let Some(e) = store.map.remove(&k) {
-                        store.used_bytes = store.used_bytes.saturating_sub(e.size);
-                    }
-                }
-                None => break,
-            }
+            store.take(&k);
         }
     }
 }
@@ -736,12 +850,13 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        self.insert(key, value, self.resolve_ttl(ttl)).await;
+        self.insert(key, value, self.resolve_ttl(ttl), false).await;
         Ok(())
     }
 
+    /// Pinned: no TTL, outside both budgets, never evicted while within the pinned caps (#2009).
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
-        self.insert(key, value, None).await;
+        self.insert(key, value, None, true).await;
         Ok(())
     }
 
@@ -769,18 +884,9 @@ impl Cache for InMemoryCache {
             Some(e) if !e.is_expired() && ttl.is_none() => e.expires_at,
             _ => self.resolve_ttl(ttl),
         };
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
+        store.put(
             key.to_owned(),
-            CacheEntry {
-                value,
-                expires_at,
-                last_used: AtomicU64::new(tick),
-                size,
-            },
+            CacheEntry::new(value, expires_at, tick, size),
         );
         self.evict_locked(&mut store);
         Ok(new)
@@ -796,28 +902,14 @@ impl Cache for InMemoryCache {
             return Ok(false);
         }
         let size = key.len() + value.len();
-        if let Some(old) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(old.size);
-        }
-        store.used_bytes += size;
-        store.map.insert(
-            key.to_owned(),
-            CacheEntry {
-                value: value.to_owned(),
-                expires_at: self.resolve_ttl(ttl),
-                last_used: AtomicU64::new(tick),
-                size,
-            },
-        );
+        let entry = CacheEntry::new(value.to_owned(), self.resolve_ttl(ttl), tick, size);
+        store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
         Ok(true)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
-        let mut store = self.inner.write().await;
-        if let Some(e) = store.map.remove(key) {
-            store.used_bytes = store.used_bytes.saturating_sub(e.size);
-        }
+        self.inner.write().await.take(key);
         Ok(())
     }
 
@@ -830,24 +922,17 @@ impl Cache for InMemoryCache {
         let mut store = self.inner.write().await;
         store.map.clear();
         store.used_bytes = 0;
+        store.evictable = 0;
         Ok(())
     }
 
     /// Exact prefix delete: the map is right here, so it can be
-    /// filtered. `used_bytes` drops by exactly what was removed, so
-    /// the budget stays honest.
+    /// filtered. `Store::retain` keeps the budget totals honest.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        let mut store = self.inner.write().await;
-        let mut freed = 0usize;
-        store.map.retain(|k, e| {
-            if k.starts_with(prefix) {
-                freed += k.len() + e.value.len();
-                false
-            } else {
-                true
-            }
-        });
-        store.used_bytes = store.used_bytes.saturating_sub(freed);
+        self.inner
+            .write()
+            .await
+            .retain(|k, _| !k.starts_with(prefix));
         Ok(())
     }
 }
@@ -1573,6 +1658,56 @@ mod bound_tests {
             cache.set(&format!("k{i}"), "v", None).await.unwrap();
         }
         assert_eq!(cache.inner.read().await.map.len(), 1000);
+    }
+
+    /// Over budget, eviction goes down to the 90% mark, not to the cap (#1906).
+    #[tokio::test]
+    async fn eviction_stops_at_the_low_water_mark() {
+        let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(100);
+        for i in 0..=100 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert_eq!(cache.inner.read().await.map.len(), 90);
+        assert_eq!(cache.get("k100").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// `set_forever` entries survive a flood and use none of the budget (#2009).
+    #[tokio::test]
+    async fn set_forever_is_never_evicted() {
+        let cache = InMemoryCache::new().with_max_bytes(64).with_max_entries(3);
+        cache.set_forever("flag:x", "on").await.unwrap();
+        for i in 0..50 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert_eq!(cache.get("flag:x").await.unwrap().as_deref(), Some("on"));
+        let store = cache.inner.read().await;
+        assert!(store.evictable <= 3, "{}", store.evictable);
+        drop(store);
+        cache.delete("flag:x").await.unwrap();
+        let store = cache.inner.read().await;
+        assert_eq!(store.map.len(), store.evictable);
+        assert_eq!((store.pinned, store.pinned_bytes), (0, 0));
+    }
+
+    /// Past the pinned caps `set_forever` stores an evictable entry, so pinned memory stays bounded.
+    #[tokio::test]
+    async fn set_forever_past_the_pinned_cap_is_evictable() {
+        let cache = InMemoryCache::new()
+            .with_max_bytes(0)
+            .with_max_entries(10)
+            .with_max_pinned_entries(2);
+        for i in 0..50 {
+            cache.set_forever(&format!("flag:{i}"), "on").await.unwrap();
+        }
+        // Re-pinning a pinned key does not count twice.
+        cache.set_forever("flag:0", "off").await.unwrap();
+        let store = cache.inner.read().await;
+        assert_eq!(store.pinned, 2);
+        assert!(store.map.len() <= 12, "{}", store.map.len());
+        assert!(store.map["flag:0"].pinned && store.map["flag:1"].pinned);
+        drop(store);
+        assert_eq!(cache.get("flag:0").await.unwrap().as_deref(), Some("off"));
+        assert_eq!(cache.get("flag:49").await.unwrap().as_deref(), Some("on"));
     }
 
     /// Deleting an entry returns its bytes to the budget.

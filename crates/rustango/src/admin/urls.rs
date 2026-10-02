@@ -176,10 +176,8 @@ pub(crate) struct Config {
     /// `Builder::admin_prefix`. An empty string means the admin
     /// router is the root.
     pub(crate) admin_prefix: String,
-    /// URL of the self-serve change-password page. When set, the
-    /// sidebar links to it. The tenant admin takes it from
-    /// `RouteConfig::change_password_url`. Standalone admins with no
-    /// auth surface leave it `None`.
+    /// Full URL of the self-serve change-password page; the sidebar links
+    /// to it as is. `None` with session auth means `{admin_prefix}/account/password`.
     pub(crate) change_password_url: Option<String>,
     /// POST target for the sidebar Logout button. `None` makes the
     /// chrome fall back to `{admin_prefix}/logout`, the bare admin's
@@ -367,12 +365,6 @@ impl Builder {
     #[must_use]
     pub fn with_session_auth(mut self, secret: crate::session::SessionSecret) -> Self {
         self.config.session_secret = Some(secret);
-        // Point at the standard `/account/password` route so the
-        // sidebar's "Change password" link renders. A custom
-        // `change_password_url` already set is left alone.
-        if self.config.change_password_url.is_none() {
-            self.config.change_password_url = Some("/account/password".to_owned());
-        }
         self
     }
 
@@ -407,8 +399,8 @@ impl Builder {
         self
     }
 
-    /// URL of the self-serve change-password page. When set, the
-    /// sidebar renders a "Change password" link to it. Tenant admins
+    /// Full URL of the self-serve change-password page, linked as given
+    /// (not under the admin prefix) from the sidebar. Tenant admins
     /// set it from
     /// [`crate::tenancy::RouteConfig::change_password_url`].
     #[must_use]
