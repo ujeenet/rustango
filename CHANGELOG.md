@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `render_changes_between` takes the before-snapshot (#2026)
+
+It renders a MySQL column drop with its FK drop first, which `render_changes_split_with_dialect` cannot see.
+
+### Fixed — SQLite keeps CHECKs when a rebuild precedes a RenameTable (#2140)
+
+The rebuild reads the table's CHECKs under the name the migration renames it to.
+
+### Fixed — a re-created system index on a project-owned table (#2139)
+
+An index a later system step drops and creates again is restored on the project's copy of the table.
+
+### Fixed — MySQL atomic-migration warning says what the transaction covers (#1660)
+
+Only data ops before the first DDL are in it; each DDL commits and later ops run in autocommit. The warning no longer mentions RunPython.
+
+### Fixed — MySQL's migrate lock is per database (#1991)
+
+The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
