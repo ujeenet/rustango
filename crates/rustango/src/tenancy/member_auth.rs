@@ -66,7 +66,7 @@ use crate::sso::link::{
     ProviderKey,
 };
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
+use crate::sso::{build_provider, open_flow, seal_flow, FlowScope, NormalizedUser};
 use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
@@ -546,7 +546,7 @@ async fn sso_begin_in(
     };
 
     let (authorize_url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, secret.key());
+    let sealed = seal_flow(&flow, FlowScope::new(&t.org.slug, slug), secret.key());
     let flow_cookie = format!(
         "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
         s = secure_suffix(),
@@ -598,7 +598,7 @@ async fn sso_callback_in(
             login_base,
         );
     };
-    let flow = match open_flow(&sealed, secret.key()) {
+    let flow = match open_flow(&sealed, FlowScope::new(&t.org.slug, slug), secret.key()) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");

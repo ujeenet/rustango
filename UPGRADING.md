@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `seal_flow` / `open_flow` take a `FlowScope`
+
+**Breaking:** pass `FlowScope::new(tenant, provider)` (`""` tenant when single-tenant) at both ends. SSO logins in flight at deploy must restart (#1992).
+
 ### MCP agent tokens
 
 **Breaking:** `issue_agent_token` takes the key's `secret_prefix`, `agent_token_still_valid_pool` takes it too, and `McpAgent` has a `secret_prefix` field. Agent JWTs minted before the upgrade are refused; clients re-mint (#1962).

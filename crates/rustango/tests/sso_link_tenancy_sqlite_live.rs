@@ -607,6 +607,56 @@ async fn a_link_in_one_tenant_does_not_sign_into_another() {
     );
 }
 
+/// #1992 — a flow begun for one tenant's provider is refused at another
+/// provider's or tenant's callback.
+#[tokio::test]
+async fn a_flow_completes_only_where_it_began() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    for t in 0..2 {
+        env.user_in(t, "ann", "ann@example.com", false).await;
+        env.provider_in(t, "corp", true).await;
+        env.provider_in(t, "other", true).await;
+    }
+    env.idp.assert("sub-ann", "ann@example.com");
+    let begin = send(
+        &env.admin,
+        Request::builder()
+            .uri("/__login/sso/corp")
+            .header(header::HOST, &env.tenants[0].host)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    let state = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("state="))
+        .unwrap()
+        .to_owned();
+    let flow = set_cookies(&begin).join("; ");
+    for (host, slug) in [
+        (&env.tenants[0].host, "other"),
+        (&env.tenants[1].host, "corp"),
+    ] {
+        let resp = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("/__login/sso/{slug}/callback?code=c&state={state}"))
+                .header(header::HOST, host)
+                .header(header::COOKIE, &flow)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            location(&resp).ends_with("sso_error=expired"),
+            "{host} {slug}: {}",
+            location(&resp)
+        );
+    }
+}
+
 #[tokio::test]
 async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
     let _g = SUITE.lock().await;

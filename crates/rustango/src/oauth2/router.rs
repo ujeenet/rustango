@@ -52,7 +52,9 @@ use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 
-use super::{open_flow, seal_flow, NormalizedUser, OAuth2Registry, OAuthError, TokenResponse};
+use super::{
+    open_flow, seal_flow, FlowScope, NormalizedUser, OAuth2Registry, OAuthError, TokenResponse,
+};
 
 const FLOW_COOKIE: &str = "rustango_oauth_flow";
 const INVALID_FLOW_COOKIE: &str = "invalid flow cookie — restart at /login";
@@ -71,7 +73,8 @@ pub type OnAuthSuccess = Arc<
 #[non_exhaustive]
 pub struct AuthSuccess {
     /// The registry tenant whose provider vouched for `user` (`""` when
-    /// single-tenant). Its IdP speaks for no other tenant.
+    /// single-tenant). Its IdP speaks for no other tenant. It is the URL's
+    /// tenant, sealed in at login: check it is the host's tenant too.
     pub tenant: String,
     /// The identity the provider returned.
     pub user: NormalizedUser,
@@ -168,7 +171,11 @@ async fn login_handler(
     };
 
     let (auth_url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, &state.flow_secret);
+    let sealed = seal_flow(
+        &flow,
+        FlowScope::new(&tenant, &provider_name),
+        &state.flow_secret,
+    );
     let secure = if state.secure { "; Secure" } else { "" };
     // 5-minute window — if the user takes longer to log in we issue a fresh flow.
     let cookie =
@@ -223,7 +230,11 @@ async fn callback_handler(
         )
             .into_response();
     };
-    let flow = match open_flow(sealed, &state.flow_secret) {
+    let flow = match open_flow(
+        sealed,
+        FlowScope::new(&tenant, &provider_name),
+        &state.flow_secret,
+    ) {
         Ok(f) => f,
         Err(e) => {
             // The reason helps a forger more than the user (#2087).
@@ -535,6 +546,54 @@ mod tests {
             .unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert_eq!(body, "authentication failed at the identity provider");
+    }
+
+    /// #1992 — a flow begun at one tenant's provider is refused at another's callback.
+    #[tokio::test]
+    async fn callback_refuses_a_flow_begun_elsewhere() {
+        let registry = OAuth2Registry::new();
+        for (tenant, name) in [("acme", "google"), ("globex", "google"), ("acme", "okta")] {
+            let mut p = providers::google("cid", "csec", "https://app/cb");
+            p.name = name.into();
+            // Blocked, so getting past the cookie fails fast with a 502.
+            p.token_url = "https://10.9.8.7/token".into();
+            registry.register(tenant, p);
+        }
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/acme/google/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loc = login.headers()[header::LOCATION].to_str().unwrap();
+        let state = loc
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let set = login.headers()[header::SET_COOKIE].to_str().unwrap();
+        let pair = set.split(';').next().unwrap().to_owned();
+        for path in ["globex/google", "acme/okta"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/auth/{path}/callback?code=abc&state={state}"))
+                        .header(header::COOKIE, pair.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     /// The cookie set by `/login` is read back and opened on callback: a

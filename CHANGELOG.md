@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `member_sso_router` also serves `/<prefix>{login_base}/sso/…`, and the IdP callback URL keeps the prefix.
 
+### Security — SSO flow cookie bound to tenant and provider (#1992)
+
+A flow begun for one tenant's provider is refused at any other callback. `seal_flow` / `open_flow` take a `FlowScope`.
+
 ### Security — a rotated MCP agent secret ends its JWTs (#1962)
 
 Agent JWTs carry the key prefix and are refused once the secret rotates; skills and tools are re-read from the rows on every request.
