@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — M2M managers go through the ORM (#2136)
+
+`M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. A key outside the through model's bounds is now refused on SQLite too, and `set` splits a list past the bind limit.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

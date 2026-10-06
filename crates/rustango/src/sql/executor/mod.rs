@@ -1568,6 +1568,27 @@ pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, 
     execute_tx(tx, &stmt.sql, stmt.params).await
 }
 
+/// Validated multi-row `INSERT` inside an open transaction, split to fit
+/// the backend's bind-parameter limit like [`bulk_insert_pool`].
+pub(crate) async fn bulk_insert_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<(), ExecError> {
+    query.validate()?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    for chunk in query.rows.chunks(max_rows) {
+        let stmt = tx.dialect().compile_bulk_insert(&BulkInsertQuery {
+            model: query.model,
+            columns: query.columns.clone(),
+            rows: chunk.to_vec(),
+            returning: query.returning.clone(),
+            on_conflict: query.on_conflict.clone(),
+        })?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(())
+}
+
 /// `SELECT` inside an open transaction, with optional `select_related`
 /// join decoding. Mirrors [`select_rows_pool_with_related`] but
 /// executes against `tx`.
@@ -1911,7 +1932,6 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::fetch_flat_raw;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,

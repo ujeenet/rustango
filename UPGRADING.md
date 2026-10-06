@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### M2M writes check the through model's bounds
+
+`add` and `set` validate keys against a registered through model, so a too-long key is an error on SQLite as on PG and MySQL (#2136).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
