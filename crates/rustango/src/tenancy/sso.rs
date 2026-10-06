@@ -20,7 +20,8 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, seal_flow, FlowScope, ProviderButton, SsoError, SSO_FLOW_COOKIE,
+    build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError,
+    SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
 use crate::query::QuerySet;
@@ -246,7 +247,11 @@ pub(super) async fn tenant_sso_begin(
         }
     };
     let (url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, FlowScope::new(&org.slug, slug), secret.key());
+    let sealed = seal_flow(
+        &flow,
+        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        secret.key(),
+    );
     let flow_cookie = format!(
         "{SSO_FLOW_COOKIE}={sealed}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=600{}",
         secure_suffix()
@@ -279,7 +284,11 @@ pub(super) async fn tenant_sso_callback(
     let Some(sealed) = crate::cookies::cookie_from_headers(&parts.headers, SSO_FLOW_COOKIE) else {
         return login_error(routes, "expired");
     };
-    let flow = match open_flow(sealed, FlowScope::new(&org.slug, slug), secret.key()) {
+    let flow = match open_flow(
+        sealed,
+        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        secret.key(),
+    ) {
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };

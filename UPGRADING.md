@@ -152,7 +152,7 @@ untouched.
 
 ### `seal_flow` / `open_flow` take a `FlowScope`
 
-**Breaking:** pass `FlowScope::new(tenant, provider)` (`""` tenant when single-tenant) at both ends. SSO logins in flight at deploy must restart (#1992).
+**Breaking:** pass `FlowScope::new(purpose, tenant, provider)` (`""` tenant when single-tenant) at both ends. SSO logins in flight at deploy must restart (#1992).
 
 ### MCP agent tokens
 
@@ -160,7 +160,7 @@ untouched.
 
 ### `MediaManager::pool()` returns `&sql::Pool`
 
-**Breaking:** use `manager.pool().as_postgres()` where a `PgPool` was needed (#2070).
+**Breaking:** use `manager.pool().as_postgres()` where a `PgPool` was needed; it returns `Option<&PgPool>`, `None` on other backends (#2070).
 
 ## 0.60.0
 

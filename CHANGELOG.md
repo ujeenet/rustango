@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — SSO flow cookie bound to tenant and provider (#1992)
 
-A flow begun for one tenant's provider is refused at any other callback. `seal_flow` / `open_flow` take a `FlowScope`.
+A flow begun for one tenant's provider, on one sign-in surface, is refused at any other callback. `seal_flow` / `open_flow` take a `FlowScope`.
 
 ### Security — a rotated MCP agent secret ends its JWTs (#1962)
 

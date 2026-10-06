@@ -668,25 +668,55 @@ fn encode_form<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
 // hits a different process than `begin()` did (multi-replica, no sticky
 // sessions).
 
-/// The one provider of one tenant a sealed flow is good for (#1992).
-/// Use `""` as the tenant when single-tenant.
+/// The sign-in surface a sealed flow belongs to; one never opens on another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FlowPurpose {
+    /// The operator admin (`admin::sso`).
+    Admin,
+    /// A tenant's admin login (`tenancy::sso`).
+    TenantAdmin,
+    /// A tenant's member login (`tenancy::member_auth`).
+    Member,
+    /// The standalone [`router::oauth2_router`].
+    OAuth2,
+}
+
+impl FlowPurpose {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::TenantAdmin => "tenant-admin",
+            Self::Member => "member",
+            Self::OAuth2 => "oauth2",
+        }
+    }
+}
+
+/// The one provider of one tenant, on one surface, a sealed flow is good
+/// for (#1992). Use `""` as the tenant when single-tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowScope<'a> {
+    purpose: FlowPurpose,
     tenant: &'a str,
     provider: &'a str,
 }
 
 impl<'a> FlowScope<'a> {
     #[must_use]
-    pub fn new(tenant: &'a str, provider: &'a str) -> Self {
-        Self { tenant, provider }
+    pub fn new(purpose: FlowPurpose, tenant: &'a str, provider: &'a str) -> Self {
+        Self {
+            purpose,
+            tenant,
+            provider,
+        }
     }
 
     /// The MAC over the scope and the payload; length-prefixed so no two
     /// scopes share an input.
     fn mac(self, secret: &[u8], payload_b64: &str) -> Hmac<Sha256> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
-        for part in [self.tenant, self.provider] {
+        for part in [self.purpose.tag(), self.tenant, self.provider] {
             mac.update(&(part.len() as u64).to_be_bytes());
             mac.update(part.as_bytes());
         }
@@ -1335,6 +1365,7 @@ mod tests {
     }
 
     const SCOPE: FlowScope<'static> = FlowScope {
+        purpose: FlowPurpose::Member,
         tenant: "acme",
         provider: "google",
     };
@@ -1349,13 +1380,33 @@ mod tests {
         };
         let sealed = seal_flow(&flow, SCOPE, b"k");
         for (tenant, provider) in [("acme", "okta"), ("globex", "google"), ("acmeg", "oogle")] {
-            let other = FlowScope::new(tenant, provider);
+            let other = FlowScope::new(FlowPurpose::Member, tenant, provider);
             assert!(
                 open_flow(&sealed, other, b"k").is_err(),
                 "{tenant}/{provider}"
             );
         }
-        assert!(open_flow(&sealed, FlowScope::new("acme", "google"), b"k").is_ok());
+        let same = FlowScope::new(FlowPurpose::Member, "acme", "google");
+        assert!(open_flow(&sealed, same, b"k").is_ok());
+    }
+
+    /// A flow from one sign-in surface never opens on another.
+    #[test]
+    fn open_flow_rejects_another_purpose() {
+        let flow = OAuth2Flow {
+            state: "s".into(),
+            pkce_verifier: "v".into(),
+            created_at: 0,
+        };
+        let sealed = seal_flow(&flow, SCOPE, b"k");
+        for purpose in [
+            FlowPurpose::Admin,
+            FlowPurpose::TenantAdmin,
+            FlowPurpose::OAuth2,
+        ] {
+            let other = FlowScope::new(purpose, "acme", "google");
+            assert!(open_flow(&sealed, other, b"k").is_err(), "{purpose:?}");
+        }
     }
 
     #[test]

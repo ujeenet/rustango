@@ -1218,6 +1218,24 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
         "signed in under the prefix: {:?}",
         location(&resp)
     );
+    assert_eq!(location(&resp), "/acme/", "lands under the prefix");
+    let denied = send(
+        &app,
+        Request::builder()
+            .uri("/acme/auth/sso/corp/callback?error=denied")
+            .header(header::HOST, "app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains("href=\"/acme/auth\""),
+        "back link keeps the prefix: {body}"
+    );
 }
 
 // ---- upgrade: a framework column lives only in the system chain ----------

@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-pub use crate::oauth2::{open_flow, seal_flow, FlowScope, NormalizedUser, OAuth2Flow};
+pub use crate::oauth2::{open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser, OAuth2Flow};
 
 /// Cookie the sealed [`OAuth2Flow`] round-trips in between the login
 /// redirect and the callback. Distinct from the standalone

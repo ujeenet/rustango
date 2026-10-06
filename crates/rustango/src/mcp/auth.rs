@@ -98,6 +98,9 @@ pub fn issue_agent_token(
 ///
 /// It is async because the revocation check may read a durable
 /// [`crate::jti_store::JtiStore`].
+///
+/// Skills and tools are as at mint time, and the secret is not checked for
+/// rotation; the live path re-checks both via [`crate::tenancy::agent_token_still_valid_pool`].
 #[must_use]
 pub async fn verify_agent_token(
     jwt: &JwtLifecycle,

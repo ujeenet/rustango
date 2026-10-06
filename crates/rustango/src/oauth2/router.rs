@@ -53,7 +53,8 @@ use axum::Router;
 use serde::Deserialize;
 
 use super::{
-    open_flow, seal_flow, FlowScope, NormalizedUser, OAuth2Registry, OAuthError, TokenResponse,
+    open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser, OAuth2Registry, OAuthError,
+    TokenResponse,
 };
 
 const FLOW_COOKIE: &str = "rustango_oauth_flow";
@@ -173,7 +174,7 @@ async fn login_handler(
     let (auth_url, flow) = provider.begin();
     let sealed = seal_flow(
         &flow,
-        FlowScope::new(&tenant, &provider_name),
+        FlowScope::new(FlowPurpose::OAuth2, &tenant, &provider_name),
         &state.flow_secret,
     );
     let secure = if state.secure { "; Secure" } else { "" };
@@ -232,7 +233,7 @@ async fn callback_handler(
     };
     let flow = match open_flow(
         sealed,
-        FlowScope::new(&tenant, &provider_name),
+        FlowScope::new(FlowPurpose::OAuth2, &tenant, &provider_name),
         &state.flow_secret,
     ) {
         Ok(f) => f,
