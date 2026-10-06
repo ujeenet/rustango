@@ -57,10 +57,10 @@ impl MountPrefix {
         &self.0
     }
 
-    /// `path` under the prefix when it is console-relative (`/…`).
-    /// Absolute and scheme-relative URLs pass through.
+    /// `path` under the prefix when it is a local path (`/…`). Absolute
+    /// and scheme-relative URLs pass through.
     pub(super) fn url(&self, path: &str) -> String {
-        if self.0.is_empty() || !path.starts_with('/') || path.starts_with("//") {
+        if self.0.is_empty() || crate::auth_decorators::safe_next(path).is_none() {
             return path.to_owned();
         }
         // `nest` answers `/ops`, not `/ops/`.
