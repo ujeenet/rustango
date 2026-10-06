@@ -24,7 +24,8 @@
 //! insert them in multi-row statements sized to the bind limit.
 //!
 //! Rows the database removes or changes through an FK `ON DELETE`
-//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited.
+//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited
+//! (planned for 0.61.0).
 
 use serde_json::{Map, Value};
 
