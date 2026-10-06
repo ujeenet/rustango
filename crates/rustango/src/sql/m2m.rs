@@ -309,12 +309,15 @@ async fn replace(
     // A bad key fails before the DELETE runs, not after.
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
-    let mut tx = crate::sql::transaction_pool(pool).await?;
     let del = DeleteQuery::new(junction, WhereExpr::and_predicates(owner));
-    super::executor::delete_tx(&mut tx, &del).await?;
-    super::executor::bulk_insert_tx(&mut tx, &ins).await?;
-    tx.commit().await.map_err(ExecError::Driver)?;
-    Ok(())
+    let mut scope = crate::sql::TxScope::begin(pool, crate::sql::Begin::Deferred).await?;
+    let r: Result<(), ExecError> = async {
+        let tx = scope.tx();
+        super::executor::delete_tx(tx, &del).await?;
+        super::executor::bulk_insert_tx(tx, &ins).await
+    }
+    .await;
+    scope.end(r).await
 }
 
 /// The source PK bound as-is (#1926); an unsaved source has none.

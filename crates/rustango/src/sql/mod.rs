@@ -135,6 +135,7 @@ pub use executor::{
 pub mod __macro_internals {
     pub use super::executor::{
         bulk_insert_on, delete_on, fetch_with_prefetch, insert_on, insert_returning_on, update_on,
+        Begin, TxScope,
     };
 }
 
@@ -155,6 +156,7 @@ pub(crate) use executor::write_transaction_pool;
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use executor::LoadRelatedSqlite;
+pub(crate) use executor::{Begin, TxScope};
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;

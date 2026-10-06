@@ -136,6 +136,29 @@ async fn assert_atomic(pool: &Pool, ddl: &str, backend: &str) {
         "[{backend}] a valid batch must still be created"
     );
     assert_eq!(row_count(pool).await, 2, "[{backend}] both rows land");
+
+    // Inside an `atomic` block on the pool the batch joins it (#1460), so
+    // the block's rollback takes it back. Not on in-memory SQLite: its one
+    // connection is the block's, and the read-back needs another (S3).
+    if backend == "sqlite" {
+        return;
+    }
+    let p = pool.clone();
+    let res: Result<(), rustango::sql::ExecError> = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rustango::atomic!(pool, |_tx| {
+            post_json(&p, r#"[{"label":"eps","priority":1}]"#).await;
+            Err(rustango::sql::ExecError::AtomicAborted)
+        }),
+    )
+    .await
+    .expect("deadlock");
+    assert!(res.is_err());
+    assert_eq!(
+        row_count(pool).await,
+        2,
+        "[{backend}] the batch outlived the block it ran in"
+    );
 }
 
 #[tokio::test]

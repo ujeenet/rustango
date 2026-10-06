@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
 
-use super::{transaction_pool, ExecError, PoolTx};
+use super::{transaction_pool, write_transaction_pool, ExecError, PoolTx};
 use crate::sql::Pool;
 
 type Callback = Box<dyn FnOnce() + Send>;
@@ -353,6 +353,181 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
         .unwrap_or(false)
 }
 
+/// Open a savepoint one level below `parent`, holding the transaction's
+/// lock. The returned [`OpenSavepoint`] is armed: dropped, it is rolled back.
+async fn open_savepoint(
+    parent: &Block,
+) -> Result<(OpenSavepoint, OwnedMutexGuard<TxState>), ExecError> {
+    let slot = Arc::clone(&parent.slot);
+    let guard = acquire(&slot).await?;
+    let parent_depth = parent.depth;
+    let depth = parent_depth + 1;
+    let opening = Arc::new(Opening::default());
+    // Armed before the SAVEPOINT is sent: a drop from here on is a cancel.
+    let mut open = OpenSavepoint {
+        slot: Arc::clone(&slot),
+        depth,
+        opening: Arc::clone(&opening),
+        ending: false,
+    };
+    let (task_slot, task_opening) = (Arc::clone(&slot), Arc::clone(&opening));
+    let claim = Claim::new(&slot);
+    let opened = in_background(async move {
+        let mut g = guard;
+        // Only the innermost open block may open a child.
+        if g.depth != parent_depth {
+            return Err(ExecError::NestedAtomic);
+        }
+        g.savepoint("SAVEPOINT", depth).await?;
+        g.depth = depth;
+        task_opening.opened.store(true, Ordering::SeqCst);
+        if task_opening.abandoned.load(Ordering::SeqCst) {
+            mark_cancelled(&task_slot, depth);
+        }
+        Ok(g)
+    })
+    .await;
+    drop(claim);
+    match opened {
+        Ok(g) => Ok((open, g)),
+        Err(e) => {
+            open.ending = true;
+            Err(e)
+        }
+    }
+}
+
+/// Release (then run `on_release`) or roll back savepoint `depth`, in the
+/// background so a dropped caller cannot cut the statement off.
+async fn end_savepoint(
+    slot: &Arc<Slot>,
+    guard: OwnedMutexGuard<TxState>,
+    depth: usize,
+    release: bool,
+    on_release: impl FnOnce() + Send + 'static,
+) -> Result<(), ExecError> {
+    let _claim = Claim::new(slot);
+    in_background(async move {
+        let mut g = guard;
+        if g.depth != depth {
+            g.poisoned = true;
+            return Err(ExecError::AtomicAborted);
+        }
+        if release {
+            g.savepoint("RELEASE SAVEPOINT", depth).await?;
+            g.depth = depth - 1;
+            on_release();
+            Ok(())
+        } else {
+            g.rollback_to(depth).await
+        }
+    })
+    .await
+}
+
+/// How a [`TxScope`] of its own begins.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Begin {
+    Deferred,
+    /// SQLite takes its write lock at `BEGIN`.
+    Immediate,
+}
+
+/// The transaction an internal multi-statement write runs in: its own, or
+/// a savepoint of the open [`atomic`] block on its pool, so it never waits
+/// for a second connection (#1460). Dropped before [`Self::end`], it rolls back.
+#[doc(hidden)]
+#[must_use = "end the scope, or its writes roll back"]
+pub struct TxScope(Scoped);
+
+enum Scoped {
+    Own(PoolTx<'static>),
+    // Field order is drop order: mark the cancel before unlocking.
+    Savepoint {
+        open: OpenSavepoint,
+        held: Held,
+        guard: OwnedMutexGuard<TxState>,
+    },
+}
+
+/// Counts the scope as a live guard, so a `join!`ed block is refused, not queued.
+struct Held(Arc<Slot>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.guards.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl TxScope {
+    /// Join the open block on `pool` as a savepoint, else begin a transaction.
+    ///
+    /// # Errors
+    /// Driver errors from `BEGIN` / `SAVEPOINT`; [`ExecError::NestedAtomic`]
+    /// while the block's [`TxGuard`] is held.
+    pub async fn begin(pool: &Pool, begin: Begin) -> Result<Self, ExecError> {
+        let id = PoolId(pool.clone());
+        let parent =
+            std::iter::successors(BLOCK.try_with(Arc::clone).ok(), |b| b.enclosing.clone())
+                .find(|b| b.pool.same(&id));
+        let Some(parent) = parent else {
+            return Ok(Self(Scoped::Own(match begin {
+                Begin::Deferred => transaction_pool(pool).await?,
+                Begin::Immediate => write_transaction_pool(pool).await?,
+            })));
+        };
+        let (open, guard) = open_savepoint(&parent).await?;
+        open.slot.guards.fetch_add(1, Ordering::SeqCst);
+        Ok(Self(Scoped::Savepoint {
+            held: Held(Arc::clone(&open.slot)),
+            open,
+            guard,
+        }))
+    }
+
+    /// The transaction to run statements on.
+    pub fn tx(&mut self) -> &mut PoolTx<'static> {
+        match &mut self.0 {
+            Scoped::Own(tx) => tx,
+            Scoped::Savepoint { guard, .. } => guard.tx(),
+        }
+    }
+
+    /// Commit (release) on `Ok`, roll back on `Err`; `r`'s error wins.
+    ///
+    /// # Errors
+    /// `r`'s error, else a driver error from `COMMIT` / `RELEASE`.
+    pub async fn end<T, E: From<ExecError>>(self, r: Result<T, E>) -> Result<T, E> {
+        let ended = self.finish(r.is_ok()).await;
+        let v = r?;
+        ended?;
+        Ok(v)
+    }
+
+    /// Commit (release) when `commit`, else roll back.
+    ///
+    /// # Errors
+    /// A driver error from `COMMIT` / `RELEASE` / `ROLLBACK`.
+    pub async fn finish(self, commit: bool) -> Result<(), ExecError> {
+        match self.0 {
+            Scoped::Own(tx) if commit => Ok(tx.commit().await?),
+            Scoped::Own(tx) => Ok(tx.rollback().await?),
+            Scoped::Savepoint {
+                mut open,
+                held,
+                guard,
+            } => {
+                open.ending = true;
+                drop(held);
+                let slot = Arc::clone(&open.slot);
+                end_savepoint(&slot, guard, open.depth, commit, || {}).await
+            }
+        }
+    }
+}
+
 /// Warn, once per `op`, that `op` ran on `pool` while an [`atomic`] block
 /// on it is open: it takes another connection, outside the block (#1460).
 pub(crate) fn warn_if_in_block(pool: &Pool, op: &'static str) {
@@ -423,9 +598,11 @@ pub(crate) fn warn_if_in_block(pool: &Pool, op: &'static str) {
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
 ///
-/// **`&Pool` calls inside the block** (`fetch(&pool)`, `save_pool`, …) run
+/// **`&Pool` calls inside the block** (`fetch(&pool)`, `update_pool`, …) run
 /// on another connection, outside the block, and can deadlock a small
 /// pool. Each kind logs one `rustango::atomic` warning; use the `_tx` helpers.
+/// Multi-statement writes (audited saves, M2M `set`, fixtures, viewset bulk
+/// create) join the block as a savepoint; do not hold a [`TxGuard`] across them.
 ///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
@@ -613,39 +790,10 @@ where
     >,
 {
     let slot = Arc::clone(&parent.slot);
-    let guard = acquire(&slot).await?;
-    let parent_depth = parent.depth;
-    let depth = parent_depth + 1;
-    let opening = Arc::new(Opening::default());
-    // Armed before the SAVEPOINT is sent: a drop from here on is a cancel.
-    let mut open = OpenSavepoint {
-        slot: Arc::clone(&slot),
-        depth,
-        opening: Arc::clone(&opening),
-        ending: false,
-    };
-    let (task_slot, task_opening) = (Arc::clone(&slot), Arc::clone(&opening));
-    let claim = Claim::new(&slot);
-    let opened = in_background(async move {
-        let mut g = guard;
-        // Only the innermost open block may open a child.
-        if g.depth != parent_depth {
-            return Err(ExecError::NestedAtomic);
-        }
-        g.savepoint("SAVEPOINT", depth).await?;
-        g.depth = depth;
-        task_opening.opened.store(true, Ordering::SeqCst);
-        if task_opening.abandoned.load(Ordering::SeqCst) {
-            mark_cancelled(&task_slot, depth);
-        }
-        Ok(())
-    })
-    .await;
-    drop(claim);
-    if let Err(e) = opened {
-        open.ending = true;
-        return Err(e);
-    }
+    let (mut open, guard) = open_savepoint(&parent).await?;
+    // The body locks the transaction per statement.
+    drop(guard);
+    let depth = open.depth;
     let block = Arc::new(Block {
         pool: parent.pool.clone(),
         slot: Arc::clone(&slot),
@@ -669,29 +817,15 @@ where
     // included, even if this future is dropped.
     open.ending = true;
     let release = res.is_ok() && end == End::Commit;
-    let claim = Claim::new(&slot);
-    let ended = in_background(async move {
-        let mut g = guard;
-        if g.depth != depth {
-            g.poisoned = true;
-            return Err(ExecError::AtomicAborted);
-        }
-        if release {
-            g.savepoint("RELEASE SAVEPOINT", depth).await?;
-            g.depth = depth - 1;
-            let callbacks = block.take_callbacks();
-            parent
-                .callbacks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend(callbacks);
-            Ok(())
-        } else {
-            g.rollback_to(depth).await
-        }
+    let ended = end_savepoint(&slot, guard, depth, release, move || {
+        let callbacks = block.take_callbacks();
+        parent
+            .callbacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(callbacks);
     })
     .await;
-    drop(claim);
     // A block's own error wins over a failure to end its savepoint.
     let v = res?;
     ended?;

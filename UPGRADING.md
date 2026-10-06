@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Audited writes inside `atomic` join the block
+
+Inside an `atomic` block on the same pool, audited `save_pool` / `insert_pool` / `delete_pool`, M2M `set` and fixture loads now commit or roll back with the block (#1460). Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`.
+
 ### Audited `_tx` writes now write audit rows
 
 `insert_tx`, `save_tx` and `delete_tx` on audited models add their audit row in the same transaction, like the `_pool` methods (#1460). Drop any manual audit emit you added after them.

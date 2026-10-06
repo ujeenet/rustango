@@ -3134,8 +3134,8 @@ async fn create_many(
     // the response says which. Those constraints are exactly the class
     // validation cannot decide up front.
     let fields = state.effective_fields();
-    let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
-        Ok(tx) => tx,
+    let mut write = match crate::sql::TxScope::begin(&acq.pool, crate::sql::Begin::Deferred).await {
+        Ok(write) => write,
         Err(e) => {
             return json_server_error("viewset::bulk_create::begin", &e);
         }
@@ -3150,12 +3150,12 @@ async fn create_many(
             returning: vec![pk_field.column],
             on_conflict: None,
         };
-        match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
+        match crate::audit::insert_tx(write.tx(), &query, pk_field).await {
             Ok(pk) => pks.push(pk),
             Err(e) => {
                 // Drop every row this request wrote, including the ones
                 // that succeeded before entry `i`.
-                let _ = tx.rollback().await;
+                let _ = write.finish(false).await;
                 // The entry index is what the caller can act on; the
                 // driver text behind it names tables and constraints,
                 // so it goes to the log only (#1525). The body must
@@ -3171,7 +3171,7 @@ async fn create_many(
             }
         }
     }
-    if let Err(e) = tx.commit().await {
+    if let Err(e) = write.finish(true).await {
         return json_server_error("viewset::bulk_create::commit", &e);
     }
 

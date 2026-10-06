@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — multi-statement writes join an open `atomic` block (#1460)
+
+Audited `_pool` writes, M2M `set`, fixture loads, the DB cache's MySQL `incr`, SSO member provisioning and viewset bulk create run in a savepoint of an `atomic` block on the same pool, instead of a second transaction that could deadlock it.
+
 ### Fixed — audited models' `insert_tx` / `save_tx` / `delete_tx` write audit rows (#1460)
 
 They use the same audit helpers as the `_pool` methods, so the rows commit or roll back with the caller's transaction. New `audit::*_tx` helpers back them.
