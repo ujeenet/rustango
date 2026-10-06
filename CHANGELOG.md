@@ -12,6 +12,10 @@ Relations sharing a `through` table must match up to which side is the source; a
 
 Before, only `create-api-key` did, and it mints a key.
 
+### Fixed — `migrate-tenant-storage` checks only the target schema (#1864, partial)
+
+An empty target schema no longer passes the smoke check through `public.rustango_users`, so the Org row is reverted. The restore into a schema is still broken.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
