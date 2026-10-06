@@ -326,6 +326,52 @@ pub(crate) fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
     Some((host, Some(port.parse().ok()?)))
 }
 
+/// A `Host` header that is only `host[:port]`, so it is safe to put in a
+/// URL: `good.com:1@evil.com` or `a@evil.com` never parse (#2173).
+#[cfg_attr(
+    not(any(
+        feature = "_http_layers",
+        feature = "admin-sso",
+        feature = "mcp",
+        all(feature = "tenancy", feature = "sso")
+    )),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostAuthority<'a>(&'a str);
+
+#[cfg_attr(
+    not(any(
+        feature = "_http_layers",
+        feature = "admin-sso",
+        feature = "mcp",
+        all(feature = "tenancy", feature = "sso")
+    )),
+    allow(dead_code)
+)]
+impl<'a> HostAuthority<'a> {
+    /// `None` unless the host is a DNS name, IPv4 or `[v6]`, with a digit port.
+    pub(crate) fn parse(raw: &'a str) -> Option<Self> {
+        let (host, _) = split_host_port(raw)?;
+        let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
+            None => {
+                !host.is_empty()
+                    && host
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+            }
+        };
+        ok.then_some(Self(raw))
+    }
+}
+
+impl std::fmt::Display for HostAuthority<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// `true` when `url` is absolute: it has a scheme prefix such as
 /// `https:`, `mailto:` or `javascript:`, or it starts with `//`.
 ///
@@ -1516,6 +1562,38 @@ mod querystring_tests {
             escape_leading_slashes("/path//slashes//inside"),
             "/path//slashes//inside"
         );
+    }
+
+    /// Only `host[:port]` goes into a URL; userinfo or a path never does (#2173).
+    #[test]
+    fn host_authority_refuses_what_is_not_a_host() {
+        for good in [
+            "app.test",
+            "app.test:8080",
+            "127.0.0.1:80",
+            "[::1]:8080",
+            "a_b.test",
+        ] {
+            assert_eq!(
+                HostAuthority::parse(good).map(|h| h.to_string()),
+                Some(good.into())
+            );
+        }
+        for bad in [
+            "",
+            ":80",
+            "good.com:1@evil.com:2",
+            "a@evil.com",
+            "evil.com/x",
+            "evil.com?x",
+            "evil.com#x",
+            "a b.test",
+            "a\\b.test",
+            "[evil.com]",
+            "[::1]x",
+        ] {
+            assert_eq!(HostAuthority::parse(bad), None, "{bad}");
+        }
     }
 
     /// `[v6]:port` splits after the bracket, not at its first colon (#2043).

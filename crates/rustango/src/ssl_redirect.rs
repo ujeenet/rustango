@@ -149,11 +149,16 @@ async fn handle(cfg: Arc<SslRedirectLayer>, req: Request<Body>, next: Next) -> R
         return next.run(req).await;
     }
     // Target URL: Host header, then path and query from the request.
-    let host = req
+    let Some(host) = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
+        .and_then(crate::urls::HostAuthority::parse)
+    else {
+        let mut resp = Response::new(Body::from("invalid Host header"));
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+        return resp;
+    };
     let path_and_query = req
         .uri()
         .path_and_query()

@@ -52,6 +52,19 @@ async fn plain_http_redirects_to_https() {
     assert_eq!(loc, "https://example.com/api/users?page=2");
 }
 
+/// A Host with userinfo must not steer the redirect elsewhere (#2173).
+#[tokio::test]
+async fn host_with_userinfo_is_refused_not_redirected() {
+    for host in ["good.com:1@evil.com:2", "good.com@evil.com"] {
+        let resp = app(SslRedirectLayer::new())
+            .oneshot(req("/", host, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{host}");
+        assert!(resp.headers().get("location").is_none(), "{host}");
+    }
+}
+
 #[tokio::test]
 async fn forwarded_proto_https_passes_through() {
     let app = app(SslRedirectLayer::new().proxy_ssl_header("X-Forwarded-Proto", "https"));
