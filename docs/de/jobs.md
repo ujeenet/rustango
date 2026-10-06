@@ -445,6 +445,17 @@ um den Lauf wieder ein. `PgJobQueue` speichert sie in `rustango_jobs.context`;
 laufen Jobs als `AuditSource::System`. Keine Queue trägt eine Session oder einen
 Tenant.
 
+Eine Quelle aus dem Tenant-Admin nennt einen Benutzer dieses Tenants. Sie wird
+nur bei Schreibvorgängen über `tenancy::with_tenant` (oder `for_each_tenant`)
+für diesen Tenant erfasst; andere Schreibvorgänge erfassen `system`:
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
+
 ---
 
 ## Geplante Sweeps unter Multi-Tenancy

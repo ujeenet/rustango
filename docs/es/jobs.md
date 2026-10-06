@@ -440,6 +440,17 @@ ambos los reinstalan alrededor de la ejecución. `PgJobQueue` los guarda en
 antigua. Sin la columna, los trabajos corren como `AuditSource::System`.
 Ninguna cola lleva sesión ni tenant.
 
+Una fuente del admin del tenant nombra a un usuario de ese tenant, así que solo
+se registra en escrituras hechas con `tenancy::with_tenant` (o
+`for_each_tenant`) para ese tenant. Las demás escrituras registran `system`:
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
+
 ---
 
 ## Barridos programados con multi-tenancy

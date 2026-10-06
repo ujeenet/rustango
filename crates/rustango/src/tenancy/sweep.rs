@@ -136,6 +136,30 @@ where
         .await?)
 }
 
+/// Run `f` against `org`'s own pool, as one step of [`for_each_tenant`].
+///
+/// Write through this from a job: a tenant-bound audit source (the
+/// tenant admin's user) is recorded only on writes known to go to its
+/// tenant. A pool from `scoped_pool_dyn` alone records `system` (#2123).
+///
+/// # Errors
+/// As [`TenantPools::scoped_pool_dyn`]; `f`'s own result is in the `Ok`.
+pub async fn with_tenant<DB, F, Fut, T>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    f: F,
+) -> Result<T, TenancyError>
+where
+    DB: Database,
+    crate::sql::Pool: From<crate::sql::sqlx::Pool<DB>>,
+    F: FnOnce(crate::sql::Pool) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let pool = pools.scoped_pool_dyn(org).await?;
+    // The pool exists only inside this scope, so the writes go to `org`.
+    Ok(crate::audit::writing_to_tenant(org.slug.clone(), f(pool)).await)
+}
+
 /// Run `f` once per active tenant, against that tenant's own pool.
 ///
 /// It never stops early. A tenant whose pool fails to resolve, or whose
@@ -160,8 +184,10 @@ where
 
     for org in orgs {
         let slug = org.slug.clone();
-        let pool = match pools.scoped_pool_dyn(&org).await {
-            Ok(p) => p,
+        let target = org.clone();
+        let result = match with_tenant(pools, &target, |pool| f(org, pool)).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(SweepError::Sweep(e)),
             Err(e) => {
                 tracing::warn!(
                     target: "rustango::tenancy::sweep",
@@ -175,13 +201,6 @@ where
                 });
                 continue;
             }
-        };
-
-        // The writes go to this tenant: a source bound to another
-        // tenant must not be stamped on its rows (#1229).
-        let result = match crate::audit::writing_to_tenant(slug.clone(), f(org, pool)).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(SweepError::Sweep(e)),
         };
         if let Err(SweepError::Sweep(ref e)) = result {
             // `E` has no `Display` bound, so log only the slug; the

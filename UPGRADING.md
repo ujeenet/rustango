@@ -154,6 +154,10 @@ untouched.
 
 `PgJobQueue::ensure_table_pool` adds a nullable `context` column (JSONB / JSON / TEXT). If you create the table in your own migration, add it there; until then jobs run as `system`, as before (#1229).
 
+### Tenant writes from a job
+
+A job dispatched from the tenant admin records its user only on writes made through `tenancy::with_tenant` for that tenant; a bare `scoped_pool_dyn` pool still records `system` (#2123).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

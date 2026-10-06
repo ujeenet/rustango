@@ -24,8 +24,8 @@
 //!
 //! A source set by the tenant admin (or `audit::with_tenant_source`) names a user of that tenant, so it
 //! is recorded only where writes are known to go there (a
-//! `for_each_tenant` pass over it); elsewhere, the registry included,
-//! it reads as `system`.
+//! `tenancy::with_tenant` or `for_each_tenant` pass over it); elsewhere,
+//! the registry included, it reads as `system`.
 //!
 //! ## Where it is carried
 //!

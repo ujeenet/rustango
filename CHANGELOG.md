@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The enqueuer's audit source and timezone are stored in a new `rustango_jobs.context` column and reinstalled around the run, as `InMemoryJobQueue` already did. The transaction still does not cross.
 
+### Fixed — a job writing to its own tenant keeps the tenant user (#2123)
+
+New `tenancy::with_tenant(&pools, &org, |pool| …)` runs one step of `for_each_tenant`, so a source set by the tenant admin is recorded on that tenant's writes instead of `system`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

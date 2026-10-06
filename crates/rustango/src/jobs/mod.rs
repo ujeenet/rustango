@@ -106,6 +106,9 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// which `PgJobQueue::ensure_table_pool` adds; without that column
     /// its jobs run as `System` in the default timezone.
     ///
+    /// A source set by the tenant admin is recorded only on writes to
+    /// its own tenant: write through `tenancy::with_tenant`.
+    ///
     /// **Neither queue carries a session or a tenant.** Anything else a
     /// job needs travels in its payload.
     async fn run(&self) -> Result<(), JobError>;

@@ -448,6 +448,17 @@ les réinstalle autour de l'exécution. `PgJobQueue` les stocke dans
 plus ancienne. Sans la colonne, les tâches tournent en `AuditSource::System`.
 Aucune file ne porte de session ni de tenant.
 
+Une source posée par l'admin du tenant nomme un utilisateur de ce tenant : elle
+n'est enregistrée que sur les écritures faites via `tenancy::with_tenant` (ou
+`for_each_tenant`) pour ce tenant. Les autres écritures enregistrent `system` :
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
+
 ---
 
 ## Les balayages planifiés en multi-tenancy
