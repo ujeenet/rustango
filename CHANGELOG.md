@@ -12,6 +12,10 @@ Create, bulk create and update return `409 conflict` on a unique or primary-key 
 
 Under `tenant_router` the throttle key includes the tenant, so one client no longer shares a budget across tenants.
 
+### Fixed — `server::AppBuilder::serve` catches handler panics (#2069)
+
+A panicking handler is a logged opaque `500`, as under `Cli` and `server::Builder`, not a dropped connection.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

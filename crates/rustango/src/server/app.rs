@@ -163,12 +163,18 @@ impl AppBuilder {
     /// `bind` failure, or the underlying `axum::serve` returning
     /// an error.
     pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let pool = Arc::new(self.pool);
-        let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
+        let app = self.into_app();
         let listener = tokio::net::TcpListener::bind(addr).await?;
         crate::shutdown::serve_until_drained(listener, app, crate::shutdown::DEFAULT_DRAIN_TIMEOUT)
             .await?;
         Ok(())
+    }
+
+    /// The router `serve` runs. A handler panic is a logged 500 (#2069).
+    fn into_app(self) -> Router {
+        let pool = Arc::new(self.pool);
+        let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
+        crate::panic_guard::catch_panics(app)
     }
 }
 
@@ -194,5 +200,31 @@ mod tests {
         let builder = AppBuilder::from_pool(pool);
         assert_eq!(builder.pool().backend_name(), "sqlite");
         assert!(builder.pool().as_sqlite().is_some());
+    }
+
+    /// #2069 — a panicking handler is an opaque 500, not a dropped connection.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_panicking_handler_is_a_500() {
+        use tower::ServiceExt as _;
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let api = Router::new().route(
+            "/boom",
+            axum::routing::get(|| async {
+                if std::hint::black_box(true) {
+                    panic!("boom-2069");
+                }
+                "unreachable"
+            }),
+        );
+        let app = AppBuilder::from_pool(pool).api(api).into_app();
+        let req = axum::http::Request::builder()
+            .uri("/boom")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
     }
 }
