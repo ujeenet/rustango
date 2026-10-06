@@ -154,6 +154,10 @@ untouched.
 
 A ViewSet write that hits a unique or primary-key constraint now answers `409` (`"error": "conflict"`), not `400`. Clients that matched on 400 must accept 409 (#2075).
 
+### `AppBuilder::serve` catches panics outside `api`
+
+A handler panic is now a 500, but layers on the `api` router (headers, request id) do not see it (#2069).
+
 ### ViewSet throttles run after tenant resolution
 
 Each tenant now has its own throttle budget; unknown tenants share one per client. `tenant_router` resolves the tenant through the mounted context auth uses, and takes no connection before the throttle (#2076).

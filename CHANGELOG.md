@@ -16,6 +16,10 @@ Under `tenant_router` the throttle key includes the tenant, so one client no lon
 
 A panicking handler is a logged opaque `500`, as under `Cli` and `server::Builder`, not a dropped connection.
 
+### Fixed — ViewSet `tenant_router` works on every backend and pins no connection (#2163)
+
+It resolves the tenant through the mounted context auth uses, not `Tenant<DefaultTenantDb>`, and holds no PG connection the handler never used.
+
 ### Tests — `server::Builder` panic catch with observability off (#2105)
 
 A test now covers the opaque 500 with no observability or security headers.

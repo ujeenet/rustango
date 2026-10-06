@@ -159,6 +159,9 @@ impl AppBuilder {
     /// request so handlers can run ORM calls without a stateful
     /// router.
     ///
+    /// A handler panic is a logged 500, caught outside `api`: layers you
+    /// put on `api` (headers, request id) do not see that 500.
+    ///
     /// # Errors
     /// `bind` failure, or the underlying `axum::serve` returning
     /// an error.
