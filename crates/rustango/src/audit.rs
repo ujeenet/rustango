@@ -22,6 +22,9 @@
 //! Per-row writes record before/after values for every field named in the
 //! model's `audit(track = "...")`. Bulk writes collect their entries and
 //! insert them in multi-row statements sized to the bind limit.
+//!
+//! Rows the database removes or changes through an FK `ON DELETE`
+//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited.
 
 use serde_json::{Map, Value};
 

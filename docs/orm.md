@@ -1615,6 +1615,8 @@ with_source(
 
 The admin's per-row history panel reads from this table; the cross-model feed is at `/__audit`.
 
+Rows the database deletes or changes through an FK `on_delete` action (`cascade`, `set_null`, `set_default`) are not audited, and neither are the child tables PostgreSQL's `Model::truncate` empties with `CASCADE`. Delete such children yourself first if they need audit rows.
+
 Cleanup:
 
 ```rust
