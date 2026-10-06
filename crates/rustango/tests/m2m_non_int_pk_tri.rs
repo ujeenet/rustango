@@ -218,10 +218,10 @@ async fn too_long_key_is_an_error(pool: &Pool) {
         long.tags_m2m().add(1, pool).await.is_err(),
         "add accepted it"
     );
-    assert!(
-        long.tags_m2m().set(&[1], pool).await.is_err(),
-        "set accepted it"
-    );
+    // Refused before any statement runs, so no DELETE goes out (#2152).
+    let tags = long.tags_m2m();
+    let res = rustango::test_assertions::assert_num_queries(0, tags.set(&[1], pool)).await;
+    assert!(res.is_err(), "set accepted it");
     assert_eq!(PostTag::objects().count(pool).await.expect("count"), 0);
 }
 

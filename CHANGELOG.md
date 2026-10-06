@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — M2M managers go through the ORM (#2136)
 
-`M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. A key outside the through model's bounds is now refused on SQLite too, and `set` splits a list past the bind limit.
+`M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. `add` and `set` run the through model's full `validate()` on every backend, and `set` splits a list past the bind limit. A skipped MySQL `add` now sets the connection's `LAST_INSERT_ID()`.
 
 ### Removed — `#[rustango(manager(ext = ...))]` (#2132)
 
