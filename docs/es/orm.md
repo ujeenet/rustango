@@ -28,7 +28,6 @@ Las versiones recientes añadieron un lote de características que aún no está
 - **Tipos de campo** — `rust_decimal::Decimal` (nativo en PG/MySQL, en SQLite vía shim de Decode), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) ahora aceptados por `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valida sin escribir de inmediato. Valida ahora, muta el conjunto de escritura preparado, confirma cuando estés listo.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — restricciones únicas parciales. "Email único por fila no eliminada" / "Slug único por tenant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — emite un trait marcador vacío junto al modelo. No añade métodos: pon tus atajos de consulta en tu propio trait de extensión sobre `QuerySet<Foo>`, como muestra `crates/rustango/src/manager.rs`.
 - **`manage makemigrations --merge`** (#346, v0.42) — nodo de fusión para cadenas de ramas divergentes. Ver [`docs/manage.md`](manage.md#makemigrations---merge).
 
 El CHANGELOG contiene el índice completo de tickets de cada versión.

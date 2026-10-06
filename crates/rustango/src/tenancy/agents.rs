@@ -1071,9 +1071,9 @@ pub async fn agent_owner_is_active_pool(pool: &Pool, user_id: i64) -> Result<boo
 /// that revoking / deactivating a key takes effect immediately instead of
 /// lingering until the token expires.
 ///
-/// Returns `false` (reject) when the agent row is absent or `active == false`,
-/// and — for a user-owned key (`user_id.is_some()`) — when the owning user is
-/// missing or `active == false`. One cheap lookup per request.
+/// Returns `false` (reject) when the agent row is absent, inactive, owned by
+/// another user, or its secret was rotated since `secret_prefix` (#1962), and
+/// — for a user-owned key — when the owning user is missing or inactive.
 ///
 /// # Errors
 /// Propagates DB errors.
@@ -1081,11 +1081,12 @@ pub async fn agent_token_still_valid_pool(
     pool: &Pool,
     agent_id: i64,
     user_id: Option<i64>,
+    secret_prefix: &str,
 ) -> Result<bool, AgentError> {
     let Some(agent) = agent_auth_state_pool(pool, agent_id).await? else {
         return Ok(false);
     };
-    if !agent.active {
+    if !agent.active || agent.user_id != user_id || agent.secret_prefix != secret_prefix {
         return Ok(false);
     }
 

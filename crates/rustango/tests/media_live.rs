@@ -375,7 +375,7 @@ async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
           WHERE id = ANY($1)",
     )
     .bind(&ids)
-    .execute(manager.pool())
+    .execute(manager.pool().as_postgres().unwrap())
     .await
     .expect("backdate");
 
@@ -416,7 +416,7 @@ async fn purge_pending_clears_abandoned_uploads() {
           WHERE id = $1",
     )
     .bind(ticket.media_id)
-    .execute(manager.pool())
+    .execute(manager.pool().as_postgres().unwrap())
     .await
     .expect("backdate");
 

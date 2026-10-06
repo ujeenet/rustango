@@ -138,25 +138,11 @@ impl AllowedHostsLayer {
         if self.patterns.is_empty() {
             return true;
         }
-        let host = strip_port(host).to_ascii_lowercase();
+        let Some((host, _)) = crate::urls::split_host_port(host) else {
+            return false;
+        };
+        let host = host.to_ascii_lowercase();
         self.patterns.iter().any(|p| p.matches(&host))
-    }
-}
-
-/// Drop a trailing `:<port>` so the allowlist compares host names
-/// only. Returns the input unchanged when there is no port. Handles
-/// bracketed IPv6 literals.
-fn strip_port(host: &str) -> &str {
-    if let Some(rest) = host.strip_prefix('[') {
-        // IPv6 literal: `[::1]:8080` → cut at the closing bracket.
-        if let Some(end) = rest.find(']') {
-            return &host[..end + 2.min(host.len())];
-        }
-        return host;
-    }
-    match host.rfind(':') {
-        Some(i) => &host[..i],
-        None => host,
     }
 }
 
@@ -245,6 +231,21 @@ mod tests {
     fn ipv6_with_port_is_handled() {
         let layer = AllowedHostsLayer::new(["[::1]"]);
         assert!(layer.permits("[::1]:8080"));
+    }
+
+    /// A non-digit port is refused, not cut to its first host (#2043).
+    #[test]
+    fn a_port_is_digits_only() {
+        let layer = AllowedHostsLayer::new(["good.com", "[::1]", "*"]);
+        assert!(layer.permits("good.com:80"));
+        assert!(layer.permits("[::1]:8080"));
+        for bad in [
+            "good.com:1@evil.com:2",
+            "good.com:@evil.com",
+            "[::1]:@evil.com",
+        ] {
+            assert!(!layer.permits(bad), "{bad}");
+        }
     }
 
     #[test]

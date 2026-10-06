@@ -103,6 +103,7 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
 
     // UPGRADING's repair: drop the constraint, re-run `seed-permissions --slug`.
     let fks = [
+        ("rustango_api_keys", "user_id"),
         ("rustango_role_permissions", "role_id"),
         ("rustango_user_roles", "user_id"),
         ("rustango_user_roles", "role_id"),

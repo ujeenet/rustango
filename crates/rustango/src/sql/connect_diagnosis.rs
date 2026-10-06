@@ -236,32 +236,34 @@ fn classify_db(db: &dyn sqlx::error::DatabaseError) -> ConnectFault {
 #[must_use]
 pub fn redact(url: &str) -> String {
     let url = redact_userinfo(url);
-    // sqlx also reads `password=` from the query; mask it after the
-    // userinfo pass so a `?` in the password cannot start the query.
-    let Some((base, query)) = url.split_once('?') else {
-        return url;
-    };
-    let query: Vec<String> = query
-        .split('&')
-        .map(|chunk| match chunk.split_once('=') {
-            Some((k, _)) if crate::url_codec::url_decode(k) == "password" => format!("{k}=***"),
-            _ => chunk.to_owned(),
+    // sqlx also reads `password=` from the query. Every `?`/`&` chunk is
+    // checked, so it is masked even if the userinfo pass ate the `?`.
+    url.split_inclusive(['?', '&'])
+        .map(|piece| {
+            let chunk = piece.trim_end_matches(['?', '&']);
+            let delim = &piece[chunk.len()..];
+            match chunk.split_once('=') {
+                Some((k, _)) if crate::url_codec::url_decode(k) == "password" => {
+                    format!("{k}=***{delim}")
+                }
+                _ => piece.to_owned(),
+            }
         })
-        .collect();
-    format!("{base}?{}", query.join("&"))
+        .collect()
 }
 
 fn redact_userinfo(url: &str) -> String {
-    // `scheme://user:password@host:port/db?params`. Only the segment
-    // between the last `:` of the userinfo and the `@` is secret, and
-    // userinfo is whatever precedes the *first* `@` after `://`.
+    // `scheme://user:password@host:port/db?params`. Userinfo runs to the last
+    // `@` before any `?`/`#`: a password may hold a raw `@` or `/` (#2109).
     let Some((scheme, rest)) = url.split_once("://") else {
         // `sqlite:path` and friends carry no credentials.
         return url.to_owned();
     };
-    let Some((userinfo, hostpart)) = rest.split_once('@') else {
+    let authority = rest.split(['?', '#']).next().unwrap_or(rest);
+    let Some(at) = authority.rfind('@') else {
         return url.to_owned();
     };
+    let (userinfo, hostpart) = (&rest[..at], &rest[at + 1..]);
     let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
     if userinfo.contains(':') {
         format!("{scheme}://{user}:***@{hostpart}")
@@ -317,11 +319,37 @@ mod tests {
     /// separator in a way that leaks the rest of it.
     #[test]
     fn redact_handles_an_at_sign_in_the_password() {
-        // Split on the FIRST `@`: everything after it is host-ish, and
-        // the tail of a password containing `@` would otherwise survive.
-        let out = redact("mysql://root:p@ss@127.0.0.1:3306/app");
-        assert!(!out.contains("p@ss"), "password leaked: {out}");
-        assert!(out.starts_with("mysql://root:***@"), "{out}");
+        assert_eq!(
+            redact("mysql://root:p@ss@127.0.0.1:3306/app"),
+            "mysql://root:***@127.0.0.1:3306/app"
+        );
+        assert_eq!(
+            redact("postgres://u:a@b@c@db/acme?application_name=x@y"),
+            "postgres://u:***@db/acme?application_name=x@y"
+        );
+    }
+
+    /// An `@` after the path is not userinfo; it must not hide a `password=`.
+    #[test]
+    fn redact_ignores_an_at_sign_in_the_query() {
+        assert_eq!(
+            redact("postgres://db:5432/app?user=a@b&password=s3cret"),
+            "postgres://db:5432/app?user=a@b&password=***"
+        );
+        let out = redact("postgres://db:5432?user=a@b&password=s3cret");
+        assert!(!out.contains("s3cret"), "{out}");
+    }
+
+    #[test]
+    fn redact_handles_a_slash_in_the_password() {
+        assert_eq!(
+            redact("postgres://u:pa/ss@host/db"),
+            "postgres://u:***@host/db"
+        );
+        assert_eq!(
+            redact("postgres://u:p@ss@host/db"),
+            "postgres://u:***@host/db"
+        );
     }
 
     #[test]

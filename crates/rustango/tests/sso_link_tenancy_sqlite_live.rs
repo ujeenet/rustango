@@ -607,6 +607,56 @@ async fn a_link_in_one_tenant_does_not_sign_into_another() {
     );
 }
 
+/// #1992 — a flow begun for one tenant's provider is refused at another
+/// provider's or tenant's callback.
+#[tokio::test]
+async fn a_flow_completes_only_where_it_began() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    for t in 0..2 {
+        env.user_in(t, "ann", "ann@example.com", false).await;
+        env.provider_in(t, "corp", true).await;
+        env.provider_in(t, "other", true).await;
+    }
+    env.idp.assert("sub-ann", "ann@example.com");
+    let begin = send(
+        &env.admin,
+        Request::builder()
+            .uri("/__login/sso/corp")
+            .header(header::HOST, &env.tenants[0].host)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    let state = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("state="))
+        .unwrap()
+        .to_owned();
+    let flow = set_cookies(&begin).join("; ");
+    for (host, slug) in [
+        (&env.tenants[0].host, "other"),
+        (&env.tenants[1].host, "corp"),
+    ] {
+        let resp = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("/__login/sso/{slug}/callback?code=c&state={state}"))
+                .header(header::HOST, host)
+                .header(header::COOKIE, &flow)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            location(&resp).ends_with("sso_error=expired"),
+            "{host} {slug}: {}",
+            location(&resp)
+        );
+    }
+}
+
 #[tokio::test]
 async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
     let _g = SUITE.lock().await;
@@ -1116,6 +1166,76 @@ async fn member_callback_signs_in_by_link_only() {
     assert_ne!(new, ann);
     env.deactivate(new).await;
     assert!(!member("sub-new", "new@example.com").await, "inactive");
+}
+
+/// #2145 — a path-prefix tenant's member SSO runs under its prefix, and
+/// the IdP is sent back there.
+#[tokio::test]
+async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    use rustango::tenancy::{PathPrefixResolver, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let registry = env._pools.registry_pool();
+    let mut org = Org::objects()
+        .filter("slug", "acme")
+        .fetch(&registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&registry).await.unwrap();
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(PathPrefixResolver),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx));
+    let begin = send(
+        &app,
+        Request::builder()
+            .uri("/acme/auth/sso/corp")
+            .header(header::HOST, "app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    assert!(
+        to.contains("redirect_uri=https%3A%2F%2Fapp.test%2Facme%2Fauth%2Fsso%2Fcorp%2Fcallback"),
+        "callback must keep the prefix: {to}"
+    );
+    env.idp.assert("sub-p", "p@example.com");
+    let resp = handshake(&app, "app.test", "/acme/auth", "corp").await;
+    assert!(
+        set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "signed in under the prefix: {:?}",
+        location(&resp)
+    );
+    assert_eq!(location(&resp), "/acme/", "lands under the prefix");
+    let denied = send(
+        &app,
+        Request::builder()
+            .uri("/acme/auth/sso/corp/callback?error=denied")
+            .header(header::HOST, "app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains("href=\"/acme/auth\""),
+        "back link keeps the prefix: {body}"
+    );
 }
 
 // ---- upgrade: a framework column lives only in the system chain ----------

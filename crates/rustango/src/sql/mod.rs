@@ -51,7 +51,8 @@ pub use hstore::HStore;
 pub use range::Range;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-pub(crate) use executor::inserted_pk;
+#[cfg(feature = "postgres")]
+pub(crate) use executor::insert_returning_on;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;
@@ -74,6 +75,7 @@ pub use executor::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
     UpdaterPool,
 };
+pub(crate) use executor::{bulk_insert_pks_tx, inserted_pk};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted
@@ -94,11 +96,8 @@ pub use executor::row_to_json;
 /// Nine in-tree tests, the `cookbook_blog` example — both its request
 /// handlers and its chapter-3 test — and **rustango's own library**
 /// imported them anyway, because there was no other way to run an
-/// aggregate or a prefetch against a specific connection. A
-/// prohibition the framework itself violates is not a prohibition:
-/// `tenancy::permissions` still calls `__macro_internals::delete_on`
-/// today, and the guard in `macro_internals_stays_internal` walks only
-/// `tests/` and `examples/`, so it cannot see it (#1519, #1516).
+/// aggregate or a prefetch against a specific connection. The guard in
+/// `macro_internals_stays_internal` now walks `src/` as well (#1516).
 ///
 /// The macro never emits `fetch_aggregate_on` or
 /// `annotate_count_children{,_on}`. Audited `save_on` calls

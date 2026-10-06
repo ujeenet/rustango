@@ -1304,8 +1304,7 @@ async fn provision_schema<DB: Database>(
             .downcast_ref::<TenantPools<sqlx::Postgres>>()
             .ok_or_else(|| {
                 TenancyError::Validation(
-                    "schema-mode tenants require a Postgres registry — pass --mode database \
-                     on sqlite/mysql"
+                    "schema mode needs a Postgres registry — choose the database storage mode"
                         .into(),
                 )
             })?;
@@ -1324,9 +1323,7 @@ async fn provision_schema<DB: Database>(
     {
         let _ = (pools, schema);
         Err(TenancyError::Validation(
-            "schema-mode tenants require the `postgres` feature — pass --mode database \
-             on sqlite/mysql builds"
-                .into(),
+            "schema mode is not available on this server — choose the database storage mode".into(),
         ))
     }
 }

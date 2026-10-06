@@ -1560,6 +1560,70 @@ pub async fn insert_returning_tx(
     )
 }
 
+/// Run `query` in `tx` with `RETURNING <pk>`, in bind-sized batches, and
+/// give back the PK of every row it wrote. PG and SQLite only.
+///
+/// # Errors
+/// As [`bulk_insert_pool`]; [`ExecError::AuditUnsupported`] on MySQL.
+pub(crate) async fn bulk_insert_pks_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let pk = query
+        .model
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    let mut pks = Vec::with_capacity(query.rows.len());
+    for chunk in query.rows.chunks(max_rows) {
+        let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), chunk.to_vec())
+            .returning(vec![pk.column]);
+        batch.on_conflict.clone_from(&query.on_conflict);
+        batch.validate()?;
+        crate::test_assertions::query_counter::bump();
+        let rows: Result<Vec<InsertReturningPool>, ExecError> = match tx {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(t) => {
+                let stmt = Postgres.compile_bulk_insert(&batch)?;
+                Ok(stmt
+                    .params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::PgRow)
+                    .collect())
+            }
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(_) => Err(ExecError::AuditUnsupported {
+                table: query.model.table,
+                reason: "MySQL has no RETURNING to read the written rows",
+            }),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(t) => {
+                let stmt = super::sqlite::DIALECT.compile_bulk_insert(&batch)?;
+                Ok(stmt
+                    .params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::SqliteRow)
+                    .collect())
+            }
+        };
+        let rows = rows?;
+        for row in &rows {
+            pks.push(generated_pk(row, pk, query.model.table)?);
+        }
+    }
+    Ok(pks)
+}
+
 /// `UPDATE` inside an open transaction; returns rows affected.
 ///
 /// # Errors
@@ -1577,6 +1641,27 @@ pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, 
 pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
     let stmt = tx.dialect().compile_delete(query)?;
     execute_tx(tx, &stmt.sql, stmt.params).await
+}
+
+/// Validated multi-row `INSERT` inside an open transaction, split to fit
+/// the backend's bind-parameter limit like [`bulk_insert_pool`].
+pub(crate) async fn bulk_insert_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<(), ExecError> {
+    query.validate()?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    for chunk in query.rows.chunks(max_rows) {
+        let stmt = tx.dialect().compile_bulk_insert(&BulkInsertQuery {
+            model: query.model,
+            columns: query.columns.clone(),
+            rows: chunk.to_vec(),
+            returning: query.returning.clone(),
+            on_conflict: query.on_conflict.clone(),
+        })?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(())
 }
 
 /// `SELECT` inside an open transaction, with optional `select_related`
@@ -1922,7 +2007,6 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::fetch_flat_raw;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,

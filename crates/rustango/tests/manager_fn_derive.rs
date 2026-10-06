@@ -16,7 +16,6 @@ use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "mfn_post")]
-#[rustango(manager(ext = "PostManagerExt"))]
 #[rustango(manager_fn = "active")]
 #[rustango(manager_fn = "archived")]
 #[allow(dead_code)]

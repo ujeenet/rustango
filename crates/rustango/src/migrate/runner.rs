@@ -237,7 +237,7 @@ fn validate_ledger_name(name: &str) {
 /// `relation already exists` or PK violation on the ledger INSERT.
 ///
 /// "RUSTMIGT" in ASCII hex.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "postgres")]
 const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
 
 /// Collect every registered model's schema into a `Vec`. Order is the
@@ -852,32 +852,15 @@ fn preview_migration(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, dialect, None)?;
-                // The runner looks these names up live; a migrate-built FK has this one.
-                if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-                    let has_fk = before
-                        .table(&fk.table)
-                        .and_then(|t| t.field(&fk.column))
-                        .is_some_and(|f| f.fk.is_some());
-                    if has_fk {
-                        let name = ddl::fk_constraint_name(&fk.table, &fk.column);
-                        statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
-                    }
-                }
-                // Apply drops the name it finds in the catalog; this is the usual one.
-                if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
-                    let name = ddl::unique_constraint_name(&u.table, &u.column);
-                    statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
-                }
-                statements.extend(step.batch.immediate);
-                if let Some(rebuild) = &step.batch.rebuild {
-                    statements.extend(rebuild.statements(dialect));
-                    statements.push(format!(
-                        "-- re-create the indexes and triggers of {}",
-                        rebuild.table()
-                    ));
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
+                let deferred = preview_schema_op(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    before,
+                    dialect,
+                    &mut statements,
+                )?;
+                deferred_fks.extend(deferred);
             }
             Operation::Data(d) => {
                 statements.push(d.sql.clone());
@@ -907,6 +890,74 @@ fn preview_migration(
         atomic: mig.atomic,
         statements,
     })
+}
+
+/// Render `change`, one of `ops`, as a preview: push its statements to
+/// `statements` and return its deferred FKs. `before` is the schema `ops`
+/// start from, for the FKs a MySQL column drop removes.
+fn preview_schema_op(
+    change: &super::SchemaChange,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+    before: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    statements: &mut Vec<String>,
+) -> Result<Vec<String>, MigrateError> {
+    let step = render_step(change, ops, after, dialect, None)?;
+    // The runner looks these names up live; a migrate-built FK has this one.
+    if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
+        let has_fk = before
+            .table(&fk.table)
+            .and_then(|t| t.field(&fk.column))
+            .is_some_and(|f| f.fk.is_some());
+        if has_fk {
+            let name = ddl::fk_constraint_name(&fk.table, &fk.column);
+            statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
+        }
+    }
+    // Apply drops the name it finds in the catalog; this is the usual one.
+    if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
+        let name = ddl::unique_constraint_name(&u.table, &u.column);
+        statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+    }
+    statements.extend(step.batch.immediate);
+    if let Some(rebuild) = &step.batch.rebuild {
+        statements.extend(rebuild.statements(dialect));
+        statements.push(format!(
+            "-- re-create the indexes and triggers of {}",
+            rebuild.table()
+        ));
+    }
+    Ok(step.batch.deferred_fks)
+}
+
+/// The DDL that moves `before` to `after` by `changes` on `dialect`, as
+/// `sqlmigrate` prints it: a MySQL column drop drops its FK first (#2026).
+///
+/// # Errors
+/// A change the dialect cannot render.
+pub fn render_changes_between(
+    changes: &[super::SchemaChange],
+    before: &SchemaSnapshot,
+    after: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Vec<String>, MigrateError> {
+    let ops: Vec<Operation> = changes.iter().cloned().map(Operation::Schema).collect();
+    let (mut statements, mut deferred) = (Vec::new(), Vec::new());
+    for op in &ops {
+        if let Operation::Schema(change) = op {
+            deferred.extend(preview_schema_op(
+                change,
+                &ops,
+                after,
+                before,
+                dialect,
+                &mut statements,
+            )?);
+        }
+    }
+    statements.extend(deferred);
+    Ok(statements)
 }
 
 #[cfg(feature = "postgres")]
@@ -2476,10 +2527,9 @@ async fn fake_apply_pool(
 /// - **Postgres** — `pg_advisory_lock($1)` takes an `i64`; we bind
 ///   [`MIGRATE_LOCK_KEY`] (the same key the legacy PgPool runner
 ///   uses, so the two paths coordinate).
-/// - **MySQL** — `GET_LOCK(?, -1)` takes a `VARCHAR` lock name; we
-///   bind `format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY)` so
-///   the name is stable, deterministic, and namespaced (MySQL
-///   `GET_LOCK` is global to the server, not scoped per database).
+/// - **MySQL** — `GET_LOCK` names are server-wide, so the dialect
+///   appends a hash of `DATABASE()` to the bound `rustango_migrate_`
+///   prefix: one lock per database, like PG advisory locks.
 ///
 /// The lock is acquired on a checked-out connection and held until
 /// `body` returns; release happens on the same connection so MySQL's
@@ -2592,12 +2642,12 @@ where
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            let name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
+            const NAME: &str = "rustango_migrate_";
             let mut held = LockSession::wait(my, |conn| {
-                let (sql, name) = (acquire.clone(), name.clone());
+                let sql = acquire.clone();
                 Box::pin(async move {
                     let got: Option<i64> = sqlx::query_scalar(&sql)
-                        .bind(name)
+                        .bind(NAME)
                         .fetch_one(&mut **conn)
                         .await?;
                     mysql_lock_taken(got)
@@ -2606,7 +2656,7 @@ where
             .await?;
             let result = body.await;
             let _ = sqlx::query(&release)
-                .bind(&name)
+                .bind(NAME)
                 .execute(&mut **held.conn())
                 .await;
             result
@@ -2776,19 +2826,9 @@ fn render_step(
         .map_or(&[][..], |i| &ops[i + 1..]);
     // A rebuild takes the table's shape at this op, not at the end (#2121).
     let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
-        Some(table) if later.iter().any(|op| touches_table(op, table)) => {
-            let mut at = after.clone();
-            let shape =
-                super::rebuild::shape_at(table, later, after).map_err(MigrateError::Validation)?;
-            at.tables.retain(|t| t.name != table);
-            at.tables.push(shape);
-            at.checks.retain(|c| {
-                !later.iter().any(|op| {
-                    matches!(op, Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
-                })
-            });
-            Some(at)
-        }
+        Some(table) if later.iter().any(|op| touches_table(op, table)) => Some(
+            super::rebuild::snapshot_at(table, later, after).map_err(MigrateError::Validation)?,
+        ),
         _ => None,
     };
     let mut batch = render(at.as_ref().unwrap_or(after)).map_err(MigrateError::Validation)?;
@@ -3093,34 +3133,14 @@ async fn apply_atomic_pool(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            // ⚠ MySQL atomic migrations have a caveat that PG / SQLite
-            // don't: MySQL silently auto-COMMITs the current
-            // transaction on every DDL statement (CREATE TABLE,
-            // ALTER TABLE, DROP TABLE, CREATE INDEX, etc. — the
-            // "implicit commit before/after statement" list in
-            // https://dev.mysql.com/doc/refman/8.0/en/implicit-commit.html).
-            // The first DDL statement commits the BEGIN below and later
-            // operations run in autocommit, so the transaction only
-            // protects data operations before the first DDL (#2151).
-            //
-            // In practice this means: if a migration has 5 DDL ops and
-            // op #3 fails, ops #1+#2 are already committed and can't be
-            // rolled back. The migration ends up half-applied; operators
-            // have to manually un-do the partially-applied DDL OR fix
-            // the migration to be re-runnable from where it failed.
-            //
-            // This is a MySQL engine limitation, not a rustango bug:
-            // MySQL does not roll back DDL. Tracked in #559.
-            // The runner emits a `tracing::warn!` so operators see
-            // the caveat in logs when they invoke `atomic: true` on
-            // MySQL.
+            // MySQL commits implicitly on every DDL statement and does not
+            // roll DDL back (#559). The BEGIN below covers only data ops
+            // before the first DDL; every op after it runs in autocommit (#1660).
             tracing::warn!(
                 migration = %mig.name,
-                "MySQL silently auto-commits on every DDL statement (CREATE/ALTER/DROP/INDEX); \
-                 the atomic-migration wrapper only protects data operations before \
-                 the first DDL. A failure after it leaves the migration partially applied \
-                 and requires manual recovery. See migrate/runner.rs::apply_atomic_pool for \
-                 details. Tracked in #559."
+                "MySQL commits on every DDL statement: the atomic wrapper only covers \
+                 data operations before the first DDL. A failure after it leaves the \
+                 migration partially applied and needs manual recovery (#559)."
             );
             let mut tx = my.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
@@ -3658,15 +3678,12 @@ async fn unapply_atomic_pool(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            // MySQL: implicit-commit on every DDL statement defeats the
-            // atomic-rollback wrapper here too. A failure mid-unapply
-            // leaves the schema half-reverted. See `apply_atomic_pool`'s
-            // MySQL arm for the full caveat doc. Tracked in #559.
+            // As in `apply_atomic_pool`: only ops before the first DDL are in the tx.
             tracing::warn!(
                 migration = %target.name,
-                "MySQL silently auto-commits on every DDL statement; the atomic-unapply \
-                 wrapper only protects RunSQL/RunPython between DDL ops. A failure mid-unapply \
-                 leaves the schema half-reverted and requires manual recovery."
+                "MySQL commits on every DDL statement: the atomic-unapply wrapper only \
+                 covers data operations before the first DDL. A failure after it leaves \
+                 the schema half-reverted and needs manual recovery (#559)."
             );
             let mut tx = my.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
@@ -3828,5 +3845,38 @@ mod tests {
         assert!(super::mysql_lock_taken(Some(1)).unwrap());
         assert!(!super::mysql_lock_taken(Some(0)).unwrap());
         assert!(super::mysql_lock_taken(None).is_err());
+    }
+
+    /// #2026 — MySQL refuses to drop an FK column (1828); its FK goes first.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn render_between_drops_the_fk_before_its_column() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let table = |with_fk: bool| {
+            let mut fields = vec![
+                serde_json::json!({ "name": "id", "column": "id", "ty": "i64",
+                "nullable": false, "primary_key": true }),
+            ];
+            if with_fk {
+                fields.push(
+                    serde_json::json!({ "name": "p", "column": "p_id", "ty": "i64",
+                    "nullable": true, "primary_key": false,
+                    "fk": { "kind": "fk", "to": "parent", "on": "id" } }),
+                );
+            }
+            serde_json::json!({ "name": "child", "model": "Child", "fields": fields })
+        };
+        let snap = |with_fk: bool| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [table(with_fk)] })).unwrap()
+        };
+        let drop = [SchemaChange::DropColumn {
+            table: "child".into(),
+            column: "p_id".into(),
+        }];
+        let out =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
+                .unwrap();
+        assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[1].contains("DROP COLUMN `p_id`"), "{out:?}");
     }
 }

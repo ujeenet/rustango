@@ -41,6 +41,8 @@ pub const CLAIM_SKILLS: &str = "skills";
 pub const CLAIM_TOOLS: &str = "tools";
 /// Claim naming the user who owns the key. A machine agent has none.
 pub const CLAIM_UID: &str = "uid";
+/// Claim naming the credential the token was minted from; a rotation ends it.
+pub const CLAIM_KEY_PREFIX: &str = "key_prefix";
 
 /// A verified agent, read out of a tenant-pinned access token.
 #[derive(Debug, Clone)]
@@ -58,6 +60,8 @@ pub struct McpAgent {
     pub user_id: Option<i64>,
     /// The token id, which is what revocation acts on.
     pub jti: String,
+    /// The public prefix of the credential this agent signed in with.
+    pub secret_prefix: String,
 }
 
 /// Issue a short-lived access token for `agent_id`, pinned to
@@ -73,9 +77,11 @@ pub fn issue_agent_token(
     skills: &[String],
     tools: &[String],
     user_id: Option<i64>,
+    secret_prefix: &str,
 ) -> Result<String, JwtIssueError> {
     let mut custom = serde_json::Map::new();
     custom.insert(CLAIM_KIND.into(), json!(KIND_AGENT));
+    custom.insert(CLAIM_KEY_PREFIX.into(), json!(secret_prefix));
     custom.insert(CLAIM_TENANT.into(), json!(tenant));
     custom.insert(CLAIM_SKILLS.into(), json!(skills));
     custom.insert(CLAIM_TOOLS.into(), json!(tools));
@@ -92,6 +98,9 @@ pub fn issue_agent_token(
 ///
 /// It is async because the revocation check may read a durable
 /// [`crate::jti_store::JtiStore`].
+///
+/// Skills and tools are as at mint time, and the secret is not checked for
+/// rotation; the live path re-checks both via [`crate::tenancy::agent_token_still_valid_pool`].
 #[must_use]
 pub async fn verify_agent_token(
     jwt: &JwtLifecycle,
@@ -106,6 +115,8 @@ pub async fn verify_agent_token(
     if tenant != expected_tenant {
         return None;
     }
+    // A token from before the claim existed cannot be checked for rotation.
+    let secret_prefix = claims.get_custom::<String>(CLAIM_KEY_PREFIX)?;
     Some(McpAgent {
         agent_id: claims.sub,
         tenant,
@@ -117,6 +128,7 @@ pub async fn verify_agent_token(
             .unwrap_or_default(),
         user_id: claims.get_custom::<i64>(CLAIM_UID),
         jti: claims.jti,
+        secret_prefix,
     })
 }
 
@@ -185,11 +197,19 @@ pub(crate) async fn mint_agent_jwt(
         tracing::warn!(error = %e, "mcp grant resolution failed");
         MintError::Internal
     })?;
-    let token =
-        issue_agent_token(jwt, agent_id, slug, &skills, &tools, agent.user_id).map_err(|e| {
-            tracing::error!(error = %e, "mcp token issuance failed");
-            MintError::Internal
-        })?;
+    let token = issue_agent_token(
+        jwt,
+        agent_id,
+        slug,
+        &skills,
+        &tools,
+        agent.user_id,
+        &agent.secret_prefix,
+    )
+    .map_err(|e| {
+        tracing::error!(error = %e, "mcp token issuance failed");
+        MintError::Internal
+    })?;
     Ok(MintedToken {
         token,
         expires_in: jwt.access_ttl_secs,
@@ -304,21 +324,36 @@ pub(crate) async fn authenticate_bearer(
     token: &str,
 ) -> Result<McpAgent, BearerRejection> {
     match verify_agent_token(jwt, token, slug).await {
-        Some(agent) => {
+        Some(mut agent) => {
             // The JWT holds no state, so check here that the agent,
             // and the owner of a user-owned key, still exist and are
-            // active. A revoked key is then refused at once instead
-            // of working until it expires.
-            match crate::tenancy::agent_token_still_valid_pool(pool, agent.agent_id, agent.user_id)
-                .await
+            // active, and that its secret was not rotated. A revoked
+            // key is then refused at once instead of working until it
+            // expires.
+            match crate::tenancy::agent_token_still_valid_pool(
+                pool,
+                agent.agent_id,
+                agent.user_id,
+                &agent.secret_prefix,
+            )
+            .await
             {
-                Ok(true) => Ok(agent),
-                Ok(false) => Err(BearerRejection::Unauthorized),
+                Ok(true) => {}
+                Ok(false) => return Err(BearerRejection::Unauthorized),
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp agent liveness re-check failed");
-                    Err(BearerRejection::CheckFailed)
+                    return Err(BearerRejection::CheckFailed);
                 }
             }
+            // Grants come from the rows, not the claims, as on the raw-key path (#1962).
+            let grants = match agent.user_id {
+                Some(uid) => {
+                    crate::tenancy::resolve_user_agent_grants_pool(pool, agent.agent_id, uid).await
+                }
+                None => crate::tenancy::resolve_agent_grants_pool(pool, agent.agent_id).await,
+            };
+            (agent.skills, agent.tools) = grants?;
+            Ok(agent)
         }
         None => match verify_raw_agent_credential(pool, slug, token).await {
             Ok(Some(agent)) => Ok(agent),
@@ -482,6 +517,7 @@ pub async fn verify_raw_agent_credential(
         tools,
         user_id,
         jti: format!("raw:{agent_id}"),
+        secret_prefix: state.secret_prefix,
     }))
 }
 
@@ -666,6 +702,43 @@ mod tests {
     use super::*;
     use axum::http::Uri;
 
+    /// #1962 — a minted JWT ends at a secret rotation, and its grants
+    /// follow the rows, not the claims.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_jwt_ends_at_rotation_and_reads_live_grants() {
+        use crate::tenancy::{
+            create_agent_pool, create_skill_pool, grant_skill_pool, revoke_skill_pool,
+            rotate_agent_secret_pool,
+        };
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        create_skill_pool(&pool, "editor", "Editor", "", "", &["edit".into()])
+            .await
+            .unwrap();
+        let bot = create_agent_pool(&pool, "bot").await.unwrap();
+        grant_skill_pool(&pool, "acme", "bot", "editor")
+            .await
+            .unwrap();
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let Ok(minted) = mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token).await else {
+            panic!("mint");
+        };
+        let tools = || async {
+            authenticate_bearer(&jwt, &pool, "acme", &minted.token)
+                .await
+                .ok()
+                .map(|a| a.tools)
+        };
+        assert_eq!(tools().await, Some(vec!["edit".to_owned()]));
+        revoke_skill_pool(&pool, "acme", "bot", "editor")
+            .await
+            .unwrap();
+        assert_eq!(tools().await, Some(vec![]), "a revoked skill ends at once");
+        rotate_agent_secret_pool(&pool, "bot").await.unwrap();
+        assert_eq!(tools().await, None, "a rotation ends the JWT");
+    }
+
     #[tokio::test]
     async fn token_round_trips_the_owning_user_id() {
         use crate::tenancy::jwt_lifecycle::JwtLifecycle;
@@ -679,6 +752,7 @@ mod tests {
             &["coach".into()],
             &["log".into()],
             Some(99),
+            "abcd1234",
         )
         .expect("issue");
         let agent = verify_agent_token(&jwt, &token, "acme")
@@ -689,7 +763,7 @@ mod tests {
         assert_eq!(agent.tools, vec!["log"]);
 
         // A machine agent has no `uid`.
-        let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None).expect("issue");
+        let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None, "abcd1234").expect("issue");
         assert_eq!(
             verify_agent_token(&jwt, &token, "acme")
                 .await
