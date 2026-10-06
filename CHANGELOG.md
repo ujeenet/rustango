@@ -12,6 +12,10 @@ The tenant probe and the branding upload log the cause and show an opaque messag
 
 Schema-mode refusals name the storage-mode control, not a CLI flag or wire value. A connection check no longer names a Cargo feature or echoes an unknown-scheme URL, which can carry a password.
 
+### Fixed — operator console works under a path prefix (#2007)
+
+Nested with `Router::nest`, its links, forms, scripts and redirects keep the prefix.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

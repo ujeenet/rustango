@@ -18,16 +18,16 @@
 {% if provisioning_enabled or edit_enabled %}
 <div class="page-actions">
   {% if provisioning_enabled %}
-  <a href="/orgs/new" class="btn btn-primary">+ New tenant</a>
-  <a href="/orgs/provision" class="btn btn-secondary">Runs</a>
-  <form method="post" action="/orgs/migrate" class="inline-form"
+  <a href="{{ console_prefix }}/orgs/new" class="btn btn-primary">+ New tenant</a>
+  <a href="{{ console_prefix }}/orgs/provision" class="btn btn-secondary">Runs</a>
+  <form method="post" action="{{ console_prefix }}/orgs/migrate" class="inline-form"
         data-confirm="Run migrations for every active tenant?">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Migrate all tenants</button>
   </form>
   {% endif %}
   {% if edit_enabled %}
-  <form method="post" action="/orgs/prewarm" class="inline-form"
+  <form method="post" action="{{ console_prefix }}/orgs/prewarm" class="inline-form"
         data-confirm="Open a connection for every active database-mode tenant? This can take a moment.">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Pre-warm pools</button>
@@ -52,7 +52,7 @@ with <code>cargo run -- create-tenant</code>; removal is
 {% if orgs | length == 0 %}
   {% if provisioning_enabled %}
   <div class="empty">No tenants yet —
-  <a href="/orgs/new">create the first one</a>.</div>
+  <a href="{{ console_prefix }}/orgs/new">create the first one</a>.</div>
   {% else %}
   <div class="empty">No tenants yet — provision one with
   <code>cargo run -- create-tenant &lt;slug&gt;</code>.</div>
@@ -79,7 +79,7 @@ with <code>cargo run -- create-tenant</code>; removal is
       <td>{% if org.host_pattern %}{{ org.host_pattern }}{% else %}<em class="faint">—</em>{% endif %}</td>
       <td>{% if org.active %}✓{% else %}—{% endif %}</td>
       <td>{{ org.created_at }}</td>
-      {% if edit_enabled %}<td class="actions-col"><a class="btn-row-action" href="/orgs/{{ org.slug }}/edit">Edit</a></td>{% endif %}
+      {% if edit_enabled %}<td class="actions-col"><a class="btn-row-action" href="{{ console_prefix }}/orgs/{{ org.slug }}/edit">Edit</a></td>{% endif %}
     </tr>
     {% endfor %}
   </tbody>

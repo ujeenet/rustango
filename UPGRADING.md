@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Operator console
+
+The console can be nested under a path prefix; its templates take `console_prefix` (#2007). Schema-mode and connect-check error texts changed (#1335).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

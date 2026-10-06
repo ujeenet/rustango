@@ -929,6 +929,7 @@ jobs:
       # #1341 — pre-warming pools from the console, which was CLI-only.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_errors_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_mount_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_store_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,testkit --test org_hosts_sqlite_live

@@ -67,6 +67,7 @@ mod audit;
 mod decommission;
 mod hosts;
 mod migrate;
+mod mount;
 mod operators;
 mod provisioning;
 
@@ -149,6 +150,9 @@ struct ConsoleState {
     tenant_handoff_url: String,
 }
 
+/// The bundled logo, served by the console itself.
+const DEFAULT_LOGO_URL: &str = "/__static__/rustango.png";
+
 /// Operator console branding, resolved once at boot. Per-tenant
 /// branding lives on `Org` instead.
 ///
@@ -171,7 +175,7 @@ impl OpBrand {
         Self {
             name: "Rustango".to_owned(),
             tagline: None,
-            logo_url: "/__static__/rustango.png".to_owned(),
+            logo_url: DEFAULT_LOGO_URL.to_owned(),
             primary_color: None,
             theme_mode: "auto".to_owned(),
         }
@@ -299,8 +303,7 @@ pub fn router_with_provisioning(
 }
 
 /// Build the read-only operator-console `axum::Router`. Mount it at the
-/// apex host; the console expects to live at the root, not under a path
-/// prefix.
+/// apex host, at the root or nested under a path prefix.
 ///
 /// Use [`router_with_pools`] to let operators edit org config (display
 /// name, host pattern, port, path prefix, active flag, `database_url`)
@@ -756,6 +759,7 @@ fn router_unlogged(
         .route_layer(crate::forms::csrf::layer())
         .merge(assets)
         .with_state(state)
+        .layer(middleware::from_fn(mount::layer))
 }
 
 /// Rows per page, for every list the console renders. One number for
@@ -928,9 +932,19 @@ fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
     ctx.insert("sso_console", &cfg!(feature = "admin-sso"));
+    // Templates prefix every console link with it (#2007).
+    let prefix = mount::MountPrefix::current();
+    ctx.insert("console_prefix", prefix.as_str());
+    ctx.insert("console_home", &prefix.url("/"));
     ctx.insert("brand_name", &brand.name);
     ctx.insert("brand_tagline", &brand.tagline);
-    ctx.insert("brand_logo_url", &brand.logo_url);
+    // A configured logo URL is the deployment's own; only ours moves.
+    let logo_url = if brand.logo_url == DEFAULT_LOGO_URL {
+        prefix.url(DEFAULT_LOGO_URL)
+    } else {
+        brand.logo_url.clone()
+    };
+    ctx.insert("brand_logo_url", &logo_url);
     ctx.insert("theme_mode", &brand.theme_mode);
     ctx.insert(
         "brand_css",
@@ -1770,9 +1784,20 @@ async fn org_edit_form(
     // Pull current logo / favicon paths off the org row.
     let logo_path: Option<String> = org_row.logo_path.clone();
     let favicon_path: Option<String> = org_row.favicon_path.clone();
-    let logo_url = branding::brand_asset_url(&slug, logo_path.as_deref(), &state.brand_storage);
+    // The `/__brand__/` fallback is a console route; a storage URL is not.
+    let prefix = mount::MountPrefix::current();
+    let console_url = |u: String| {
+        if u.starts_with("/__brand__/") {
+            prefix.url(&u)
+        } else {
+            u
+        }
+    };
+    let logo_url = branding::brand_asset_url(&slug, logo_path.as_deref(), &state.brand_storage)
+        .map(console_url);
     let favicon_url =
-        branding::brand_asset_url(&slug, favicon_path.as_deref(), &state.brand_storage);
+        branding::brand_asset_url(&slug, favicon_path.as_deref(), &state.brand_storage)
+            .map(console_url);
 
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
