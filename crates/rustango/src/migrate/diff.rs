@@ -556,6 +556,12 @@ fn fk_identity(r: &RelationSnapshot) -> (&str, &str, &str) {
     (&r.kind, &r.to, &r.on)
 }
 
+/// The action the database applies: no clause is `NO ACTION` on all three
+/// backends, so `None` and `Some("NO ACTION")` must not diff (#1573).
+fn effective_on_delete(r: &RelationSnapshot) -> &str {
+    r.on_delete.as_deref().unwrap_or("NO ACTION")
+}
+
 fn push_alter_changes(
     table: &str,
     pf: &FieldSnapshot,
@@ -612,7 +618,7 @@ fn push_alter_changes(
     }
     // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
     if let (Some(p), Some(c)) = (&pf.fk, &cf.fk) {
-        if fk_identity(p) == fk_identity(c) && p.on_delete != c.on_delete {
+        if fk_identity(p) == fk_identity(c) && effective_on_delete(p) != effective_on_delete(c) {
             out.push(SchemaChange::AlterFkOnDelete {
                 table: table.to_owned(),
                 column: cf.column.clone(),

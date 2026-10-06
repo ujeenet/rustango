@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — no `on_delete` and `NO ACTION` no longer diff (#1573)
+
+`makemigrations` treats them as the same FK, so it writes no no-op `AlterFkOnDelete` (a full table rebuild on SQLite).
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

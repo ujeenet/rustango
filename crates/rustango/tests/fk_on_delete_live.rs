@@ -444,6 +444,24 @@ fn a_changed_on_delete_action_is_an_op() {
     }
 }
 
+/// No clause is `NO ACTION` on every backend, so the two never diff (#1573).
+#[test]
+fn no_action_and_no_clause_are_equal() {
+    let base = SchemaSnapshot::from_models(&[<PostDefault as rustango::core::Model>::SCHEMA]);
+    let mut explicit = base.clone();
+    explicit.tables[0]
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "author_id")
+        .and_then(|f| f.fk.as_mut())
+        .expect("fk")
+        .on_delete = Some("NO ACTION".into());
+    for (prev, cur) in [(&base, &explicit), (&explicit, &base)] {
+        let changes = detect_changes(prev, cur);
+        assert!(changes.is_empty(), "{changes:?}");
+    }
+}
+
 fn models() -> SchemaSnapshot {
     SchemaSnapshot::from_models(&[
         <Author as rustango::core::Model>::SCHEMA,

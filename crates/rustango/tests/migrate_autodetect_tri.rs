@@ -996,6 +996,31 @@ async fn on_delete_reaches_an_existing_table(pool: &Pool) {
     on_delete_reaches(pool, "mad_od", true).await;
 }
 
+/// No `on_delete` and an explicit `NO ACTION` are one schema: neither way
+/// writes a migration, so SQLite never rebuilds for nothing (#1573).
+async fn no_action_is_not_a_change(pool: &Pool) {
+    let (a, b) = ("mad_noact_author", "mad_noact_book");
+    for (first, second) in [(None, Some("NO ACTION")), (Some("NO ACTION"), None)] {
+        let chain = Chain::new(pool, "mad_noact", &[b, a]).await;
+        let with = |on_delete: Option<&str>| {
+            let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+            if let Some(action) = on_delete {
+                rel["on_delete"] = json!(action);
+            }
+            json!({"tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))]),
+            ]})
+        };
+        chain.step(pool, with(first)).await.expect("initial");
+        for _ in 0..2 {
+            let mig = make_migrations_from(chain.dir.path(), &snap(with(second)), None)
+                .expect("makemigrations");
+            assert!(mig.is_none(), "{first:?} -> {second:?} wrote {mig:?}");
+        }
+    }
+}
+
 /// As above through the non-atomic runners.
 async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
     on_delete_reaches(pool, "mad_odn", false).await;
@@ -1925,6 +1950,7 @@ tri_dialect_test!(
     scenarios: [
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
+        no_action_is_not_a_change,
         on_delete_and_drop_in_one_migration,
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,
