@@ -1548,11 +1548,44 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
 #[cfg(feature = "mysql")]
 const MY_HOLD_LOCK: &str = "SELECT GET_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())), -1)";
 
+/// Whether the database at `url` has its migrate lock taken.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn migrate_lock_held(backend: Backend, url: &str) -> bool {
+    use rustango::sql::sqlx::{self, Connection as _};
+    match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            let mut c = sqlx::PgConnection::connect(url).await.unwrap();
+            sqlx::query(
+                "SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database \
+                 WHERE l.locktype = 'advisory' AND l.granted AND d.datname = current_database()",
+            )
+            .fetch_optional(&mut c)
+            .await
+            .unwrap()
+            .is_some()
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            let mut c = sqlx::MySqlConnection::connect(url).await.unwrap();
+            let held: (Option<u64>,) = sqlx::query_as(
+                "SELECT IS_USED_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())))",
+            )
+            .fetch_one(&mut c)
+            .await
+            .unwrap();
+            held.0.is_some()
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    }
+}
+
 /// A slow migrate in one database doesn't block a migrate in another (#1991).
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn lock_is_per_database(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let (Some((a, _)), Some((b, _))) = (
+    let (Some((a, a_url)), Some((b, _))) = (
         fresh(backend, tmp.path(), "lockdba").await,
         fresh(backend, tmp.path(), "lockdbb").await,
     ) else {
@@ -1574,7 +1607,13 @@ async fn lock_is_per_database(backend: Backend) {
         vec![json!({ "data": { "sql": sleep, "reversible": false } })],
     );
     let slow = tokio::spawn(async move { rustango::migrate::migrate_pool(&a, &slow_dir).await });
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !migrate_lock_held(backend, &a_url).await {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the slow migrate holds its database's lock");
     let empty = tmp.path().join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     let limit = std::time::Duration::from_secs(1);

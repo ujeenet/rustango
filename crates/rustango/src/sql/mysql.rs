@@ -945,6 +945,7 @@ mod tests {
         assert!(acq.contains("DATABASE()"), "{acq}");
         let rel = MySql.release_session_lock_sql().unwrap();
         assert!(rel.contains("RELEASE_LOCK"));
+        assert!(rel.contains("DATABASE()"), "{rel}");
     }
 
     #[test]
