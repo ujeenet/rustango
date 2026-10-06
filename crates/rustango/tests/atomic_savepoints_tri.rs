@@ -875,3 +875,33 @@ async fn put_pool(pool: &Pool, id: i64) {
     .await
     .unwrap();
 }
+
+/// #1460 premise: a `&Pool` read inside a block takes a second connection,
+/// so on a one-connection pool it waits forever. S3 routes it into the block.
+#[tokio::test]
+#[ignore = "#1460 S3"]
+async fn pool_read_inside_atomic_joins_the_block() {
+    use rustango::sql::CounterPool as _;
+    use rustango::testkit::matrix::{live_lock, Backend};
+    for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
+        let _guard = live_lock().lock().await;
+        let Some(pool) = backend.pool().await else {
+            continue;
+        };
+        setup(&pool).await;
+        let p = one_conn(&pool).await;
+        let q = p.clone();
+        let seen = within(rustango::atomic!(&p, |tx| {
+            put(tx, 1).await?;
+            Note::objects().count(&q).await
+        }))
+        .await
+        .expect("atomic");
+        assert_eq!(
+            seen,
+            1,
+            "{}: the read saw the block's write",
+            dialect(&pool)
+        );
+    }
+}

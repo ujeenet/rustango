@@ -215,6 +215,7 @@ pub async fn fetch_values_dict(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "fetch_values_dict");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -301,6 +302,7 @@ pub async fn fetch_aggregate_dict(
     pool: &Pool,
     query: &AggregateQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "fetch_aggregate_dict");
     let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -383,6 +385,7 @@ pub async fn fetch_values_list(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "fetch_values_list");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -790,6 +793,7 @@ async fn fetch_flat_raw<U: FlatScalar>(
     sql: &str,
     params: Vec<SqlValue>,
 ) -> Result<Vec<U>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "fetch_values_flat");
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -837,6 +841,7 @@ where
     K: FlatScalar,
     V: FlatScalar,
 {
+    super::atomic::warn_if_in_block(pool, "fetch_values_pairs");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]

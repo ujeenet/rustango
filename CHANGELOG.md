@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — audited models' `insert_tx` / `save_tx` / `delete_tx` write audit rows (#1460)
+
+They use the same audit helpers as the `_pool` methods, so the rows commit or roll back with the caller's transaction. New `audit::*_tx` helpers back them.
+
+### Added — warning for `&Pool` calls inside an `atomic` block (#1460)
+
+Such a call runs on another connection, outside the block; each kind logs one `rustango::atomic` warning. The `get_or_create` docs no longer point to a `Pool::begin()` that does not exist.
+
 ### Added — `render_changes_between` takes the before-snapshot (#2026)
 
 It renders a MySQL column drop with its FK drop first, which `render_changes_split_with_dialect` cannot see.

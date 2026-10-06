@@ -5,6 +5,7 @@
 //! pool runs in a savepoint on it (#1666). Each block's future carries its
 //! own context in a task-local, so `join!`ed blocks cannot see each other's.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -352,6 +353,26 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
         .unwrap_or(false)
 }
 
+/// Warn, once per `op`, that `op` ran on `pool` while an [`atomic`] block
+/// on it is open: it takes another connection, outside the block (#1460).
+pub(crate) fn warn_if_in_block(pool: &Pool, op: &'static str) {
+    static WARNED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    if in_block(pool)
+        && WARNED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(op)
+    {
+        tracing::warn!(
+            target: "rustango::atomic",
+            op,
+            "a `&Pool` call ran inside an `atomic` block on the same pool: it uses \
+             another connection, so it does not see the block's writes and can \
+             deadlock a small pool; use the `_tx` helper on the block's guard"
+        );
+    }
+}
+
 /// Closure-scoped transaction with after-commit hooks.
 /// Auto-commits when `f` returns `Ok`,
 /// auto-rolls-back when `f` returns `Err`. Callbacks queued via
@@ -401,6 +422,10 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
 /// [`ExecError::NestedAtomic`]. If a savepoint statement fails, the
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
+///
+/// **`&Pool` calls inside the block** (`fetch(&pool)`, `save_pool`, …) run
+/// on another connection, outside the block, and can deadlock a small
+/// pool. Each kind logs one `rustango::atomic` warning; use the `_tx` helpers.
 ///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
@@ -755,4 +780,44 @@ pub fn on_commit_pending() -> usize {
                 .len()
         })
         .sum()
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "runtime"))]
+mod tests {
+    use super::*;
+
+    /// A `&Pool` call inside a block on that pool warns, once (#1460).
+    #[tokio::test]
+    async fn pool_call_inside_block_warns_once() {
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        let _sub = tracing::subscriber::set_default(sub);
+        let pool = Pool::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(2)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        crate::sql::raw_execute_pool(&pool, "SELECT 1", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(out.contents(), "", "outside a block");
+        let p = pool.clone();
+        atomic(&pool, move |_tx| {
+            Box::pin(async move {
+                for _ in 0..2 {
+                    crate::sql::raw_execute_pool(&p, "SELECT 1", Vec::new()).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let logs = out.contents();
+        assert_eq!(logs.matches("raw_execute_pool").count(), 1, "{logs}");
+    }
 }

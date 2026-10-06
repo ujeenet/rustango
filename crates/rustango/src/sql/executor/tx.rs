@@ -194,6 +194,7 @@ impl<'a> PoolTx<'a> {
 /// # Errors
 /// Driver errors from `BEGIN`.
 pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "transaction_pool");
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),
@@ -210,7 +211,10 @@ pub(crate) async fn write_transaction_pool(pool: &Pool) -> Result<PoolTx<'static
         // Take the write lock up front: a deferred tx that reads first
         // fails at once on a busy WAL database instead of waiting.
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?)),
+        Pool::Sqlite(sq) => {
+            super::atomic::warn_if_in_block(pool, "transaction_pool");
+            Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?))
+        }
         #[allow(unreachable_patterns)]
         _ => transaction_pool(pool).await,
     }
