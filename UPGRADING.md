@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `seed-permissions` reports each failed tenant
+
+It no longer stops at the first failure; it prints a `failed` line per broken tenant and ends with `N of M tenant(s) failed` (#2156).
+
 ### MySQL `PartiallyApplied` can report zero DDL
 
 It is now also raised when only data operations committed, so `ddl_applied` can be 0 (#2151).

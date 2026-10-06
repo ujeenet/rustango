@@ -357,15 +357,30 @@ where
         return Ok(());
     }
 
+    // One broken tenant must not stop the rest (#2156).
+    let mut failures = 0;
     for org in &targets {
-        let pool = pools.scoped_pool_dyn(org).await?;
-        permissions::ensure_tables_pool(&pool)
-            .await
-            .map_err(TenancyError::Driver)?;
-        permissions::auto_create_permissions_pool(&pool).await?;
-        writeln!(w, "seeded `{}`", org.slug)?;
+        match seed_one(pools, org).await {
+            Ok(()) => writeln!(w, "seeded `{}`", org.slug)?,
+            Err(e) => {
+                failures += 1;
+                writeln!(w, "failed `{}`: {e}", org.slug)?;
+            }
+        }
     }
     writeln!(w, "done — {} tenant(s) processed", targets.len())?;
+    super::migrations::tenant_failures(failures, targets.len())
+}
+
+async fn seed_one<DB: Database>(pools: &TenantPools<DB>, org: &Org) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let pool = pools.scoped_pool_dyn(org).await?;
+    permissions::ensure_tables_pool(&pool)
+        .await
+        .map_err(TenancyError::Driver)?;
+    permissions::auto_create_permissions_pool(&pool).await?;
     Ok(())
 }
 
