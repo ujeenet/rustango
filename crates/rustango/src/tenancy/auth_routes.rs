@@ -428,6 +428,20 @@ impl RefreshSession {
         })
     }
 
+    /// The session of `claims` (access or refresh) while its family is
+    /// unrevoked and under the absolute cap; the one way in (#2119).
+    async fn live(
+        auth: &JwtAuth,
+        claims: &crate::tenancy::jwt_lifecycle::JwtClaims,
+    ) -> Option<Self> {
+        let session = Self::read(claims)?;
+        let capped = chrono::Utc::now().timestamp() >= session.ends_at(auth);
+        if capped || auth.0.jwt.family_revoked(&session.fam).await {
+            return None;
+        }
+        Some(session)
+    }
+
     /// When the family stops mattering: the absolute cap.
     fn ends_at(&self, auth: &JwtAuth) -> i64 {
         self.sat.saturating_add(auth.0.session_cap_secs)
@@ -668,12 +682,9 @@ async fn refresh_in(
         ));
     }
     // Pre-#1854 tokens carry no session claims: fail closed.
-    let session = RefreshSession::read(&claims).ok_or_else(refused)?;
-    if chrono::Utc::now().timestamp() >= session.ends_at(&auth)
-        || jwt.family_revoked(&session.fam).await
-    {
-        return Err(refused());
-    }
+    let session = RefreshSession::live(&auth, &claims)
+        .await
+        .ok_or_else(refused)?;
     // Audit P2 — re-check the account is still active (and exists) before
     // minting a fresh pair; #1854 — and that its password is unchanged.
     // Same uniform 401 as other refresh failures.
@@ -989,7 +1000,8 @@ async fn session_user_in(
         .user_id_in(UserTokenScope::Tenant(slug))
         .map_err(|_| SessionLookup::Refused)?;
     // Tokens the login route did not mint carry no session: fail closed.
-    let Some(session) = RefreshSession::read(&claims) else {
+    // A revoked family or the cap ends the access tokens too (#2119).
+    let Some(session) = RefreshSession::live(auth, &claims).await else {
         return Ok(None);
     };
     let users: Vec<crate::tenancy::auth::User> = crate::tenancy::auth::User::objects()
