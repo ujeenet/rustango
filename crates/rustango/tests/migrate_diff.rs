@@ -986,27 +986,38 @@ fn unchanged_schema_with_every_constraint_kind_emits_nothing() {
     assert_eq!(detect_changes(&s, &s.clone()), vec![]);
 }
 
-/// Two models sharing one junction give the same snapshot in either
+/// Both sides declaring one junction give the same snapshot in either
 /// `inventory` order, so the diff between them is empty.
 #[test]
 fn shared_through_pair_emits_nothing_in_either_order() {
     use rustango::core::{M2MRelation, ModelSchema};
-    const M2M: &[M2MRelation] = &[M2MRelation::new(
+    const TAGS: &[M2MRelation] = &[M2MRelation::new(
         "tags",
         "rv_tag",
         "rv_shared_tags",
         "item_id",
         "tag_id",
     )];
-    const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+    const ITEMS: &[M2MRelation] = &[M2MRelation::new(
+        "items",
+        "rv_post",
+        "rv_shared_tags",
+        "tag_id",
+        "item_id",
+    )];
+    const fn model(
+        name: &'static str,
+        table: &'static str,
+        m2m: &'static [M2MRelation],
+    ) -> ModelSchema {
         let mut s = ModelSchema::new(name, table);
-        s.m2m = M2M;
+        s.m2m = m2m;
         s
     }
-    static POST: ModelSchema = model("Post", "rv_post");
-    static NOTE: ModelSchema = model("Note", "rv_note");
-    let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
-    let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+    static POST: ModelSchema = model("Post", "rv_post", TAGS);
+    static TAG: ModelSchema = model("Tag", "rv_tag", ITEMS);
+    let a = SchemaSnapshot::from_models(&[&POST, &TAG]);
+    let b = SchemaSnapshot::from_models(&[&TAG, &POST]);
     assert_eq!(detect_changes(&a, &b), vec![]);
 }
 
