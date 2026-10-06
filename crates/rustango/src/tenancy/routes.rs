@@ -211,6 +211,15 @@ impl RouteConfig {
     }
 }
 
+/// The cookie `Path` for `org` at request `path`: its prefix when `path`
+/// is under it, so prefix tenants on one host keep apart; else `/` (#2098).
+pub(crate) fn cookie_path<'a>(org: &'a super::Org, path: &str) -> &'a str {
+    org.path_prefix
+        .as_deref()
+        .filter(|p| path_is_under(path, p))
+        .map_or("/", |p| p.trim_end_matches('/'))
+}
+
 /// Is `path` at or below the path prefix `prefix` (`/acme`)?
 pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
     let p = prefix.trim_end_matches('/');
@@ -223,6 +232,18 @@ pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2098 — cookies scope to the prefix only when the request is under it.
+    #[test]
+    fn cookie_path_follows_the_request() {
+        let org = crate::tenancy::Org {
+            path_prefix: Some("/acme".into()),
+            ..crate::testkit::org()
+        };
+        assert_eq!(cookie_path(&org, "/acme/__login"), "/acme");
+        assert_eq!(cookie_path(&org, "/acmecorp/__login"), "/");
+        assert_eq!(cookie_path(&crate::testkit::org(), "/acme/x"), "/");
+    }
 
     #[test]
     fn a_path_prefix_covers_its_segment_only() {

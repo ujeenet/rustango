@@ -1594,6 +1594,17 @@ async fn create_ledger_locked(pool: &crate::sql::Pool, ledger: &str) -> Result<(
     Ok(())
 }
 
+/// `ledger`'s names, creating it first: on PG a read before a tenant schema
+/// has its ledger finds `public`'s, and the cached plan keeps it (#2143).
+pub(crate) async fn ledger_names(
+    _: LockHeld,
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<HashSet<String>, MigrateError> {
+    create_ledger_locked(pool, ledger).await?;
+    applied_set_pool_with_ledger(pool, ledger).await
+}
+
 /// The statement that records a migration as applied — one column list
 /// for the five runners that write it.
 ///
@@ -3621,6 +3632,10 @@ async fn unapply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     let schema = super::ensure::creation_schema(pool).await?;
     match pool {
         #[cfg(feature = "postgres")]

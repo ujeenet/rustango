@@ -2,7 +2,7 @@
 //! `rustango_users` storage. Mirrors every framework-required column
 //! verbatim, then tacks on `display_name` and `timezone`.
 //!
-//! The framework's auth and admin paths read the seven core columns
+//! The framework's auth and admin paths read the nine core columns
 //! by name; the extras here are for the application to use via the
 //! ORM (`AppUser::objects().fetch_on(...)`).
 
@@ -32,6 +32,9 @@ pub struct AppUser {
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
+    /// Read by every session check; `Cli::user_model` refuses a model without them.
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     // ---------- extras ----------
     /// Free-form display name shown in greetings / mentions. Defaults
     /// to empty string so existing rows can apply the bootstrap
@@ -45,6 +48,6 @@ pub struct AppUser {
 }
 
 // Marker impl — opts AppUser in as a valid `rustango_users` schema.
-// Validated at `init-tenancy` time via
+// `Cli::user_model` validates it at startup via
 // [`rustango::tenancy::validate_tenant_user_schema`].
 impl rustango::tenancy::TenantUserModel for AppUser {}

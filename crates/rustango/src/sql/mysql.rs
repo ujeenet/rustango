@@ -8,7 +8,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -615,10 +615,7 @@ impl Dialect for MySql {
                     write_my_ident(sql, col);
                     sql.push(')');
                 }
-                let auto_int = |f: &&FieldSchema| {
-                    f.auto && matches!(f.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
-                };
-                if let Some(pk) = model.primary_key().filter(auto_int) {
+                if let Some(pk) = model.primary_key().filter(|f| f.is_serial()) {
                     sql.push_str(", ");
                     write_my_ident(sql, pk.column);
                     sql.push_str(" = LAST_INSERT_ID(");

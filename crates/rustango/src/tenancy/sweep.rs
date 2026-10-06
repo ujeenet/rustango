@@ -177,7 +177,9 @@ where
             }
         };
 
-        let result = match f(org, pool).await {
+        // The writes go to this tenant: a source bound to another
+        // tenant must not be stamped on its rows (#1229).
+        let result = match crate::audit::writing_to_tenant(slug.clone(), f(org, pool)).await {
             Ok(v) => Ok(v),
             Err(e) => Err(SweepError::Sweep(e)),
         };

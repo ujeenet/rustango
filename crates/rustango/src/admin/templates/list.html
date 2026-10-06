@@ -173,7 +173,7 @@
     <h4>By {{ facet.field }}</h4>
     {% if facet.is_fk %}
     {# FK facets: dropdown so the operator picks from named options #}
-    <select onchange="location.href=this.options[this.selectedIndex].dataset.href" style="width:100%;margin-bottom:.4rem">
+    <select data-nav class="filter-select">
       <option data-href="{{ facet.clear_url | safe }}">— all —</option>
       {% for v in facet.values %}
       <option data-href="{{ v.toggle_url | safe }}"{% if v.active %} selected{% endif %}>{{ v.display | safe }} ({{ v.count }})</option>

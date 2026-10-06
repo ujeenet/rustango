@@ -1,8 +1,8 @@
 //! Dialect-agnostic database pool wrapper.
 //!
 //! [`Pool`] reaches Postgres, MySQL or SQLite through one handle and
-//! picks the matching [`Dialect`] for you. The older `&PgPool` APIs
-//! still work; this is an addition, not a replacement.
+//! picks the matching [`Dialect`] for you. It is the multi-backend entry
+//! point; the `&PgPool` / `_on` APIs are the Postgres-only executor forms.
 //!
 //! Wrap a pool you already have:
 //!

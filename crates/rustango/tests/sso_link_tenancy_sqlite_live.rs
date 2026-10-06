@@ -1081,7 +1081,7 @@ async fn member_callback_signs_in_by_link_only() {
     let ann = env.user("ann", "ann@example.com", false).await;
     env.tenant_provider("corp", false).await;
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
-        pools: env.pools.clone(),
+        pools: env._pools.clone(),
         resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),

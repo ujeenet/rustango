@@ -662,6 +662,8 @@ async fn viewset_body_cannot_set_deleted_at(pool: &Pool) {
         let row = memo(pool, pks[0]).await;
         assert_eq!(row.tag, "x", "{method}: the rest of the body is written");
         assert!(row.deleted_at.is_none(), "{method} soft-deleted the row");
+        let (status, body) = get(pool, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{method} hid the row: {body}");
     }
     let (status, body) = send(pool, Method::POST, "/api/memos", JSON, stamp).await;
     assert!(status.is_success(), "create: {status} {body}");

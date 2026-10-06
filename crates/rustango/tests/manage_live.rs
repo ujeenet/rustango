@@ -511,6 +511,94 @@ async fn migrate_tenants_runs_against_active_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A new schema tenant applies a migration `public`'s ledger already lists:
+/// it reads its own ledger, not `public`'s through the search path (#2143).
+#[tokio::test]
+async fn a_new_schema_tenant_does_not_read_publics_project_ledger() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    let slug = unique("ledger");
+    drop_schema(&pool, &slug).await;
+    let dir = fresh_dir("ledger2143");
+    let pools = TenantPools::new(pool.clone());
+    run(
+        &pools,
+        &url,
+        &dir,
+        &["create-tenant", &slug, "--no-migrate"],
+    )
+    .await
+    .1
+    .unwrap();
+
+    let mig_name = unique_migration_name("0001_ledger");
+    let mig = rmig::Migration {
+        name: mig_name.clone(),
+        created_at: "2026-10-02T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rmig::MigrationScope::Tenant,
+        replaces: Vec::new(),
+        snapshot: serde_json::from_value(serde_json::json!({
+            "tables": [{
+                "name": "ledger2143_thing", "model": "T",
+                "fields": [
+                    {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true}
+                ]
+            }]
+        }))
+        .unwrap(),
+        forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
+            "ledger2143_thing".into(),
+        ))],
+    };
+    rmig::file::write(&dir.join(format!("{mig_name}.json")), &mig).unwrap();
+    // `public` ran this chain, e.g. as a tenant living in the default schema.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS public.__rustango_migrations__ \
+         (name VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO public.__rustango_migrations__ (name) VALUES ($1)")
+        .bind(&mig_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (out, res) = run(&pools, &url, &dir, &["migrate-tenants"]).await;
+    res.unwrap();
+    let exists: bool = sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = $1 AND table_name = 'ledger2143_thing')",
+    )
+    .bind(&slug)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .0;
+    assert!(
+        exists,
+        "the tenant skipped a migration public applied: {out}"
+    );
+
+    sqlx::query("DELETE FROM public.__rustango_migrations__ WHERE name = $1")
+        .bind(&mig_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop_schema(&pool, &slug).await;
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `purge-tenant` hard-deletes a schema-mode tenant: drops the
 /// schema CASCADE, removes the Org row, prints a confirmation. Soft-
 /// deleted (inactive) orgs purge cleanly too.

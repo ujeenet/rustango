@@ -1,7 +1,7 @@
 {% extends "op_layout.html" %}
 {% block title %}Welcome — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<style>
+<style nonce="{{ csp_nonce }}">
   .welcome { max-width: 720px; margin: var(--space-4) auto; text-align: center; }
   .welcome img { max-width: 480px; width: 100%; height: auto; margin: var(--space-4) 0 var(--space-6); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
   .welcome p { color: var(--color-fg-muted); }

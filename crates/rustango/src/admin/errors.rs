@@ -163,7 +163,7 @@ impl IntoResponse for AdminError {
                 let body = format!(
                     r##"<!doctype html>
 <html><head><meta charset="utf-8"><title>Table not migrated — rustango admin</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:680px;margin:4em auto;padding:0 1em;color:#222}}
+<style{nonce}>body{{font-family:system-ui,sans-serif;max-width:680px;margin:4em auto;padding:0 1em;color:#222}}
 h1{{color:#b00;font-size:1.25em}} code{{background:#f3f3f3;padding:.1em .35em;border-radius:.2em}}
 .hint{{background:#fff8dc;border-left:4px solid #d4a000;padding:.8em 1em;margin:1em 0}}</style>
 </head><body>
@@ -180,6 +180,7 @@ applied yet for this tenant / database.</p>
 </body></html>
 "##,
                     table = html_escape(&table),
+                    nonce = crate::csp_nonce::nonce_attr(),
                 );
                 (StatusCode::SERVICE_UNAVAILABLE, Html(body)).into_response()
             }
@@ -236,6 +237,21 @@ use crate::text::html_escape;
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    /// #1703 — the table-missing page's inline style carries the CSP nonce.
+    #[tokio::test]
+    async fn table_missing_page_style_carries_the_nonce() {
+        let res = crate::csp_nonce::scoped("N0nce", async {
+            AdminError::TableMissing { table: "t".into() }.into_response()
+        })
+        .await;
+        let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        crate::testkit::assert_strict_csp_html(
+            &String::from_utf8_lossy(&body),
+            "N0nce",
+            "table missing",
+        );
+    }
 
     /// `short_correlation_id` returns 16 hex chars, and 32 calls give
     /// 32 distinct ids.

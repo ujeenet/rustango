@@ -889,6 +889,10 @@ pub(super) struct ListQuery {
 fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
     // Every console form posts this back; `csrf::layer()` checks it (#1710).
     let mut ctx = ctx.clone();
+    ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     // `csrf_token` is for scripts that send `X-CSRF-Token` (fetch, and
     // the multipart branding form, whose body the layer cannot read).
     if let Some(token) = crate::admin::session::current_csrf_token() {

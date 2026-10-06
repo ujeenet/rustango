@@ -42,18 +42,17 @@
 //!
 //! | | PostgreSQL | MySQL | SQLite |
 //! |---|---|---|---|
-//! | drop a CHECK | `DROP CONSTRAINT IF EXISTS` | `DROP CHECK` | **rejected at render** |
-//! | drop a composite FK | `DROP CONSTRAINT IF EXISTS` | `DROP FOREIGN KEY` | **rejected at render** |
+//! | drop a CHECK | `DROP CONSTRAINT IF EXISTS` | `DROP CHECK` | **table rebuild** |
+//! | drop a composite FK | `DROP CONSTRAINT IF EXISTS` | `DROP FOREIGN KEY` | **table rebuild** |
 //! | idempotent? | yes | **no** — error 3821 | n/a |
 //!
-//! SQLite has no `ALTER TABLE DROP CONSTRAINT` at all, so the framework
-//! refuses at render time with a message pointing at the rebuild-the-
-//! table workaround (#559). That is an engine incapability, so it is
-//! pinned with `by_dialect!` rather than papered over — and the SQLite
-//! arm asserts the *refusal*, which is the behaviour users depend on.
+//! SQLite has no `ALTER TABLE DROP CONSTRAINT`, so the migrate runner
+//! rebuilds the table (#2127). The SQLite arm here asserts the render
+//! hands the change to that rebuild; `migrate_autodetect_tri` runs it.
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
+use rustango::core::Model as _;
 use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
 use rustango::sql::{raw_execute_pool, Auto, Pool};
 use rustango::testkit::matrix::fresh_table;
@@ -155,6 +154,20 @@ fn render(pool: &Pool, change: SchemaChange) -> Result<Vec<String>, String> {
     })
 }
 
+/// SQLite applies `change` by a table rebuild only the runner runs (#2127);
+/// `migrate_autodetect_tri` proves the rebuilt table enforces it.
+fn assert_rebuilds(pool: &Pool, change: SchemaChange, table: &str) {
+    let snap = SchemaSnapshot::from_models(&[Widget::SCHEMA, Parent::SCHEMA, Child::SCHEMA]);
+    let b = render_changes_split_with_dialect(&[change], &snap, pool.dialect())
+        .expect("SQLite renders the change as a rebuild");
+    assert!(
+        b.immediate.is_empty(),
+        "no in-place ALTER: {:?}",
+        b.immediate
+    );
+    assert_eq!(b.rebuild.as_ref().map(|r| r.table()), Some(table));
+}
+
 /// Run every statement, failing with the statement that broke.
 ///
 /// This is the whole point of the file: the emitted SQL reaches a real
@@ -226,23 +239,13 @@ async fn check_constraint_can_be_added_and_dropped(pool: &Pool) {
                      DROP CHECK and takes no IF EXISTS — emitting the Postgres form \
                      here was error 1064 (#1461)",
         sqlite => false,
-            because "SQLite has no ALTER TABLE DROP CONSTRAINT at all, so the framework \
-                     refuses at render time and points at the rebuild-the-table \
-                     workaround (#559)",
+            because "SQLite has no ALTER TABLE ADD/DROP CONSTRAINT, so the runner \
+                     rebuilds the table (#2127)",
     };
 
     if !supported.value {
-        let err = render(pool, add).expect_err("SQLite must refuse to add a CHECK");
-        assert!(
-            err.contains("AddCheckConstraint") && err.contains("sqlite"),
-            "the refusal should name the operation and the dialect — {}\ngot: {err}",
-            supported.why
-        );
-        let err = render(pool, drop).expect_err("SQLite must refuse to drop a CHECK");
-        assert!(
-            err.contains("DropCheckConstraint") && err.contains("sqlite"),
-            "got: {err}"
-        );
+        assert_rebuilds(pool, add, "dc_tri_widget");
+        assert_rebuilds(pool, drop, "dc_tri_widget");
         return;
     }
 
@@ -281,16 +284,12 @@ async fn composite_fk_can_be_added_and_dropped(pool: &Pool) {
                      error 1064, and ddl::drop_constraints_sql_with_dialect already knew \
                      this for per-field FKs while diff.rs did not (#1461)",
         sqlite => false,
-            because "no ALTER TABLE DROP CONSTRAINT, same as the CHECK case (#559)",
+            because "no ALTER TABLE ADD/DROP CONSTRAINT, same as the CHECK case (#2127)",
     };
 
     if !supported.value {
-        let err = render(pool, drop).expect_err("SQLite must refuse to drop a composite FK");
-        assert!(
-            err.contains("DropCompositeFk") && err.contains("sqlite"),
-            "the refusal should name the operation and the dialect — {}\ngot: {err}",
-            supported.why
-        );
+        assert_rebuilds(pool, add, "dc_tri_child");
+        assert_rebuilds(pool, drop, "dc_tri_child");
         return;
     }
 

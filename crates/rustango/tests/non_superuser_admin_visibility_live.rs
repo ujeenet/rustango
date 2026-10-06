@@ -109,6 +109,19 @@ async fn auto_create_permissions_seeds_codenames_for_default_models() {
             "expected `rustango_users.{action}` codename after auto_create_permissions"
         );
     }
+    // #2061: the reserved codenames too, as `auto_create_permissions_pool` seeds.
+    for codename in [
+        rustango::tenancy::permissions::ACCESS_ADMIN_CODENAME,
+        rustango::audit::VIEW_CODENAME,
+    ] {
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rustango_permissions WHERE codename = $1")
+                .bind(codename)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(n, 1, "expected `{codename}` after auto_create_permissions");
+    }
 }
 
 /// End-to-end: a non-superuser whose only granted codename is

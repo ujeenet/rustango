@@ -412,6 +412,9 @@ Restríngelo de una de dos maneras:
 
 - **Ponle tu propia auth por delante.** Deja el admin abierto y coloca HTTP Basic auth,
   OAuth2 o SSO corporativo delante de la ruta de anidamiento con tu propio middleware.
+  El admin solo monta CSRF con auth de sesión, y el navegador reenvía Basic auth por
+  su cuenta, así que las mutaciones de un admin con Basic auth se pueden falsificar
+  cross-site; consulta [Seguridad → CSRF](security.md#protección-contra-csrf).
 
 Cuando la auth de sesión está activa, el pie de la barra lateral muestra una línea
 **"Signed in as _username_"** y un botón **Logout** (un formulario `POST`). Los admins

@@ -910,11 +910,9 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
             use crate::sql::Dialect as _;
             crate::sql::Postgres.compile_select(&query)?
         };
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-        for v in stmt.params {
-            q = bind_query(q, v);
-        }
-        let rows = q.fetch_all(executor).await?;
+        let rows = super::pg_on_query(&stmt.sql, stmt.params)
+            .fetch_all(executor)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             use sqlx::{Column as _, Row as _};

@@ -101,6 +101,14 @@ queue.start().await;
 queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 ```
 
+`shutdown()` gives running jobs a grace period (`shutdown_grace`, default 5s),
+then aborts and re-queues them. Queued jobs and parked retries stay queued, and
+`start()` again picks them up.
+
+Jobs are **at-least-once**. No stop signal reaches a running job, and an aborted
+job runs again from the start (the DB queue releases its row even if the job had
+just finished). The abort spends an attempt. Make every job idempotent.
+
 Keep the `Arc<InMemoryJobQueue>` in your app state so handlers can reach it.
 
 > **In-memory means in-memory.** Jobs queued or in-flight are **lost on
@@ -424,11 +432,12 @@ yourself, as above. New tenants provisioned after boot get no workers until
 the process restarts. Tracked in
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
 
-**No ambient context, either.** Workers are `tokio::spawn`ed, and task-locals
-do not cross a spawn — so a job runs with the audit source at
-`AuditSource::System` and the default timezone, no matter what the dispatching
-request had set. Carry what you need in the payload, or re-enter the scope
-inside `run()` with `audit::with_source`. Tracked in
+**Ambient context: audit source and timezone only.** `InMemoryJobQueue`
+captures them at `dispatch` and the scheduler at `every()`, and each reinstalls
+them around the run. `PgJobQueue` does not yet: its jobs run as
+`AuditSource::System` with the default timezone, so carry the actor in the
+payload and re-enter the scope inside `run()` with `audit::with_source`. No
+queue carries a session or a tenant. Tracked in
 [#1229](https://github.com/ujeenet/rustango/issues/1229).
 
 ---
@@ -503,7 +512,7 @@ the expected outcome, so nothing is logged. Tracked in
 | `Queue(String)` | internal queue error (serialization/registration) |
 
 **`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
-`shutdown()` · `pending_count()`. The `DatabaseJobQueue` adds
+`shutdown()` · `pending_count()`. Both queues have `shutdown_grace`. The `DatabaseJobQueue` adds
 `ensure_table_pool`, `with_workers_pool`, `poll_interval`, and
 `reclaim_stuck_jobs_pool`.
 
@@ -511,8 +520,9 @@ the expected outcome, so nothing is logged. Tracked in
 
 ## See also
 
-- [Scheduler](manage.md) — for *time-based* recurring work (cron-style), as
-  opposed to on-demand jobs.
+- [Scheduler](manage.md) — for *time-based* recurring work at a fixed interval
+  (`Scheduler::every` + a `Duration`; there are no cron expressions), as opposed to
+  on-demand jobs.
 - [Email](email.md) — the canonical "do it in a job" workload.
 - [Caching](caching.md) — the other way to keep request handlers fast.
 - [Signals](orm.md) — fire-and-forget hooks that often *dispatch* a job.

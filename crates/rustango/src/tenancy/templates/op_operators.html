@@ -75,7 +75,7 @@ reach every tenant, so this list is the console's access control.</p>
           {{ csrf_input | default(value='') | safe }}
           {% if op.active %}
           <button type="submit" class="btn btn-secondary"
-                  onclick="return confirm('Deactivate {{ op.username }}? They are signed out on their next request.');">Deactivate</button>
+                  data-confirm="Deactivate {{ op.username }}? They are signed out on their next request.">Deactivate</button>
           {% else %}
           <input type="hidden" name="active" value="on">
           <button type="submit" class="btn btn-secondary">Activate</button>

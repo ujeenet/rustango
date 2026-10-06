@@ -152,11 +152,14 @@ impl CorsLayer {
     ///   headers most APIs need. For tighter control, build the
     ///   layer yourself.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use rustango::cors::{CorsLayer, CorsRouterExt};
+    /// # fn wire(mut app: axum::Router) -> Result<axum::Router, Box<dyn std::error::Error>> {
     /// let cfg = rustango::config::Settings::load_from_env()?;
     /// if let Some(layer) = CorsLayer::from_settings(&cfg.security) {
-    ///     app = app.layer(layer.into_layer());
+    ///     app = app.cors(layer);
     /// }
+    /// # Ok(app) }
     /// ```
     #[cfg(feature = "config")]
     #[must_use]

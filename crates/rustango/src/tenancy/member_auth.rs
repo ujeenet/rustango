@@ -237,6 +237,11 @@ fn secure_suffix() -> &'static str {
 /// If `user` has no id (was never saved).
 #[must_use]
 pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+    mint_cookie_at(secret, user, slug, ttl, "/")
+}
+
+/// [`mint_cookie`] scoped to `path`, a path-prefix tenant's prefix (#2098).
+fn mint_cookie_at(secret: &SessionSecret, user: &User, slug: &str, ttl: i64, path: &str) -> String {
     let uid = user
         .id
         .get()
@@ -247,7 +252,7 @@ pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) ->
     payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let value = encode(secret, &payload);
     format!(
-        "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}{s}",
+        "{MEMBER_COOKIE}={value}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={ttl}{s}",
         s = secure_suffix(),
     )
 }
@@ -515,8 +520,9 @@ async fn sso_begin_in(
 
     let (authorize_url, flow) = provider.begin();
     let sealed = seal_flow(&flow, secret.key());
+    let path = super::routes::cookie_path(&t.org, parts.uri.path());
     let flow_cookie = format!(
-        "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path=/; Max-Age={FLOW_TTL_SECS}{s}",
+        "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
         s = secure_suffix(),
     );
     redirect_with_cookie(&authorize_url, &flow_cookie)
@@ -543,6 +549,8 @@ async fn sso_callback_in(
 ) -> Response {
     let (parts, _body) = req.into_parts();
     let login_base = &config.login_base;
+    let path = super::routes::cookie_path(&t.org, parts.uri.path()).to_owned();
+    let clear_flow = |resp: Response| clear_flow(resp, &path);
     let Some(secret) = session_secret(&parts) else {
         return sso_error("Sign-in is temporarily unavailable.", login_base);
     };
@@ -648,7 +656,7 @@ async fn sso_callback_in(
         tracing::warn!(member_id, "member missing or inactive after sign-in");
         return clear_flow(sso_error("Could not complete sign-in.", login_base));
     };
-    let cookie = mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
+    let cookie = mint_cookie_at(&secret, &member, &t.org.slug, config.session_ttl, &path);
     let landing = safe_landing(params.next.as_deref(), &config.landing_url);
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
@@ -915,10 +923,10 @@ fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
 }
 
 /// Append a flow-cookie-clearing `Set-Cookie` to a response.
-fn clear_flow(mut resp: Response) -> Response {
+fn clear_flow(mut resp: Response, path: &str) -> Response {
     resp.headers_mut().append(
         header::SET_COOKIE,
-        format!("{FLOW_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+        format!("{FLOW_COOKIE}=; HttpOnly; SameSite=Lax; Path={path}; Max-Age=0")
             .parse()
             .expect("valid cookie"),
     );

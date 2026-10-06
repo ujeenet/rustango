@@ -24,6 +24,44 @@ Only data ops before the first DDL are in it; each DDL commits and later ops run
 
 The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
 
+## [0.60.0] — 2026-10-02
+
+### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
+
+It reads the user row like `require_bearer`, so a logout, password change or deactivation ends the token. It now takes the `Tenant`, and its future is `Send`.
+
+### Security — admin CSRF without session auth (#2131)
+
+`protect_with_basic_auth` adds CSRF and form tokens, since the browser resends basic credentials cross-site. New `admin::protect_with_csrf` does the same for an admin behind app cookie auth.
+
+### Security — path-prefix tenants keep separate sessions (#2098)
+
+Tenant session, member session and SSO flow cookies are scoped to the tenant's path prefix, so signing in to one prefix tenant no longer replaces another's session on the same host. End-impersonation also clears an old `Path=/` cookie.
+
+### Fixed — admin, console and tenant login work under a strict CSP (#1703)
+
+`[security]` headers now run the CSP nonce layer. Bundled pages nonce their inline `<script>`/`<style>` and drop inline `on*` handlers and `style` attributes. New `csp_nonce::current()` gives a template the request's nonce.
+
+### Fixed — `api::create_tenant` validates and clash-checks the host (#2097)
+
+It runs the provisioner's checks: slug, host pattern, path prefix, port, and that no other tenant routes on them.
+
+### Security — a custom `redact` list keeps `?token=` hidden (#1818)
+
+`token`, `signature` and `code` are always redacted in access and trace logs. `register_action` documents that custom actions are gated like edits.
+
+### Fixed — docs: a new password hash ends sessions (#1736)
+
+The reset docs no longer say `password_changed_at` ends sessions; `_into` notes that app-written session checks must compare the hash.
+
+### Fixed — `Cli::user_model` checks the model at startup (#1203)
+
+It panics when the model lacks a required column. `REQUIRED_USER_COLUMNS` adds `password_changed_at` and `sessions_revoked_at`; the docs say declaring the model is what selects it.
+
+### Fixed — a new schema tenant reads its own migration ledgers (#2143)
+
+On PostgreSQL its first ledger read could hit `public`'s through the search path, so it skipped migrations `public` had applied.
+
 ### Fixed — the commerce examples' system chains are current (#2054)
 
 Regenerated with `migrate` / `makemigrations`; CI now fails when an example's framework steps are not committed.
@@ -51,6 +89,87 @@ A system step that waits for the project chain first creates its tables that nee
 ### Fixed — unrelated system steps no longer wait for the project chain (#2053)
 
 Only the system ops that depend on a waiting step wait; later unrelated steps run before the project chain.
+
+### Fixed — testkit tables get their indexes (#2120)
+
+`create_tables_for` / `fresh_table` create the model's indexes, `unique_together` included, through the migrate renderer.
+
+### Fixed — `assert_num_queries` counts the PG `_on` reads (#1561)
+
+`fetch_on`, `count_on`, `fetch_paginated_on`, `explain_on`, `select_rows_on`, `fetch_aggregate_on`, `annotate_count_children_on` and `fetch_with_prefetch` were counted as 0.
+
+### Fixed — MySQL refuses a DB-default integer PK it cannot read (#1986)
+
+A non-`Auto` integer PK left to its DB default is refused before the INSERT, instead of reading `LAST_INSERT_ID()` = 0.
+
+### Fixed — PG `bulk_update` sets an all-NULL vector column (#1970)
+
+The NULL is cast `::vector`, not left as text.
+
+### Fixed — a DISTINCT page counts distinct rows (#1966)
+
+`fetch_paginated_pool` / `fetch_paginated_on` with `distinct()` (or PG `distinct_on`) counted rows before DISTINCT; the total is now a counting subquery. Table lookups share `ModelEntry::for_table`.
+
+### Fixed — job queues drain on shutdown (#1255)
+
+`shutdown()` lets running jobs finish within `shutdown_grace` (default 5s), then aborts and re-queues them. Parked retries are kept, so `pending_count()` returns to 0.
+
+### Fixed — a job queue restarts after `shutdown()` (#1677)
+
+`start()` after `shutdown()` panicked on `InMemoryJobQueue` and ran nothing on `DatabaseJobQueue`. Each start now gets fresh workers.
+
+### Fixed — every server drains through one wrapper (#1948)
+
+`shutdown::serve_until_drained` takes the listener and router and is the crate's only `axum::serve`. A `config` build without `manage` no longer has dead settings setters.
+
+### Fixed — `rustango::server_error` for handler 500s (#2032)
+
+It logs the error and sends a fixed body. The examples use it instead of `(500, e.to_string())`.
+
+### Fixed — docs truth pass (#1680)
+
+`manage check --deploy` no longer reports the CSRF Origin check as disabled; it runs against the request's own Host.
+The Stripe webhook example now verifies Stripe's `t=…,v1=…` signature over `"{t}.{body}"` with a replay window, tested against a fixed vector.
+Corrected false claims across README, `models.md` (attribute reference), `orm.md`, `security.md`, `middleware.md`, `admin.md`, `files.md`, `caching.md`, `html-views.md`, `logging.md`, `jobs.md` and rustdoc, in every locale that carries them.
+
+### Fixed — the ORM covers the media sweeps' anti-join delete (#1578)
+
+Bounded deletes and `IN (… LIMIT n)` on MySQL were already in; a `where_not_exists` + `outer_ref` delete is now tested on all three backends.
+
+### Fixed — media sweeps and deletes go through the ORM (#1571)
+
+`delete`, `purge`, `purge_orphans`, `purge_pending` and `delete_collection` no longer build SQL or bind order by hand.
+
+### Fixed — the `ModelForm` unique_together check goes through the ORM (#2011)
+
+It runs as `CountQuery::exists`, and skips partial unique indexes, which used to reject a legal duplicate.
+
+### Fixed — `.dates()` / `.datetimes()` SQL comes from the dialect emitter (#2030)
+
+### Fixed — `ChainResolver` docs name `standard()`, not the empty `default()` (#2044)
+
+`template_extensions_live` is gated on Tera, so `--features sqlite,manage --tests` builds.
+
+### Fixed — audited saves pre-read through the emitter; legacy permission seeding is complete (#2061)
+
+`save_pool` / `save_on` read the "before" row with a compiled `SelectQuery`. `auto_create_permissions(&PgPool)` seeds what `auto_create_permissions_pool` seeds. A provision run attaches its org once.
+
+### Fixed — in-memory jobs and scheduled tasks keep the caller's audit source and timezone (#1229)
+
+`InMemoryJobQueue` captures them at `dispatch`, `Scheduler` at `every()`; a job enqueued by user 42 audits as `user:42`, not `system`. A tenant user's id stays on its own tenant's rows. `PgJobQueue` still runs as `system`.
+
+### Fixed — OpenAPI 3.1 nulls and ViewSet request bodies (#1922)
+
+`Schema::nullable` emits `type: [T, "null"]` (or `anyOf` for a `$ref`); 3.1 has no `nullable`.
+ViewSet POST/PUT/PATCH bodies list only the fields the ViewSet writes: no `Auto` id or `read_only` field, `write_only` included, and PATCH requires nothing.
+
+### Fixed — a deleted media collection's slug can be reused (#1677)
+
+`create_collection` drops a soft-deleted collection holding the slug instead of failing on the unique key.
+
+### Fixed — `RedisCache` keeps millisecond TTLs (#1677)
+
+`set`, `add` and `incr` use `PX`/`PEXPIRE`, so a 1500 ms TTL no longer expires at 1 s.
 
 ### Fixed — `AlterColumn*` migrations run on MySQL and SQLite (#1676)
 

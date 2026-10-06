@@ -92,12 +92,10 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Use this form for `rustango_users`.** It also stamps `password_changed_at`,
-> which is what ends sessions issued before the reset ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
-> `_into` takes an arbitrary table and cannot assume a rotation column exists,
-> so it writes only the password — a reset through it leaves every existing
-> session valid, including an attacker's. That matters precisely because a
-> reset is what someone does when they think their account is compromised.
+> **Use this form for `rustango_users`.** Framework sessions carry a fingerprint
+> of the password hash ([#1338](https://github.com/ujeenet/rustango/issues/1338)), so the new hash ends every
+> session issued before the reset, an attacker's included. It also stamps
+> `password_changed_at`, which records the change but is not what ends them.
 
 The confirm helper applies the [password policy](auth-passwords.md#strength-checks),
 argon2id-hashes the new password, and writes it — rejecting weak, expired,
@@ -112,9 +110,10 @@ tampered, or wrong-secret inputs without touching the row:
 It is the same `passwords::strength_score` the rest of the framework uses, so a
 password refused at registration cannot be set by resetting (#1399).
 
-> `_into` points at your own table/columns — a tenant `app_users`, say. If it
-> has an equivalent of `password_changed_at`, stamp it yourself in the same
-> transaction, or the reset will not end existing sessions.
+> `_into` points at your own table/columns — a tenant `app_users`, say. It writes
+> only the hash. Sessions the framework issues end on that new hash; a session
+> check your app writes itself must compare the hash too, or stamp its own column
+> in the same transaction.
 
 ### Make the link single-use
 

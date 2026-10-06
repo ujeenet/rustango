@@ -158,9 +158,87 @@ untouched.
 
 The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.
 
+## 0.60.0
+
+### `verify_for_tenant` takes the `Tenant`
+
+**Breaking:** call `auth.verify_for_tenant(token, &tenant)`. It refuses tokens not minted by `/login` or `/refresh`, and ended sessions (#2118).
+
+### Strict CSP and the bundled admin
+
+Put `'nonce-__RUSTANGO_NONCE__'` in `script-src` and `style-src` of `[security] csp` to run the admin without `'unsafe-inline'`. The `csp_nonce` module now also builds with `admin` (#1703).
+
+### Basic-auth admins check CSRF
+
+`protect_with_basic_auth` now refuses a POST without the `rustango_csrf` cookie and a matching `_csrf` field or `X-CSRF-Token` header. Scripts that post to it get 403 (#2131).
+
+### Path-prefix tenant cookies use the prefix path
+
+Tenant session, member session and SSO flow cookies set under a path prefix now carry `Path=/<prefix>`, not `Path=/` (#2098).
+
+### `api::create_tenant` refuses what the CLI refuses
+
+A bad slug or host, or a host, prefix or port another tenant uses, is now a `Validation` error (#2097).
+
+### `user_model` validates the model
+
+**Breaking:** `Cli::user_model` / `Builder::user_model` panic if the model lacks a required column. Add `password_changed_at` and `sessions_revoked_at` (`Option<DateTime<Utc>>`) to a custom user model (#1203).
+
 ### SQLite rebuilds tables for CHECK and composite FK changes
 
 These ops no longer fail on SQLite (#2127); like other rebuilds, they refuse a table with a column the migration snapshot lacks. On PG, `render_changes_split_with_dialect` no longer emits the `DROP CONSTRAINT` of a UNIQUE drop: the runner finds the live name (#2133). `render_changes` still prints the usual name.
+
+### `fresh_table` creates indexes
+
+Test tables now carry the model's indexes (#2120): a test that inserted duplicate `unique_together` rows now gets a unique violation, and MySQL refuses an index over an unbounded `String`, as `migrate` does.
+
+### `assert_num_queries` sees the PG `_on` reads
+
+A block using `fetch_on`, `count_on` or another `_on` read now counts its queries (#1561); an expectation of 0 written around one fails.
+
+### MySQL refuses a DB-default integer PK
+
+An insert that leaves a non-`Auto` integer PK to its DB default fails with `GeneratedPkUnreadable` on MySQL (#1986). Set the PK or use `Auto<i64>`.
+
+### Job queue `shutdown()` drains
+
+`shutdown()` now waits up to `shutdown_grace` (default 5s) for running jobs; `InMemoryJobQueue` used to abort at once. Aborted jobs and parked retries stay queued for the next `start()` (#1255, #1677). An aborted job runs again from the start, so make jobs idempotent.
+
+### `serve_until_drained(listener, app, drain)`
+
+**Breaking:** it takes a `TcpListener` and an `axum::Router` instead of a serve closure, always adds `ConnectInfo<SocketAddr>`, and needs an axum-enabled feature such as `admin` (#1948). Other listeners or services now call `axum::serve` directly.
+
+```rust
+// before
+serve_until_drained(|stop| axum::serve(listener, app).with_graceful_shutdown(stop), drain).await?;
+// after
+serve_until_drained(listener, app, drain).await?;
+```
+
+### `audit::save_one_with_diff` takes the BEFORE query
+
+The macro-support function takes `&SelectQuery` (build it with `audit::before_image_query`) instead of a pk column, pk value and three column lists (#2061).
+
+### `ModelForm::validate_unique_together` skips partial unique indexes
+
+Like the serializer check; the database still enforces them (#2011).
+
+### `auto_create_permissions(&PgPool)` seeds the reserved codenames
+
+It now seeds `auth.access_admin`, the audit codenames and `extra_permissions`, like `auto_create_permissions_pool` (#2061).
+
+### Background work keeps its caller's audit source
+
+`InMemoryJobQueue` jobs and `Scheduler` ticks now run with the audit source and timezone of the scope they were dispatched or registered in, not `system` and UTC (#1229). A `run()` that re-enters `audit::with_source` overrides it. Reports counting `system` rows will drop.
+A tenant admin user's id is recorded only on that tenant's writes (a `for_each_tenant` pass); elsewhere it is `system`. Tenant handlers that set a user source should use `audit::with_tenant_source`.
+
+### OpenAPI `Schema` has no `nullable` field
+
+**Breaking:** `Schema.nullable` is gone and `Schema.type_` is a `SchemaType`; call `.nullable()` instead (#1922). A new `any_of` field holds a nullable `$ref`. ViewSet request bodies are now inline schemas, not `$ref`s to the item schema.
+
+### Re-creating a deleted media collection
+
+`create_collection` hard-deletes a soft-deleted collection with the same slug (#1677).
 
 ### `AlterColumn*` no longer refused on MySQL and SQLite
 

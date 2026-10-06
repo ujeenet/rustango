@@ -222,10 +222,15 @@ pegamento HTTP/axum; úsalo cuando quieras backends de autenticación
 intercambiables dentro de tu propio código de autenticación:
 
 ```rust
-use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};
+use std::sync::Arc;
+use rustango::auth_backends::{
+    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
+};
 
-let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-let principal = chain.authenticate(&Credentials::remote("alice")).await?;
+async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
+    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
+    chain.authenticate(&Credentials::remote(remote_user)).await
+}
 ```
 
 La misma semántica «el primer éxito gana / el primer error detiene» que la cadena

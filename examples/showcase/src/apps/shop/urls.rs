@@ -98,7 +98,7 @@ async fn list_products(
     let rows: Vec<Product> = qs
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     Ok(Json(rows.into_iter().map(ProductOut::from).collect()))
 }
 
@@ -111,7 +111,7 @@ async fn retrieve_product(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     if let Some(p) = rows.pop() {
         Ok(Json(ProductOut::from(p)))
     } else {
@@ -134,7 +134,7 @@ async fn create_product(
     };
     p.insert_pool(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
 
     // Re-fetch by PK — same MySQL parity reason as blog.
     let id = match p.id {
@@ -150,7 +150,7 @@ async fn create_product(
         .filter_op("id", Op::Eq, id)
         .fetch(&pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     let stored = rows.pop().ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "could not re-fetch inserted row".into(),

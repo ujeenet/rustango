@@ -23,7 +23,17 @@
 use crate::openapi::{Operation, Parameter, PathItem, RequestBody, Response, Schema};
 
 use super::{PaginationStyle, ViewSet};
-use crate::core::FieldType;
+use crate::core::{FieldType, WriteKind};
+use crate::forms::absent_is_missing;
+
+/// Which write a request schema describes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Create,
+    Replace,
+    /// Every key optional.
+    Patch,
+}
 
 impl ViewSet {
     /// Generate the OpenAPI path items for this viewset.
@@ -34,7 +44,10 @@ impl ViewSet {
     ///
     /// `item_schema_ref` is the name of the schema you registered in the
     /// spec's `components.schemas` (typically the model name, e.g. `"Post"`).
-    /// Both create/update bodies and retrieve responses reference it.
+    /// Responses reference it. Request bodies are inlined from the
+    /// fields the ViewSet writes, so `Auto` ids and read-only fields are
+    /// left out, and a PATCH body requires nothing. Filter-backend pins are
+    /// per request, so a pinned field still shows (the server ignores it).
     #[must_use]
     pub fn openapi_paths(&self, prefix: &str, item_schema_ref: &str) -> Vec<(String, PathItem)> {
         let prefix = prefix.trim_end_matches('/').to_owned();
@@ -71,7 +84,7 @@ impl ViewSet {
                 .summary(format!("Create {tag}"))
                 .operation_id(format!("create_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(Schema::ref_(item_ref)))
+                .request_body(RequestBody::json(self.request_schema(Body::Create)))
                 .response(
                     "201",
                     Response::new("created").json_content(Schema::ref_(item_ref)),
@@ -157,7 +170,7 @@ impl ViewSet {
                 .summary(format!("Replace {tag}"))
                 .operation_id(format!("update_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(Schema::ref_(item_ref)))
+                .request_body(RequestBody::json(self.request_schema(Body::Replace)))
                 .response(
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
@@ -169,7 +182,7 @@ impl ViewSet {
                 .summary(format!("Partially update {tag}"))
                 .operation_id(format!("partial_update_{}", snake(tag)))
                 .tag(tag)
-                .request_body(RequestBody::json(Schema::ref_(item_ref)))
+                .request_body(RequestBody::json(self.request_schema(Body::Patch)))
                 .response(
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
@@ -187,6 +200,29 @@ impl ViewSet {
         }
 
         p
+    }
+
+    /// The body a write accepts, from the same field set the handlers
+    /// read: no server-set columns, `required` only where absence is a 400 (#1922).
+    fn request_schema(&self, body: Body) -> Schema {
+        let kind = match body {
+            Body::Create => WriteKind::Insert,
+            Body::Replace | Body::Patch => WriteKind::Update,
+        };
+        let mut s = Schema::object();
+        let mut required = Vec::new();
+        for f in self.body_fields() {
+            if !f.accepts_input(kind) {
+                continue;
+            }
+            let key = self.body_key(f.name);
+            let prop = field_type_to_schema(f.ty);
+            s = s.property(key, if f.nullable { prop.nullable() } else { prop });
+            if body != Body::Patch && absent_is_missing(f) {
+                required.push(key);
+            }
+        }
+        s.required(required)
     }
 
     fn pk_path_param(&self) -> Parameter {
@@ -658,7 +694,10 @@ mod tests {
         // response: { page_size, next, results } — no count
         let resp = &v["responses"]["200"]["content"]["application/json"]["schema"];
         assert!(resp["properties"]["count"].is_null());
-        assert_eq!(resp["properties"]["next"]["nullable"], true);
+        assert_eq!(
+            resp["properties"]["next"]["type"],
+            serde_json::json!(["string", "null"])
+        );
     }
 
     #[test]
@@ -679,18 +718,96 @@ mod tests {
     }
 
     #[test]
-    fn create_body_and_response_reference_item_schema() {
+    fn create_response_references_item_schema() {
         let paths = vs().openapi_paths("/api/posts", "Post");
         let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
         let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
         assert_eq!(
-            v["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/Post"
-        );
-        assert_eq!(
             v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/Post"
         );
+    }
+
+    fn body_schema(op: Option<&crate::openapi::Operation>) -> serde_json::Value {
+        let v = serde_json::to_value(op.unwrap()).unwrap();
+        v["requestBody"]["content"]["application/json"]["schema"].clone()
+    }
+
+    /// #1922: the item schema as a request body required the `Auto` id
+    /// and made PATCH require every field.
+    #[test]
+    fn write_bodies_leave_out_the_auto_id_and_patch_requires_nothing() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let item = &paths
+            .iter()
+            .find(|(p, _)| p == "/api/posts/{pk}")
+            .unwrap()
+            .1;
+        let fields = serde_json::json!({"type": "object", "properties": {
+            "title": {"type": "string"},
+            "author_id": {"type": "integer", "format": "int64"},
+        }});
+        let mut full = fields.clone();
+        full["required"] = serde_json::json!(["title", "author_id"]);
+        assert_eq!(body_schema(coll.post.as_ref()), full, "POST");
+        assert_eq!(body_schema(item.put.as_ref()), full, "PUT");
+        assert_eq!(body_schema(item.patch.as_ref()), fields, "PATCH");
+    }
+
+    /// A body cannot set the soft-delete column, so the schema must not offer it.
+    #[test]
+    fn write_bodies_leave_out_the_soft_delete_column() {
+        static FIELDS: [FieldSchema; 2] = [title_const(), deleted_at_const()];
+        static MS: std::sync::OnceLock<ModelSchema> = std::sync::OnceLock::new();
+        let ms = MS.get_or_init(|| ModelSchema {
+            fields: &FIELDS,
+            soft_delete_column: Some("deleted_at"),
+            ..schema().clone()
+        });
+        let paths = ViewSet::for_model(ms).openapi_paths("/p", "P");
+        let item = &paths.iter().find(|(p, _)| p == "/p/{pk}").unwrap().1;
+        let body = body_schema(item.patch.as_ref());
+        assert!(body["properties"]["title"].is_object());
+        assert!(body["properties"].get("deleted_at").is_none(), "{body}");
+    }
+
+    const fn title_const() -> FieldSchema {
+        FieldSchema {
+            name: "title",
+            column: "title",
+            ty: FieldType::String,
+            nullable: false,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            auto_now: false,
+            unique: false,
+            generated_as: None,
+            help_text: None,
+            choices: None,
+            db_comment: None,
+            verbose_name: None,
+            editable: true,
+            blank: false,
+            case_insensitive: false,
+            fk_on_delete: None,
+            validators: &[],
+        }
+    }
+
+    const fn deleted_at_const() -> FieldSchema {
+        FieldSchema {
+            name: "deleted_at",
+            column: "deleted_at",
+            ty: FieldType::DateTime,
+            nullable: true,
+            ..title_const()
+        }
     }
 
     #[test]

@@ -116,25 +116,14 @@ where
             select.joins.iter().map(|j| j.alias).collect();
         let stmt = Postgres.compile_select(&select)?;
 
+        // With joins, each JOINed target is stitched from the same row:
+        // one round trip, no N+1.
+        let raw_rows = pg_on_query(&stmt.sql, stmt.params)
+            .fetch_all(executor)
+            .await?;
         if select_related_aliases.is_empty() {
-            // No JOINs — fast path, decode straight into `T`.
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                sqlx::query_as::<_, T>(&stmt.sql);
-            for value in stmt.params {
-                q = bind_query_as(q, value);
-            }
-            let rows = q.fetch_all(executor).await?;
-            return Ok(rows);
+            return Ok(raw_rows.iter().map(T::from_row).collect::<Result<_, _>>()?);
         }
-
-        // select_related path: fetch raw rows so we can decode `T` and
-        // also stitch each JOINed target from the same row. One round
-        // trip, no N+1.
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-        for value in stmt.params {
-            q = bind_query(q, value);
-        }
-        let raw_rows = q.fetch_all(executor).await?;
         // Stitch from leaf aliases so each FK chain (including
         // multi-hop `a__b__c`) is decoded once.
         let leaves = select_related_leaves(&select_related_aliases);
@@ -179,11 +168,9 @@ where
     {
         let select = self.compile()?;
         let stmt = paginated_statement(&Postgres, &select)?;
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-        for value in stmt.params {
-            q = bind_query(q, value);
-        }
-        let raw_rows: Vec<PgRow> = q.fetch_all(executor).await?;
+        let raw_rows: Vec<PgRow> = pg_on_query(&stmt.sql, stmt.params)
+            .fetch_all(executor)
+            .await?;
         let total: i64 = raw_rows
             .first()
             .map(|row| sqlx::Row::try_get::<i64, _>(row, "__rustango_total"))
@@ -366,11 +353,7 @@ where
     }
     sql.push_str(&tail.sql);
 
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
-    for param in tail.params {
-        q = bind_query(q, param);
-    }
-    let raw_rows = q.fetch_all(executor).await?;
+    let raw_rows = pg_on_query(&sql, tail.params).fetch_all(executor).await?;
     let mut out = Vec::with_capacity(raw_rows.len());
     for row in &raw_rows {
         let parent_obj = P::from_row(row)?;
@@ -501,11 +484,9 @@ impl<T: Model + Send> QuerySet<T> {
             return Ok(0);
         };
         let stmt = Postgres.compile_count(&CountQuery::from_select(select))?;
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-        for value in stmt.params {
-            q = bind_query(q, value);
-        }
-        let row = q.fetch_one(executor).await?;
+        let row = pg_on_query(&stmt.sql, stmt.params)
+            .fetch_one(executor)
+            .await?;
         let count: i64 = sqlx::Row::try_get(&row, 0)?;
         Ok(count)
     }
@@ -555,11 +536,7 @@ impl<T: Model + Send> QuerySet<T> {
         }
         sql.push_str(&stmt.sql);
 
-        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
-        for value in stmt.params {
-            q = bind_query(q, value);
-        }
-        let rows = q.fetch_all(executor).await?;
+        let rows = pg_on_query(&sql, stmt.params).fetch_all(executor).await?;
         let mut out = Vec::with_capacity(rows.len());
         // EXPLAIN's row type follows `FORMAT`: text/yaml/xml come back
         // as TEXT, `FORMAT JSON` gives column 0 as the JSON type.
@@ -884,6 +861,17 @@ pub(crate) fn bind_query(
     bind_match!(q, value)
 }
 
+/// The bound query of a PG `_on` read. The one place that family is
+/// counted for `assert_num_queries` (#1561).
+#[cfg(feature = "postgres")]
+pub(super) fn pg_on_query(
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Query<'_, sqlx::Postgres, PgArguments> {
+    crate::test_assertions::query_counter::bump();
+    params.into_iter().fold(sqlx::query(sql), bind_query)
+}
+
 /// Like [`fetch_aggregate_pool`] but accepts any sqlx executor.
 ///
 /// # Errors
@@ -897,11 +885,9 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     let stmt = Postgres.compile_aggregate(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for p in stmt.params {
-        q = bind_query(q, p);
-    }
-    let raw_rows = q.fetch_all(executor).await?;
+    let raw_rows = pg_on_query(&stmt.sql, stmt.params)
+        .fetch_all(executor)
+        .await?;
 
     let mut out = Vec::with_capacity(raw_rows.len());
     for row in &raw_rows {
@@ -1109,17 +1095,12 @@ where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
     // The OK packet only carries an AUTO_INCREMENT id: refuse before the
-    // write, or the row lands and its PK is lost (#1978). Only the PK:
-    // other RETURNING columns (e.g. `generated_as`) stay unread here.
+    // write, or the row lands and its PK is lost (#1978, #1986). Only the
+    // PK: other RETURNING columns (e.g. `generated_as`) stay unread here.
     if let Some(pk) = query.model.primary_key().filter(|pk| {
         query.returning.contains(&pk.column)
             && !query.columns.contains(&pk.column)
-            && !matches!(
-                pk.ty,
-                crate::core::FieldType::I16
-                    | crate::core::FieldType::I32
-                    | crate::core::FieldType::I64
-            )
+            && !pk.is_serial()
     }) {
         return Err(ExecError::GeneratedPkUnreadable {
             table: query.model.table,
@@ -2065,22 +2046,18 @@ pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DatesQuerySet<T>,
 ) -> Result<Vec<chrono::NaiveDate>, ExecError> {
-    let descending = qs.descending;
-    let kind = qs.kind;
     let column = qs.resolve_column()?;
-    // The inner SELECT keeps WHERE / JOINs / LIMIT. Its ORDER BY is
-    // overridden below: `.dates()` orders by the truncated bucket.
-    let select_query = qs.qs.compile()?;
-    let dialect = pool.dialect();
-    let inner = dialect.compile_select(&select_query)?;
-    let col_quoted = dialect.quote_ident(column);
-    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
-    let order_dir = if descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT DISTINCT {trunc_sql} AS rs_dates_bucket FROM ({inner_sql}) AS rs_dates_sub ORDER BY rs_dates_bucket {order_dir}",
-        inner_sql = inner.sql,
-    );
-    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&sql, inner.params, pool).await?;
+    // The inner SELECT keeps WHERE / JOINs / LIMIT; the outer orders by bucket.
+    let bucket = crate::sql::DateBucket::Date(qs.kind);
+    let descending = qs.descending;
+    let stmt = crate::sql::compile_date_buckets(
+        pool.dialect(),
+        &qs.qs.compile()?,
+        column,
+        bucket,
+        descending,
+    )?;
+    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&stmt.sql, stmt.params, pool).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -2094,21 +2071,18 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     pool: &Pool,
     qs: crate::query::DateTimesQuerySet<T>,
 ) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
-    let descending = qs.descending;
-    let kind = qs.kind;
     let column = qs.resolve_column()?;
-    let select_query = qs.qs.compile()?;
-    let dialect = pool.dialect();
-    let inner = dialect.compile_select(&select_query)?;
-    let col_quoted = dialect.quote_ident(column);
-    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
-    let order_dir = if descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT DISTINCT {trunc_sql} AS rs_datetimes_bucket FROM ({inner_sql}) AS rs_datetimes_sub ORDER BY rs_datetimes_bucket {order_dir}",
-        inner_sql = inner.sql,
-    );
+    let bucket = crate::sql::DateBucket::DateTime(qs.kind);
+    let descending = qs.descending;
+    let stmt = crate::sql::compile_date_buckets(
+        pool.dialect(),
+        &qs.qs.compile()?,
+        column,
+        bucket,
+        descending,
+    )?;
     let rows: Vec<(chrono::DateTime<chrono::Utc>,)> =
-        raw_query_pool(&sql, inner.params, pool).await?;
+        raw_query_pool(&stmt.sql, stmt.params, pool).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 

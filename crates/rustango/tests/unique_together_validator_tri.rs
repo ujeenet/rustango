@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use rustango::core::{Model as _, SqlValue};
+use rustango::forms::ModelFormFor;
 use rustango::serializer::check_unique_together_pool;
 use rustango::sql::{Auto, Pool};
 use rustango::{tri_dialect_test, Model};
@@ -21,6 +22,24 @@ pub struct UtvMembership {
     id: Auto<i64>,
     org_id: i64,
     user_id: i64,
+}
+
+/// Unique only where `user_id > 100`; lower ids may repeat.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "utv_partial",
+    unique_when(columns = "org_id, user_id", condition = "user_id > 100")
+)]
+pub struct UtvPartial {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    org_id: i64,
+    user_id: i64,
+}
+
+fn form<T: rustango::core::Model>(org_id: i64, user_id: i64) -> ModelFormFor<T> {
+    ModelFormFor::<T>::from_json(&serde_json::json!({ "org_id": org_id, "user_id": user_id }))
+        .expect("form parses")
 }
 
 async fn seed(pool: &Pool, org_id: i64, user_id: i64) -> i64 {
@@ -101,13 +120,69 @@ async fn partial_value_set_skips_the_check(pool: &Pool) {
         .expect("partial bind should be a silent skip, not an error");
 }
 
+async fn model_form_flags_a_collision(pool: &Pool) {
+    let pk = seed(pool, 1, 2).await;
+    let err = form::<UtvMembership>(1, 2)
+        .validate_unique_together(pool, None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.non_field().is_empty(),
+        "the probe itself failed: {err:?}"
+    );
+    assert_eq!(
+        err.get("org_id"),
+        ["a row with the same (org_id, user_id) already exists"]
+    );
+    form::<UtvMembership>(1, 2)
+        .validate_unique_together(pool, Some(&SqlValue::I64(pk)))
+        .await
+        .expect("own row is not a conflict");
+    form::<UtvMembership>(1, 3)
+        .validate_unique_together(pool, None)
+        .await
+        .expect("free pair");
+}
+
+async fn model_form_skips_a_partial_unique_index(pool: &Pool) {
+    // #2011: a repeat outside the index predicate is legal.
+    rustango::testkit::matrix::fresh_table::<UtvPartial>(pool).await;
+    let mut row = UtvPartial {
+        id: Auto::Unset,
+        org_id: 1,
+        user_id: 2,
+    };
+    row.save_pool(pool).await.expect("seed");
+    form::<UtvPartial>(1, 2)
+        .validate_unique_together(pool, None)
+        .await
+        .expect("partial index does not cover this row");
+}
+
+/// #2120: `fresh_table` built no `unique_together` index, so this passed.
+async fn the_table_itself_rejects_a_duplicate_pair(pool: &Pool) {
+    seed(pool, 1, 2).await;
+    let mut dup = UtvMembership {
+        id: Auto::Unset,
+        org_id: 1,
+        user_id: 2,
+    };
+    assert!(
+        dup.save_pool(pool).await.is_err(),
+        "duplicate pair inserted"
+    );
+}
+
 tri_dialect_test!(
     model: UtvMembership,
     scenarios: [
+        the_table_itself_rejects_a_duplicate_pair,
         validator_returns_ok_when_no_collision,
         validator_returns_err_on_collision,
         exclude_pk_lets_a_row_re_save_its_own_values,
         exclude_pk_still_catches_collisions_against_other_rows,
         partial_value_set_skips_the_check,
+        model_form_flags_a_collision,
+        model_form_skips_a_partial_unique_index,
     ],
 );

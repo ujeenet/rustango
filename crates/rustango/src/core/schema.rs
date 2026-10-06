@@ -203,6 +203,13 @@ impl FieldSchema {
         self.auto && !self.primary_key && matches!(self.ty, FieldType::DateTime)
     }
 
+    /// An integer `Auto<T>`: a sequence / AUTO_INCREMENT column, the only
+    /// PK MySQL's `LAST_INSERT_ID()` can report.
+    #[must_use]
+    pub fn is_serial(&self) -> bool {
+        self.auto && matches!(self.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
+    }
+
     /// An `Auto<Uuid>` the writer must fill Rust-side (`default_uuid_v7`).
     /// Inferred: `auto_uuid` always carries a `gen_random_uuid()` default.
     #[must_use]

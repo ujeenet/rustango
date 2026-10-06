@@ -46,7 +46,7 @@ async fn lookup(
         .where_(AppUser::username.eq(username.clone()))
         .fetch_on(tenant.conn())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(rustango::server_error)?;
     rows.into_iter()
         .next()
         .map(|u| Json(UserOut::from(u)))

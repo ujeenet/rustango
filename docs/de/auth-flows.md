@@ -92,14 +92,11 @@ let user_id = confirm_password_reset_pool(
 ).await?;
 ```
 
-> **Verwende diese Form für `rustango_users`.** Sie stempelt auch
-> `password_changed_at`, was Sitzungen beendet, die vor dem Zurücksetzen
-> ausgestellt wurden ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
-> `_into` nimmt eine beliebige Tabelle und kann keine Rotationsspalte
-> voraussetzen, schreibt also nur das Passwort — ein Zurücksetzen darüber lässt
-> jede bestehende Sitzung gültig, auch die eines Angreifers. Genau darauf kommt
-> es an, denn ein Zurücksetzen macht man, wenn man sein Konto für kompromittiert
-> hält.
+> **Verwende diese Form für `rustango_users`.** Framework-Sitzungen tragen einen
+> Fingerabdruck des Passwort-Hashes ([#1338](https://github.com/ujeenet/rustango/issues/1338)), daher beendet der
+> neue Hash jede vor dem Zurücksetzen ausgestellte Sitzung, auch die eines
+> Angreifers. Sie stempelt auch `password_changed_at`; das hält die Änderung fest,
+> beendet die Sitzungen aber nicht.
 
 Der Bestätigungshelfer wendet die [Passwortrichtlinie](auth-passwords.md#stärkeprüfungen) an,
 hasht das neue Passwort mit argon2id und schreibt es — wobei er schwache, abgelaufene,
@@ -115,9 +112,9 @@ Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwend
 Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
 
 > `_into` verweist auf Ihre eigene Tabelle/Spalten — etwa ein mandantenspezifisches
-> `app_users`. Hat sie ein Gegenstück zu `password_changed_at`, stempeln Sie es
-> selbst in derselben Transaktion, sonst beendet das Zurücksetzen keine
-> bestehenden Sitzungen.
+> `app_users`. Es schreibt nur den Hash. Vom Framework ausgestellte Sitzungen enden
+> mit dem neuen Hash; eine Sitzungsprüfung, die Ihre App selbst schreibt, muss den
+> Hash ebenfalls vergleichen oder eine eigene Spalte in derselben Transaktion stempeln.
 
 ### Den Link einmalig machen
 

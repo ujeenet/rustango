@@ -32,7 +32,7 @@
 <p class="form-actions"><a href="/orgs" class="btn btn-secondary">Back to tenants</a></p>
 
 {% if not terminal %}
-<script>
+<script nonce="{{ csp_nonce }}">
   // Resume from the last row already rendered, so a reload does not
   // replay what is on screen — and a reconnect mid-run picks up
   // exactly where it stopped. The server honours `Last-Event-ID` too;

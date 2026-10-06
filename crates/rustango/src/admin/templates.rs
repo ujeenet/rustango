@@ -57,7 +57,12 @@ fn templates() -> &'static tera::Tera {
 /// If the template is missing or the context does not serialize. Both
 /// are bugs the tests catch.
 pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String {
-    let tera_ctx = tera::Context::from_serialize(ctx).expect("admin context serializes");
+    let mut tera_ctx = tera::Context::from_serialize(ctx).expect("admin context serializes");
+    // Inline tags carry it so a strict `[security] csp` runs them (#1703).
+    tera_ctx.insert(
+        "csp_nonce",
+        &crate::csp_nonce::current().unwrap_or_default(),
+    );
     templates()
         .render(template, &tera_ctx)
         .expect("admin template renders")

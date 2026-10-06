@@ -408,6 +408,9 @@ one of two ways:
 
 - **Front it with your own auth.** Leave the admin open and put HTTP Basic auth,
   OAuth2, or corporate SSO in front of the nest path with your own middleware.
+  The admin mounts CSRF only with session auth, and Basic auth is re-sent by the
+  browser on its own, so a Basic-auth admin's mutations are cross-site forgeable;
+  see [Security → CSRF](security.md#protecting-against-csrf).
 
 When session auth is on, the sidebar footer shows a **"Signed in as _username_"**
 line and a **Logout** button (a `POST` form). Standalone admins post to

@@ -245,7 +245,9 @@ cache.clear().await?;                            // drops ONLY acme's entries
 tome un `BoxedCache` — `cache_page`, `cache_fragment`, los rate limiters,
 `DistributedLock`. Reenvía al backend interno con las claves mapeadas en lugar
 de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
-`SET NX`, `MGET`) conservan su atomicidad y su batching.
+`SET NX`) conservan su atomicidad. `get_many` / `set_many` / `delete_many` también
+se reenvían, pero ningún backend incluido los agrupa aún: cada clave es un viaje
+de ida y vuelta.
 
 **Contadores atómicos y bloqueos.** `Cache::incr` está detrás del
 [rate limiting](middleware.md) y el bloqueo por cuenta; `Cache::add`

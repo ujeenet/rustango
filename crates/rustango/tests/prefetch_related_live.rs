@@ -156,3 +156,68 @@ async fn prefetch_with_no_parents_returns_empty() {
             .unwrap();
     assert!(groups.is_empty());
 }
+
+/// #1561: the `_on` reads ran uncounted, so any `assert_num_queries` passed.
+#[tokio::test]
+async fn on_reads_are_counted_and_stay_flat() {
+    use rustango::test_assertions::assert_num_queries;
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup(&pool).await;
+    for name in ["Ada", "Grace", "Linus"] {
+        let mut a = Author {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        a.save(&pool).await.unwrap();
+        let mut p = Post {
+            id: Auto::default(),
+            title: format!("{name} post"),
+            author: ForeignKey::unloaded(a.id.get().copied().unwrap()),
+        };
+        p.save(&pool).await.unwrap();
+    }
+    assert_num_queries(1, async {
+        let rows = rustango::sql::annotate_count_children_on(
+            Author::objects(),
+            "rustango_pf_post",
+            "author",
+            &pool,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    })
+    .await;
+    assert_num_queries(2, async {
+        let groups = fetch_with_prefetch::<Author, Post>(Author::objects(), "author", &pool)
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 3);
+    })
+    .await;
+    assert_num_queries(6, async {
+        assert_eq!(Author::objects().fetch_on(&pool).await.unwrap().len(), 3);
+        assert_eq!(Author::objects().count_on(&pool).await.unwrap(), 3);
+        let page = Author::objects().limit(1).fetch_paginated_on(&pool).await;
+        assert_eq!(page.unwrap().total, 3);
+        let q = Author::objects().compile().unwrap();
+        assert_eq!(
+            rustango::sql::select_rows_on(&pool, &q)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        let dicts = Author::objects().values_dict(&["name"]).fetch_on(&pool);
+        assert_eq!(dicts.await.unwrap().len(), 3);
+        let agg = Author::objects()
+            .values(&["name"])
+            .annotate("n", rustango::core::AggregateExpr::Count(None))
+            .fetch_on(&pool);
+        assert_eq!(agg.await.unwrap().len(), 3);
+    })
+    .await;
+}

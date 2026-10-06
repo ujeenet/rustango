@@ -221,3 +221,39 @@ async fn auto_now_add_and_soft_delete() {
         .unwrap();
     assert_eq!(all.len(), 1, "still in the table, visible with_trashed()");
 }
+
+// ------------------------------------------------- the attribute reference
+
+/// The reference-table forms of `o2o`, `on_delete` and container `index(..)`
+/// (#1680): the earlier `o2o` flag, `cascade` flag and `index(columns = ..)`
+/// did not compile.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "md_doc_profile", index("bio", method = "gin"))]
+pub struct DocProfile {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(o2o = "md_gadget")]
+    pub gadget_id: i64,
+    #[rustango(fk = "md_account", on_delete = "cascade")]
+    pub account_id: i64,
+    pub bio: String,
+}
+
+#[test]
+fn reference_table_attributes_compile_and_land_in_the_schema() {
+    use rustango::core::{IndexMethod, OnDeleteAction, Relation};
+    let s = DocProfile::SCHEMA;
+    assert!(matches!(
+        s.field("gadget_id").unwrap().relation,
+        Some(Relation::O2O {
+            to: "md_gadget",
+            ..
+        })
+    ));
+    assert_eq!(
+        s.field("account_id").unwrap().fk_on_delete,
+        Some(OnDeleteAction::Cascade)
+    );
+    let idx = s.indexes.iter().find(|i| i.columns == ["bio"]).unwrap();
+    assert_eq!(idx.method, IndexMethod::Gin);
+}

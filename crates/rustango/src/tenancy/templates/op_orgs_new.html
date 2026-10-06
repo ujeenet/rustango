@@ -200,7 +200,7 @@ connection check passes.</p>
   </p>
 </form>
 
-<script>
+<script nonce="{{ csp_nonce }}">
   // The form shows only the fields that apply to the chosen storage
   // mode. Everything here is presentation — the server validates
   // regardless, so a browser with JS off gets every field and a

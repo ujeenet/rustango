@@ -34,6 +34,8 @@
 //! - **Zero period is clamped**: `every(_, Duration::ZERO, _)` would
 //!   panic tokio's timer at spawn; it is clamped to 1s with a warning
 //!   instead (#1256).
+//! - **Context**: each tick runs with the audit source and timezone that
+//!   were active when the task was registered with `every()` (#1229).
 //! - **Shutdown**: `Handle::shutdown()` stops every task loop *and*
 //!   aborts any job currently in flight — a running job does not outlive
 //!   shutdown (#1256).
@@ -60,6 +62,8 @@ struct Task {
     name: String,
     period: Duration,
     factory: JobFactory,
+    /// Captured at `every()`: a tick has no caller to inherit from.
+    context: crate::task_context::TaskContext,
 }
 
 /// Scheduler configuration — register tasks, then `start()` to spawn the runner.
@@ -88,11 +92,11 @@ impl Scheduler {
     /// `name` appears in tracing logs and panic messages — keep it short
     /// and identifying.
     ///
-    /// **The job runs with no ambient context.** Each tick is a
-    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
-    /// state — there is no request to inherit from anyway — so the audit
-    /// source is [`crate::audit::AuditSource::System`] and the timezone
-    /// is the default (#1229). Nor is there a tenant: a scheduled sweep
+    /// **Each tick runs with the audit source and timezone active at
+    /// this call** (#1229), so wrap registration in
+    /// [`crate::audit::with_source`] to attribute a task, e.g.
+    /// `AuditSource::Custom("cron:sweep".into())`. Outside any scope that
+    /// is `System` and UTC. There is no session or tenant: a scheduled sweep
     /// over per-tenant tables must fan out explicitly with
     /// [`crate::tenancy::for_each_tenant`] (#1226), and a
     /// once-per-cluster guard should be scoped per tenant with
@@ -125,6 +129,7 @@ impl Scheduler {
                 name: name.to_owned(),
                 period,
                 factory,
+                context: crate::task_context::TaskContext::capture(),
             });
     }
 
@@ -167,6 +172,7 @@ fn spawn_task_loop(task: Task) -> JoinHandle<()> {
         loop {
             tick.tick().await;
             let factory = task.factory.clone();
+            let context = task.context.clone();
             let name = task.name.clone();
             // Run each invocation as a separate spawned task so a panic
             // doesn't kill the loop. Wrap it in an abort-on-drop guard so
@@ -175,8 +181,7 @@ fn spawn_task_loop(task: Task) -> JoinHandle<()> {
             // running detached (#1256) — dropping a bare `JoinHandle`
             // does NOT stop its task.
             let mut job = AbortOnDrop(tokio::spawn(async move {
-                let fut = (factory)();
-                fut.await;
+                context.install(async move { (factory)().await }).await;
             }));
             if let Err(e) = (&mut job.0).await {
                 if e.is_panic() {
@@ -267,6 +272,36 @@ mod tests {
             0,
             "in-flight job kept running after shutdown",
         );
+    }
+
+    /// #1229 — a tick runs with the context active at `every()`, not the
+    /// `System` a bare spawn would give it; outside a scope it stays `System`.
+    #[tokio::test]
+    async fn tick_runs_with_the_context_active_at_registration() {
+        use crate::audit::{current_source, with_source, AuditSource};
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = Scheduler::new();
+        let (a, b) = (seen.clone(), seen.clone());
+        with_source(AuditSource::Custom("cron:sweep".into()), async {
+            s.every("attributed", Duration::from_millis(10), move || {
+                a.lock().unwrap().push(current_source().as_token());
+                async {}
+            });
+        })
+        .await;
+        s.every("plain", Duration::from_millis(10), move || {
+            let b = b.clone();
+            async move { b.lock().unwrap().push(current_source().as_token()) }
+        });
+        let handle = s.start();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.shutdown().await;
+        let seen = seen.lock().unwrap();
+        assert!(seen.contains(&"cron:sweep".to_owned()), "got {seen:?}");
+        assert!(seen.contains(&"system".to_owned()), "got {seen:?}");
     }
 
     #[tokio::test]
