@@ -16,6 +16,10 @@ Under `tenant_router` the throttle key includes the tenant, so one client no lon
 
 A panicking handler is a logged opaque `500`, as under `Cli` and `server::Builder`, not a dropped connection.
 
+### Tests — `server::Builder` panic catch with observability off (#2105)
+
+A test now covers the opaque 500 with no observability or security headers.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
