@@ -286,9 +286,12 @@ async fn schema_mode_on_sqlite_is_refused_with_a_useful_message() {
     .await
     .expect_err("schema mode must be refused on sqlite");
 
+    // Shown in the console too, so it names the control, not a CLI flag (#1335).
+    let msg = err.to_string();
+    assert!(!msg.contains("--"), "names a CLI flag: {msg}");
     assert!(
-        err.to_string().contains("--mode database"),
-        "the error should point at the fix, got: {err}"
+        msg.contains("database storage mode"),
+        "the error should point at the fix, got: {msg}"
     );
     // It gets past validation — the request is internally coherent —
     // and fails at the storage step, which is where the dialect

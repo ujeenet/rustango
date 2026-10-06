@@ -108,6 +108,18 @@ It links `?<field>__isempty=1`, which the list reads; `?<field>=` still means no
 
 Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt"` gives `"viet"`.
 
+### Security — operator console withholds driver text in probe and branding errors (#2034)
+
+The tenant probe and the branding upload log the cause and the org slug, and show an opaque message, like the console's 500s. A too-large or cut-off upload says so instead.
+
+### Fixed — console errors speak to the operator (#1335)
+
+Schema-mode refusals name the storage-mode control, not a CLI flag or wire value. A connection check no longer names a Cargo feature or echoes an unknown-scheme URL, which can carry a password.
+
+### Fixed — operator console works under a path prefix (#2007)
+
+Nested with `Router::nest`, its links, forms, scripts and redirects keep the prefix.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

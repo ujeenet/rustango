@@ -1,7 +1,7 @@
 {% extends "op_layout.html" %}
 {% block title %}{{ verb }} {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span><a href="/orgs/provision">Runs</a><span class="sep">/</span>{{ verb }} {{ slug }}</p>
+<p class="breadcrumb"><a href="{{ console_prefix }}/orgs">Organizations</a><span class="sep">/</span><a href="{{ console_prefix }}/orgs/provision">Runs</a><span class="sep">/</span>{{ verb }} {{ slug }}</p>
 <h1>{{ verb }} <code>{{ slug }}</code></h1>
 
 <p class="lead">
@@ -29,7 +29,7 @@
   </tbody>
 </table>
 
-<p class="form-actions"><a href="/orgs" class="btn btn-secondary">Back to tenants</a></p>
+<p class="form-actions"><a href="{{ console_prefix }}/orgs" class="btn btn-secondary">Back to tenants</a></p>
 
 {% if not terminal %}
 <script nonce="{{ csp_nonce }}">
@@ -42,7 +42,7 @@
     const rows = tbody.querySelectorAll("tr[data-seq]");
     const last = rows.length ? rows[rows.length - 1].dataset.seq : 0;
 
-    const es = new EventSource("/orgs/provision/{{ run_id }}/stream?after=" + last);
+    const es = new EventSource(consoleUrl("/orgs/provision/{{ run_id }}/stream?after=" + last));
 
     es.addEventListener("step", (msg) => {
       const e = JSON.parse(msg.data);

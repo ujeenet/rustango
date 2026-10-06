@@ -210,6 +210,10 @@ Each tenant now has its own throttle budget; unknown tenants share one per clien
 
 `slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).
 
+### Operator console
+
+The console can be nested under a path prefix; its templates take `console_prefix` (#2007). Schema-mode and connect-check error texts changed (#1335).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

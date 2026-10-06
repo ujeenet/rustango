@@ -4,9 +4,14 @@
   <meta charset="utf-8">
   {#- Scripts read the CSRF token here (autoescaped), never inline. -#}
   <meta name="csrf-token" content="{{ csrf_token | default(value='') }}">
+  <meta name="console-prefix" content="{{ console_prefix | default(value='') }}">
   <script nonce="{{ csp_nonce }}">
     function csrfToken() {
       return document.querySelector('meta[name="csrf-token"]').content;
+    }
+    // A console path under the console's mount prefix (#2007).
+    function consoleUrl(path) {
+      return document.querySelector('meta[name="console-prefix"]').content + path;
     }
 // Delegated handlers: a strict CSP blocks inline on* attributes (#1703).
 document.addEventListener('submit',function(e){var m=e.target.getAttribute('data-confirm');if(m&&!confirm(m))e.preventDefault();});
@@ -31,15 +36,15 @@ document.addEventListener('change',function(e){var s=e.target;if(s.matches&&s.ma
         {% if brand_tagline %}<span class="brand-tagline">{{ brand_tagline }}</span>{% endif %}
       </div>
       <nav>
-        <a href="/" class="{% if section == 'home' %}active{% endif %}">Home</a>
-        <a href="/operators" class="{% if section == 'operators' %}active{% endif %}">Operators</a>
-        <a href="/orgs" class="{% if section == 'orgs' %}active{% endif %}">Organizations</a>
-        {% if sso_console %}<a href="/sso-shared" class="{% if section == 'sso' %}active{% endif %}">Shared SSO</a>{% endif %}
-        <a href="/audit" class="{% if section == 'audit' %}active{% endif %}">Audit log</a>
-        <a href="/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
+        <a href="{{ console_home | default(value='/') }}" class="{% if section == 'home' %}active{% endif %}">Home</a>
+        <a href="{{ console_prefix | default(value='') }}/operators" class="{% if section == 'operators' %}active{% endif %}">Operators</a>
+        <a href="{{ console_prefix | default(value='') }}/orgs" class="{% if section == 'orgs' %}active{% endif %}">Organizations</a>
+        {% if sso_console %}<a href="{{ console_prefix | default(value='') }}/sso-shared" class="{% if section == 'sso' %}active{% endif %}">Shared SSO</a>{% endif %}
+        <a href="{{ console_prefix | default(value='') }}/audit" class="{% if section == 'audit' %}active{% endif %}">Audit log</a>
+        <a href="{{ console_prefix | default(value='') }}/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
-      <form class="logout" method="post" action="/logout">
+      <form class="logout" method="post" action="{{ console_prefix | default(value='') }}/logout">
         {{ csrf_input | default(value='') | safe }}
         <button type="submit">Sign out</button>
       </form>
