@@ -354,8 +354,8 @@ fn origin_allowed_in(
 /// entry the operator believed covered it, and the symptom was a 403
 /// that reads as flaky rather than as a config problem (#1529).
 fn wildcard_matches(authority: &str, wild: &str) -> bool {
-    let host = authority.split(':').next().unwrap_or(authority);
-    let wild_host = wild.split(':').next().unwrap_or(wild);
+    let (host, _) = crate::urls::split_host_port(authority);
+    let (wild_host, _) = crate::urls::split_host_port(wild);
     if host == wild_host {
         return true;
     }
@@ -1451,5 +1451,12 @@ mod tests {
             .body(())
             .unwrap();
         assert!(!sets_cookie(&resp, "rustango_csrf"));
+    }
+
+    /// IPv6 authorities compare whole addresses, not `[` (#2043).
+    #[test]
+    fn wildcard_compares_ipv6_addresses() {
+        assert!(!wildcard_matches("[::1]:8443", "[::2]"));
+        assert!(wildcard_matches("[::1]:8443", "[::1]"));
     }
 }

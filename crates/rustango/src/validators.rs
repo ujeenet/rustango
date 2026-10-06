@@ -275,7 +275,7 @@ pub fn validate_url(s: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
     }
     // Strip optional :port off the host and require a hostname part.
-    let hostname = host.split(':').next().unwrap_or(host);
+    let (hostname, _) = crate::urls::split_host_port(host);
     if hostname.is_empty() {
         return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
     }

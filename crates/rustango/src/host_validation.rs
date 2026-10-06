@@ -138,25 +138,8 @@ impl AllowedHostsLayer {
         if self.patterns.is_empty() {
             return true;
         }
-        let host = strip_port(host).to_ascii_lowercase();
+        let host = crate::urls::split_host_port(host).0.to_ascii_lowercase();
         self.patterns.iter().any(|p| p.matches(&host))
-    }
-}
-
-/// Drop a trailing `:<port>` so the allowlist compares host names
-/// only. Returns the input unchanged when there is no port. Handles
-/// bracketed IPv6 literals.
-fn strip_port(host: &str) -> &str {
-    if let Some(rest) = host.strip_prefix('[') {
-        // IPv6 literal: `[::1]:8080` → cut at the closing bracket.
-        if let Some(end) = rest.find(']') {
-            return &host[..end + 2.min(host.len())];
-        }
-        return host;
-    }
-    match host.rfind(':') {
-        Some(i) => &host[..i],
-        None => host,
     }
 }
 

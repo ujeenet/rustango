@@ -296,15 +296,31 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
         .rsplit_once('@')
         .map_or(host_with_port, |(_, h)| h);
     // Strip port.
-    let host = host_after_userinfo
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let host = split_host_port(host_after_userinfo).0.to_ascii_lowercase();
     if host.is_empty() {
         return false;
     }
     allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
+}
+
+/// Splits an authority into host and port. `[v6]:port` keeps the
+/// brackets on the host; its colons are not a port (#2043).
+pub(crate) fn split_host_port(authority: &str) -> (&str, Option<&str>) {
+    if authority.starts_with('[') {
+        let Some(end) = authority.find(']') else {
+            return (authority, None);
+        };
+        let (host, rest) = authority.split_at(end + 1);
+        return match rest.strip_prefix(':') {
+            Some(port) => (host, Some(port)),
+            None if rest.is_empty() => (host, None),
+            None => (authority, None),
+        };
+    }
+    match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    }
 }
 
 /// `true` when `url` is absolute: it has a scheme prefix such as
@@ -1497,5 +1513,25 @@ mod querystring_tests {
             escape_leading_slashes("/path//slashes//inside"),
             "/path//slashes//inside"
         );
+    }
+
+    /// `[v6]:port` splits after the bracket, not at its first colon (#2043).
+    #[test]
+    fn split_host_port_handles_ipv6() {
+        assert_eq!(split_host_port("[::1]:8080"), ("[::1]", Some("8080")));
+        assert_eq!(split_host_port("[::1]"), ("[::1]", None));
+        assert_eq!(split_host_port("app.test:80"), ("app.test", Some("80")));
+        assert_eq!(split_host_port("app.test"), ("app.test", None));
+        assert_eq!(split_host_port("[::1]x"), ("[::1]x", None));
+        assert!(url_has_allowed_host_and_scheme(
+            "http://[::1]:8080/x",
+            &["[::1]"],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "http://[::2]:8080/x",
+            &["["],
+            false
+        ));
     }
 }
