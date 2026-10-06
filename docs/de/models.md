@@ -410,7 +410,6 @@ spezifischer.
 | `default_permissions` | `"add, change, delete, view"` | zu erstellende Auto-Berechtigungen |
 | `default_related_name` | `"posts"` | Name des Rückwärts-Accessors auf dem Elternobjekt |
 | `base_manager_name` | `"all_objects"` | Name des Basis- (ungefilterten) Managers |
-| `manager(ext = "Trait")` | Trait-Pfad | ein leeres Marker-Trait emittieren (ohne Methoden) |
 | `manager_fn` | `"published"` | einen Manager-Accessor über `objects()` hinaus hinzufügen |
 | `get_latest_by` | `"created_at"` | Standardspalte für `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | Ordnung der Kindzeilen relativ zum Elternobjekt |

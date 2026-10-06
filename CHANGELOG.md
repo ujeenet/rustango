@@ -23,6 +23,17 @@ Only data ops before the first DDL are in it; each DDL commits and later ops run
 ### Fixed — MySQL's migrate lock is per database (#1991)
 
 The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
+### Fixed — M2M managers go through the ORM (#2136)
+
+`M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. `add` and `set` run the through model's full `validate()` on every backend, and `set` splits a list past the bind limit. A skipped MySQL `add` now sets the connection's `LAST_INSERT_ID()`.
+
+### Removed — `#[rustango(manager(ext = ...))]` (#2132)
+
+Its empty trait could not take methods. The derive now refuses the attribute and points to a trait of your own over `QuerySet<Foo>`.
+
+### Fixed — nothing in `src/` imports `__macro_internals` (#1516)
+
+`clear_user_perm` forwards to `clear_user_perm_pool`, and the guard now scans `src/` with `sql/mod.rs` as its one exception.
 
 ## [0.60.0] — 2026-10-02
 

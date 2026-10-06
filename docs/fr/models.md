@@ -403,7 +403,6 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `default_permissions` | `"add, change, delete, view"` | auto-permissions à créer |
 | `default_related_name` | `"posts"` | nom de l'accesseur inverse sur le parent |
 | `base_manager_name` | `"all_objects"` | nom du manager de base (non filtré) |
-| `manager(ext = "Trait")` | chemin de trait | émet un trait marqueur vide (sans méthodes) |
 | `manager_fn` | `"published"` | ajoute un accesseur de manager en plus de `objects()` |
 | `get_latest_by` | `"created_at"` | colonne par défaut pour `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | ordre des lignes enfants relatif au parent |

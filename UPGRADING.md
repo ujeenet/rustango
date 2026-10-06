@@ -157,6 +157,15 @@ untouched.
 ### MySQL migrate lock name changed
 
 The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.
+### `manager(ext = ...)` is gone
+
+**Breaking:** drop the attribute and declare the trait yourself: `trait FooManagerExt: Sized { … }` plus `impl FooManagerExt for QuerySet<Foo>` (#2132).
+
+### M2M writes validate against the through model
+
+On a registered through model, `add` and `set` run its full `validate()`: `max_length`, `min`/`max`, `choices` and named validators, on every backend. A through model missing a manager column now gives `UnknownField` (#2136).
+
+On MySQL, an `add` skipped as a duplicate sets the connection's `LAST_INSERT_ID()`, as other skipped inserts already did.
 
 ## 0.60.0
 
