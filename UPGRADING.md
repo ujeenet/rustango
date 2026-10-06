@@ -190,6 +190,18 @@ Two `m2m` relations on one `through` table with different tables or columns (not
 
 Under `csrf::with_config`, CBV and admin cookies take `Secure` from `CsrfConfig::secure`; plain-HTTP dev needs `allow_insecure_for_dev()`. Under a default `csrf::layer()` (and with no layer) they, and that layer's own cookie, follow the session `Secure` policy (#2117).
 
+### ViewSet duplicate keys are 409
+
+A ViewSet write that hits a unique or primary-key constraint now answers `409` (`"error": "conflict"`), not `400`. Clients that matched on 400 must accept 409 (#2075).
+
+### `AppBuilder::serve` catches panics outside `api`
+
+A handler panic is now a 500, but layers on the `api` router (headers, request id) do not see it (#2069).
+
+### ViewSet throttles run after tenant resolution
+
+Each tenant now has its own throttle budget; unknown tenants share one per client. `tenant_router` resolves the tenant through the mounted context auth uses, and takes no connection before the throttle (#2076).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

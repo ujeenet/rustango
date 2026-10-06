@@ -72,6 +72,26 @@ The userinfo ends at the last `@` before the path, and an `@` in the query no lo
 
 CBV and admin cookies take `Secure` from an explicit `with_config`; under a default `layer()` they follow the session policy, like that layer's own cookie.
 
+### Fixed — ViewSet answers a duplicate key with 409 (#2075)
+
+Create, bulk create and update return `409 conflict` on a unique or primary-key violation, not `400`.
+
+### Fixed — ViewSet throttle budgets are per tenant (#2076)
+
+Under `tenant_router` the throttle key includes the tenant, so one client no longer shares a budget across tenants.
+
+### Fixed — `server::AppBuilder::serve` catches handler panics (#2069)
+
+A panicking handler is a logged opaque `500`, as under `Cli` and `server::Builder`, not a dropped connection.
+
+### Fixed — ViewSet `tenant_router` works on every backend and pins no connection (#2163)
+
+It resolves the tenant through the mounted context auth uses, not `Tenant<DefaultTenantDb>`, and holds no PG connection the handler never used.
+
+### Tests — `server::Builder` panic catch with observability off (#2105)
+
+A test now covers the opaque 500 with no observability or security headers.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
