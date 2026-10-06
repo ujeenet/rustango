@@ -699,14 +699,14 @@ impl Dialect for MySql {
     }
 }
 
-/// Write a backtick-quoted identifier in place, for the conflict
-/// clause, which writes straight into a `String` rather than through
-/// the [`Sql`] builder.
 /// Bound prefix + SHA1 of the current database: 57 chars, under MySQL's 64-char lock-name cap.
 fn my_db_lock_name(prefix: impl std::fmt::Display) -> String {
     format!("CONCAT({prefix}, SHA1(COALESCE(DATABASE(), '')))")
 }
 
+/// Write a backtick-quoted identifier in place, for the conflict
+/// clause, which writes straight into a `String` rather than through
+/// the [`Sql`] builder.
 fn write_my_ident(sql: &mut String, name: &str) {
     sql.push('`');
     for ch in name.chars() {
