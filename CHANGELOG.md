@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `slugify` folds İ and Vietnamese letters (#2092)
+
+Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt"` gives `"viet"`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

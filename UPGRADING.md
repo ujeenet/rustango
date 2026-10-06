@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `slugify` output for some non-ASCII input
+
+`slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
