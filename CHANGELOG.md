@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — a second shape for one M2M junction is refused (#2000)
 
-Relations sharing a `through` table must match up to which side is the source; a different one panics instead of taking the junction over and rebuilding it.
+Relations sharing a `through` table must match up to which side is the source; a different one is a `makemigrations` error instead of taking the junction over and rebuilding it. Adding the mirrored side no longer rebuilds it either.
 
 ### Fixed — `seed-permissions` recreates `rustango_api_keys` and its FK (#1731)
 

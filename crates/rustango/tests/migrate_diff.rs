@@ -1021,6 +1021,48 @@ fn shared_through_pair_emits_nothing_in_either_order() {
     assert_eq!(detect_changes(&a, &b), vec![]);
 }
 
+/// Declaring the other side of a junction, from a table that sorts first,
+/// keeps the junction and its rows (#2000).
+#[test]
+fn adding_the_mirror_side_keeps_the_junction() {
+    use rustango::core::{M2MRelation, ModelSchema};
+    const TAGS: &[M2MRelation] = &[M2MRelation::new(
+        "tags",
+        "rv_a_tag",
+        "rv_post_tags",
+        "post_id",
+        "tag_id",
+    )];
+    const POSTS: &[M2MRelation] = &[M2MRelation::new(
+        "posts",
+        "rv_post",
+        "rv_post_tags",
+        "tag_id",
+        "post_id",
+    )];
+    static POST: ModelSchema = {
+        let mut s = ModelSchema::new("Post", "rv_post");
+        s.m2m = TAGS;
+        s
+    };
+    static TAG: ModelSchema = {
+        let mut s = ModelSchema::new("Tag", "rv_a_tag");
+        s.m2m = POSTS;
+        s
+    };
+    let current = SchemaSnapshot::from_models(&[&POST, &TAG]);
+    // As 0.60.0 wrote it with only `Post.tags` declared.
+    let mut prev = current.clone();
+    prev.m2m_tables = serde_json::from_value(serde_json::json!([
+        {"through": "rv_post_tags", "src_table": "rv_post", "src_col": "post_id",
+         "dst_table": "rv_a_tag", "dst_col": "tag_id"}
+    ]))
+    .unwrap();
+    assert_eq!(detect_changes(&prev, &current), vec![]);
+    let one_side = SchemaSnapshot::from_models(&[&POST]);
+    assert_eq!(one_side.m2m_tables, current.m2m_tables);
+}
+
 /// Each edited object is dropped and added again with its new shape, and
 /// the recreated composite FK comes after the unique index it needs.
 #[test]

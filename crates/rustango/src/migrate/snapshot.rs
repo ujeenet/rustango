@@ -103,7 +103,10 @@ fn default_index_method() -> String {
 }
 
 /// Snapshot of one many-to-many junction table.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+///
+/// Equality and order ignore which end is the source: a mirrored
+/// declaration is the same table, and a flip must not rebuild it (#2000).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M2MTableSnapshot {
     /// Junction table name, such as `"post_tags"`.
     pub through: String,
@@ -115,6 +118,39 @@ pub struct M2MTableSnapshot {
     pub dst_table: String,
     /// Junction column pointing at the target, such as `"tag_id"`.
     pub dst_col: String,
+}
+
+impl M2MTableSnapshot {
+    /// The `(table, column)` ends, sorted.
+    fn key(&self) -> (&str, [(&str, &str); 2]) {
+        let mut e = [
+            (&*self.src_table, &*self.src_col),
+            (&*self.dst_table, &*self.dst_col),
+        ];
+        e.sort_unstable();
+        (&self.through, e)
+    }
+
+    /// Source is the end that sorts first, so the snapshot never flips.
+    fn canonical(mut self) -> Self {
+        if (&self.src_table, &self.src_col) > (&self.dst_table, &self.dst_col) {
+            std::mem::swap(&mut self.src_table, &mut self.dst_table);
+            std::mem::swap(&mut self.src_col, &mut self.dst_col);
+        }
+        self
+    }
+}
+
+impl PartialEq for M2MTableSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl PartialOrd for M2MTableSnapshot {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.key().cmp(&other.key()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -727,42 +763,52 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
 /// accessor still works, because it uses the table name rather than
 /// the snapshot.
 fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<M2MTableSnapshot> {
-    let mut out: Vec<M2MTableSnapshot> = Vec::new();
-    for schema in schemas {
-        for rel in schema.m2m.iter().filter(|r| r.auto_create) {
-            out.push(M2MTableSnapshot {
-                through: rel.through.to_owned(),
-                src_table: schema.table.to_owned(),
-                src_col: rel.src_col.to_owned(),
-                dst_table: rel.to.to_owned(),
-                dst_col: rel.dst_col.to_owned(),
-            });
-        }
+    let out: Vec<M2MTableSnapshot> = schemas.flat_map(m2m_snapshots).collect();
+    if let Some(e) = junction_conflict(&out) {
+        panic!("{e}");
     }
-    refuse_conflicting_junctions(&out);
     dedup_by_name(out, "M2M junction", |m| &m.through)
+}
+
+fn m2m_snapshots(schema: &ModelSchema) -> impl Iterator<Item = M2MTableSnapshot> + '_ {
+    schema.m2m.iter().filter(|r| r.auto_create).map(|rel| {
+        M2MTableSnapshot {
+            through: rel.through.to_owned(),
+            src_table: schema.table.to_owned(),
+            src_col: rel.src_col.to_owned(),
+            dst_table: rel.to.to_owned(),
+            dst_col: rel.dst_col.to_owned(),
+        }
+        .canonical()
+    })
 }
 
 /// One table holds one pair of FKs, so declarations may differ only by
 /// which side is the source. Picking one by sort order lost rows (#2000).
-fn refuse_conflicting_junctions(out: &[M2MTableSnapshot]) {
-    fn ends(m: &M2MTableSnapshot) -> [(&str, &str); 2] {
-        let mut e = [(&*m.src_table, &*m.src_col), (&*m.dst_table, &*m.dst_col)];
-        e.sort_unstable();
-        e
-    }
-    for (i, a) in out.iter().enumerate() {
-        if let Some(b) = out[..i]
+fn junction_conflict(out: &[M2MTableSnapshot]) -> Option<String> {
+    out.iter().enumerate().find_map(|(i, a)| {
+        out[..i]
             .iter()
-            .find(|b| b.through == a.through && ends(a) != ends(b))
-        {
-            panic!(
-                "M2M junction `{}` is declared with two shapes: {b:?} and {a:?}; \
-                 give each relation its own `through` table",
-                a.through
-            );
-        }
-    }
+            .find(|b| b.through == a.through && *b != a)
+            .map(|b| {
+                format!(
+                    "M2M junction `{}` is declared with two shapes: {b:?} and {a:?}; \
+                     give each relation its own `through` table",
+                    a.through
+                )
+            })
+    })
+}
+
+/// `makemigrations` refuses a conflicting junction as an error; the
+/// snapshot builders can only panic.
+pub(crate) fn check_registry_junctions() -> Result<(), super::MigrateError> {
+    let out: Vec<M2MTableSnapshot> = inventory::iter::<ModelEntry>
+        .into_iter()
+        .filter(|e| !e.schema.is_view && e.schema.managed)
+        .flat_map(|e| m2m_snapshots(e.schema))
+        .collect();
+    junction_conflict(&out).map_or(Ok(()), |e| Err(super::MigrateError::Validation(e)))
 }
 
 #[cfg(test)]

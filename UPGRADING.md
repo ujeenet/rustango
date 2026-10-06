@@ -152,7 +152,9 @@ untouched.
 
 ### One `through` table, one shape
 
-Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) now panic in `makemigrations` and the `SchemaSnapshot` builders (#2000). Give each its own `through`.
+Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) are now a `MigrateError::Validation` in `makemigrations`, and a panic in the `SchemaSnapshot` builders (#2000). Give each its own `through`.
+
+`M2MTableSnapshot` equality and order now ignore which end is the source, and new snapshots put the end that sorts first as the source. A mirrored pair no longer rebuilds the junction.
 
 ## 0.60.0
 
