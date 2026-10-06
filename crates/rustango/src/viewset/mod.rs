@@ -2969,16 +2969,19 @@ async fn insert_and_fetch_one(
         })
 }
 
-/// A failed INSERT/UPDATE: a database rejection is the client's `400`,
-/// with the driver text withheld; anything else (an audit write) is a logged `500`.
+/// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
+/// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
     let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
     let body = crate::error::client_error_body(context, e, client_caused);
-    if client_caused {
-        (StatusCode::BAD_REQUEST, body)
+    let status = if e.is_unique_violation() {
+        StatusCode::CONFLICT
+    } else if client_caused {
+        StatusCode::BAD_REQUEST
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, body)
-    }
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, body)
 }
 
 /// Single-row create — used by both the form-urlencoded codepath

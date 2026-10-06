@@ -672,8 +672,8 @@ Independently of a serializer, the write path always enforces the **schema**:
   value is a `400` naming the field.
 - **Required / NOT NULL** — a missing non-nullable field (or empty string for a
   non-nullable `String`) is a `400`; nullable fields accept empty → `NULL`.
-- **Database constraints** — unique, foreign keys and check constraints surface
-  as a `400` on INSERT/UPDATE.
+- **Database constraints** — a duplicate key is a `409` (`conflict`); foreign
+  keys and check constraints surface as a `400` on INSERT/UPDATE.
 
 So even without a serializer you get type + required + DB-constraint validation;
 wire a serializer to get declarative length/range/choice checks (auto-inherited)

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet answers a duplicate key with 409 (#2075)
+
+Create, bulk create and update return `409 conflict` on a unique or primary-key violation, not `400`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
