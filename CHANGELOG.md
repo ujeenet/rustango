@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `template_views_bulk_actions_live` builds without `postgres` (#2125)
+
+The PG-only suite is gated on `postgres`, so sqlite-only test builds compile.
+
 ### Fixed — admin facet for an empty text value filters the list (#2081)
 
 It links `?<field>__isempty=1`, which the list reads; `?<field>=` still means no filter.
