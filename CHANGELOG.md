@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — member SSO under a path-prefix tenant (#2145)
+
+`member_sso_router` also serves `/<prefix>{login_base}/sso/…`, and the IdP callback URL keeps the prefix.
+
 ### Security — a rotated MCP agent secret ends its JWTs (#1962)
 
 Agent JWTs carry the key prefix and are refused once the secret rotates; skills and tools are re-read from the rows on every request.

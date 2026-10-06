@@ -1118,6 +1118,58 @@ async fn member_callback_signs_in_by_link_only() {
     assert!(!member("sub-new", "new@example.com").await, "inactive");
 }
 
+/// #2145 — a path-prefix tenant's member SSO runs under its prefix, and
+/// the IdP is sent back there.
+#[tokio::test]
+async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    use rustango::tenancy::{PathPrefixResolver, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let registry = env._pools.registry_pool();
+    let mut org = Org::objects()
+        .filter("slug", "acme")
+        .fetch(&registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&registry).await.unwrap();
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(PathPrefixResolver),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx));
+    let begin = send(
+        &app,
+        Request::builder()
+            .uri("/acme/auth/sso/corp")
+            .header(header::HOST, "app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    assert!(
+        to.contains("redirect_uri=https%3A%2F%2Fapp.test%2Facme%2Fauth%2Fsso%2Fcorp%2Fcallback"),
+        "callback must keep the prefix: {to}"
+    );
+    env.idp.assert("sub-p", "p@example.com");
+    let resp = handshake(&app, "app.test", "/acme/auth", "corp").await;
+    assert!(
+        set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "signed in under the prefix: {:?}",
+        location(&resp)
+    );
+}
+
 // ---- upgrade: a framework column lives only in the system chain ----------
 
 /// Strip every `allow_email_link` entry from a migration file, as the

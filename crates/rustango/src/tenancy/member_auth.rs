@@ -50,7 +50,7 @@ use axum::body::Body;
 use axum::extract::{Extension, FromRequestParts, Path, Query, Request};
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use base64::Engine;
@@ -406,12 +406,34 @@ where
     Tenant<DB>: FromRequestParts<()> + Send,
 {
     let login = config.login_base.trim_end_matches('/').to_owned();
-    let begin_path = format!("{login}/sso/{{slug}}");
-    let callback_path = format!("{login}/sso/{{slug}}/callback");
-    Router::new()
-        .route(&begin_path, get(sso_begin::<DB>))
-        .route(&callback_path, get(sso_callback::<DB>))
-        .layer(Extension(config))
+    let mut router = Router::new();
+    // A path-prefix tenant reaches the same routes under its prefix (#2145).
+    for mount in ["", "/{prefix}"] {
+        router = router
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}"),
+                get(sso_begin::<DB>),
+            )
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}/callback"),
+                get(sso_callback::<DB>),
+            );
+    }
+    router.layer(Extension(config))
+}
+
+/// Path params; `prefix` is set on the path-prefix tenant routes.
+#[derive(Deserialize)]
+struct SsoPath {
+    slug: String,
+    prefix: Option<String>,
+}
+
+/// The tenant's mount: its path prefix when the request is under it, else
+/// `/`. `None` when a prefixed route matched a path outside the prefix.
+fn mount<'a>(t: &'a TenantScope, sso: &SsoPath, parts: &Parts) -> Option<&'a str> {
+    let mount = super::routes::cookie_path(&t.org, parts.uri.path());
+    (sso.prefix.is_none() || mount != "/").then_some(mount)
 }
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`),
@@ -465,10 +487,11 @@ pub(crate) fn external_base(parts: &Parts) -> String {
 }
 
 /// The absolute callback URL for a slug — must match at begin + callback.
-fn callback_uri(parts: &Parts, login_base: &str, slug: &str) -> String {
+fn callback_uri(parts: &Parts, mount: &str, login_base: &str, slug: &str) -> String {
     format!(
-        "{}/{}/sso/{}/callback",
+        "{}{}/{}/sso/{}/callback",
         external_base(parts).trim_end_matches('/'),
+        mount.trim_end_matches('/'),
         login_base.trim_matches('/'),
         slug,
     )
@@ -478,27 +501,31 @@ fn callback_uri(parts: &Parts, login_base: &str, slug: &str) -> String {
 /// the IdP, seal the flow into the transient flow cookie.
 fn sso_begin<DB: Database>(
     t: Tenant<DB>,
-    Path(slug): Path<String>,
+    Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     req: Request,
 ) -> impl std::future::Future<Output = Response> + Send {
-    sso_begin_in(t.into(), slug, config, req)
+    sso_begin_in(t.into(), sso, config, req)
 }
 
 async fn sso_begin_in(
     t: TenantScope,
-    slug: String,
+    sso: SsoPath,
     config: MemberAuthConfig,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
+    let Some(path) = mount(&t, &sso, &parts) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let slug = sso.slug.as_str();
     let Some(secret) = session_secret(&parts) else {
         return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
     };
     let pool = t.pool();
 
-    let redirect_uri = callback_uri(&parts, &config.login_base, &slug);
-    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
+    let redirect_uri = callback_uri(&parts, path, &config.login_base, slug);
+    let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(slug, "SSO provider not found / disabled");
@@ -520,7 +547,6 @@ async fn sso_begin_in(
 
     let (authorize_url, flow) = provider.begin();
     let sealed = seal_flow(&flow, secret.key());
-    let path = super::routes::cookie_path(&t.org, parts.uri.path());
     let flow_cookie = format!(
         "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
         s = secure_suffix(),
@@ -532,24 +558,27 @@ async fn sso_begin_in(
 /// find-or-provision the member, mint the member session cookie.
 fn sso_callback<DB: Database>(
     t: Tenant<DB>,
-    Path(slug): Path<String>,
+    Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,
     req: Request,
 ) -> impl std::future::Future<Output = Response> + Send {
-    sso_callback_in(t.into(), slug, config, params, req)
+    sso_callback_in(t.into(), sso, config, params, req)
 }
 
 async fn sso_callback_in(
     t: TenantScope,
-    slug: String,
+    sso: SsoPath,
     config: MemberAuthConfig,
     params: CallbackParams,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
     let login_base = &config.login_base;
-    let path = super::routes::cookie_path(&t.org, parts.uri.path()).to_owned();
+    let Some(path) = mount(&t, &sso, &parts).map(str::to_owned) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let slug = sso.slug.as_str();
     let clear_flow = |resp: Response| clear_flow(resp, &path);
     let Some(secret) = session_secret(&parts) else {
         return sso_error("Sign-in is temporarily unavailable.", login_base);
@@ -582,8 +611,8 @@ async fn sso_callback_in(
 
     let pool = t.pool();
 
-    let redirect_uri = callback_uri(&parts, login_base, &slug);
-    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
+    let redirect_uri = callback_uri(&parts, &path, login_base, slug);
+    let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         _ => {
             return clear_flow(sso_error(
