@@ -414,7 +414,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `audit(track = "…")` | field list | per-row change history |
 | `scope` | `"tenant"` / `"registry"` | multi-tenancy scope |
 | `proxy` | flag | proxy model (shares another's table) |
-| `global_scope(name, apply = fn)` | name + fn | filter auto-applied to all queries |
+| `global_scope(name, apply = fn)` | name + fn | filter auto-applied to querysets and shortcuts, not to PK-keyed instance methods or `truncate` |
 | `through(...)` | relation spec | custom through-relation accessor |
 | `reverse_has(...)` / `generic_has(...)` | relation spec | reverse has-many / reverse generic-FK accessor |
 | `required_db_features` / `required_db_vendor` | list / vendor | deployment validation constraints |

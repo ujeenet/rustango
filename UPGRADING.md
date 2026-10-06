@@ -166,6 +166,13 @@ The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rollin
 On a registered through model, `add` and `set` run its full `validate()`: `max_length`, `min`/`max`, `choices` and named validators, on every backend. A through model missing a manager column now gives `UnknownField` (#2136).
 
 On MySQL, an `add` skipped as a duplicate sets the connection's `LAST_INSERT_ID()`, as other skipped inserts already did.
+### Audited conflict bulk inserts run on PG and SQLite
+
+On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does, except for an empty slice, which is now `Ok`. An audited model with no PK gets `MissingPrimaryKey` instead of `AuditUnsupported`. An audited `upsert` may now run two statements (#1795).
+
+### Audited models have `save_partial`
+
+`#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).
 
 ## 0.60.0
 
