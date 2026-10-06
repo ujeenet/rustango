@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — `redact` masks a password containing `@` (#2109)
 
-The userinfo ends at the last `@` before the path. `migrate` and `migrate-storage` logs use the same `redact`.
+The userinfo ends at the last `@` before the path, and an `@` in the query no longer hides `password=`. `migrate`, `about` and `migrate-storage` use the same `redact`.
 
 ### Security — config parse errors never quote the TOML line (#2108)
 
@@ -18,7 +18,7 @@ The userinfo ends at the last `@` before the path. `migrate` and `migrate-storag
 
 ### Security — CBV CSRF cookie follows `CsrfConfig::secure` (#2117)
 
-The cookie a CBV mints takes `Secure` from the CSRF layer's config, like the layer's own cookie.
+CBV and admin cookies take `Secure` from an explicit `with_config`; under a default `layer()` they follow the session policy, like that layer's own cookie.
 
 ## [0.60.0] — 2026-10-02
 

@@ -1612,6 +1612,11 @@ fn usage() -> String {
 
 // ============================================================ about / check / docs / version
 
+/// `DATABASE_URL` as `manage about` prints it: through the shared `redact`.
+fn about_db_url(raw: Option<String>) -> String {
+    raw.map_or_else(|| "(unset)".into(), |s| redact_url(&s))
+}
+
 /// `manage about` — env summary for support tickets / debugging.
 async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError> {
     let registered_models = crate::core::inventory::iter::<crate::core::ModelEntry>
@@ -1639,17 +1644,7 @@ async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError>
     )?;
     let env_label = std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "(unset)".into());
     writeln!(w, "  RUSTANGO_ENV:   {env_label}")?;
-    let db_url = std::env::var("DATABASE_URL").map_or("(unset)".into(), |s| {
-        // Redact password component
-        if let Some(at) = s.rfind('@') {
-            if let Some(scheme_end) = s.find("://") {
-                let prefix = &s[..scheme_end + 3];
-                let rest = &s[at..];
-                return format!("{prefix}***{rest}");
-            }
-        }
-        s
-    });
+    let db_url = about_db_url(std::env::var("DATABASE_URL").ok());
     writeln!(w, "  DATABASE_URL:   {db_url}")?;
 
     // DB connectivity — tri-dialect: SELECT 1 is universal across PG/MySQL/SQLite.
@@ -7303,6 +7298,15 @@ mod db_cmd_tests {
             redact_url("postgres://alice@localhost/db"),
             "postgres://alice@localhost/db"
         );
+    }
+
+    #[test]
+    fn about_masks_a_query_password() {
+        assert_eq!(
+            about_db_url(Some("postgres://db/app?password=x".into())),
+            "postgres://db/app?password=***"
+        );
+        assert_eq!(about_db_url(None), "(unset)");
     }
 
     #[test]

@@ -67,15 +67,25 @@ pub const CSRF_FORM_FIELD: &str = "_csrf";
 /// Defaults are sensible: 32-byte tokens, Lax SameSite, HttpOnly
 /// off (the SPA must read the cookie). Override via [`CsrfConfig`]
 /// + [`with_config`].
+///
+/// Its cookie's `Secure` flag follows [`crate::session::secure_cookies`].
 pub fn layer() -> CsrfLayer {
-    CsrfLayer::new(CsrfConfig::default())
+    CsrfLayer::new(CsrfConfig::default(), SecureFrom::SessionPolicy)
 }
 
 /// Create the middleware with explicit config — used by integrators
 /// who need a different cookie name (e.g. when stacking against a
 /// different framework on the same host).
 pub fn with_config(cfg: CsrfConfig) -> CsrfLayer {
-    CsrfLayer::new(cfg)
+    CsrfLayer::new(cfg, SecureFrom::Config)
+}
+
+/// Who sets the cookie's `Secure` flag: an explicit [`with_config`], or
+/// the session policy under a default [`layer`] (#2117).
+#[derive(Debug, Clone, Copy)]
+enum SecureFrom {
+    Config,
+    SessionPolicy,
 }
 
 /// Configuration for the CSRF layer. All fields have sensible
@@ -368,6 +378,7 @@ fn wildcard_matches(authority: &str, wild: &str) -> bool {
 #[derive(Clone)]
 pub(crate) struct ActiveCsrf {
     cfg: Arc<CsrfConfig>,
+    secure_from: SecureFrom,
     checked: bool,
 }
 
@@ -382,17 +393,21 @@ pub(crate) struct CsrfCookieSpec {
 impl CsrfCookieSpec {
     /// The cookie of the CSRF layer on this request; with no layer, the
     /// default name under the session `Secure` policy.
-    #[cfg(feature = "template_views")]
+    #[cfg(any(feature = "template_views", feature = "admin"))]
     pub(crate) fn active(extensions: &axum::http::Extensions) -> Self {
-        extensions
-            .get::<ActiveCsrf>()
-            .map_or_else(|| Self::session_policy(CSRF_COOKIE), |a| Self::of(&a.cfg))
+        extensions.get::<ActiveCsrf>().map_or_else(
+            || Self::session_policy(CSRF_COOKIE),
+            |a| Self::of(&a.cfg, a.secure_from),
+        )
     }
 
-    fn of(cfg: &CsrfConfig) -> Self {
-        Self {
-            name: cfg.cookie_name.clone(),
-            secure: cfg.secure,
+    fn of(cfg: &CsrfConfig, secure_from: SecureFrom) -> Self {
+        match secure_from {
+            SecureFrom::Config => Self {
+                name: cfg.cookie_name.clone(),
+                secure: cfg.secure,
+            },
+            SecureFrom::SessionPolicy => Self::session_policy(&cfg.cookie_name),
         }
     }
 
@@ -414,11 +429,15 @@ impl CsrfCookieSpec {
 #[derive(Clone)]
 pub struct CsrfLayer {
     cfg: Arc<CsrfConfig>,
+    secure_from: SecureFrom,
 }
 
 impl CsrfLayer {
-    fn new(cfg: CsrfConfig) -> Self {
-        Self { cfg: Arc::new(cfg) }
+    fn new(cfg: CsrfConfig, secure_from: SecureFrom) -> Self {
+        Self {
+            cfg: Arc::new(cfg),
+            secure_from,
+        }
     }
 }
 
@@ -428,6 +447,7 @@ impl<S> tower::Layer<S> for CsrfLayer {
         CsrfService {
             inner,
             cfg: Arc::clone(&self.cfg),
+            secure_from: self.secure_from,
         }
     }
 }
@@ -438,6 +458,7 @@ impl<S> tower::Layer<S> for CsrfLayer {
 pub struct CsrfService<S> {
     inner: S,
     cfg: Arc<CsrfConfig>,
+    secure_from: SecureFrom,
 }
 
 impl<S> Service<Request<Body>> for CsrfService<S>
@@ -459,6 +480,7 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let cfg = Arc::clone(&self.cfg);
+        let secure_from = self.secure_from;
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let mut req = req;
@@ -468,18 +490,22 @@ where
             // The outer layer seeds the cookie; a second one here would not
             // match the token the page rendered (#2131).
             let nested = active.is_some();
-            let cfg = match active {
+            let (cfg, secure_from) = match active {
                 Some(a) if a.checked => return inner.call(req).await,
-                Some(a) => Arc::new(CsrfConfig {
-                    exempt_prefixes: Vec::new(),
-                    ..CsrfConfig::clone(&a.cfg)
-                }),
+                Some(a) => (
+                    Arc::new(CsrfConfig {
+                        exempt_prefixes: Vec::new(),
+                        ..CsrfConfig::clone(&a.cfg)
+                    }),
+                    a.secure_from,
+                ),
                 None => {
                     req.extensions_mut().insert(ActiveCsrf {
                         cfg: Arc::clone(&cfg),
+                        secure_from,
                         checked: false,
                     });
-                    cfg
+                    (cfg, secure_from)
                 }
             };
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
@@ -535,6 +561,7 @@ where
             if enforced {
                 req.extensions_mut().insert(ActiveCsrf {
                     cfg: Arc::clone(&cfg),
+                    secure_from,
                     checked: true,
                 });
             }
@@ -559,7 +586,7 @@ where
                 && !sets_cookie(&response, &cfg.cookie_name)
                 && !is_publicly_cacheable(response.headers())
             {
-                let cookie_str = CsrfCookieSpec::of(&cfg).set_cookie(&mint_token());
+                let cookie_str = CsrfCookieSpec::of(&cfg, secure_from).set_cookie(&mint_token());
                 if let Ok(hv) = HeaderValue::from_str(&cookie_str) {
                     response
                         .headers_mut()
@@ -732,6 +759,21 @@ pub fn ensure_token(
     // No layer config here, so `Secure` follows the session cookie policy:
     // the boot override, else the prod tier (#1608).
     ensure_token_for(headers, &CsrfCookieSpec::session_policy(cookie_name))
+}
+
+/// [`ensure_token`] for `cookie_name`, with `Secure` chosen as the CSRF
+/// layer on this request chooses it (#2117).
+#[cfg(feature = "admin")]
+pub(crate) fn ensure_token_under_layer(
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    cookie_name: &str,
+) -> (String, Option<String>) {
+    let spec = CsrfCookieSpec {
+        name: cookie_name.to_owned(),
+        secure: CsrfCookieSpec::active(extensions).secure,
+    };
+    ensure_token_for(headers, &spec)
 }
 
 fn ensure_token_for(

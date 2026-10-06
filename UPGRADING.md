@@ -154,9 +154,9 @@ untouched.
 
 **Breaking:** its `source` is now `config::TomlSyntaxError` (message and line only), not `toml::de::Error`. Read `message()` / `line_col()` (#2108).
 
-### CBV CSRF cookies follow `CsrfConfig::secure`
+### CSRF cookie `Secure` follows the layer
 
-A CBV under `csrf::with_config` sets `Secure` per that config, not the session policy. Plain-HTTP dev needs `allow_insecure_for_dev()` (#2117).
+Under `csrf::with_config`, CBV and admin cookies take `Secure` from `CsrfConfig::secure`; plain-HTTP dev needs `allow_insecure_for_dev()`. Under a default `csrf::layer()` (and with no layer) they, and that layer's own cookie, follow the session `Secure` policy (#2117).
 
 ## 0.60.0
 

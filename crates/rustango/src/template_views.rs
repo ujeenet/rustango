@@ -6057,6 +6057,37 @@ mod tests {
         }
     }
 
+    /// With only the CBV's own default layer, `Secure` follows the session
+    /// policy, so plain-HTTP dev keeps its cookie (#2117 review).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_cookie_without_an_app_layer_follows_the_session_policy() {
+        // nextest gives each test its own process, so the `OnceLock` is ours.
+        let ours = crate::session::set_secure_cookies(false);
+        if !ours && crate::session::secure_cookies() {
+            return;
+        }
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool);
+        let req = Request::builder()
+            .uri("/c/new")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let cookies: Vec<&str> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(!cookies[0].contains("; Secure"), "{cookies:?}");
+    }
+
     /// An outer layer's `exempt_prefix` does not switch off a CBV's own
     /// guard (#1669): `/c` would also cover `/comments`.
     #[cfg(feature = "sqlite")]
