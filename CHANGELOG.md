@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Security — operator console withholds driver text in probe and branding errors (#2034)
 
-The tenant probe and the branding upload log the cause and show an opaque message, like the console's 500s.
+The tenant probe and the branding upload log the cause and the org slug, and show an opaque message, like the console's 500s. A too-large or cut-off upload says so instead.
 
 ### Fixed — console errors speak to the operator (#1335)
 

@@ -357,6 +357,7 @@ pub(super) async fn test_tenant_connection(
         Err(e) => {
             return probe_bad(&withheld(
                 "operator_console::test_tenant_connection",
+                &slug,
                 "Could not read the tenant",
                 &e,
             ))
@@ -380,6 +381,7 @@ pub(super) async fn test_tenant_connection(
         Err(e) => {
             return probe_bad(&withheld(
                 "operator_console::test_tenant_connection",
+                &slug,
                 "Could not resolve the tenant's database URL",
                 &e,
             ))

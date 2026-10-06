@@ -414,8 +414,11 @@ fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
 }
 
 /// Operator text for a failure whose cause is logged, not shown (#2034).
-fn withheld(context: &str, what: &str, e: &dyn std::fmt::Display) -> String {
-    format!("{what} ({})", crate::error::server_error_body(context, e))
+/// The log line names the org, so the operator can find it.
+fn withheld(context: &str, slug: &str, what: &str, e: &dyn std::fmt::Display) -> String {
+    let body = tracing::error_span!("operator_console", org = %slug)
+        .in_scope(|| crate::error::server_error_body(context, e));
+    format!("{what} ({body})")
 }
 
 fn default_tenant_handoff_url() -> String {
@@ -2034,14 +2037,15 @@ async fn org_edit_branding(
             Ok(b) if b.is_empty() => continue,
             Ok(b) => b.to_vec(),
             Err(e) => {
-                return redirect_with_error(
-                    &slug,
-                    &withheld(
-                        "operator_console::branding",
-                        "Could not read the upload",
-                        &e,
-                    ),
-                )
+                // Body limit or a cut-off upload: the client's doing, not a 500.
+                tracing::warn!(
+                    target: "rustango::error",
+                    context = "operator_console::branding",
+                    org = %slug,
+                    error = %e,
+                    "rejected upload"
+                );
+                return redirect_with_error(&slug, "upload too large or incomplete");
             }
         };
         match branding::save_brand_asset(
@@ -2075,7 +2079,7 @@ async fn org_edit_branding(
             Err(e) => {
                 return redirect_with_error(
                     &slug,
-                    &withheld("operator_console::branding", "Upload failed", &e),
+                    &withheld("operator_console::branding", &slug, "Upload failed", &e),
                 )
             }
         }
@@ -2108,6 +2112,7 @@ async fn org_edit_branding(
             &slug,
             &withheld(
                 "operator_console::branding",
+                &slug,
                 "Could not save the branding",
                 &e,
             ),
@@ -2387,6 +2392,24 @@ mod config_warn_tests {
         let logged = out.contents();
         assert!(!logged.contains("s3cret"), "{logged}");
         assert!(logged.contains("line 2"), "{logged}");
+    }
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod withheld_tests {
+    #[test]
+    fn the_withheld_log_line_names_the_org() {
+        let out = crate::testkit::CaptureWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            super::withheld("ctx", "acme-org", "Upload failed", &"disk full")
+        });
+        let logged = out.contents();
+        assert!(logged.contains("disk full"), "{logged}");
+        assert!(logged.contains("org=acme-org"), "{logged}");
     }
 }
 

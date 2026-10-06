@@ -174,3 +174,37 @@ async fn a_failed_branding_save_withholds_the_driver_text() {
     assert!(!shown.contains(DRIVER_TEXT), "driver text leaked: {shown}");
     assert!(shown.contains("Could not save the branding"), "{shown}");
 }
+
+#[tokio::test]
+async fn a_cut_off_upload_is_a_client_error() {
+    let b = boot().await;
+    // The file part never ends: no closing boundary.
+    let body = b"--b\r\nContent-Disposition: form-data; name=\"logo\"; filename=\"logo\"\r\n\
+          Content-Type: image/png\r\n\r\npng-without-an-end"
+        .to_vec();
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/acme/edit/branding")
+                .header("x-csrf-token", "t")
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+                .header(header::COOKIE, format!("rustango_csrf=t; {}", b.cookie))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("redirect back to the form")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let shown = rustango::url_codec::url_decode(&location);
+    assert!(shown.contains("upload too large or incomplete"), "{shown}");
+    assert!(!shown.contains("internal server error"), "{shown}");
+}
