@@ -158,6 +158,10 @@ untouched.
 
 **Breaking:** `AdminSession` has a new `impersonated_by` field; build it with `AdminSession::new`. In an impersonation `username` is empty: read `impersonated_by`, or `actor()` for an author label (#2110).
 
+### `TenantSessionPayload::impersonation` takes a session id
+
+**Breaking:** it takes a `sid` (the handoff `jti`), and the payload has a new `sid` field. Impersonation cookies from before this release are refused; open the tenant again from the console (#2038).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

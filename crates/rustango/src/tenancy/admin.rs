@@ -525,7 +525,8 @@ where
                 Some(routes.logout_url.as_str()),
             );
             // End the user's sessions everywhere. An impersonation logout
-            // leaves the operator's console session alone.
+            // ends only that impersonation.
+            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
             let revoked =
                 match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
                     .await
@@ -573,6 +574,7 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
+            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
             return end_impersonation_response(cookie_path);
         }
 
@@ -827,6 +829,16 @@ async fn validate_session(
     // superuser. Re-check on every request that the operator still
     // exists, is active and has the same password.
     if let Some(operator_id) = payload.imp {
+        // No `sid` means a pre-#2038 cookie that no logout can revoke.
+        let Some(sid) = payload.sid.as_deref() else {
+            return SessionCheck::Anonymous;
+        };
+        if super::impersonation_handoff::JtiBlacklist::shared()
+            .session_ended(sid)
+            .await
+        {
+            return SessionCheck::Anonymous;
+        }
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
             .fetch(registry_pool)
@@ -1312,8 +1324,13 @@ async fn redeem_impersonation_handoff(
     // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let mut session =
-        TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
+    let mut session = TenantSessionPayload::impersonation(
+        payload.op,
+        &org.slug,
+        ttl_secs,
+        payload.pwf,
+        payload.jti,
+    );
     // The session dates from the handoff's mint, on the console's clock.
     session.iat = payload.iat;
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
@@ -1363,6 +1380,25 @@ fn extract_token_param(query: &str) -> Option<String> {
     None
 }
 
+/// Revoke the request's impersonation cookie, if it is one; the
+/// operator stays signed in to the console (#2038).
+async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, slug: &str) {
+    let Some(value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+        return;
+    };
+    if let Ok(TenantSessionPayload {
+        imp: Some(_),
+        sid: Some(sid),
+        exp,
+        ..
+    }) = tenant_console::decode(&cfg.secret, slug, &value)
+    {
+        super::impersonation_handoff::JtiBlacklist::shared()
+            .end_session(&sid, exp)
+            .await;
+    }
+}
+
 /// Clear the impersonation cookie and send the browser back to the
 /// operator console. The operator's own apex session cookie is left
 /// alone, so they stay signed in there.
@@ -1371,7 +1407,7 @@ fn extract_token_param(query: &str) -> Option<String> {
 /// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
 /// them set it falls back to `/`, which still clears the cookie.
 fn end_impersonation_response(cookie_path: &str) -> Response {
-    // Also the legacy `Path=/` one: impersonation has no server-side revoke.
+    // Also the legacy `Path=/` one, from before the cookie was path-scoped.
     let mut paths = vec![cookie_path];
     if cookie_path != "/" {
         paths.push("/");

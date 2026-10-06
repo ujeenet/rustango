@@ -504,6 +504,62 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
     );
 }
 
+/// Ending an impersonation, by its button or by logout, revokes the
+/// cookie server-side: a copy stops working (#2038).
+#[tokio::test]
+async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
+    let env = boot().await;
+    for end in ["/__admin/__end-impersonation", "/__logout"] {
+        let (op, location) = start_impersonation(&env).await;
+        let handoff = &location[location
+            .find("/__impersonation_handoff")
+            .expect("handoff url")..];
+        let redeemed = env.get(handoff, "").await;
+        let cookie = redeemed.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(env.get("/__admin/", &cookie).await.status(), StatusCode::OK);
+
+        let ended = env.post(end, &cookie, "").await;
+        assert!(ended.status().is_redirection(), "{end}: {}", ended.status());
+        assert_eq!(
+            env.get("/__admin/", &cookie).await.status(),
+            StatusCode::SEE_OTHER,
+            "{end}: a kept copy must be refused"
+        );
+        let op = Operator::objects()
+            .filter("id", op.id.get().copied().unwrap())
+            .fetch(&env.registry)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            op.sessions_revoked_at, None,
+            "{end}: the console session stays"
+        );
+    }
+
+    // A cookie with no session id could never be revoked, so it is refused.
+    let (op, _) = start_impersonation(&env).await;
+    let mut legacy = TenantSessionPayload::impersonation(
+        op.id.get().copied().unwrap(),
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &op.password_hash),
+        "unused",
+    );
+    legacy.sid = None;
+    let legacy = format!("{COOKIE_NAME}={}", encode(&env.secret, &legacy));
+    assert_eq!(
+        env.get("/__admin/", &legacy).await.status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 /// The tenant change-password form applies the shared 8-character rule (#1874).
 #[tokio::test]
 async fn a_short_new_password_is_refused_by_the_tenant_admin() {
