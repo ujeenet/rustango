@@ -1408,15 +1408,8 @@ WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public'
 ```
 
 Drop each one (`ALTER TABLE "<schema>"."<table>" DROP CONSTRAINT "<name>"`).
-For the three permission tables, `manage seed-permissions --slug <slug>`
-then re-creates them inside the tenant. For `rustango_api_keys`, re-add it
-by hand:
-
-```sql
-ALTER TABLE "<schema>"."rustango_api_keys"
-  ADD CONSTRAINT "rustango_api_keys_user_id_fkey" FOREIGN KEY ("user_id")
-  REFERENCES "<schema>"."rustango_users" ("id") ON DELETE CASCADE;
-```
+Then `manage seed-permissions --slug <slug>` re-creates them inside the
+tenant, the `rustango_api_keys` one included since 0.60.1 (#1731).
 
 ### Tenant admin and operator console POSTs need the CSRF token
 
