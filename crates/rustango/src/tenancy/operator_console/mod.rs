@@ -410,6 +410,11 @@ fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
     (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
 }
 
+/// Operator text for a failure whose cause is logged, not shown (#2034).
+fn withheld(context: &str, what: &str, e: &dyn std::fmt::Display) -> String {
+    format!("{what} ({})", crate::error::server_error_body(context, e))
+}
+
 fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
@@ -2003,7 +2008,16 @@ async fn org_edit_branding(
         let bytes = match field.bytes().await {
             Ok(b) if b.is_empty() => continue,
             Ok(b) => b.to_vec(),
-            Err(e) => return redirect_with_error(&slug, &format!("multipart: {e}")),
+            Err(e) => {
+                return redirect_with_error(
+                    &slug,
+                    &withheld(
+                        "operator_console::branding",
+                        "Could not read the upload",
+                        &e,
+                    ),
+                )
+            }
         };
         match branding::save_brand_asset(
             &slug,
@@ -2033,7 +2047,12 @@ async fn org_edit_branding(
                     &format!("unsupported file type `{ct}` — use PNG/JPEG/WebP/ICO"),
                 );
             }
-            Err(e) => return redirect_with_error(&slug, &format!("upload failed: {e}")),
+            Err(e) => {
+                return redirect_with_error(
+                    &slug,
+                    &withheld("operator_console::branding", "Upload failed", &e),
+                )
+            }
         }
     }
     if updates.is_empty() {
@@ -2060,7 +2079,14 @@ async fn org_edit_branding(
         }]),
     };
     if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
-        return redirect_with_error(&slug, &format!("update failed: {e}"));
+        return redirect_with_error(
+            &slug,
+            &withheld(
+                "operator_console::branding",
+                "Could not save the branding",
+                &e,
+            ),
+        );
     }
     // Only now does no column name the old file (#1933).
     for (kind, _, kept) in &updates {

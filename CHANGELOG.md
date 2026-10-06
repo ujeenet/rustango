@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — operator console withholds driver text in probe and branding errors (#2034)
+
+The tenant probe and the branding upload log the cause and show an opaque message, like the console's 500s.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

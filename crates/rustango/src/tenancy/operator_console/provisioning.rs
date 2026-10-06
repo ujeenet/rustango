@@ -37,7 +37,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use tera::Context;
 
-use super::{inject_op_brand, ConsoleState};
+use super::{inject_op_brand, withheld, ConsoleState};
 use crate::sql::connect_diagnosis::redact;
 use crate::tenancy::auth;
 use crate::tenancy::org::{BackendKind, StorageMode};
@@ -354,7 +354,13 @@ pub(super) async fn test_tenant_connection(
         .await
     {
         Ok(r) => r,
-        Err(e) => return probe_bad(&format!("could not read the tenant: {e}")),
+        Err(e) => {
+            return probe_bad(&withheld(
+                "operator_console::test_tenant_connection",
+                "Could not read the tenant",
+                &e,
+            ))
+        }
     };
     let Some(org) = rows.into_iter().next() else {
         return probe_bad(&format!("No tenant `{slug}`."));
@@ -371,7 +377,13 @@ pub(super) async fn test_tenant_connection(
 
     let url = match pools.resolved_database_url(&org).await {
         Ok(u) => u,
-        Err(e) => return probe_bad(&e.to_string()),
+        Err(e) => {
+            return probe_bad(&withheld(
+                "operator_console::test_tenant_connection",
+                "Could not resolve the tenant's database URL",
+                &e,
+            ))
+        }
     };
     match preflight::check(&url, &Preflight::default()).await {
         Ok(ok) => Html(format!(
