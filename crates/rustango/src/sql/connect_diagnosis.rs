@@ -253,13 +253,13 @@ pub fn redact(url: &str) -> String {
 }
 
 fn redact_userinfo(url: &str) -> String {
-    // `scheme://user:password@host:port/db?params`. Userinfo is before the
-    // first `/`, up to its last `@`: the password may hold a raw `@` (#2109).
+    // `scheme://user:password@host:port/db?params`. Userinfo runs to the last
+    // `@` before any `?`/`#`: a password may hold a raw `@` or `/` (#2109).
     let Some((scheme, rest)) = url.split_once("://") else {
         // `sqlite:path` and friends carry no credentials.
         return url.to_owned();
     };
-    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = rest.split(['?', '#']).next().unwrap_or(rest);
     let Some(at) = authority.rfind('@') else {
         return url.to_owned();
     };
@@ -338,6 +338,18 @@ mod tests {
         );
         let out = redact("postgres://db:5432?user=a@b&password=s3cret");
         assert!(!out.contains("s3cret"), "{out}");
+    }
+
+    #[test]
+    fn redact_handles_a_slash_in_the_password() {
+        assert_eq!(
+            redact("postgres://u:pa/ss@host/db"),
+            "postgres://u:***@host/db"
+        );
+        assert_eq!(
+            redact("postgres://u:p@ss@host/db"),
+            "postgres://u:***@host/db"
+        );
     }
 
     #[test]
