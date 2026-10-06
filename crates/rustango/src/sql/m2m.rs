@@ -387,6 +387,9 @@ fn dst_column_type(through: &str, dst_col: &str) -> Option<FieldType> {
 /// `content_type_id`, resolved from [`Self::src_schema`] via
 /// [`crate::contenttypes::ContentType::get_for_schema`] (cached).
 ///
+/// The `content_type_id` column is bound as an `i64`; a non-integer one is
+/// not supported yet (#2050).
+///
 /// Constructed by the macro-generated `<name>_m2m()` method on any model
 /// declaring `#[rustango(generic_m2m(...))]` — do not build directly.
 pub struct GenericM2MManager {
@@ -456,6 +459,7 @@ impl GenericM2MManager {
     }
 
     /// Related PKs linked to this instance (scoped to its content type).
+    /// Decoded as `i64`; use [`Self::all_as`] for a non-integer target PK (#2050).
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
