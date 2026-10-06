@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `makemigrations` treats them as the same FK, so it writes no no-op `AlterFkOnDelete` (a full table rebuild on SQLite).
 
+### Fixed — media collection delete races a create (#1573)
+
+`delete_collection` walks and locks the subtree inside its transaction; `create_collection` locks the parent and refuses a missing or deleted one.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

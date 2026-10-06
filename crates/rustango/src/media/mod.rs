@@ -913,7 +913,8 @@ impl MediaManager {
     ///
     /// # Errors
     /// `Db` for unique-constraint violations on `slug` or any other
-    /// underlying sqlx error.
+    /// underlying sqlx error. `Other("collection N not found")` when
+    /// `parent` is missing or deleted.
     pub async fn create_collection(
         &self,
         name: impl Into<String>,
@@ -942,6 +943,22 @@ impl MediaManager {
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
+        // Locked until commit, so a concurrent `delete_collection` either
+        // sees this child or has already deleted the parent (#1573).
+        if let Some(p) = parent {
+            use crate::sql::FetcherTx as _;
+            let live = MediaCollection::objects()
+                .where_(MediaCollection::id.eq(p))
+                .where_(MediaCollection::deleted_at.is_null())
+                .select_for_update()
+                .fetch_tx(&mut tx)
+                .await
+                .map_err(media_err_from_exec)?;
+            if live.is_empty() {
+                tx.rollback().await?;
+                return Err(MediaError::Other(format!("collection {p} not found")));
+            }
+        }
         crate::sql::delete_tx(&mut tx, &tombstone)
             .await
             .map_err(media_err_from_exec)?;
@@ -1040,16 +1057,17 @@ impl MediaManager {
     /// [`Self::list_collections`], and [`Self::collection_path`] on
     /// any of them a permanent error.
     pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
-        // The **whole subtree**, not just this row. Reuses the same
-        // recursive walk `list_in_collection` uses, so the two agree
-        // about what "inside" means.
-        let mut ids = self.collect_descendant_ids(id).await?;
-        if !ids.contains(&id) {
-            // `collect_descendant_ids` filters already-deleted rows, so
-            // a re-delete would otherwise find nothing and skip the
-            // orphaning below.
-            ids.push(id);
-        }
+        // Both statements in one transaction. Run separately, a
+        // failure of the soft-delete leaves the orphaning committed:
+        // the collection still live, every media row under it
+        // orphaned, and the old `collection_id` recorded nowhere.
+        // Both are database-only, so a transaction closes it.
+        let mut tx = crate::sql::transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        // The **whole subtree**, walked inside the transaction so a
+        // child created mid-delete is not left under a dead parent.
+        let ids = lock_subtree_tx(&mut tx, id).await?;
 
         // Media survives, as documented — it is orphaned, not deleted.
         let orphan = Media::objects()
@@ -1064,15 +1082,6 @@ impl MediaManager {
             .set("deleted_at", Utc::now())
             .compile()
             .map_err(media_err_from_query)?;
-
-        // Both statements in one transaction. Run separately, a
-        // failure of the soft-delete leaves the orphaning committed:
-        // the collection still live, every media row under it
-        // orphaned, and the old `collection_id` recorded nowhere.
-        // Both are database-only, so a transaction closes it.
-        let mut tx = crate::sql::transaction_pool(&self.pool)
-            .await
-            .map_err(media_err_from_exec)?;
         crate::sql::update_tx(&mut tx, &orphan)
             .await
             .map_err(media_err_from_exec)?;
@@ -1650,6 +1659,43 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
 
 fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
     media_err_from_exec(e.into())
+}
+
+/// `root` and its live descendants, each level locked `FOR UPDATE`, so a
+/// `create_collection` under any of them waits for `tx` (#1573).
+async fn lock_subtree_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    root: i64,
+) -> Result<Vec<i64>, MediaError> {
+    use crate::sql::FetcherTx as _;
+    // Even a deleted root: a re-delete still orphans its media.
+    MediaCollection::objects()
+        .where_(MediaCollection::id.eq(root))
+        .select_for_update()
+        .fetch_tx(tx)
+        .await
+        .map_err(media_err_from_exec)?;
+    let mut ids = vec![root];
+    let mut level = vec![root];
+    while !level.is_empty() {
+        let children = MediaCollection::objects()
+            .where_(MediaCollection::parent_id.is_in(level))
+            .where_(MediaCollection::deleted_at.is_null())
+            .select_for_update()
+            .fetch_tx(tx)
+            .await
+            .map_err(media_err_from_exec)?;
+        // `ids` guards against a parent_id cycle.
+        level = children
+            .into_iter()
+            .filter_map(|c| match c.id {
+                Auto::Set(id) if !ids.contains(&id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        ids.extend(&level);
+    }
+    Ok(ids)
 }
 
 /// Decode one `popular_tags` row: a `MediaTag` plus the aggregate

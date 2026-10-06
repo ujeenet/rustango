@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `create_collection` checks the parent
+
+A missing or soft-deleted `parent` now returns `MediaError::Other("collection N not found")` (404 over REST) instead of creating an orphan (#1573).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
