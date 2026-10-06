@@ -27,6 +27,7 @@ Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt
 - An impersonating operator is attributed by id: audit `source` is `operator:<id>:impersonating` (was `user:0`), and `AdminSession` carries `impersonated_by` instead of an `operator:<name>` username. The i18n editor's `updated_by` is now `user:<id>` or `operator:<id>:impersonating` (was the username or `operator:<name>`), so a username cannot pose as an operator (#2110).
 - Ending an impersonation (its button or logout) revokes that cookie server-side, leaving the operator signed in (#2038).
 - The HTTPS redirect and SSO `redirect_uri`s take only a plain `host[:port]` from `Host`; `good.com@evil.com` gets a 400 or an SSO error (#2173).
+- `S3Storage`'s default client no longer follows redirects, so signed requests stay on the configured endpoint (#1780).
 
 ## [0.60.0] — 2026-10-02
 

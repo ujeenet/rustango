@@ -174,6 +174,10 @@ untouched.
 
 `SslRedirectLayer` answers 400 and SSO login shows an error when `Host` is not `host[:port]` (#2173).
 
+### `S3Storage` does not follow redirects
+
+A 3xx from the endpoint is now an error. Point `S3Config` at the bucket's own region endpoint (#1780).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
