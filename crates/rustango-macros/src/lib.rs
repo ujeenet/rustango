@@ -967,24 +967,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &collected.column_entries,
     );
 
-    // Issue #271 / T1.9 — `#[rustango(manager(ext = "FooManagerExt"))]`
-    // emits an empty extension trait so users can add methods via
-    // `impl FooManagerExt for QuerySet<Foo>` without hand-writing the
-    // trait declaration. See `crates/rustango/src/manager.rs` for the
-    // pattern this replaces.
-    let manager_trait = container.manager_ext.as_ref().map(|name| {
-        let model_name_str = struct_name.to_string();
-        let doc = format!(
-            "Empty marker trait for [`{model_name_str}`], from \
-             `#[rustango(manager(ext = ...))]`. Put query shortcuts on your \
-             own extension trait over `QuerySet<{model_name_str}>`."
-        );
-        quote! {
-            #[doc = #doc]
-            pub trait #name: ::core::marker::Sized {}
-        }
-    });
-
     Ok(quote! {
         #model_impl
         #inherent_impl
@@ -996,7 +978,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #through_accessors
         #reverse_has_accessors
         #generic_fk_accessors
-        #manager_trait
 
         #root::core::inventory::submit! {
             // `module_path!()` evaluates at the registration site,
@@ -8268,13 +8249,6 @@ struct ContainerAttrs {
     /// to partition diff output between registry-scoped and
     /// tenant-scoped migration files.
     scope: Option<String>,
-    /// Custom-Manager extension-trait name from
-    /// `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-    /// When set, the macro emits an empty `pub trait <name>: Sized {}`
-    /// adjacent to the model so users can write
-    /// `impl FooManagerExt for QuerySet<Foo> { fn published(self) -> Self ... }`
-    /// and discover the convention from the model definition.
-    manager_ext: Option<syn::Ident>,
     /// Extra QuerySet accessor names from
     /// `#[rustango(manager_fn = "active")]`. Issue #289 / T2.6.
     /// Each value adds a `pub fn <name>() -> QuerySet<Self>` next to
@@ -8753,7 +8727,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
         scope: None,
-        manager_ext: None,
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
@@ -8944,26 +8917,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("manager") {
-                // `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-                // Stretch `from_queryset = "..."` is left as a
-                // follow-up — the issue's primary acceptance is the
-                // `ext = ...` trait emission.
-                meta.parse_nested_meta(|inner| {
-                    if inner.path.is_ident("ext") {
-                        let s: LitStr = inner.value()?.parse()?;
-                        let name = s.value();
-                        if name.is_empty() {
-                            return Err(inner.error("manager(ext = \"...\") cannot be empty"));
-                        }
-                        out.manager_ext =
-                            Some(syn::Ident::new(&name, s.span()));
-                        return Ok(());
-                    }
-                    Err(inner.error(
-                        "unknown manager attribute (supported: `ext = \"TraitName\"`)",
-                    ))
-                })?;
-                return Ok(());
+                // Its empty trait could not take methods (#2132).
+                return Err(meta.error(
+                    "`manager(ext = ...)` was removed (#2132): declare your own \
+                     `trait FooManagerExt: Sized { … }` and implement it for `QuerySet<Foo>`",
+                ));
             }
             if meta.path.is_ident("manager_fn") {
                 // `#[rustango(manager_fn = "active")]` — issue #289 / T2.6.
@@ -13811,6 +13769,17 @@ mod field_attr_tests {
         assert!(errs[1].as_deref().unwrap().contains("vector"), "{errs:?}");
         assert!(errs[2].as_deref().unwrap().contains("geometry"), "{errs:?}");
         assert_eq!(errs[3], None);
+    }
+
+    /// `manager(ext)` emitted a trait nobody could add methods to; it is refused (#2132).
+    #[test]
+    fn manager_ext_is_refused() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "p", manager(ext = "PostManagerExt"))]
+            struct Post { id: i64 }
+        };
+        let err = parse_container_attrs(&input).err().expect("refused");
+        assert!(err.to_string().contains("#2132"), "{err}");
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

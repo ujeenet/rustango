@@ -28,7 +28,6 @@ Les versions récentes ont ajouté un lot de fonctionnalités qui ne sont pas en
 - **Types de champ** — `rust_decimal::Decimal` (natif sur PG/MySQL, via un shim Decode sur SQLite), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) sont désormais acceptés par `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — valider sans écrire tout de suite. Validez maintenant, modifiez l'ensemble d'écriture préparé, puis validez quand vous êtes prêt.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — contraintes d'unicité partielles. « E-mail unique par ligne non supprimée » / « Slug unique par tenant ».
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — émet un trait marqueur vide à côté du modèle. Il n'ajoute aucune méthode : placez vos raccourcis de requête sur votre propre trait d'extension sur `QuerySet<Foo>`, comme le montre `crates/rustango/src/manager.rs`.
 - **`manage makemigrations --merge`** (#346, v0.42) — nœud de fusion pour les chaînes de branches divergentes. Voir [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Le CHANGELOG contient l'index complet des tickets pour chaque version.

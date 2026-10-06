@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `manager(ext = ...)` is gone
+
+**Breaking:** drop the attribute and declare the trait yourself: `trait FooManagerExt: Sized { … }` plus `impl FooManagerExt for QuerySet<Foo>` (#2132).
+
 ### M2M writes check the through model's bounds
 
 `add` and `set` validate keys against a registered through model, so a too-long key is an error on SQLite as on PG and MySQL (#2136).
