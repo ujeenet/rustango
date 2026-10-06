@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `bulk_insert_pool` checks field limits (#2153)
+
+A value over `max_length` or outside `min`/`max` is refused with the same `QueryError` as `insert_pool`, before any SQL runs.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

@@ -1244,36 +1244,15 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     // Keep every `pool.dialect()` a temporary: it yields `&dyn Dialect`,
     // which is not `Sync`, so holding one across an `.await` would make
     // this future non-Send.
-    //
-    // One multi-row INSERT binds `rows × columns` parameters, and every
-    // backend caps that: 65535 on Postgres, 32766 on SQLite,
-    // `max_allowed_packet` on MySQL. Past the cap the driver fails with
-    // an opaque error, so split into batches that fit. Batches under
-    // the cap still run as one statement.
-    let columns = query.columns.len().max(1);
-    let max_rows = (pool.dialect().max_bind_params() / columns).max(1);
+    let mut stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
 
     // One statement is atomic alone, but inside an outer `atomic` it must
     // join that transaction like a multi-batch insert does.
-    if query.rows.len() <= max_rows && !atomic::in_block(pool) {
-        let stmt = pool.dialect().compile_bulk_insert(query)?;
+    if stmts.len() == 1 && !atomic::in_block(pool) {
+        let stmt = stmts.remove(0);
         execute_pool(pool, &stmt.sql, stmt.params).await?;
         return Ok(());
     }
-
-    let stmts = query
-        .rows
-        .chunks(max_rows)
-        .map(|chunk| {
-            pool.dialect().compile_bulk_insert(&BulkInsertQuery {
-                model: query.model,
-                columns: query.columns.clone(),
-                rows: chunk.to_vec(),
-                returning: query.returning.clone(),
-                on_conflict: query.on_conflict.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     // All batches or none; inside an outer `atomic` on this pool this is a savepoint.
     atomic(pool, move |tx| {
         Box::pin(async move {
@@ -1285,6 +1264,38 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
         })
     })
     .await
+}
+
+/// Check `query` against field limits like [`insert_pool`] does (#2153),
+/// then compile it in batches that fit the backend's bind-parameter cap.
+///
+/// One multi-row INSERT binds `rows × columns` parameters: 65535 on
+/// Postgres, 32766 on SQLite, `max_allowed_packet` on MySQL. Past the
+/// cap the driver fails with an opaque error.
+fn compile_bulk_insert_batches(
+    dialect: &dyn Dialect,
+    query: &BulkInsertQuery,
+) -> Result<Vec<super::CompiledStatement>, ExecError> {
+    query.validate()?;
+    let max_rows = (dialect.max_bind_params() / query.columns.len().max(1)).max(1);
+    if query.rows.len() <= max_rows {
+        return Ok(vec![dialect.compile_bulk_insert(query)?]);
+    }
+    query
+        .rows
+        .chunks(max_rows)
+        .map(|chunk| {
+            dialect
+                .compile_bulk_insert(&BulkInsertQuery {
+                    model: query.model,
+                    columns: query.columns.clone(),
+                    rows: chunk.to_vec(),
+                    returning: query.returning.clone(),
+                    on_conflict: query.on_conflict.clone(),
+                })
+                .map_err(ExecError::from)
+        })
+        .collect()
 }
 
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN

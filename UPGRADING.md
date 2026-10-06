@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `bulk_insert_pool` validates rows
+
+It and the `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` model methods now return `ExecError::Query` for a value that breaks a field limit, as `insert_pool` does (#2153).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
