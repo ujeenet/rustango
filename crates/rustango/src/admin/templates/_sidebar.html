@@ -44,7 +44,9 @@
         <form method="post" action="{{ logout_url | default(value=admin_prefix ~ '/logout') }}" class="logout-form">
             {{ csrf_input | safe }}
             <p class="signed-in-as">
-                {% if session_user.username %}
+                {% if session_user.impersonated_by %}
+                    Impersonating as operator <strong>#{{ session_user.impersonated_by }}</strong>
+                {% elif session_user.username %}
                     Signed in as <strong>{{ session_user.username }}</strong>
                 {% else %}
                     Signed in

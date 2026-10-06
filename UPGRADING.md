@@ -158,6 +158,18 @@ untouched.
 
 `slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).
 
+### `tenancy::authenticate_*` return `PasswordVerified`
+
+**Breaking:** `authenticate_user`, `authenticate_user_pool`, `authenticate_operator` and `authenticate_operator_pool` return `Option<PasswordVerified<_>>`. It derefs to the row; call `.complete(&pool)` (or `.complete_on(conn)`) after your second factor to store an upgraded hash (#2093).
+
+### `AdminSession::impersonated_by`
+
+**Breaking:** `AdminSession` has a new `impersonated_by` field; build it with `AdminSession::new`. In an impersonation `username` is empty: read `impersonated_by`. `actor()` returns an `AuditSource`; the i18n editor stores its token as `updated_by`, now `user:<id>` or `operator:<id>:impersonating` instead of a username or `operator:<name>`. Update any filter on it (#2110).
+
+### `TenantSessionPayload::impersonation` takes a session id
+
+**Breaking:** it takes a `sid` (the handoff `jti`), and the payload has a new `sid` field. Impersonation cookies from before this release are refused; open the tenant again from the console (#2038).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
