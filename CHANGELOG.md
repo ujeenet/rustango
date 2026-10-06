@@ -41,6 +41,17 @@ An audited PG `upsert` on a `unique_together` target records `create` for a new 
 ### Fixed — audited models get `save_partial`; global-scope docs (#1744)
 
 Audited models had no `save_partial` / `save_partial_typed`; they now write a diff of only the saved fields. The docs say which methods skip global scopes.
+### Fixed — a second shape for one M2M junction is refused (#2000)
+
+Relations sharing a `through` table must match up to which side is the source; a different one is a `makemigrations` error instead of taking the junction over and rebuilding it. Adding the mirrored side no longer rebuilds it either.
+
+### Fixed — `seed-permissions` recreates `rustango_api_keys` and its FK (#1731)
+
+Before, only `create-api-key` did, and it mints a key.
+
+### Fixed — `migrate-tenant-storage` checks only the target schema (#1864, partial)
+
+An empty target schema no longer passes the smoke check through `public.rustango_users`, so the Org row is reverted. The restore into a schema is still broken.
 
 ## [0.60.0] — 2026-10-02
 

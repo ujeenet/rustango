@@ -66,14 +66,23 @@ pub struct DocTag {
     m2m(
         name = "tags",
         to = "m2m1926_tag",
-        through = "m2m1926_post_tag",
-        src = "post_id",
+        through = "m2m1926_note_tag",
+        src = "note_id",
         dst = "tag_id"
     )
 )]
 pub struct Note {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(app = "m2m1926", table = "m2m1926_note_tag")]
+pub struct NoteTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub note_id: i64,
+    pub tag_id: i64,
 }
 
 /// A source whose M2M target has a String PK.
@@ -175,6 +184,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<RackBadge>(pool).await;
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<NoteTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<ShelfLabel>(pool).await;
 }
 
@@ -272,7 +282,7 @@ async fn uuid_pk_rows_stay_per_source(pool: &Pool) {
 
 /// An unsaved source has no key; it must not act on anyone's rows.
 async fn unsaved_source_is_refused(pool: &Pool) {
-    post("abc-slug")
+    Note { id: Auto::Set(7) }
         .tags_m2m()
         .add(1, pool)
         .await
@@ -281,7 +291,7 @@ async fn unsaved_source_is_refused(pool: &Pool) {
     let err = unsaved.tags_m2m().clear(pool).await.expect_err("unsaved");
     assert!(matches!(err, ExecError::M2mUnsavedSource { .. }), "{err:?}");
     assert!(unsaved.tags_m2m().add(1, pool).await.is_err());
-    assert_eq!(PostTag::objects().count(pool).await.expect("count"), 1);
+    assert_eq!(NoteTag::objects().count(pool).await.expect("count"), 1);
 }
 
 /// String destination keys bind and read back as text (#1950).

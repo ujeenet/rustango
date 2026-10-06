@@ -173,6 +173,11 @@ On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer 
 ### Audited models have `save_partial`
 
 `#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).
+### One `through` table, one shape
+
+Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) are now a `MigrateError::Validation` in `makemigrations`, and a panic in the `SchemaSnapshot` builders (#2000). Give each its own `through`.
+
+`M2MTableSnapshot` equality and order now ignore which end is the source, and new snapshots put the end that sorts first as the source. A mirrored pair no longer rebuilds the junction.
 
 ## 0.60.0
 
@@ -1428,15 +1433,8 @@ WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public'
 ```
 
 Drop each one (`ALTER TABLE "<schema>"."<table>" DROP CONSTRAINT "<name>"`).
-For the three permission tables, `manage seed-permissions --slug <slug>`
-then re-creates them inside the tenant. For `rustango_api_keys`, re-add it
-by hand:
-
-```sql
-ALTER TABLE "<schema>"."rustango_api_keys"
-  ADD CONSTRAINT "rustango_api_keys_user_id_fkey" FOREIGN KEY ("user_id")
-  REFERENCES "<schema>"."rustango_users" ("id") ON DELETE CASCADE;
-```
+Then `manage seed-permissions --slug <slug>` re-creates them inside the
+tenant, the `rustango_api_keys` one included since 0.60.1 (#1731).
 
 ### Tenant admin and operator console POSTs need the CSRF token
 
