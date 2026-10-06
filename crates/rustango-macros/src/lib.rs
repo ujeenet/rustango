@@ -3663,77 +3663,79 @@ fn inherent_impl_tokens(
     // audit::insert_one_with_audit (per-backend tx wraps INSERT
     // + auto-PK readback + audit emit). Snapshot-style audit (the
     // PendingEntry's `changes` carries post-write field values).
-    let pool_insert_method = if audited_fields.is_some() {
-        if let Some(_) = primary_key {
-            let pushes = if fields.has_auto {
-                fields.insert_pushes.clone()
-            } else {
-                // For non-Auto-PK models, the macro normally builds
-                // {columns, values} from fields.insert_columns +
-                // fields.insert_values rather than insert_pushes.
-                // Map those into the pushes shape.
-                fields
-                    .insert_columns
-                    .iter()
-                    .zip(&fields.insert_values)
-                    .map(|(col, val)| {
-                        quote! {
-                            _columns.push(#col);
-                            _values.push(#val);
-                        }
-                    })
-                    .collect()
-            };
-            // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
-            let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
-            {
-                fields.returning_cols.clone()
-            } else {
-                // Non-Auto-PK: still need RETURNING something for the
-                // audit helper's contract (it errors on empty
-                // returning). Return the PK column so the audit row
-                // can carry the assigned PK back. Some non-Auto PKs
-                // are server-side-default (e.g. UUIDv4 default), so
-                // RETURNING is genuinely useful.
-                primary_key
-                    .map(|(_, col)| {
-                        let lit = col.as_str();
-                        vec![quote!(#lit)]
-                    })
-                    .unwrap_or_default()
-            };
-            quote! {
-                /// Insert this row against either backend with audit
-                /// emission inside the same transaction. Bi-dialect
-                /// counterpart of [`Self::insert`] for audited models.
-                ///
-                /// Snapshot-style audit (post-write field values).
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
-                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
-                    })
-                    .await
-                }
-            }
+    let audited_insert_query = if audited_fields.is_some() && primary_key.is_some() {
+        let pushes = if fields.has_auto {
+            fields.insert_pushes.clone()
         } else {
-            quote!()
+            // For non-Auto-PK models, the macro normally builds
+            // {columns, values} from fields.insert_columns +
+            // fields.insert_values rather than insert_pushes.
+            // Map those into the pushes shape.
+            fields
+                .insert_columns
+                .iter()
+                .zip(&fields.insert_values)
+                .map(|(col, val)| {
+                    quote! {
+                        _columns.push(#col);
+                        _values.push(#val);
+                    }
+                })
+                .collect()
+        };
+        // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
+        let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty() {
+            fields.returning_cols.clone()
+        } else {
+            // Non-Auto-PK: still need RETURNING something for the
+            // audit helper's contract (it errors on empty
+            // returning). Return the PK column so the audit row
+            // can carry the assigned PK back. Some non-Auto PKs
+            // are server-side-default (e.g. UUIDv4 default), so
+            // RETURNING is genuinely useful.
+            primary_key
+                .map(|(_, col)| {
+                    let lit = col.as_str();
+                    vec![quote!(#lit)]
+                })
+                .unwrap_or_default()
+        };
+        Some(quote! {
+            let mut _columns: ::std::vec::Vec<&'static str> =
+                ::std::vec::Vec::new();
+            let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                ::std::vec::Vec::new();
+            #( #pushes )*
+            let _query = #root::core::InsertQuery::new(
+                <Self as #root::core::Model>::SCHEMA,
+                _columns,
+                _values,
+            )
+            .returning(::std::vec![ #( #returning_cols ),* ]);
+        })
+    } else {
+        None
+    };
+    let pool_insert_method = if let Some(insert_query) = &audited_insert_query {
+        quote! {
+            /// Insert this row against either backend with audit
+            /// emission inside the same transaction. Bi-dialect
+            /// counterpart of [`Self::insert`] for audited models.
+            ///
+            /// Snapshot-style audit (post-write field values).
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_pool(
+                &mut self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_query
+                #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
+                    _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                })
+                .await
+            }
         }
     } else {
         // Keep the non-audited pool_insert_method we built earlier.
@@ -3873,6 +3875,20 @@ fn inherent_impl_tokens(
                     query: &#root::core::UpdateQuery,
                     only: ::core::option::Option<&::std::collections::HashSet<&'static str>>,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let mut _tx = #root::sql::transaction_pool(pool).await?;
+                    let _affected = self.__rustango_save_with_diff_tx(&mut _tx, query, only).await?;
+                    _tx.commit().await?;
+                    ::core::result::Result::Ok(_affected)
+                }
+
+                /// [`Self::__rustango_save_with_diff`] inside an open transaction.
+                #[doc(hidden)]
+                async fn __rustango_save_with_diff_tx(
+                    &self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                    query: &#root::core::UpdateQuery,
+                    only: ::core::option::Option<&::std::collections::HashSet<&'static str>>,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     let mut _after_pairs = self.__rustango_audit_pairs();
                     if let ::core::option::Option::Some(only) = only {
                         _after_pairs.retain(|(col, _)| only.contains(col));
@@ -3885,8 +3901,8 @@ fn inherent_impl_tokens(
                         ),
                         &[ #( #tracked_cols ),* ],
                     );
-                    #root::audit::save_one_with_diff(
-                        pool,
+                    #root::audit::save_one_with_diff_tx(
+                        tx,
                         query,
                         &_before_query,
                         <Self as #root::core::Model>::SCHEMA.table,
@@ -6283,60 +6299,87 @@ fn inherent_impl_tokens(
     };
 
     // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
-    // the non-audited `_pool` methods but execute against an open
-    // `PoolTx` so the writes participate in the caller's transaction.
-    // Auditing inside TX is deferred; these always use the plain
-    // executor primitives regardless of whether the model is audited.
-    let tx_insert_method = if fields.has_auto {
-        let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
-        quote! {
-            /// Insert this row inside an open transaction, populating
-            /// any `Auto<T>` PK from the auto-assigned value. Works
-            /// against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #( #pushes )*
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
-                #root::sql::apply_auto_pk(_result, self)
+    // the `_pool` methods but execute against an open `PoolTx` so the
+    // writes participate in the caller's transaction. Audited models
+    // write their audit rows in it too, through the same audit helpers.
+    let tx_insert_method =
+        if let (true, Some(insert_query)) = (fields.has_auto, &audited_insert_query) {
+            quote! {
+                /// Insert this row inside an open transaction, populating
+                /// any `Auto<T>` PK, and write its audit row there too.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &mut self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #insert_query
+                    #root::audit::insert_one_with_audit_tx(tx, &_query, self, |_m: &Self| {
+                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    })
+                    .await
+                }
             }
-        }
-    } else {
-        let insert_columns = &fields.insert_columns;
-        let insert_values = &fields.insert_values;
-        quote! {
-            /// Insert this row inside an open transaction.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_tx(tx, &_query).await
+        } else if fields.has_auto {
+            let pushes = &fields.insert_pushes;
+            let returning_cols = &fields.returning_cols;
+            quote! {
+                /// Insert this row inside an open transaction, populating
+                /// any `Auto<T>` PK from the auto-assigned value. Works
+                /// against any backend that `tx` wraps.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &mut self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
+                    let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
+                    #root::sql::apply_auto_pk(_result, self)
+                }
             }
-        }
-    };
+        } else {
+            let insert_columns = &fields.insert_columns;
+            let insert_values = &fields.insert_values;
+            let insert_run = if audited_insert_query.is_some() {
+                quote! {
+                    let _audit_entry =
+                        self.__rustango_audit_entry(#root::audit::AuditOp::Create);
+                    #root::audit::insert_with_entry_tx(tx, &_query, &_audit_entry).await
+                }
+            } else {
+                quote!(#root::sql::insert_tx(tx, &_query).await)
+            };
+            quote! {
+                /// Insert this row inside an open transaction.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #insert_columns ),* ],
+                        ::std::vec![ #( #insert_values ),* ],
+                    );
+                    #insert_run
+                }
+            }
+        };
 
     let tx_save_method = if let Some((pk_ident, pk_col)) = primary_key {
         let pk_column_lit = pk_col.as_str();
@@ -6349,6 +6392,14 @@ fn inherent_impl_tokens(
             }
         } else {
             quote!()
+        };
+        let save_run = if audited_fields.is_some() {
+            quote! {
+                self.__rustango_save_with_diff_tx(tx, &_query, ::core::option::Option::None)
+                    .await
+            }
+        } else {
+            quote!(#root::sql::update_tx(tx, &_query).await)
         };
         quote! {
             /// Save this row inside an open transaction. `INSERT` when
@@ -6373,8 +6424,7 @@ fn inherent_impl_tokens(
                         ),
                     )),
                 );
-                let _affected = #root::sql::update_tx(tx, &_query).await?;
-                ::core::result::Result::Ok(_affected)
+                #save_run
             }
         }
     } else {
@@ -6385,6 +6435,15 @@ fn inherent_impl_tokens(
         let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
         let pk_ident_for_tx = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_tx {
+            let delete_run = if audited_fields.is_some() {
+                quote! {
+                    let _audit_entry =
+                        self.__rustango_audit_entry(#root::audit::AuditOp::Delete);
+                    #root::audit::delete_one_with_audit_tx(tx, &_query, &_audit_entry).await
+                }
+            } else {
+                quote!(#root::sql::delete_tx(tx, &_query).await)
+            };
             quote! {
                 /// Delete the row identified by this instance's PK
                 /// inside an open transaction. Works against any backend
@@ -6403,7 +6462,7 @@ fn inherent_impl_tokens(
                             ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
                     );
-                    #root::sql::delete_tx(tx, &_query).await
+                    #delete_run
                 }
             }
         } else {
