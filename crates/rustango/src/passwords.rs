@@ -263,6 +263,17 @@ pub async fn upgrade_stored_hash(
     let Some(new) = rehash_async(password, stored).await else {
         return stored.to_owned();
     };
+    store_rehash(pool, model, id, stored, new).await
+}
+
+/// Store `new` over `stored` on row `id`; the hash now in force.
+pub(crate) async fn store_rehash(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    stored: &str,
+    new: String,
+) -> String {
     let applied = crate::sql::update_pool(pool, &rehash_update(model, id, stored, &new)).await;
     rehash_applied(applied, model, id, stored, new)
 }

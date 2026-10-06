@@ -120,6 +120,13 @@ Schema-mode refusals name the storage-mode control, not a CLI flag or wire value
 
 Nested with `Router::nest`, its links, forms, scripts and redirects keep the prefix.
 
+### Security
+
+- Tenant JWT access tokens end with their refresh family (replay revoke or logout) and at the absolute session cap. Each bearer request reads the JTI store once more (#2119).
+- `tenancy::authenticate_*` no longer upgrade a weak hash before an app's second factor; call `PasswordVerified::complete` after it (#2093).
+- An impersonating operator is attributed by id: audit `source` is `operator:<id>:impersonating` (was `user:0`), and `AdminSession` carries `impersonated_by` instead of an `operator:<name>` username. The i18n editor's `updated_by` is now `user:<id>` or `operator:<id>:impersonating` (was the username or `operator:<name>`), so a username cannot pose as an operator (#2110).
+- Ending an impersonation (its button or logout) revokes that cookie server-side, leaving the operator signed in (#2038).
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

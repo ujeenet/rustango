@@ -80,6 +80,46 @@ pub struct AdminSession {
     /// The user's `is_superuser` flag at login time, cached on the
     /// cookie so the chrome's visibility check needs no query.
     pub is_superuser: bool,
+    /// `Some(operator id)` when an operator is impersonating a tenant;
+    /// then `user_id` is 0 and `username` empty (#2110).
+    #[serde(default)]
+    pub impersonated_by: Option<i64>,
+}
+
+impl AdminSession {
+    /// A signed-in user's session.
+    #[must_use]
+    pub fn new(user_id: i64, username: impl Into<String>, is_superuser: bool) -> Self {
+        Self {
+            user_id,
+            username: username.into(),
+            is_superuser,
+            impersonated_by: None,
+        }
+    }
+
+    /// An operator impersonating a tenant, as superuser.
+    #[must_use]
+    pub fn impersonation(operator_id: i64) -> Self {
+        Self {
+            user_id: 0,
+            username: String::new(),
+            is_superuser: true,
+            impersonated_by: Some(operator_id),
+        }
+    }
+
+    /// Who authored a write, by id only: a username could pose as an
+    /// operator. `as_token()` gives `user:<id>` or `operator:<id>:impersonating`.
+    #[must_use]
+    pub fn actor(&self) -> crate::audit::AuditSource {
+        match self.impersonated_by {
+            Some(id) => crate::audit::AuditSource::Custom(format!("operator:{id}:impersonating")),
+            None => crate::audit::AuditSource::User {
+                id: self.user_id.to_string(),
+            },
+        }
+    }
 }
 
 /// Wire payload: signed, then base64-encoded. Wraps [`AdminSession`]
@@ -172,11 +212,7 @@ pub(crate) fn decode_full(
         return None;
     }
     Some((
-        AdminSession {
-            user_id: payload.user_id,
-            username: payload.username,
-            is_superuser: payload.is_superuser,
-        },
+        AdminSession::new(payload.user_id, payload.username, payload.is_superuser),
         CookieAuth {
             auth_hash: payload.auth_hash,
             iat: payload.iat,
@@ -189,11 +225,7 @@ mod tests {
     use super::*;
 
     fn session(user_id: i64, username: &str, is_superuser: bool) -> AdminSession {
-        AdminSession {
-            user_id,
-            username: username.into(),
-            is_superuser,
-        }
+        AdminSession::new(user_id, username, is_superuser)
     }
 
     #[test]
