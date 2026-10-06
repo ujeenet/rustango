@@ -178,6 +178,13 @@ On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer 
 Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) are now a `MigrateError::Validation` in `makemigrations`, and a panic in the `SchemaSnapshot` builders (#2000). Give each its own `through`.
 
 `M2MTableSnapshot` equality and order now ignore which end is the source, and new snapshots put the end that sorts first as the source. A mirrored pair no longer rebuilds the junction.
+### `ConfigError::Parse` holds a `TomlSyntaxError`
+
+**Breaking:** its `source` is now `config::TomlSyntaxError` (message and line only), not `toml::de::Error`. Read `message()` / `line_col()` (#2108).
+
+### CSRF cookie `Secure` follows the layer
+
+Under `csrf::with_config`, CBV and admin cookies take `Secure` from `CsrfConfig::secure`; plain-HTTP dev needs `allow_insecure_for_dev()`. Under a default `csrf::layer()` (and with no layer) they, and that layer's own cookie, follow the session `Secure` policy (#2117).
 
 ## 0.60.0
 

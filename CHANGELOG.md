@@ -52,6 +52,21 @@ Before, only `create-api-key` did, and it mints a key.
 ### Fixed — `migrate-tenant-storage` checks only the target schema (#1864, partial)
 
 An empty target schema no longer passes the smoke check through `public.rustango_users`, so the Org row is reverted. The restore into a schema is still broken.
+### Security — `WebhookSubscription` Debug hides the secret (#2116)
+
+`{:?}` prints `<redacted>` for the signing secret and only header names.
+
+### Security — `redact` masks a password containing `@` (#2109)
+
+The userinfo ends at the last `@` before the path, and an `@` in the query no longer hides `password=`. `migrate`, `about` and `migrate-storage` use the same `redact`.
+
+### Security — config parse errors never quote the TOML line (#2108)
+
+`ConfigError::Parse` keeps only the message and line/column, in Display and Debug alike.
+
+### Security — CBV CSRF cookie follows `CsrfConfig::secure` (#2117)
+
+CBV and admin cookies take `Secure` from an explicit `with_config`; under a default `layer()` they follow the session policy, like that layer's own cookie.
 
 ## [0.60.0] — 2026-10-02
 

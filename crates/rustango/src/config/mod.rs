@@ -39,7 +39,7 @@
 mod loader;
 mod sections;
 
-pub use loader::ConfigError;
+pub use loader::{ConfigError, TomlSyntaxError};
 pub use sections::{
     AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,
     I18nSettings, JobsSettings, JwtSettings, LoggingSettings, MailSettings, McpSettings,
