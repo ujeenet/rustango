@@ -156,7 +156,7 @@ untouched.
 
 ### `AdminSession::impersonated_by`
 
-**Breaking:** `AdminSession` has a new `impersonated_by` field; build it with `AdminSession::new`. In an impersonation `username` is empty: read `impersonated_by`, or `actor()` for an author label (#2110).
+**Breaking:** `AdminSession` has a new `impersonated_by` field; build it with `AdminSession::new`. In an impersonation `username` is empty: read `impersonated_by`. `actor()` returns an `AuditSource`; the i18n editor stores its token as `updated_by`, now `user:<id>` or `operator:<id>:impersonating` instead of a username or `operator:<name>`. Update any filter on it (#2110).
 
 ### `TenantSessionPayload::impersonation` takes a session id
 

@@ -784,6 +784,32 @@ async fn the_session_cap_ends_the_access_token() {
         .await;
 }
 
+/// Logout ends every access token of that login, not only the bearer sent.
+#[tokio::test]
+async fn logout_ends_every_access_token_of_the_login() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("lo");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let first = login["access"].as_str().unwrap().to_owned();
+    let r = env.refresh(login["refresh"].as_str().unwrap()).await;
+    assert_eq!(r.status(), StatusCode::OK, "rotate");
+    let rotated = json_body(r).await["access"].as_str().unwrap().to_owned();
+    env.assert_bearer(&first, StatusCode::OK, "control").await;
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, format!("Bearer {rotated}"))
+        .body(Body::empty())
+        .unwrap();
+    let r = send(&env.api, &next_ip(), logout).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    env.assert_bearer(&first, StatusCode::UNAUTHORIZED, "earlier access")
+        .await;
+}
+
 async fn json_body(r: axum::response::Response) -> serde_json::Value {
     let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     serde_json::from_slice(&b).unwrap()

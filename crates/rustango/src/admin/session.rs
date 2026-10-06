@@ -109,13 +109,15 @@ impl AdminSession {
         }
     }
 
-    /// Who to record as the author of a write: the username, or
-    /// `operator:<id>:impersonating`, the audit log's token.
+    /// Who authored a write, by id only: a username could pose as an
+    /// operator. `as_token()` gives `user:<id>` or `operator:<id>:impersonating`.
     #[must_use]
-    pub fn actor(&self) -> String {
+    pub fn actor(&self) -> crate::audit::AuditSource {
         match self.impersonated_by {
-            Some(id) => format!("operator:{id}:impersonating"),
-            None => self.username.clone(),
+            Some(id) => crate::audit::AuditSource::Custom(format!("operator:{id}:impersonating")),
+            None => crate::audit::AuditSource::User {
+                id: self.user_id.to_string(),
+            },
         }
     }
 }

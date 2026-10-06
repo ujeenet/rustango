@@ -788,6 +788,11 @@ async fn logout_in(
             ));
         }
     }
+    // The family too, so every access token of this login ends (#2119).
+    if let Some(session) = claims.as_ref().and_then(RefreshSession::read) {
+        jwt.revoke_family(&session.fam, session.ends_at(&auth))
+            .await;
+    }
     let user_id = claims.map(|c| c.sub);
     let meta = meta_from_parts(&extensions, &headers, Some("/auth/logout"));
 

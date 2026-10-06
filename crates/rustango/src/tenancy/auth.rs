@@ -181,6 +181,7 @@ inventory::submit! {
 /// A row whose password matched, before any second factor. A weak stored
 /// hash is replaced only by `complete`, so a password alone cannot change
 /// the fingerprint that ends the user's other sessions (#2093).
+/// Fingerprint a session from the hash `complete` returns, not this one.
 #[must_use = "call `complete` once every factor has passed"]
 #[derive(Debug)]
 pub struct PasswordVerified<T> {
@@ -198,6 +199,7 @@ impl<T> std::ops::Deref for PasswordVerified<T> {
 
 impl PasswordVerified<User> {
     /// The user, its weak hash upgraded. Call after the second factor.
+    #[must_use]
     pub async fn complete(self, pool: &crate::sql::Pool) -> User {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {
@@ -216,6 +218,7 @@ impl PasswordVerified<User> {
 
     /// [`Self::complete`] on a schema-scoped connection.
     #[cfg(feature = "postgres")]
+    #[must_use]
     pub async fn complete_on(self, conn: &mut PgConnection) -> User {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {
@@ -232,6 +235,7 @@ impl PasswordVerified<User> {
 
 impl PasswordVerified<Operator> {
     /// The operator, its weak hash upgraded. Call after the second factor.
+    #[must_use]
     pub async fn complete(self, registry: &crate::sql::Pool) -> Operator {
         let Self { mut row, upgrade } = self;
         if let Some(new) = upgrade {

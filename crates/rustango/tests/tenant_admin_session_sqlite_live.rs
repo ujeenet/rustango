@@ -788,6 +788,6 @@ async fn an_impersonation_is_attributed_to_the_operator_id() {
     assert_eq!(source, token, "audited writes");
     let session = session.expect("an admin session");
     assert_eq!(session.impersonated_by, Some(op_id));
-    assert_eq!(session.actor(), token, "updated_by");
+    assert_eq!(session.actor().as_token(), token, "updated_by");
     assert!(session.username.is_empty(), "{}", session.username);
 }

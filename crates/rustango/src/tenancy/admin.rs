@@ -764,15 +764,9 @@ impl SessionActor {
         }
     }
 
-    /// The `source` audited writes record.
+    /// The `source` audited writes record; the same as `updated_by`.
     fn audit_source(&self) -> crate::audit::AuditSource {
-        match self {
-            Self::User { id, .. } => crate::audit::AuditSource::User { id: id.to_string() },
-            // The same token `AdminSession::actor` writes as `updated_by`.
-            Self::Operator { .. } => {
-                crate::audit::AuditSource::Custom(self.admin_session().actor())
-            }
-        }
+        self.admin_session().actor()
     }
 
     fn admin_session(&self) -> crate::admin::session::AdminSession {
