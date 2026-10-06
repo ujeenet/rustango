@@ -274,8 +274,8 @@ async fn mcp_agent_tokens_are_jwt_shaped_and_still_resolve() {
     let skills = vec!["search".to_owned(), "summarise".to_owned()];
     let tools = vec!["fetch".to_owned()];
 
-    let token =
-        issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5)).expect("agent token issues");
+    let token = issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5), "abcd1234")
+        .expect("agent token issues");
 
     assert_eq!(
         token.split('.').count(),
@@ -303,8 +303,8 @@ fn mcp_agent_claims_are_readable_by_a_standard_decoder() {
     let life = JwtLifecycle::new(secret());
     let skills = vec!["search".to_owned(), "summarise".to_owned()];
     let tools = vec!["fetch".to_owned()];
-    let token =
-        issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5)).expect("agent token issues");
+    let token = issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5), "abcd1234")
+        .expect("agent token issues");
 
     let std_claims = rustango::jwt::decode(&token, &secret()).expect("standard decode");
     assert_eq!(std_claims.get::<String>("kind").as_deref(), Some("agent"));
@@ -323,7 +323,7 @@ async fn an_mcp_agent_token_is_still_pinned_to_its_tenant() {
     use rustango::mcp::auth::{issue_agent_token, verify_agent_token};
 
     let life = JwtLifecycle::new(secret());
-    let token = issue_agent_token(&life, 99, "acme", &[], &[], None).expect("issue");
+    let token = issue_agent_token(&life, 99, "acme", &[], &[], None, "abcd1234").expect("issue");
 
     assert!(
         verify_agent_token(&life, &token, "globex").await.is_none(),

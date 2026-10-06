@@ -82,6 +82,7 @@ async fn ctx_with_tools(tools: &[&str]) -> McpContext {
             tools: tools.iter().map(|s| s.to_string()).collect(),
             user_id: None,
             jti: "test-jti".into(),
+            secret_prefix: String::new(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),
         cancel: rustango::mcp::CancelToken::never(),

@@ -226,6 +226,18 @@ The console can be nested under a path prefix; its templates take `console_prefi
 
 **Breaking:** it takes a `sid` (the handoff `jti`), and the payload has a new `sid` field. Impersonation cookies from before this release are refused; open the tenant again from the console (#2038).
 
+### `seal_flow` / `open_flow` take a `FlowScope`
+
+**Breaking:** pass `FlowScope::new(purpose, tenant, provider)` (`""` tenant when single-tenant) at both ends. SSO logins in flight at deploy must restart (#1992).
+
+### MCP agent tokens
+
+**Breaking:** `issue_agent_token` takes the key's `secret_prefix`, `agent_token_still_valid_pool` takes it too, and `McpAgent` has a `secret_prefix` field. Agent JWTs minted before the upgrade are refused; clients re-mint (#1962).
+
+### `MediaManager::pool()` returns `&sql::Pool`
+
+**Breaking:** use `manager.pool().as_postgres()` where a `PgPool` was needed; it returns `Option<&PgPool>`, `None` on other backends (#2070).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

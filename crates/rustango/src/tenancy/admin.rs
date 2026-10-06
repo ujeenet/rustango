@@ -452,6 +452,7 @@ where
                 }
                 if !rest.is_empty() && !rest.contains('/') {
                     return super::sso::tenant_sso_begin(
+                        &org,
                         rest,
                         &cfg.secret,
                         &pool,

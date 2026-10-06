@@ -127,6 +127,22 @@ Nested with `Router::nest`, its links, forms, scripts and redirects keep the pre
 - An impersonating operator is attributed by id: audit `source` is `operator:<id>:impersonating` (was `user:0`), and `AdminSession` carries `impersonated_by` instead of an `operator:<name>` username. The i18n editor's `updated_by` is now `user:<id>` or `operator:<id>:impersonating` (was the username or `operator:<name>`), so a username cannot pose as an operator (#2110).
 - Ending an impersonation (its button or logout) revokes that cookie server-side, leaving the operator signed in (#2038).
 
+### Fixed — member SSO under a path-prefix tenant (#2145)
+
+`member_sso_router` also serves `/<prefix>{login_base}/sso/…`, and the IdP callback URL keeps the prefix.
+
+### Security — SSO flow cookie bound to tenant and provider (#1992)
+
+A flow begun for one tenant's provider, on one sign-in surface, is refused at any other callback. `seal_flow` / `open_flow` take a `FlowScope`.
+
+### Security — a rotated MCP agent secret ends its JWTs (#1962)
+
+Agent JWTs carry the key prefix and are refused once the secret rotates; skills and tools are re-read from the rows on every request.
+
+### Fixed — `MediaManager::pool()` no longer panics off Postgres (#2070)
+
+It returns the `sql::Pool` on every backend; `pool_dyn()` is deprecated.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

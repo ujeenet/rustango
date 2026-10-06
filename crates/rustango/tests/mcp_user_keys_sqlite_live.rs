@@ -177,8 +177,16 @@ async fn permission_grants_flow_into_a_user_key() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"user-keys-secret-at-least-32-bytes!!".to_vec(),
     ));
-    let token =
-        issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, Some(uid)).expect("issue");
+    let token = issue_agent_token(
+        &jwt,
+        agent_id,
+        "acme",
+        &skills,
+        &tools,
+        Some(uid),
+        &agent_row.secret_prefix,
+    )
+    .expect("issue");
     let agent = verify_agent_token(&jwt, &token, "acme")
         .await
         .expect("verify");
@@ -315,7 +323,7 @@ async fn revoked_or_deactivated_key_is_refused_at_request_time() {
 
     // Live key + live owner → accepted.
     assert!(
-        agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+        agent_token_still_valid_pool(&pool, agent_id, Some(uid), &issued.agent.secret_prefix)
             .await
             .expect("check"),
         "live key accepted"
@@ -324,7 +332,7 @@ async fn revoked_or_deactivated_key_is_refused_at_request_time() {
     // Deactivating the owner refuses the key even though the agent row remains.
     deactivate_user(&pool, uid).await;
     assert!(
-        !agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+        !agent_token_still_valid_pool(&pool, agent_id, Some(uid), &issued.agent.secret_prefix)
             .await
             .expect("check"),
         "inactive owner refused"
@@ -335,7 +343,7 @@ async fn revoked_or_deactivated_key_is_refused_at_request_time() {
         .await
         .expect("revoke");
     assert!(
-        !agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+        !agent_token_still_valid_pool(&pool, agent_id, Some(uid), &issued.agent.secret_prefix)
             .await
             .expect("check"),
         "deleted key refused"

@@ -359,21 +359,14 @@ impl MediaManager {
         &self.registry
     }
 
-    /// Postgres-only accessor. Use [`Self::pool_dyn`] instead.
-    ///
-    /// # Panics
-    /// If the manager wraps a non-Postgres pool.
-    #[cfg(feature = "postgres")]
+    /// The pool, on any backend; `.as_postgres()` for the PG one (#2070).
     #[must_use]
-    pub fn pool(&self) -> &PgPool {
-        match &self.pool {
-            crate::sql::Pool::Postgres(pg) => pg,
-            #[cfg(any(feature = "mysql", feature = "sqlite"))]
-            _ => panic!("MediaManager::pool() called on a non-PG manager; use pool_dyn() instead"),
-        }
+    pub fn pool(&self) -> &crate::sql::Pool {
+        &self.pool
     }
 
-    /// The pool as a [`crate::sql::Pool`], on any backend.
+    /// Same as [`Self::pool`].
+    #[deprecated(since = "0.60.1", note = "use `pool()`")]
     #[must_use]
     pub fn pool_dyn(&self) -> &crate::sql::Pool {
         &self.pool
@@ -1768,6 +1761,15 @@ pub const DEFAULT_DISK: &str = DEFAULT_DISK_NAME;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2070 — `pool()` on a non-PG manager returns its pool, no panic.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn pool_works_on_a_sqlite_manager() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let m = MediaManager::new_pool(pool, StorageRegistry::new());
+        assert!(m.pool().as_sqlite().is_some());
+    }
 
     #[test]
     fn media_status_round_trips_through_string() {

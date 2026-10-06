@@ -668,25 +668,83 @@ fn encode_form<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
 // hits a different process than `begin()` did (multi-replica, no sticky
 // sessions).
 
-/// Sign `flow` with `secret`. Embed the result in a cookie or query param.
+/// The sign-in surface a sealed flow belongs to; one never opens on another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FlowPurpose {
+    /// The operator admin (`admin::sso`).
+    Admin,
+    /// A tenant's admin login (`tenancy::sso`).
+    TenantAdmin,
+    /// A tenant's member login (`tenancy::member_auth`).
+    Member,
+    /// The standalone [`router::oauth2_router`].
+    OAuth2,
+}
+
+impl FlowPurpose {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::TenantAdmin => "tenant-admin",
+            Self::Member => "member",
+            Self::OAuth2 => "oauth2",
+        }
+    }
+}
+
+/// The one provider of one tenant, on one surface, a sealed flow is good
+/// for (#1992). Use `""` as the tenant when single-tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowScope<'a> {
+    purpose: FlowPurpose,
+    tenant: &'a str,
+    provider: &'a str,
+}
+
+impl<'a> FlowScope<'a> {
+    #[must_use]
+    pub fn new(purpose: FlowPurpose, tenant: &'a str, provider: &'a str) -> Self {
+        Self {
+            purpose,
+            tenant,
+            provider,
+        }
+    }
+
+    /// The MAC over the scope and the payload; length-prefixed so no two
+    /// scopes share an input.
+    fn mac(self, secret: &[u8], payload_b64: &str) -> Hmac<Sha256> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
+        for part in [self.purpose.tag(), self.tenant, self.provider] {
+            mac.update(&(part.len() as u64).to_be_bytes());
+            mac.update(part.as_bytes());
+        }
+        mac.update(payload_b64.as_bytes());
+        mac
+    }
+}
+
+/// Sign `flow` for `scope` with `secret`. Embed the result in a cookie or query param.
 #[must_use]
-pub fn seal_flow(flow: &OAuth2Flow, secret: &[u8]) -> String {
+pub fn seal_flow(flow: &OAuth2Flow, scope: FlowScope<'_>, secret: &[u8]) -> String {
     let payload = serde_json::to_vec(flow).unwrap_or_default();
     let payload_b64 = URL_SAFE_NO_PAD.encode(&payload);
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
-    mac.update(payload_b64.as_bytes());
-    let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    let sig = URL_SAFE_NO_PAD.encode(scope.mac(secret, &payload_b64).finalize().into_bytes());
     format!("{payload_b64}.{sig}")
 }
 
-/// Verify and decode a flow sealed with [`seal_flow`].
-pub fn open_flow(sealed: &str, secret: &[u8]) -> Result<OAuth2Flow, OAuthError> {
+/// Verify and decode a flow sealed with [`seal_flow`]; a flow sealed for
+/// another `scope` is refused.
+pub fn open_flow(
+    sealed: &str,
+    scope: FlowScope<'_>,
+    secret: &[u8],
+) -> Result<OAuth2Flow, OAuthError> {
     let (payload_b64, sig_b64) = sealed
         .split_once('.')
         .ok_or(OAuthError::BadResponse("malformed sealed flow".into()))?;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
-    mac.update(payload_b64.as_bytes());
-    let expected = mac.finalize().into_bytes();
+    let expected = scope.mac(secret, payload_b64).finalize().into_bytes();
     let provided = URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| OAuthError::BadResponse("bad signature encoding".into()))?;
@@ -1279,8 +1337,8 @@ mod tests {
             pkce_verifier: "v".into(),
             created_at: 1234,
         };
-        let sealed = seal_flow(&flow, secret);
-        let opened = open_flow(&sealed, secret).unwrap();
+        let sealed = seal_flow(&flow, SCOPE, secret);
+        let opened = open_flow(&sealed, SCOPE, secret).unwrap();
         assert_eq!(opened.state, "s");
         assert_eq!(opened.pkce_verifier, "v");
         assert_eq!(opened.created_at, 1234);
@@ -1294,7 +1352,7 @@ mod tests {
             pkce_verifier: "v".into(),
             created_at: 0,
         };
-        let mut sealed = seal_flow(&flow, secret);
+        let mut sealed = seal_flow(&flow, SCOPE, secret);
         // Flip a payload character (before the `.`) — sig should mismatch.
         let dot = sealed.find('.').unwrap();
         let tampered: String = sealed
@@ -1302,8 +1360,53 @@ mod tests {
             .map(|(i, c)| if i == dot - 1 { 'A' } else { c })
             .collect();
         sealed = tampered;
-        let err = open_flow(&sealed, secret).unwrap_err();
+        let err = open_flow(&sealed, SCOPE, secret).unwrap_err();
         assert!(matches!(err, OAuthError::StateMismatch));
+    }
+
+    const SCOPE: FlowScope<'static> = FlowScope {
+        purpose: FlowPurpose::Member,
+        tenant: "acme",
+        provider: "google",
+    };
+
+    /// #1992 — a flow begun for one tenant's provider opens for no other.
+    #[test]
+    fn open_flow_rejects_another_scope() {
+        let flow = OAuth2Flow {
+            state: "s".into(),
+            pkce_verifier: "v".into(),
+            created_at: 0,
+        };
+        let sealed = seal_flow(&flow, SCOPE, b"k");
+        for (tenant, provider) in [("acme", "okta"), ("globex", "google"), ("acmeg", "oogle")] {
+            let other = FlowScope::new(FlowPurpose::Member, tenant, provider);
+            assert!(
+                open_flow(&sealed, other, b"k").is_err(),
+                "{tenant}/{provider}"
+            );
+        }
+        let same = FlowScope::new(FlowPurpose::Member, "acme", "google");
+        assert!(open_flow(&sealed, same, b"k").is_ok());
+    }
+
+    /// A flow from one sign-in surface never opens on another.
+    #[test]
+    fn open_flow_rejects_another_purpose() {
+        let flow = OAuth2Flow {
+            state: "s".into(),
+            pkce_verifier: "v".into(),
+            created_at: 0,
+        };
+        let sealed = seal_flow(&flow, SCOPE, b"k");
+        for purpose in [
+            FlowPurpose::Admin,
+            FlowPurpose::TenantAdmin,
+            FlowPurpose::OAuth2,
+        ] {
+            let other = FlowScope::new(purpose, "acme", "google");
+            assert!(open_flow(&sealed, other, b"k").is_err(), "{purpose:?}");
+        }
     }
 
     #[test]
@@ -1313,8 +1416,8 @@ mod tests {
             pkce_verifier: "v".into(),
             created_at: 0,
         };
-        let sealed = seal_flow(&flow, b"key-a");
-        let err = open_flow(&sealed, b"key-b").unwrap_err();
+        let sealed = seal_flow(&flow, SCOPE, b"key-a");
+        let err = open_flow(&sealed, SCOPE, b"key-b").unwrap_err();
         assert!(matches!(err, OAuthError::StateMismatch));
     }
 

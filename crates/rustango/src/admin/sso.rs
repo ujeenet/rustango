@@ -118,7 +118,11 @@ async fn sso_begin(
         }
     };
     let (url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, secret.key());
+    let sealed = seal_flow(
+        &flow,
+        FlowScope::new(FlowPurpose::Admin, "", &slug),
+        secret.key(),
+    );
     let cookie = format!(
         "{SSO_FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{s}",
         s = cookie_attrs(state.config.secure_cookies),
@@ -152,7 +156,11 @@ async fn sso_callback(
     let Some(sealed) = crate::cookies::cookie_from_headers(&headers, SSO_FLOW_COOKIE) else {
         return login_error(&state, "expired");
     };
-    let flow = match open_flow(sealed, secret.key()) {
+    let flow = match open_flow(
+        sealed,
+        FlowScope::new(FlowPurpose::Admin, "", &slug),
+        secret.key(),
+    ) {
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
