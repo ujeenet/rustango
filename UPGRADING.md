@@ -154,6 +154,10 @@ untouched.
 
 A missing or soft-deleted `parent` now returns `MediaError::Other("collection N not found")` (404 over REST) instead of creating an orphan (#1573).
 
+### MySQL refuses `on_delete = "set_default"`
+
+InnoDB never enforced it: the parent delete failed with 1451. A migration that adds such an FK now fails to render on MySQL; pick another action (#1573).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

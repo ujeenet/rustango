@@ -1021,6 +1021,53 @@ async fn no_action_is_not_a_change(pool: &Pool) {
     }
 }
 
+/// `SET DEFAULT` resets the child where the server enforces it, and is
+/// refused where InnoDB would accept it and then block the delete (#1573).
+async fn set_default_is_enforced_or_refused(pool: &Pool) {
+    let (a, b) = ("mad_setdef_author", "mad_setdef_book");
+    let chain = Chain::new(pool, "mad_setdef", &[b, a]).await;
+    let rel = json!({"kind": "fk", "to": a, "on": "id", "on_delete": "SET DEFAULT"});
+    let step = chain
+        .step(
+            pool,
+            json!({"tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64",
+                    json!({"fk": rel, "default": "0"}))]),
+            ]}),
+        )
+        .await;
+    let refused = by_dialect! { pool,
+        postgres => false, because "PG enforces SET DEFAULT",
+        mysql => true, because "InnoDB records SET DEFAULT but refuses the parent delete",
+        sqlite => false, because "SQLite enforces SET DEFAULT",
+    };
+    if refused.value {
+        let err = step.expect_err(refused.why);
+        assert!(err.contains("set_default"), "{err}");
+        return;
+    }
+    step.expect(refused.why);
+    exec(pool, "INSERT INTO {} ({}) VALUES (0), (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"])
+        .await
+        .expect(refused.why);
+    let sql = q(pool, "SELECT {} FROM {}", &["author_id", b]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(0,)], "{}", refused.why);
+}
+
 /// As above through the non-atomic runners.
 async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
     on_delete_reaches(pool, "mad_odn", false).await;
@@ -1951,6 +1998,7 @@ tri_dialect_test!(
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
         no_action_is_not_a_change,
+        set_default_is_enforced_or_refused,
         on_delete_and_drop_in_one_migration,
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,

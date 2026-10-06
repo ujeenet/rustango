@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `delete_collection` walks and locks the subtree inside its transaction; `create_collection` locks the parent and refuses a missing or deleted one.
 
+### Fixed — `on_delete = "set_default"` is refused on MySQL (#1573)
+
+InnoDB accepts the clause and then blocks the parent delete; migrations now fail with an error instead. New `Dialect::supports_on_delete_set_default`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

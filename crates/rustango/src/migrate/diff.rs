@@ -897,7 +897,7 @@ fn alter_column_elsewhere(
     );
     if let Some(rel) = f.fk.as_ref().filter(|_| under_fk) {
         out.deferred_fks
-            .push(field_fk_sql(table, &f.column, rel, dialect, schema));
+            .push(field_fk_sql(table, &f.column, rel, dialect, schema)?);
     }
     match unique {
         Some(true) => {
@@ -1039,7 +1039,7 @@ fn render_changes_split_inner(
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
-                        .extend(constraints_sql_from_snapshot(table, dialect, schema));
+                        .extend(constraints_sql_from_snapshot(table, dialect, schema)?);
                 }
             }
             SchemaChange::DropColumn { table, column } => {
@@ -1083,7 +1083,7 @@ fn render_changes_split_inner(
                     })?;
                 // The runner drops the live FK by its catalog name first.
                 out.deferred_fks
-                    .push(field_fk_sql(table, column, rel, dialect, schema));
+                    .push(field_fk_sql(table, column, rel, dialect, schema)?);
             }
             SchemaChange::AddColumn { table, column } => {
                 let t = current.table(table).ok_or_else(|| {
@@ -1142,7 +1142,7 @@ fn render_changes_split_inner(
                         .filter(|_| !dialect.inline_fks_in_create_table())
                 {
                     out.deferred_fks
-                        .push(field_fk_sql(table, column, rel, dialect, schema));
+                        .push(field_fk_sql(table, column, rel, dialect, schema)?);
                 }
             }
             SchemaChange::DropTable(name) => {
@@ -1767,7 +1767,7 @@ fn constraints_sql_from_snapshot(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
         .fields
@@ -1776,7 +1776,7 @@ fn constraints_sql_from_snapshot(
             f.fk.as_ref()
                 .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for cf in &t.composite_fks {
         let from_cols: Vec<String> = cf.from.iter().map(|c| dialect.quote_ident(c)).collect();
         let on_cols: Vec<String> = cf.on.iter().map(|c| dialect.quote_ident(c)).collect();
@@ -1788,7 +1788,7 @@ fn constraints_sql_from_snapshot(
             on_cols.join(", "),
         ));
     }
-    out
+    Ok(out)
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
@@ -1813,7 +1813,7 @@ fn field_fk_sql(
     rel: &RelationSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
-) -> String {
+) -> Result<String, String> {
     let mut s = format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         dialect.quote_ident(table),
@@ -1825,9 +1825,18 @@ fn field_fk_sql(
     // #1549 — this is the path system migrations take, and
     // it was silently dropping the declared action.
     if let Some(action) = &rel.on_delete {
+        // Accepted and then not enforced: refuse it rather than migrate a lie.
+        let set_default = crate::core::OnDeleteAction::SetDefault.as_sql();
+        if action.eq_ignore_ascii_case(set_default) && !dialect.supports_on_delete_set_default() {
+            return Err(format!(
+                "`{table}.{column}`: on_delete = \"set_default\" is not enforced on {} \
+                 (the parent delete is refused); use another action (#1573)",
+                dialect.name()
+            ));
+        }
         let _ = write!(s, " ON DELETE {action}");
     }
-    s
+    Ok(s)
 }
 
 /// Render a column `DEFAULT` expression for CREATE TABLE / ADD COLUMN.
@@ -2289,6 +2298,41 @@ mod sql_type_tests {
                     r#"ALTER TABLE "_rustango_rebuild_c" RENAME TO "c""#
                 ]
             );
+        }
+    }
+
+    /// InnoDB ignores `SET DEFAULT`, so MySQL refuses to render it (#1573).
+    #[test]
+    fn set_default_is_refused_where_not_enforced() {
+        use crate::migrate::{RelationSnapshot, SchemaChange};
+        let child = TableSnapshot {
+            name: "c".into(),
+            model: "c".into(),
+            fields: vec![FieldSnapshot {
+                name: "p_id".into(),
+                column: "p_id".into(),
+                fk: Some(RelationSnapshot {
+                    kind: "fk".into(),
+                    to: "p".into(),
+                    on: "id".into(),
+                    on_delete: Some("SET DEFAULT".into()),
+                }),
+                ..fs("i64", false)
+            }],
+            composite_fks: vec![],
+        };
+        let snap = SchemaSnapshot {
+            tables: vec![child],
+            ..SchemaSnapshot::default()
+        };
+        let create = [SchemaChange::CreateTable("c".into())];
+        let pg = render_changes_split_with_dialect(&create, &snap, &crate::sql::Postgres).unwrap();
+        assert!(pg.deferred_fks[0].ends_with("ON DELETE SET DEFAULT"));
+        #[cfg(feature = "mysql")]
+        {
+            let err = render_changes_split_with_dialect(&create, &snap, &crate::sql::MySql)
+                .expect_err("MySQL accepts SET DEFAULT and then refuses the delete");
+            assert!(err.contains("set_default"), "{err}");
         }
     }
 
@@ -2757,12 +2801,12 @@ mod sql_type_tests {
         }))
         .unwrap();
         let pg = &crate::sql::Postgres;
-        let fk = constraints_sql_from_snapshot(&table, pg, Some("t1"));
+        let fk = constraints_sql_from_snapshot(&table, pg, Some("t1")).unwrap();
         assert!(
             fk[0].contains(r#"REFERENCES "t1"."rustango_users" ("id")"#),
             "{fk:?}"
         );
-        let fk = constraints_sql_from_snapshot(&table, pg, None);
+        let fk = constraints_sql_from_snapshot(&table, pg, None).unwrap();
         assert!(
             fk[0].contains(r#"REFERENCES "rustango_users" ("id")"#),
             "{fk:?}"
