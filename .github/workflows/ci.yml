@@ -713,6 +713,9 @@ jobs:
   scaffolded_projects:
     needs: gate
     runs-on: ubuntu-latest
+    # Generated projects have no lockfile; pick deps that build on the 1.88 toolchain (uuid 1.27 needs 1.89).
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
