@@ -76,10 +76,12 @@ impl std::fmt::Display for McpError {
 }
 impl std::error::Error for McpError {}
 
-/// A database error inside a handler becomes an internal error.
+/// A database error inside a handler becomes an internal error; its
+/// text is logged, not sent to the agent (#1963).
 impl From<crate::sql::ExecError> for McpError {
     fn from(e: crate::sql::ExecError) -> Self {
-        Self::internal(e.to_string())
+        let e = JsonRpcError::internal_logged(e);
+        Self::new(e.code, e.message)
     }
 }
 
@@ -185,9 +187,7 @@ pub(crate) async fn call_tool_with(
         ));
     }
 
-    // Copy what the audit and the scoping need, before `ctx` moves
-    // into the tool.
-    let pool = ctx.pool.clone();
+    // Copy what the scoping needs, before `ctx` moves into the tool.
     let tenant = ctx.agent.tenant.clone();
     let agent_id = ctx.agent.agent_id;
 
@@ -207,13 +207,13 @@ pub(crate) async fn call_tool_with(
         _cancel_guard = Some(guard);
     }
 
+    // Audit before the tool runs, so a call aborted mid-way still
+    // leaves its row (#1963). The arguments are redacted.
+    audit_tool_call(&ctx.pool, agent_id, &name, &args).await;
+
     // Catch a panic here. A buggy handler must not unwind into the
     // transport, which would drop the connection.
-    let outcome = crate::panic_guard::catch_unwind((tool.handler)(ctx, args.clone())).await;
-
-    // Audit every call that ran, whether it worked or not, with the
-    // arguments redacted.
-    audit_tool_call(&pool, agent_id, &name, &args).await;
+    let outcome = crate::panic_guard::catch_unwind((tool.handler)(ctx, args)).await;
 
     // A tool that ran and failed returns a successful
     // `CallToolResult` with `isError: true`, so the client can show
@@ -292,15 +292,23 @@ const SENSITIVE_ARG_KEYS: &[&str] = &[
     "authorization",
     "client_secret",
     "private_key",
+    "otp",
+    "totp",
+    "id_token",
+    "code_verifier",
 ];
 
 /// Return a copy of `value` with every sensitive key's value
-/// replaced by `"[redacted]"`, at any depth. A key matches whole and
-/// ignoring case, so `token_count` is left alone.
+/// replaced by `"[redacted]"`, at any depth. A key matches whole or
+/// as its last `_`/`-` part, ignoring case: `new_password` is redacted,
+/// `token_count` is left alone (#1963).
 fn redact_json(value: &Value) -> Value {
     fn is_sensitive(key: &str) -> bool {
         let k = key.to_ascii_lowercase();
-        SENSITIVE_ARG_KEYS.iter().any(|s| *s == k)
+        SENSITIVE_ARG_KEYS.iter().any(|s| {
+            k.strip_suffix(s)
+                .is_some_and(|head| head.is_empty() || head.ends_with(['_', '-']))
+        })
     }
     match value {
         Value::Object(map) => Value::Object(
@@ -402,5 +410,30 @@ mod tests {
         assert_eq!(red["nested"]["ok"], true);
         assert_eq!(red["list"][0]["secret"], "[redacted]");
         assert_eq!(red["list"][1]["keep"], "v");
+    }
+
+    /// A sensitive name with a prefix is still redacted (#1963).
+    #[test]
+    fn redact_json_matches_a_sensitive_suffix() {
+        let red = redact_json(&json!({
+            "new_password": "p", "Confirm-Password": "p", "otp": "123456",
+            "user_api_key": "k", "token_count": 1, "passwords_match": true,
+        }));
+        for k in ["new_password", "Confirm-Password", "otp", "user_api_key"] {
+            assert_eq!(red[k], "[redacted]", "{k}");
+        }
+        assert_eq!(red["token_count"], 1);
+        assert_eq!(red["passwords_match"], true);
+    }
+
+    /// A database error reaches the log, not the agent (#1963).
+    #[test]
+    fn exec_error_text_is_not_sent_to_the_agent() {
+        let e: McpError = crate::sql::ExecError::from(crate::sql::sqlx::Error::Protocol(
+            "relation \"secret_table\" does not exist".into(),
+        ))
+        .into();
+        assert!(!e.message.contains("secret_table"), "{}", e.message);
+        assert_eq!(e.code, codes::INTERNAL_ERROR);
     }
 }

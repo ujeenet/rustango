@@ -178,6 +178,10 @@ untouched.
 
 A 3xx from the endpoint is now an error. Point `S3Config` at the bucket's own region endpoint (#1780).
 
+### MCP JSON-RPC checks
+
+A message with `"id": null` or a `jsonrpc` other than `"2.0"` is now an invalid request. HTTP Basic `client_id`/`client_secret` are form-urlencoded (RFC 6749), so a raw `%` or `+` in them must be encoded (#1963).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

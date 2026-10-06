@@ -569,10 +569,12 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 /// honours `X-Forwarded-Proto` from a trusted proxy, and otherwise
 /// assumes `http` on localhost and `https` anywhere else.
 pub(crate) fn origin(headers: &HeaderMap, extensions: &axum::http::Extensions) -> String {
+    // Only a plain `host[:port]` goes into the discovery URLs (#1963).
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost");
+        .and_then(crate::urls::HostAuthority::parse)
+        .map_or_else(|| "localhost".to_owned(), |h| h.to_string());
     let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .map(str::to_owned)
         .unwrap_or_else(|| {
@@ -718,6 +720,18 @@ mod tests {
         let mut ext = no_ext();
         ext.insert(crate::real_ip::TrustedRealIp([10, 0, 0, 1].into()));
         assert_eq!(origin(&h, &ext), "http://app.example");
+    }
+
+    /// A Host with userinfo never reaches the discovery URLs (#1963).
+    #[test]
+    fn origin_ignores_a_host_with_userinfo() {
+        for host in ["app.example:1@evil.com:2", "app.example@evil.com"] {
+            assert_eq!(
+                origin(&headers(host), &no_ext()),
+                "http://localhost",
+                "{host}"
+            );
+        }
     }
 
     /// A busy raw-key check is 503 + Retry-After, through the same

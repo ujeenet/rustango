@@ -98,6 +98,24 @@ async fn notification_is_accepted_with_no_body() {
     assert_eq!(body, Value::Null);
 }
 
+/// A null id or a wrong `jsonrpc` is an invalid request, not a notification (#1963).
+#[tokio::test]
+async fn null_id_and_wrong_version_are_invalid_requests() {
+    for msg in [
+        json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+        json!({"jsonrpc": "1.0", "id": 3, "method": "ping"}),
+        json!({"id": 4, "method": "ping"}),
+    ] {
+        let (status, body) = post(msg.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{msg}");
+        assert_eq!(
+            body["error"]["code"],
+            rustango::mcp::codes::INVALID_REQUEST,
+            "{msg}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn malformed_json_is_parse_error() {
     let app = rustango::mcp::tenant_router();

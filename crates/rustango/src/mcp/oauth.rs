@@ -109,14 +109,16 @@ pub(crate) struct OAuthTokenForm {
 }
 
 /// Decode an `Authorization: Basic base64(client_id:client_secret)`
-/// header. `None` when it is missing or malformed.
+/// header. Both halves are form-urlencoded (RFC 6749 §2.3.1, #1963).
+/// `None` when it is missing or malformed.
 fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let b64 = raw.strip_prefix("Basic ")?.trim();
     let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let creds = String::from_utf8(decoded).ok()?;
     let (id, secret) = creds.split_once(':')?;
-    Some((id.to_owned(), secret.to_owned()))
+    let decode = crate::url_codec::url_decode_strict;
+    Some((decode(id)?, decode(secret)?))
 }
 
 /// `POST {prefix}/oauth/token`: the OAuth 2.1 client-credentials
@@ -252,5 +254,20 @@ mod tests {
 
         // A missing header, or one that is not Basic, gives None.
         assert_eq!(basic_auth(&HeaderMap::new()), None);
+    }
+
+    /// Both halves are form-urlencoded, RFC 6749 §2.3.1 (#1963).
+    #[test]
+    fn basic_auth_percent_decodes_both_halves() {
+        let mut h = HeaderMap::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode("my%20bot:a%3Ab%25");
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Basic {b64}").parse().unwrap(),
+        );
+        assert_eq!(
+            basic_auth(&h),
+            Some(("my bot".to_owned(), "a:b%".to_owned()))
+        );
     }
 }

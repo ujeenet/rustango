@@ -163,8 +163,16 @@ impl CancelGuard {
 }
 
 impl Drop for CancelGuard {
+    /// Removes the slot only while it is still this call's: a later call
+    /// reusing the request id keeps its own (#1963).
     fn drop(&mut self) {
-        registry_lock().remove(&self.key);
+        let mut reg = registry_lock();
+        if reg
+            .get(&self.key)
+            .is_some_and(|t| Arc::ptr_eq(&t.flag, &self.token.flag))
+        {
+            reg.remove(&self.key);
+        }
     }
 }
 
@@ -235,5 +243,15 @@ mod tests {
         // does nothing.
         drop(guard);
         cancel("acme", 1, "req-42");
+    }
+
+    /// The first call's guard must not unregister a second call with the same id (#1963).
+    #[test]
+    fn earlier_guard_drop_keeps_a_reused_request_id() {
+        let first = CancelGuard::register("acme", 7, "dup");
+        let second = CancelGuard::register("acme", 7, "dup");
+        drop(first);
+        cancel("acme", 7, "dup");
+        assert!(second.token().is_cancelled());
     }
 }
