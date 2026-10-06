@@ -738,6 +738,7 @@ ViewSet::for_model(Post::SCHEMA)
 
 Over-limit → `429 Too Many Requests` + `Retry-After`. Counters are per-process;
 the client key is the trusted client IP (`TrustedRealIp`, else the socket; see [security.md](security.md)).
+Under `tenant_router` each tenant has its own budgets.
 
 ---
 

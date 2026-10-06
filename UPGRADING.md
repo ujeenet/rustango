@@ -154,6 +154,10 @@ untouched.
 
 A ViewSet write that hits a unique or primary-key constraint now answers `409` (`"error": "conflict"`), not `400`. Clients that matched on 400 must accept 409 (#2075).
 
+### ViewSet throttles run after tenant resolution
+
+Each tenant now has its own throttle budget. The throttle runs after the tenant is resolved, so a request for an unknown tenant is a `404` even when throttled (#2076).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

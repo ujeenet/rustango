@@ -1234,7 +1234,7 @@ struct ViewSetState {
     pool_source: PoolSource,
     vs: ViewSet,
     /// Process-local fixed-window throttle counters, keyed by
-    /// `{table}:{action}:{client}` and shared across requests.
+    /// `{table}:{action}:{tenant}:{client}` and shared across requests.
     throttle_store: Arc<ThrottleStore>,
 }
 
@@ -1341,11 +1341,22 @@ struct AcquiredConn {
     /// Kept alive so PG schema-mode connections are not released
     /// before the handler is done.
     #[cfg(feature = "tenancy")]
-    #[allow(dead_code)]
-    _tenant: Option<Box<crate::extractors::Tenant>>,
+    tenant: Option<Box<crate::extractors::Tenant>>,
 }
 
 impl AcquiredConn {
+    /// The resolved tenant's slug; `None` on a static pool.
+    fn tenant_slug(&self) -> Option<&str> {
+        #[cfg(feature = "tenancy")]
+        {
+            self.tenant.as_deref().map(|t| t.org.slug.as_str())
+        }
+        #[cfg(not(feature = "tenancy"))]
+        {
+            None
+        }
+    }
+
     async fn select_rows_as_json(
         &mut self,
         q: &SelectQuery,
@@ -1493,12 +1504,12 @@ impl ViewSetState {
             PoolSource::Static(pool) => Ok(AcquiredConn {
                 pool: Pool::from(pool.clone()),
                 #[cfg(feature = "tenancy")]
-                _tenant: None,
+                tenant: None,
             }),
             PoolSource::StaticPool(pool) => Ok(AcquiredConn {
                 pool: pool.clone(),
                 #[cfg(feature = "tenancy")]
-                _tenant: None,
+                tenant: None,
             }),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
@@ -1514,7 +1525,7 @@ impl ViewSetState {
                 let pool = t.pool().clone();
                 Ok(AcquiredConn {
                     pool,
-                    _tenant: Some(Box::new(t)),
+                    tenant: Some(Box::new(t)),
                 })
             }
         }
@@ -1995,12 +2006,11 @@ async fn enter(
     action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
     let (mut parts, body) = req.into_parts();
-    // Throttle before acquiring a connection, so throttled requests
-    // shed load early.
-    if let Some(resp) = check_throttle(state, action, &parts) {
+    let mut acq = state.acquire(&mut parts).await?;
+    // The budget is per tenant, so the tenant must be resolved first (#2076).
+    if let Some(resp) = check_throttle(state, action, &ThrottleClient::new(&parts, &acq)) {
         return Err(resp);
     }
-    let mut acq = state.acquire(&mut parts).await?;
     match state.check_perm(codenames, &parts, &mut acq).await {
         PermOutcome::Allow => {}
         // 401 means "authenticate", 403 means "you may not". A token
@@ -2022,19 +2032,20 @@ async fn enter(
 /// Per-action fixed-window throttle. Returns `Some(429)` when the
 /// client has gone over the action's [`ThrottleRule`] for this
 /// window. Counters are process-local — see [`ViewSetThrottle`].
-fn check_throttle(
-    state: &ViewSetState,
-    action: &str,
-    parts: &axum::http::request::Parts,
-) -> Option<Response> {
+fn check_throttle(state: &ViewSetState, action: &str, client: &ThrottleClient) -> Option<Response> {
     state.vs.throttle.for_action(action)?;
-    spend_throttle(state, action, &client_key(parts), 1)
+    spend_throttle(state, action, client, 1)
 }
 
 /// Spend `cost` requests of `action`'s throttle for `client`.
-fn spend_throttle(state: &ViewSetState, action: &str, client: &str, cost: u32) -> Option<Response> {
+fn spend_throttle(
+    state: &ViewSetState,
+    action: &str,
+    client: &ThrottleClient,
+    cost: u32,
+) -> Option<Response> {
     let rule = state.vs.throttle.for_action(action)?;
-    let key = format!("{}:{}:{}", state.vs.schema.table, action, client);
+    let key = format!("{}:{}:{}", state.vs.schema.table, action, client.0);
     state
         .throttle_store
         .spend(key, rule, cost, Instant::now())
@@ -2042,16 +2053,24 @@ fn spend_throttle(state: &ViewSetState, action: &str, client: &str, cost: u32) -
         .map(throttled_response)
 }
 
-/// The throttle key: the trusted client IP (IPv6 by /64), else one
-/// shared `"global"` bucket. Never a raw forwarding header (#1745).
-fn client_key(parts: &axum::http::request::Parts) -> String {
-    crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
-        || {
-            crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
-            "global".to_owned()
-        },
-        crate::rate_limit::ip_bucket,
-    )
+/// Who a throttle budget belongs to: the tenant, then the client.
+/// Built only from an [`AcquiredConn`], so no key can skip the tenant (#2076).
+struct ThrottleClient(String);
+
+impl ThrottleClient {
+    /// The tenant slug (empty on a static pool), then the trusted client IP
+    /// (IPv6 by /64), else one shared `"global"` bucket. Never a raw
+    /// forwarding header (#1745).
+    fn new(parts: &axum::http::request::Parts, acq: &AcquiredConn) -> Self {
+        let ip = crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
+            || {
+                crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
+                "global".to_owned()
+            },
+            crate::rate_limit::ip_bucket,
+        );
+        Self(format!("{}:{ip}", acq.tenant_slug().unwrap_or("")))
+    }
 }
 
 /// A `429 Too Many Requests` with a `Retry-After` header.
@@ -2866,7 +2885,11 @@ async fn handle_create(
         Err(resp) => return resp,
     };
     // A bulk create spends one throttle unit per row (#1999).
-    let client = state.vs.throttle.create.map(|_| client_key(&parts));
+    let client = state
+        .vs
+        .throttle
+        .create
+        .map(|_| ThrottleClient::new(&parts, &acq));
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body).await {
         Ok(b) => b,
@@ -2912,7 +2935,7 @@ async fn handle_create(
             }
             let extra = u32::try_from(rows.len().saturating_sub(1)).unwrap_or(u32::MAX);
             if let Some(resp) = client
-                .as_deref()
+                .as_ref()
                 .and_then(|c| spend_throttle(&state, "create", c, extra))
             {
                 return resp;

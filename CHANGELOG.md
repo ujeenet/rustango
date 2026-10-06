@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Create, bulk create and update return `409 conflict` on a unique or primary-key violation, not `400`.
 
+### Fixed — ViewSet throttle budgets are per tenant (#2076)
+
+Under `tenant_router` the throttle key includes the tenant, so one client no longer shares a budget across tenants.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
