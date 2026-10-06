@@ -252,16 +252,20 @@ pub fn redact(url: &str) -> String {
 }
 
 fn redact_userinfo(url: &str) -> String {
-    // `scheme://user:password@host:port/db?params`. Only the segment
-    // between the last `:` of the userinfo and the `@` is secret, and
-    // userinfo is whatever precedes the *first* `@` after `://`.
+    // `scheme://user:password@host:port/db?params`. The password may hold
+    // a raw `@`, so userinfo ends at the last `@` before the path (#2109).
     let Some((scheme, rest)) = url.split_once("://") else {
         // `sqlite:path` and friends carry no credentials.
         return url.to_owned();
     };
-    let Some((userinfo, hostpart)) = rest.split_once('@') else {
+    let Some(first_at) = rest.find('@') else {
         return url.to_owned();
     };
+    let host_end = rest[first_at..]
+        .find(['/', '?', '#'])
+        .map_or(rest.len(), |i| first_at + i);
+    let at = rest[..host_end].rfind('@').unwrap_or(first_at);
+    let (userinfo, hostpart) = (&rest[..at], &rest[at + 1..]);
     let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
     if userinfo.contains(':') {
         format!("{scheme}://{user}:***@{hostpart}")
@@ -317,11 +321,14 @@ mod tests {
     /// separator in a way that leaks the rest of it.
     #[test]
     fn redact_handles_an_at_sign_in_the_password() {
-        // Split on the FIRST `@`: everything after it is host-ish, and
-        // the tail of a password containing `@` would otherwise survive.
-        let out = redact("mysql://root:p@ss@127.0.0.1:3306/app");
-        assert!(!out.contains("p@ss"), "password leaked: {out}");
-        assert!(out.starts_with("mysql://root:***@"), "{out}");
+        assert_eq!(
+            redact("mysql://root:p@ss@127.0.0.1:3306/app"),
+            "mysql://root:***@127.0.0.1:3306/app"
+        );
+        assert_eq!(
+            redact("postgres://u:a@b@c@db/acme?application_name=x@y"),
+            "postgres://u:***@db/acme?application_name=x@y"
+        );
     }
 
     #[test]

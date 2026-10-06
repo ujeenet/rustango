@@ -423,24 +423,7 @@ async fn smoke_check(
     Ok(())
 }
 
-/// Replace the password segment of a Postgres conninfo string with
-/// `***` so log lines / writer output don't leak credentials. Best-
-/// effort: if the URL doesn't follow the `postgres://user:pass@host`
-/// shape we just return it verbatim.
-fn redact_url(url: &str) -> String {
-    if let Some(scheme_end) = url.find("://") {
-        let after = &url[scheme_end + 3..];
-        if let Some(at) = after.find('@') {
-            let creds = &after[..at];
-            if let Some(colon) = creds.find(':') {
-                let user = &creds[..colon];
-                let rest = &after[at..];
-                return format!("{}://{user}:***{rest}", &url[..scheme_end]);
-            }
-        }
-    }
-    url.to_owned()
-}
+use crate::sql::connect_diagnosis::redact as redact_url;
 
 #[cfg(test)]
 mod tests {

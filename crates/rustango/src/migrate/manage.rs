@@ -4782,24 +4782,7 @@ fn redact(argv: &[String]) -> Vec<String> {
     argv.iter().map(|a| redact_url(a)).collect()
 }
 
-fn redact_url(s: &str) -> String {
-    // Match `<scheme>://<user>:<password>@<rest>` and replace `<password>`
-    // with `***`. Anything that doesn't look like a URL passes through.
-    let Some(scheme_end) = s.find("://") else {
-        return s.to_owned();
-    };
-    let rest = &s[scheme_end + 3..];
-    let Some(at) = rest.find('@') else {
-        return s.to_owned();
-    };
-    let creds = &rest[..at];
-    let Some(colon) = creds.find(':') else {
-        return s.to_owned();
-    };
-    let user = &creds[..colon];
-    let after_at = &rest[at..];
-    format!("{}://{user}:***{after_at}", &s[..scheme_end])
-}
+use crate::sql::connect_diagnosis::redact as redact_url;
 
 /// Snapshot of the env vars `manage check --deploy` cares about.
 /// Lifted out so the audit logic is pure (testable without
@@ -7319,6 +7302,14 @@ mod db_cmd_tests {
         assert_eq!(
             redact_url("postgres://alice@localhost/db"),
             "postgres://alice@localhost/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_holding_an_at_sign() {
+        assert_eq!(
+            redact_url("postgres://alice:p@ss@localhost/db"),
+            "postgres://alice:***@localhost/db"
         );
     }
 }
