@@ -151,6 +151,18 @@ impl CapturedSource {
         &self.source
     }
 
+    /// The tenant the source belongs to, if bound.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+
+    /// Rebuild one read back from a stored job row.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn from_parts(source: AuditSource, tenant: Option<String>) -> Self {
+        Self { source, tenant }
+    }
+
     pub(crate) async fn scope<F, T>(self, fut: F) -> T
     where
         F: std::future::Future<Output = T>,

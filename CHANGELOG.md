@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `PgJobQueue` jobs run as their enqueuer (#1229)
+
+The enqueuer's audit source and timezone are stored in a new `rustango_jobs.context` column and reinstalled around the run, as `InMemoryJobQueue` already did. The transaction still does not cross.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

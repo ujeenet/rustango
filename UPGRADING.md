@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `rustango_jobs.context`
+
+`PgJobQueue::ensure_table_pool` adds a nullable `context` column (JSONB / JSON / TEXT). If you create the table in your own migration, add it there; until then jobs run as `system`, as before (#1229).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

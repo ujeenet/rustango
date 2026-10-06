@@ -47,7 +47,8 @@
 //!     locked_at    TIMESTAMPTZ,
 //!     locked_by    TEXT,
 //!     last_error   TEXT,
-//!     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+//!     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+//!     context      JSONB  -- the enqueuer's audit source and timezone
 //! );
 //! ```
 //!
@@ -97,6 +98,35 @@ pub struct PgJobQueue {
     notify: Arc<Notify>,
     worker_id_prefix: String,
     heartbeat_interval: Duration,
+    context_column: ContextColumn,
+}
+
+/// Whether `rustango_jobs` has the `context` column. A table from a
+/// hand-written migration may not; its jobs then run with no context.
+#[derive(Clone, Default)]
+struct ContextColumn(Arc<tokio::sync::OnceCell<bool>>);
+
+impl ContextColumn {
+    async fn present(&self, pool: &Pool) -> bool {
+        let probe = || async {
+            let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
+                .await
+                .map_err(|_| ())?;
+            // No table yet: ask again once `ensure_table_pool` ran.
+            if cols.is_empty() {
+                return Err(());
+            }
+            let present = cols.contains("context");
+            if !present {
+                tracing::warn!(
+                    "rustango_jobs has no `context` column; jobs run as `system`. \
+                     Call PgJobQueue::ensure_table_pool to add it (#1229)."
+                );
+            }
+            Ok(present)
+        };
+        self.0.get_or_try_init(probe).await.is_ok_and(|p| *p)
+    }
 }
 
 const CREATE_JOBS_TABLE_SQL_PG: &str = "\
@@ -110,7 +140,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     locked_at    TIMESTAMPTZ,
     locked_by    TEXT,
     last_error   TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    context      JSONB
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at)
@@ -127,7 +158,8 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
     `locked_at`    DATETIME(6),
     `locked_by`    VARCHAR(255),
     `last_error`   TEXT,
-    `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+    `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    `context`      JSON
 );
 CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`)";
 
@@ -149,7 +181,8 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     locked_at    TEXT,
     locked_by    TEXT,
     last_error   TEXT,
-    created_at   TEXT     NOT NULL DEFAULT {now}
+    created_at   TEXT     NOT NULL DEFAULT {now},
+    context      TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at) WHERE locked_at IS NULL"
@@ -180,6 +213,7 @@ impl PgJobQueue {
             notify: Arc::new(Notify::new()),
             worker_id_prefix: id_prefix,
             heartbeat_interval: Duration::from_secs(10),
+            context_column: ContextColumn::default(),
         }
     }
 
@@ -270,7 +304,15 @@ impl PgJobQueue {
             "sqlite" => create_jobs_table_sql_sqlite(pool.dialect()),
             _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
-        crate::sql::run_ddl_idempotent(pool, &ddl).await
+        crate::sql::run_ddl_idempotent(pool, &ddl).await?;
+        // A table from before 0.60.1 lacks the context column (#1229).
+        let ty = match pool.dialect().name() {
+            "mysql" => "JSON",
+            "sqlite" => "TEXT",
+            _ => "JSONB",
+        };
+        let add = format!("ALTER TABLE rustango_jobs ADD COLUMN context {ty}");
+        crate::migrate::ensure::run_statements(pool, &[add]).await
     }
 
     /// PG-typed shim around [`Self::reclaim_stuck_jobs_pool`].
@@ -340,25 +382,30 @@ impl JobQueue for PgJobQueue {
         // a row sorts below every canonical one and would jump the
         // `ORDER BY run_at, id` pickup queue forever.
         let now = Utc::now();
-        let sql = format!(
-            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at) \
-             VALUES ({p1}, {p2}, {p3}, {p4}, {p5})"
-        );
         // `SqlValue::Json` stores as JSONB on PG, JSON on MySQL and
         // TEXT on SQLite, so one call covers all three backends.
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![
-                SqlValue::String(T::NAME.to_owned()),
-                SqlValue::Json(value),
-                SqlValue::I32(max_attempts),
-                SqlValue::DateTime(now),
-                SqlValue::DateTime(now),
-            ],
-        )
-        .await
-        .map_err(|e| JobError::Queue(e.to_string()))?;
+        let mut binds = vec![
+            SqlValue::String(T::NAME.to_owned()),
+            SqlValue::Json(value),
+            SqlValue::I32(max_attempts),
+            SqlValue::DateTime(now),
+            SqlValue::DateTime(now),
+        ];
+        let (mut cols, mut vals) = (String::new(), String::new());
+        if let Some(ctx) = crate::task_context::TaskContext::capture().to_stored() {
+            if self.context_column.present(&self.pool).await {
+                cols = ", context".into();
+                vals = format!(", {}", dialect.placeholder(6));
+                binds.push(SqlValue::Json(ctx));
+            }
+        }
+        let sql = format!(
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at{cols}) \
+             VALUES ({p1}, {p2}, {p3}, {p4}, {p5}{vals})"
+        );
+        crate::sql::raw_execute_pool(&self.pool, &sql, binds)
+            .await
+            .map_err(|e| JobError::Queue(e.to_string()))?;
         // Wake one waiting worker so the job starts before the next
         // poll tick.
         self.notify.notify_one();
@@ -381,6 +428,7 @@ impl JobQueue for PgJobQueue {
             let worker = Worker {
                 id: self.worker_id(n),
                 heartbeat: self.heartbeat_interval,
+                context_column: self.context_column.clone(),
             };
             let h = tokio::spawn(async move {
                 worker_loop(pool, registry, dead_letter, stop, notify, poll, worker).await;
@@ -415,6 +463,7 @@ impl JobQueue for PgJobQueue {
 struct Worker {
     id: String,
     heartbeat: Duration,
+    context_column: ContextColumn,
 }
 
 async fn worker_loop(
@@ -427,7 +476,8 @@ async fn worker_loop(
     worker: Worker,
 ) {
     while !stop.is_set() {
-        match pick_one(&pool, &worker.id).await {
+        let with_context = worker.context_column.present(&pool).await;
+        match pick_one(&pool, &worker.id, with_context).await {
             // Stop fired during the pick: hand the row back unrun.
             Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
@@ -460,15 +510,27 @@ struct PickedJob {
     payload: Value,
     attempt: i32,
     max_attempts: i32,
+    /// The enqueuer's context, empty on a table without the column.
+    context: crate::task_context::TaskContext,
 }
 
-async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sqlx::Error> {
+async fn pick_one(
+    pool: &Pool,
+    worker_id: &str,
+    with_context: bool,
+) -> Result<Option<PickedJob>, sqlx::Error> {
+    use crate::task_context::TaskContext;
     let now: DateTime<Utc> = Utc::now();
+    let cols = if with_context {
+        "id, name, payload, attempt, max_attempts, context"
+    } else {
+        "id, name, payload, attempt, max_attempts"
+    };
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
             use sqlx::Row as _;
-            let row = sqlx::query(
+            let sql = format!(
                 "WITH next AS (
                      SELECT id FROM rustango_jobs
                       WHERE locked_at IS NULL AND run_at <= $2
@@ -479,13 +541,14 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                  UPDATE rustango_jobs
                     SET locked_at = $3, locked_by = $1, attempt = attempt + 1
                   WHERE id IN (SELECT id FROM next)
-                 RETURNING id, name, payload, attempt, max_attempts",
-            )
-            .bind(worker_id)
-            .bind(now)
-            .bind(now)
-            .fetch_optional(pg)
-            .await?;
+                 RETURNING {cols}"
+            );
+            let row = sqlx::query(&sql)
+                .bind(worker_id)
+                .bind(now)
+                .bind(now)
+                .fetch_optional(pg)
+                .await?;
             let Some(row) = row else { return Ok(None) };
             Ok(Some(PickedJob {
                 id: row.try_get("id")?,
@@ -493,6 +556,11 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                 payload: row.try_get("payload")?,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                context: TaskContext::from_stored(if with_context {
+                    row.try_get("context")?
+                } else {
+                    None
+                }),
             }))
         }
         #[cfg(feature = "mysql")]
@@ -528,21 +596,22 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            let row = sqlx::query(
-                "SELECT id, name, payload, attempt, max_attempts \
-                 FROM `rustango_jobs` WHERE id = ?",
-            )
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+            let sql = format!("SELECT {cols} FROM `rustango_jobs` WHERE id = ?");
+            let row = sqlx::query(&sql).bind(id).fetch_one(&mut *tx).await?;
             tx.commit().await?;
             let payload_json: sqlx::types::Json<Value> = row.try_get("payload")?;
+            let context: Option<sqlx::types::Json<Value>> = if with_context {
+                row.try_get("context")?
+            } else {
+                None
+            };
             Ok(Some(PickedJob {
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
                 payload: payload_json.0,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                context: TaskContext::from_stored(context.map(|c| c.0)),
             }))
         }
         #[cfg(feature = "sqlite")]
@@ -558,7 +627,7 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
             // the value, and `+` sorts below `.`, so a due job could
             // read as not yet due.
             let now_str = crate::sql::encode_datetime(now);
-            let row = sqlx::query(
+            let sql = format!(
                 "UPDATE rustango_jobs
                     SET locked_at = ?, locked_by = ?, attempt = attempt + 1
                   WHERE id = (
@@ -567,23 +636,32 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
                        ORDER BY run_at, id
                        LIMIT 1
                   )
-                  RETURNING id, name, payload, attempt, max_attempts",
-            )
-            .bind(&now_str)
-            .bind(worker_id)
-            .bind(&now_str)
-            .fetch_optional(&mut *tx)
-            .await?;
+                  RETURNING {cols}"
+            );
+            let row = sqlx::query(&sql)
+                .bind(&now_str)
+                .bind(worker_id)
+                .bind(&now_str)
+                .fetch_optional(&mut *tx)
+                .await?;
             tx.commit().await?;
             let Some(row) = row else { return Ok(None) };
             let payload_text: String = row.try_get("payload")?;
             let payload: Value = serde_json::from_str(&payload_text).unwrap_or(Value::Null);
+            let context: Option<String> = if with_context {
+                row.try_get("context")?
+            } else {
+                None
+            };
             Ok(Some(PickedJob {
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
                 payload,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                context: TaskContext::from_stored(
+                    context.and_then(|c| serde_json::from_str(&c).ok()),
+                ),
             }))
         }
     }
@@ -612,8 +690,9 @@ async fn run_one(
         return;
     }
 
-    let (result, held) =
-        run_with_heartbeat(pool, worker, job.id, handler(job.payload.clone())).await;
+    // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
+    let run = job.context.clone().install(handler(job.payload.clone()));
+    let (result, held) = run_with_heartbeat(pool, worker, job.id, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.
         tracing::warn!(id = job.id, worker = %worker.id, "job lease lost; result dropped");
@@ -824,7 +903,11 @@ async fn handle_dead_letter(
             attempts: u32::try_from(job.attempt).unwrap_or(0),
             error: error.to_owned(),
         };
-        super::deliver_dead_letter(cb, dl).await;
+        // The callback sees who enqueued the job, as the job did.
+        job.context
+            .clone()
+            .install(super::deliver_dead_letter(cb, dl))
+            .await;
     } else {
         tracing::error!(
             job = static_name,
@@ -958,6 +1041,7 @@ mod tests {
         let worker = Worker {
             id: "w".into(),
             heartbeat: Duration::from_millis(20),
+            context_column: ContextColumn::default(),
         };
         let job = async {
             let _conn = sqlite.acquire().await.expect("conn");

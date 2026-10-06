@@ -440,11 +440,10 @@ Verfolgt in
 
 **Ambienter Kontext: nur Audit-Quelle und Zeitzone.** `InMemoryJobQueue`
 erfasst sie bei `dispatch`, der Scheduler bei `every()`, und beide setzen sie
-um den Lauf wieder ein. `PgJobQueue` noch nicht: seine Jobs laufen als
-`AuditSource::System` mit der Default-Zeitzone — nimm den Akteur im Payload mit
-und betritt den Scope in `run()` mit `audit::with_source`. Keine Queue trägt
-eine Session oder einen Tenant. Verfolgt in
-[#1229](https://github.com/ujeenet/rustango/issues/1229).
+um den Lauf wieder ein. `PgJobQueue` speichert sie in `rustango_jobs.context`;
+`ensure_table_pool` fügt die Spalte einer älteren Tabelle hinzu. Ohne die Spalte
+laufen Jobs als `AuditSource::System`. Keine Queue trägt eine Session oder einen
+Tenant.
 
 ---
 

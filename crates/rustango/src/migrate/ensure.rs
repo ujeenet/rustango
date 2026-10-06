@@ -384,7 +384,7 @@ async fn apply_batch(pool: &Pool, batch: &super::RenderedBatch) -> Result<(), sq
 }
 
 /// Run `stmts` in order, tolerating objects that already exist.
-async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
+pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), sqlx::Error> {
     let dialect = pool.dialect().name();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);

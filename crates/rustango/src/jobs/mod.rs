@@ -101,14 +101,10 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// [`tokio::spawn`] inherits no `tokio::task_local!` state, so the
     /// queue must carry it — see [`crate::task_context::TaskContext`].
     ///
-    /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
-    /// |---|---|---|
-    /// | audit source | the enqueuer's | `System` |
-    /// | active timezone | the enqueuer's | the default |
-    ///
-    /// `PgJobQueue` stores its envelope as a `rustango_jobs` row, so it
-    /// needs a column to carry context (#1229). There, put the actor in
-    /// the payload and re-enter [`crate::audit::with_source`] yourself.
+    /// Both queues carry the enqueuer's audit source and active
+    /// timezone. `PgJobQueue` keeps them in `rustango_jobs.context`,
+    /// which `PgJobQueue::ensure_table_pool` adds; without that column
+    /// its jobs run as `System` in the default timezone.
     ///
     /// **Neither queue carries a session or a tenant.** Anything else a
     /// job needs travels in its payload.
