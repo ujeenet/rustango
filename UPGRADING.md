@@ -152,7 +152,7 @@ untouched.
 
 ### Audited conflict bulk inserts run on PG and SQLite
 
-On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does. An audited `upsert` may now run two statements (#1795).
+On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does, except for an empty slice, which is now `Ok`. An audited model with no PK gets `MissingPrimaryKey` instead of `AuditUnsupported`. An audited `upsert` may now run two statements (#1795).
 
 ### Audited models have `save_partial`
 

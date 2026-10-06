@@ -308,6 +308,24 @@ async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
     assert_eq!(latest(pool, TAG, "a").await.changes["label"], "uno");
 }
 
+/// A target that never matches (an unset `Auto` PK) inserts each row once.
+async fn bulk_upsert_on_unmatched_target_inserts_once(pool: &Pool) {
+    if pool.dialect().name() == "mysql" {
+        return;
+    }
+    let item = |name: &str| Item {
+        id: Auto::default(),
+        name: name.into(),
+        score: 1,
+    };
+    Item::bulk_upsert_pool(&[item("x"), item("y")], &["id"], &["score"], pool)
+        .await
+        .expect("upsert");
+    assert_eq!(Item::objects().count(pool).await.unwrap(), 2);
+    assert_eq!(ops(pool, ITEM, "create").await, 2);
+    assert_eq!(ops(pool, ITEM, "update").await, 0);
+}
+
 /// A PG `upsert` on a non-PK target records `create`, then `update` (#1795).
 async fn upsert_on_unique_target_records_its_op(pool: &Pool) {
     let _ = pool;
@@ -503,6 +521,7 @@ tri_dialect_test! {
         unauditable_bulk_writes_are_refused,
         conflict_bulk_inserts_audit_each_written_row,
         upsert_on_unique_target_records_its_op,
+        bulk_upsert_on_unmatched_target_inserts_once,
         large_bulk_update_is_chunked,
         bulk_insert_and_upsert_audit_on_postgres,
         large_audit_batch_is_chunked,

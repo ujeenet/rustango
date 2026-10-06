@@ -1890,10 +1890,11 @@ where
     let max_rows = (tx.dialect().max_bind_params() / per_row).clamp(1, BULK_AUDIT_CHUNK);
     let mut affected = 0;
     for chunk in query.rows.chunks(max_rows) {
-        let batch = crate::core::BulkUpdateQuery {
-            rows: chunk.to_vec(),
-            ..query.clone()
-        };
+        let batch = crate::core::BulkUpdateQuery::new(
+            query.model,
+            query.update_columns.clone(),
+            chunk.to_vec(),
+        );
         let stmt = tx.dialect().compile_bulk_update(&batch)?;
         affected += crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     }
@@ -1920,11 +1921,12 @@ where
 
 /// Run a conflict-handling bulk insert (`bulk_upsert_pool`,
 /// `bulk_insert_or_ignore_pool`) with one audit row per row it wrote, in
-/// one transaction (#1795). A `DoNothing` pass first returns the new rows'
-/// PKs, so a `DoUpdate` can audit only the rest as `Update`.
+/// one transaction (#1795). Each row is first tried with `DoNothing`; only
+/// the rows that skipped go to the `DoUpdate`, audited as `Update`.
 ///
-/// On PG a row deleted by another transaction between the two passes is
-/// recorded as `Update`. MySQL has no `RETURNING`, so it is refused.
+/// The first pass runs one statement per row. On PG a row deleted by
+/// another transaction between the passes is recorded as `Update`. MySQL
+/// has no `RETURNING`, so it is refused.
 ///
 /// # Errors
 /// [`crate::sql::ExecError::AuditUnsupported`] on MySQL, else as
@@ -1935,8 +1937,7 @@ pub async fn bulk_insert_with_audit<M>(
     entry: impl Fn(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
-    M: crate::sql::HasPkValue
-        + crate::sql::MaybePgFromRow
+    M: crate::sql::MaybePgFromRow
         + crate::sql::MaybeMyFromRow
         + crate::sql::MaybeSqliteFromRow
         + crate::sql::LoadRelated
@@ -1955,42 +1956,49 @@ where
     if query.rows.is_empty() {
         return Ok(());
     }
+    let pk_field = query
+        .model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let probe = crate::core::BulkInsertQuery {
-        on_conflict: Some(crate::core::ConflictClause::DoNothing),
-        ..query.clone()
-    };
-    let created = crate::sql::bulk_insert_pks_tx(&mut tx, &probe).await?;
-    let written = match query.on_conflict {
-        Some(crate::core::ConflictClause::DoUpdate { .. }) => {
-            crate::sql::bulk_insert_pks_tx(&mut tx, query).await?
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for row in &query.rows {
+        let probe = crate::core::InsertQuery::new(query.model, query.columns.clone(), row.clone())
+            .returning(vec![pk_field.column])
+            .on_conflict(crate::core::ConflictClause::DoNothing);
+        match crate::sql::insert_returning_tx(&mut tx, &probe).await {
+            Ok(returning) => {
+                created.push(crate::sql::inserted_pk(&probe, &returning, pk_field)?);
+            }
+            Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => {
+                skipped.push(row.clone());
+            }
+            Err(e) => return Err(e),
         }
-        _ => created.clone(),
-    };
-    // `SqlValue` is not `Hash`; its `Debug` form names the variant too.
-    let created: std::collections::HashSet<String> =
-        created.iter().map(|pk| format!("{pk:?}")).collect();
-    for chunk in written.chunks(BULK_AUDIT_CHUNK) {
-        let rows: Vec<M> = rows_in_tx(
-            &mut tx,
-            query.model,
-            pk_in(query.model, chunk.to_vec())?,
-            false,
-        )
-        .await?;
-        let entries: Vec<PendingEntry> = rows
-            .iter()
-            .map(|r| {
-                let pk = format!("{:?}", r.__rustango_pk_value_impl());
-                let op = if created.contains(&pk) {
-                    AuditOp::Create
-                } else {
-                    AuditOp::Update
-                };
-                entry(r, op)
-            })
-            .collect();
-        emit_many_tx(&mut tx, &entries).await?;
+    }
+    let mut updated = Vec::new();
+    if let (Some(clause @ crate::core::ConflictClause::DoUpdate { .. }), false) =
+        (&query.on_conflict, skipped.is_empty())
+    {
+        let upsert = crate::core::BulkInsertQuery::new(query.model, query.columns.clone(), skipped)
+            .on_conflict(clause.clone());
+        updated = crate::sql::bulk_insert_pks_tx(&mut tx, &upsert).await?;
+    }
+    for (pks, op) in [(created, AuditOp::Create), (updated, AuditOp::Update)] {
+        for chunk in pks.chunks(BULK_AUDIT_CHUNK) {
+            let rows: Vec<M> = rows_in_tx(
+                &mut tx,
+                query.model,
+                pk_in(query.model, chunk.to_vec())?,
+                false,
+            )
+            .await?;
+            let entries: Vec<PendingEntry> = rows.iter().map(|r| entry(r, op)).collect();
+            emit_many_tx(&mut tx, &entries).await?;
+        }
     }
     tx.commit().await?;
     Ok(())
@@ -1999,6 +2007,7 @@ where
 /// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
 /// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
 /// `DoNothing` pass first and upserts only when that skipped (#1795).
+/// A row another transaction deletes between the passes is recorded as `Update`.
 ///
 /// # Errors
 /// As [`crate::sql::insert_returning_pool`].
