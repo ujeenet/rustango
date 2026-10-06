@@ -907,26 +907,7 @@ pub async fn clear_user_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::__macro_internals::delete_on(
-        pool,
-        &DeleteQuery {
-            model: UserPermission::SCHEMA,
-            where_clause: WhereExpr::and_predicates(vec![
-                Filter {
-                    column: "user_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(user_id),
-                },
-                Filter {
-                    column: "codename",
-                    op: Op::Eq,
-                    value: SqlValue::from(codename),
-                },
-            ]),
-        },
-    )
-    .await?;
-    Ok(())
+    clear_user_perm_pool(user_id, codename, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`clear_user_perm`].

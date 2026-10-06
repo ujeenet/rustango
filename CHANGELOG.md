@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. A key outside the through model's bounds is now refused on SQLite too, and `set` splits a list past the bind limit.
 
+### Fixed — nothing in `src/` imports `__macro_internals` (#1516)
+
+`clear_user_perm` forwards to `clear_user_perm_pool`, and the guard now scans `src/` with `sql/mod.rs` as its one exception.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

@@ -94,11 +94,8 @@ pub use executor::row_to_json;
 /// Nine in-tree tests, the `cookbook_blog` example — both its request
 /// handlers and its chapter-3 test — and **rustango's own library**
 /// imported them anyway, because there was no other way to run an
-/// aggregate or a prefetch against a specific connection. A
-/// prohibition the framework itself violates is not a prohibition:
-/// `tenancy::permissions` still calls `__macro_internals::delete_on`
-/// today, and the guard in `macro_internals_stays_internal` walks only
-/// `tests/` and `examples/`, so it cannot see it (#1519, #1516).
+/// aggregate or a prefetch against a specific connection. The guard in
+/// `macro_internals_stays_internal` now walks `src/` as well (#1516).
 ///
 /// The macro never emits `fetch_aggregate_on` or
 /// `annotate_count_children{,_on}`. Audited `save_on` calls
