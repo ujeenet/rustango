@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — audited models get `save_partial`; global-scope docs (#1744)
+
+Audited models had no `save_partial` / `save_partial_typed`; they now write a diff of only the saved fields. The docs say which methods skip global scopes.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

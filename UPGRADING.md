@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Audited models have `save_partial`
+
+`#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
