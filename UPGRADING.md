@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL `PartiallyApplied` can report zero DDL
+
+It is now also raised when only data operations committed, so `ddl_applied` can be 0 (#2151).
+
 ### `bulk_insert_pool` validates rows
 
 It and the `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` model methods now return `ExecError::Query` for a value that breaks a field limit, as `insert_pool` does (#2153).

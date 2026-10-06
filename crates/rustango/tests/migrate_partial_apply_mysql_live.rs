@@ -194,3 +194,83 @@ async fn a_failure_before_any_ddl_is_still_a_plain_driver_error() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Data operations before a failing DDL are committed by MySQL, so the
+/// error must say so rather than claim a clean rollback (#2151).
+#[tokio::test]
+async fn data_committed_before_a_failing_ddl_is_reported() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let my = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+    let pool = rustango::sql::Pool::Mysql(my.clone());
+
+    let table = unique("pa_data");
+    sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .execute(&my)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE TABLE `{table}` (id BIGINT PRIMARY KEY)"))
+        .execute(&my)
+        .await
+        .unwrap();
+
+    // Op 1 inserts a row; op 2 drops a table that does not exist.
+    let name = unique("9902_data_then_ddl");
+    let mig = rustango::migrate::Migration {
+        name: name.clone(),
+        created_at: "2026-10-06T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
+        replaces: vec![],
+        snapshot: SchemaSnapshot::default(),
+        forward: vec![
+            rustango::migrate::Operation::Data(
+                serde_json::from_value(serde_json::json!({
+                    "sql": format!("INSERT INTO `{table}` (id) VALUES (1)"),
+                    "reversible": false
+                }))
+                .unwrap(),
+            ),
+            rustango::migrate::Operation::Schema(SchemaChange::DropTable(unique("pa_missing"))),
+        ],
+    };
+
+    let dir = std::env::temp_dir().join(unique("rustango_data_ddl"));
+    std::fs::create_dir_all(&dir).unwrap();
+    rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+
+    let err = rustango::migrate::migrate_pool(&pool, &dir)
+        .await
+        .expect_err("the table to drop does not exist");
+    let msg = err.to_string();
+    assert!(
+        matches!(
+            err,
+            rustango::migrate::MigrateError::PartiallyApplied {
+                applied: 1,
+                ddl_applied: 0,
+                ..
+            }
+        ),
+        "the insert committed, so this is not a clean rollback: {err:?}"
+    );
+    assert!(
+        msg.contains("1 of 2"),
+        "the error must say what was applied: {msg}"
+    );
+
+    let rows: i64 = sqlx::query(&format!("SELECT COUNT(*) AS c FROM `{table}`"))
+        .fetch_one(&my)
+        .await
+        .unwrap()
+        .get::<i64, _>("c");
+    assert_eq!(rows, 1, "the insert really committed");
+
+    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .execute(&my)
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

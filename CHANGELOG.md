@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL migrate reports data committed before a failing DDL (#2151)
+
+MySQL commits the open transaction at the first DDL, so a failure there now returns `PartiallyApplied` with what committed, not a plain driver error.
+
 ### Fixed — `bulk_insert_pool` checks field limits (#2153)
 
 A value over `max_length` or outside `min`/`max` is refused with the same `QueryError` as `insert_pool`, before any SQL runs.

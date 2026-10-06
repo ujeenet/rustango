@@ -3099,11 +3099,9 @@ async fn apply_atomic_pool(
             // ALTER TABLE, DROP TABLE, CREATE INDEX, etc. — the
             // "implicit commit before/after statement" list in
             // https://dev.mysql.com/doc/refman/8.0/en/implicit-commit.html).
-            // The BEGIN we issue below establishes a tx that subsequent
-            // `Operation::Data(RunSQL)` statements DO participate in,
-            // but every `Operation::Schema(change)` auto-commits and
-            // breaks atomicity. The COMMIT at the end is a no-op for
-            // any DDL emitted above.
+            // The first DDL statement commits the BEGIN below and later
+            // operations run in autocommit, so the transaction only
+            // protects data operations before the first DDL (#2151).
             //
             // In practice this means: if a migration has 5 DDL ops and
             // op #3 fails, ops #1+#2 are already committed and can't be
@@ -3119,8 +3117,8 @@ async fn apply_atomic_pool(
             tracing::warn!(
                 migration = %mig.name,
                 "MySQL silently auto-commits on every DDL statement (CREATE/ALTER/DROP/INDEX); \
-                 the atomic-migration wrapper only protects RunSQL/RunPython operations \
-                 between DDL ops. A failure mid-DDL leaves the migration partially applied \
+                 the atomic-migration wrapper only protects data operations before \
+                 the first DDL. A failure after it leaves the migration partially applied \
                  and requires manual recovery. See migrate/runner.rs::apply_atomic_pool for \
                  details. Tracked in #559."
             );
@@ -3128,21 +3126,18 @@ async fn apply_atomic_pool(
             let mut deferred_fks: Vec<String> = Vec::new();
             // What has already committed when something fails.
             //
-            // `applied` counts operations that finished; `ddl_applied`
-            // counts how many of those were DDL, and that is the number
-            // that decides whether the failure is recoverable. A driver
-            // error with `ddl_applied == 0` rolls back cleanly and is
-            // reported unchanged; above zero, the schema has moved and
-            // the ledger has not, so the operator needs to be told that
-            // and told how to get out (#1588).
+            // Once a DDL statement was sent, every finished operation
+            // is committed, so a failure then is reported with what it
+            // left behind (#1588, #2151). Before that it rolls back.
             let total = mig.forward.len();
             let mut applied = 0usize;
             let mut ddl_applied = 0usize;
+            let mut ddl_sent = false;
             // Wrap a driver error with what survived it.
             macro_rules! stuck {
                 ($e:expr) => {{
                     let e: sqlx::Error = $e;
-                    if ddl_applied == 0 {
+                    if !ddl_sent || (applied == 0 && ddl_applied == 0) {
                         MigrateError::Driver(e)
                     } else {
                         MigrateError::PartiallyApplied {
@@ -3174,6 +3169,13 @@ async fn apply_atomic_pool(
                         // that fails halfway has still left the
                         // earlier ones applied.
                         for stmt in stmts {
+                            // DDL that fails to parse does not commit;
+                            // commit first so the count holds either way.
+                            if !ddl_sent {
+                                tx.commit().await?;
+                                tx = my.begin().await?;
+                                ddl_sent = true;
+                            }
                             sqlx::query(&stmt)
                                 .execute(&mut *tx)
                                 .await
