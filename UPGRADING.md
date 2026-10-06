@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Audited conflict bulk inserts run on PG and SQLite
+
+On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does. An audited `upsert` may now run two statements (#1795).
+
 ### Audited models have `save_partial`
 
 `#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).

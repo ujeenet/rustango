@@ -6556,20 +6556,12 @@ fn inherent_impl_tokens(
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
         };
-        // An upsert that may hit a conflict is recorded as `Update`; only
-        // an unset PK with a PK-only target is surely a `Create`.
-        let (audit_upsert_pre, audit_upsert_emit) = if audited_fields.is_some() {
+        // Audited: the upsert reports whether it inserted or updated (#1795).
+        let (upsert_run, audit_upsert_emit) = if audited_fields.is_some() {
             (
-                if upsert_target_columns == [pk_column.clone()] {
-                    quote! {
-                        let _audit_op = if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                            #root::audit::AuditOp::Create
-                        } else {
-                            #root::audit::AuditOp::Update
-                        };
-                    }
-                } else {
-                    quote!(let _audit_op = #root::audit::AuditOp::Update;)
+                quote! {
+                    let (_returning_row_v, _audit_op) =
+                        #root::audit::upsert_returning_on(&mut *_executor, &query).await?;
                 },
                 quote! {
                     let _audit_entry = self.__rustango_audit_entry(_audit_op);
@@ -6577,7 +6569,14 @@ fn inherent_impl_tokens(
                 },
             )
         } else {
-            (quote!(), quote!())
+            (
+                quote! {
+                    let _returning_row_v =
+                        #root::sql::__macro_internals::insert_returning_on(_executor, &query)
+                            .await?;
+                },
+                quote!(),
+            )
         };
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
@@ -6719,11 +6718,7 @@ fn inherent_impl_tokens(
                 )
                 .returning(::std::vec![ #( #upsert_returning ),* ])
                 .on_conflict(#conflict_clause);
-                #audit_upsert_pre
-                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
+                #upsert_run
                 let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
                 #audit_upsert_emit
@@ -7390,15 +7385,21 @@ fn inherent_impl_tokens(
     // Auto<T> PKs are required to be `Auto::Unset` for every row so the
     // sequence picks the PK for fresh inserts; the UPDATE branch never
     // touches the Auto column.
-    // No RETURNING on MySQL, so which rows landed is unknown: refuse on
-    // audited models rather than write unaudited (#1747).
-    let refuse_unaudited_bulk_insert = quote! {
-        if <Self as #root::core::Model>::SCHEMA.audit_track.is_some() {
-            return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+    // Audited models audit each written row; MySQL, with no RETURNING,
+    // is refused there (#1747, #1795).
+    let run_conflict_bulk_insert = match (audited_fields.is_some(), primary_key.is_some()) {
+        (false, _) => quote!(#root::sql::bulk_insert_pool(pool, &_query).await),
+        (true, true) => quote! {
+            #root::audit::bulk_insert_with_audit::<Self>(pool, &_query, |_r: &Self, _op| {
+                _r.__rustango_audit_entry(_op)
+            })
+            .await
+        },
+        (true, false) => quote! {
+            ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
                 table: <Self as #root::core::Model>::SCHEMA.table,
-                reason: "conflict-handling bulk inserts cannot tell which rows landed",
-            });
-        }
+            })
+        },
     };
     let bulk_upsert_pool_method = {
         // Pick the "no Auto" columns when the model has Auto fields,
@@ -7435,7 +7436,8 @@ fn inherent_impl_tokens(
             /// Auto-PK rows must all have `Auto::Unset` (the sequence
             /// picks the PK on insert; the update path never touches
             /// the Auto column). Auto-set rows trigger a hard error.
-            /// Empty slice is a no-op.
+            /// Empty slice is a no-op. On an audited model each written
+            /// row gets a `create` or `update` audit row; MySQL refuses it.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
@@ -7446,7 +7448,6 @@ fn inherent_impl_tokens(
                 update_cols: &[&'static str],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7465,7 +7466,7 @@ fn inherent_impl_tokens(
                     _all_rows,
                 )
                 .on_conflict_do_update(target, update_cols);
-                #root::sql::bulk_insert_pool(pool, &_query).await
+                #run_conflict_bulk_insert
             }
 
             /// Tri-dialect `bulk_create(ignore_conflicts=True)` — silently
@@ -7481,7 +7482,6 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7500,7 +7500,7 @@ fn inherent_impl_tokens(
                     _all_rows,
                 )
                 .on_conflict_do_nothing();
-                #root::sql::bulk_insert_pool(pool, &_query).await
+                #run_conflict_bulk_insert
             }
         }
     };

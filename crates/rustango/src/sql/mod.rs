@@ -51,7 +51,6 @@ pub use hstore::HStore;
 pub use range::Range;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-pub(crate) use executor::inserted_pk;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;
@@ -74,6 +73,7 @@ pub use executor::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
     UpdaterPool,
 };
+pub(crate) use executor::{bulk_insert_pks_tx, inserted_pk};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted

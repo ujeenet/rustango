@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — accurate upsert audit ops; audited conflict bulk inserts (#1795)
+
+An audited PG `upsert` on a `unique_together` target records `create` for a new row instead of always `update`. Audited `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` now run on PG and SQLite with one audit row per written row; an audited `bulk_update` past the bind limit is split.
+
 ### Fixed — audited models get `save_partial`; global-scope docs (#1744)
 
 Audited models had no `save_partial` / `save_partial_typed`; they now write a diff of only the saved fields. The docs say which methods skip global scopes.

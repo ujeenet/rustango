@@ -1884,8 +1884,19 @@ where
         return Ok(0);
     }
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let stmt = tx.dialect().compile_bulk_update(query)?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    // Each row binds its PK and one value per update column. Small pages
+    // also keep SQLite's per-row CTE lookup cheap.
+    let per_row = query.update_columns.len() + 1;
+    let max_rows = (tx.dialect().max_bind_params() / per_row).clamp(1, BULK_AUDIT_CHUNK);
+    let mut affected = 0;
+    for chunk in query.rows.chunks(max_rows) {
+        let batch = crate::core::BulkUpdateQuery {
+            rows: chunk.to_vec(),
+            ..query.clone()
+        };
+        let stmt = tx.dialect().compile_bulk_update(&batch)?;
+        affected += crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    }
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query
         .rows
@@ -1905,6 +1916,117 @@ where
     }
     tx.commit().await?;
     Ok(affected)
+}
+
+/// Run a conflict-handling bulk insert (`bulk_upsert_pool`,
+/// `bulk_insert_or_ignore_pool`) with one audit row per row it wrote, in
+/// one transaction (#1795). A `DoNothing` pass first returns the new rows'
+/// PKs, so a `DoUpdate` can audit only the rest as `Update`.
+///
+/// On PG a row deleted by another transaction between the two passes is
+/// recorded as `Update`. MySQL has no `RETURNING`, so it is refused.
+///
+/// # Errors
+/// [`crate::sql::ExecError::AuditUnsupported`] on MySQL, else as
+/// [`crate::sql::bulk_insert_pool`], plus the re-read and the emit.
+pub async fn bulk_insert_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::BulkInsertQuery,
+    entry: impl Fn(&M, AuditOp) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    if !pool.dialect().supports_returning() {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason:
+                "without RETURNING a conflict-handling bulk insert cannot tell which rows it wrote",
+        });
+    }
+    if query.rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let probe = crate::core::BulkInsertQuery {
+        on_conflict: Some(crate::core::ConflictClause::DoNothing),
+        ..query.clone()
+    };
+    let created = crate::sql::bulk_insert_pks_tx(&mut tx, &probe).await?;
+    let written = match query.on_conflict {
+        Some(crate::core::ConflictClause::DoUpdate { .. }) => {
+            crate::sql::bulk_insert_pks_tx(&mut tx, query).await?
+        }
+        _ => created.clone(),
+    };
+    // `SqlValue` is not `Hash`; its `Debug` form names the variant too.
+    let created: std::collections::HashSet<String> =
+        created.iter().map(|pk| format!("{pk:?}")).collect();
+    for chunk in written.chunks(BULK_AUDIT_CHUNK) {
+        let rows: Vec<M> = rows_in_tx(
+            &mut tx,
+            query.model,
+            pk_in(query.model, chunk.to_vec())?,
+            false,
+        )
+        .await?;
+        let entries: Vec<PendingEntry> = rows
+            .iter()
+            .map(|r| {
+                let pk = format!("{:?}", r.__rustango_pk_value_impl());
+                let op = if created.contains(&pk) {
+                    AuditOp::Create
+                } else {
+                    AuditOp::Update
+                };
+                entry(r, op)
+            })
+            .collect();
+        emit_many_tx(&mut tx, &entries).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
+/// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
+/// `DoNothing` pass first and upserts only when that skipped (#1795).
+///
+/// # Errors
+/// As [`crate::sql::insert_returning_pool`].
+#[cfg(feature = "postgres")]
+pub async fn upsert_returning_on(
+    conn: &mut sqlx::PgConnection,
+    query: &crate::core::InsertQuery,
+) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
+    use crate::sql::__macro_internals::insert_returning_on;
+    if !matches!(
+        query.on_conflict,
+        Some(crate::core::ConflictClause::DoUpdate { .. })
+    ) {
+        return Ok((
+            insert_returning_on(&mut *conn, query).await?,
+            AuditOp::Create,
+        ));
+    }
+    let mut probe = query.clone();
+    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
+    match insert_returning_on(&mut *conn, &probe).await {
+        Ok(row) => Ok((row, AuditOp::Create)),
+        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
+            insert_returning_on(&mut *conn, query).await?,
+            AuditOp::Update,
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 /// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`

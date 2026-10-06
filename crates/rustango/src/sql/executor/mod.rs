@@ -1549,6 +1549,67 @@ pub async fn insert_returning_tx(
     )
 }
 
+/// Run `query` in `tx` with `RETURNING <pk>`, in bind-sized batches, and
+/// give back the PK of every row it wrote. PG and SQLite only.
+///
+/// # Errors
+/// As [`bulk_insert_pool`]; on MySQL the `RETURNING` fails to compile.
+pub(crate) async fn bulk_insert_pks_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let pk = query
+        .model
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    let mut pks = Vec::with_capacity(query.rows.len());
+    for chunk in query.rows.chunks(max_rows) {
+        let batch = BulkInsertQuery {
+            rows: chunk.to_vec(),
+            returning: vec![pk.column],
+            ..query.clone()
+        };
+        batch.validate()?;
+        let stmt = tx.dialect().compile_bulk_insert(&batch)?;
+        crate::test_assertions::query_counter::bump();
+        let rows: Vec<InsertReturningPool> = match tx {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(t) => stmt
+                .params
+                .into_iter()
+                .fold(sqlx::query(&stmt.sql), bind_query)
+                .fetch_all(&mut **t)
+                .await?
+                .into_iter()
+                .map(InsertReturningPool::PgRow)
+                .collect(),
+            // Not reached: MySQL's writer refused the RETURNING above.
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(_) => {
+                drop(stmt);
+                Vec::new()
+            }
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(t) => stmt
+                .params
+                .into_iter()
+                .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                .fetch_all(&mut **t)
+                .await?
+                .into_iter()
+                .map(InsertReturningPool::SqliteRow)
+                .collect(),
+        };
+        for row in &rows {
+            pks.push(generated_pk(row, pk, query.model.table)?);
+        }
+    }
+    Ok(pks)
+}
+
 /// `UPDATE` inside an open transaction; returns rows affected.
 ///
 /// # Errors
