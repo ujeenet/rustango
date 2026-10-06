@@ -1328,35 +1328,45 @@ impl ThrottleStore {
     }
 }
 
-/// A per-request connection handle covering both static-pool and
-/// per-request-tenant modes. [`ViewSetState::acquire`] builds it at
+/// A request's tenant, resolved but not connected yet, so the
+/// throttle can run between the two (#2076).
+enum Scope {
+    /// A static pool: no tenant.
+    Static,
+    #[cfg(feature = "tenancy")]
+    Tenant(Box<crate::tenancy::Org>),
+    /// No tenant matched: throttled by client, then a `404`.
+    #[cfg(feature = "tenancy")]
+    Unknown,
+}
+
+impl Scope {
+    /// The tenant part of a throttle key. `?` cannot be in a slug.
+    fn throttle_label(&self) -> &str {
+        match self {
+            Self::Static => "",
+            #[cfg(feature = "tenancy")]
+            Self::Tenant(org) => &org.slug,
+            #[cfg(feature = "tenancy")]
+            Self::Unknown => "?",
+        }
+    }
+}
+
+/// A per-request pool handle covering both static-pool and
+/// per-request-tenant modes. [`ViewSetState::connect`] builds it at
 /// the top of each handler, and its facade methods keep handler
 /// bodies free of pool-source branching.
 ///
-/// In tenant mode the inner `Pool` is what `Tenant<DB>::pool()`
-/// yields: a search-path-bound pool for PG schema mode, or a clone of
-/// the cached pool for database mode.
+/// In tenant mode the inner `Pool` is the tenant's scoped pool: a
+/// search-path-bound pool for PG schema mode, or the cached pool for
+/// database mode. No connection is held until a query runs.
 struct AcquiredConn {
     pool: Pool,
-    /// Kept alive so PG schema-mode connections are not released
-    /// before the handler is done.
-    #[cfg(feature = "tenancy")]
-    tenant: Option<Box<crate::extractors::Tenant>>,
+    scope: Scope,
 }
 
 impl AcquiredConn {
-    /// The resolved tenant's slug; `None` on a static pool.
-    fn tenant_slug(&self) -> Option<&str> {
-        #[cfg(feature = "tenancy")]
-        {
-            self.tenant.as_deref().map(|t| t.org.slug.as_str())
-        }
-        #[cfg(not(feature = "tenancy"))]
-        {
-            None
-        }
-    }
-
     async fn select_rows_as_json(
         &mut self,
         q: &SelectQuery,
@@ -1487,48 +1497,58 @@ impl ViewSetState {
         fields
     }
 
-    /// Get a per-request pool handle. A cheap clone in static-pool
-    /// mode; in tenant mode it runs the resolver chain and takes a
-    /// connection from the right tenant pool. Errors come back as a
-    /// finished [`Response`] so handlers can `?` straight to the
-    /// client.
+    /// Resolve the request's tenant through the mounted context, the
+    /// one auth uses. Takes no connection. Errors come back as a
+    /// finished [`Response`].
     // Only the `tenancy`-gated `PoolSource::Tenant` arm reads `parts`,
     // so an admin-only build sees an unused parameter.
     #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
-    async fn acquire(
-        &self,
-        parts: &mut axum::http::request::Parts,
-    ) -> Result<AcquiredConn, Response> {
+    async fn resolve(&self, parts: &axum::http::request::Parts) -> Result<Scope, Response> {
         match &self.pool_source {
             #[cfg(feature = "postgres")]
-            PoolSource::Static(pool) => Ok(AcquiredConn {
-                pool: Pool::from(pool.clone()),
-                #[cfg(feature = "tenancy")]
-                tenant: None,
-            }),
-            PoolSource::StaticPool(pool) => Ok(AcquiredConn {
-                pool: pool.clone(),
-                #[cfg(feature = "tenancy")]
-                tenant: None,
-            }),
+            PoolSource::Static(_) => Ok(Scope::Static),
+            PoolSource::StaticPool(_) => Ok(Scope::Static),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
-                use axum::response::IntoResponse as _;
-                // The generic param is spelled out so multi-backend
-                // builds infer `Tenant<DefaultTenantDb>` instead of
-                // failing on an ambiguous type.
-                let t = <crate::extractors::Tenant<
-                    crate::tenancy::DefaultTenantDb,
-                > as axum::extract::FromRequestParts<()>>::from_request_parts(parts, &())
-                    .await
-                    .map_err(|e| e.into_response())?;
-                let pool = t.pool().clone();
-                Ok(AcquiredConn {
-                    pool,
-                    tenant: Some(Box::new(t)),
-                })
+                use crate::extractors::TenantRejection;
+                match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
+                    Some(Ok(Some(org))) => Ok(Scope::Tenant(Box::new(org))),
+                    Some(Ok(None)) => Ok(Scope::Unknown),
+                    Some(Err(e)) => Err(TenantRejection::Internal(e.to_string()).into_response()),
+                    None => Err(TenantRejection::MissingContext.into_response()),
+                }
             }
         }
+    }
+
+    /// The pool handle for a resolved `scope`. A cheap clone in
+    /// static-pool mode; the tenant's scoped pool in tenant mode.
+    #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
+    async fn connect(
+        &self,
+        scope: Scope,
+        parts: &axum::http::request::Parts,
+    ) -> Result<AcquiredConn, Response> {
+        let pool = match (&self.pool_source, &scope) {
+            #[cfg(feature = "postgres")]
+            (PoolSource::Static(pool), _) => Pool::from(pool.clone()),
+            (PoolSource::StaticPool(pool), _) => pool.clone(),
+            #[cfg(feature = "tenancy")]
+            (PoolSource::Tenant, scope) => {
+                use crate::extractors::TenantRejection;
+                let Scope::Tenant(org) = scope else {
+                    return Err(TenantRejection::NotFound.into_response());
+                };
+                match crate::tenancy::middleware::request_pool(&parts.extensions, org).await {
+                    Some(Ok(pool)) => pool,
+                    Some(Err(e)) => {
+                        return Err(TenantRejection::Internal(e.to_string()).into_response())
+                    }
+                    None => return Err(TenantRejection::MissingContext.into_response()),
+                }
+            }
+        };
+        Ok(AcquiredConn { pool, scope })
     }
 
     /// Permission gate. An empty `codenames` skips the check.
@@ -2005,12 +2025,14 @@ async fn enter(
     codenames: &[String],
     action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
-    let (mut parts, body) = req.into_parts();
-    let mut acq = state.acquire(&mut parts).await?;
-    // The budget is per tenant, so the tenant must be resolved first (#2076).
-    if let Some(resp) = check_throttle(state, action, &ThrottleClient::new(&parts, &acq)) {
+    let (parts, body) = req.into_parts();
+    // Resolve, throttle, then connect: the budget is per tenant, and a
+    // throttled request must not touch the tenant pool (#2076).
+    let scope = state.resolve(&parts).await?;
+    if let Some(resp) = check_throttle(state, action, &parts, &scope) {
         return Err(resp);
     }
+    let mut acq = state.connect(scope, &parts).await?;
     match state.check_perm(codenames, &parts, &mut acq).await {
         PermOutcome::Allow => {}
         // 401 means "authenticate", 403 means "you may not". A token
@@ -2032,9 +2054,14 @@ async fn enter(
 /// Per-action fixed-window throttle. Returns `Some(429)` when the
 /// client has gone over the action's [`ThrottleRule`] for this
 /// window. Counters are process-local — see [`ViewSetThrottle`].
-fn check_throttle(state: &ViewSetState, action: &str, client: &ThrottleClient) -> Option<Response> {
+fn check_throttle(
+    state: &ViewSetState,
+    action: &str,
+    parts: &axum::http::request::Parts,
+    scope: &Scope,
+) -> Option<Response> {
     state.vs.throttle.for_action(action)?;
-    spend_throttle(state, action, client, 1)
+    spend_throttle(state, action, &ThrottleClient::new(parts, scope), 1)
 }
 
 /// Spend `cost` requests of `action`'s throttle for `client`.
@@ -2054,14 +2081,14 @@ fn spend_throttle(
 }
 
 /// Who a throttle budget belongs to: the tenant, then the client.
-/// Built only from an [`AcquiredConn`], so no key can skip the tenant (#2076).
+/// Built only from a resolved [`Scope`], so no key can skip the tenant (#2076).
 struct ThrottleClient(String);
 
 impl ThrottleClient {
-    /// The tenant slug (empty on a static pool), then the trusted client IP
+    /// The scope's tenant label, then the trusted client IP
     /// (IPv6 by /64), else one shared `"global"` bucket. Never a raw
     /// forwarding header (#1745).
-    fn new(parts: &axum::http::request::Parts, acq: &AcquiredConn) -> Self {
+    fn new(parts: &axum::http::request::Parts, scope: &Scope) -> Self {
         let ip = crate::rate_limit::client_ip(&parts.extensions, &parts.headers).map_or_else(
             || {
                 crate::rate_limit::warn_missing_discriminator("IP (ConnectInfo missing)");
@@ -2069,7 +2096,7 @@ impl ThrottleClient {
             },
             crate::rate_limit::ip_bucket,
         );
-        Self(format!("{}:{ip}", acq.tenant_slug().unwrap_or("")))
+        Self(format!("{}:{ip}", scope.throttle_label()))
     }
 }
 
@@ -2889,7 +2916,7 @@ async fn handle_create(
         .vs
         .throttle
         .create
-        .map(|_| ThrottleClient::new(&parts, &acq));
+        .map(|_| ThrottleClient::new(&parts, &acq.scope));
     // A JSON array body means a bulk create.
     let create_body = match extract_create_body(parts, body).await {
         Ok(b) => b,
@@ -2956,8 +2983,8 @@ async fn handle_create(
 /// JSON, narrowed by `scope`; `None` when the new row is outside it.
 ///
 /// Returns `(StatusCode, message)` so the caller emits the right code:
-/// * `BAD_REQUEST` when the INSERT fails — a constraint violation or
-///   a bad value, so probably the client's fault.
+/// * `CONFLICT` on a duplicate key, `BAD_REQUEST` on another constraint
+///   violation or a bad value — see [`write_failure`].
 /// * `INTERNAL_SERVER_ERROR` when the re-fetch errors.
 ///
 /// `columns` and `values` come from an earlier `collect_values`, so

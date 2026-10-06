@@ -156,7 +156,7 @@ A ViewSet write that hits a unique or primary-key constraint now answers `409` (
 
 ### ViewSet throttles run after tenant resolution
 
-Each tenant now has its own throttle budget. The throttle runs after the tenant is resolved, so a request for an unknown tenant is a `404` even when throttled (#2076).
+Each tenant now has its own throttle budget; unknown tenants share one per client. `tenant_router` resolves the tenant through the mounted context auth uses, and takes no connection before the throttle (#2076).
 
 ## 0.60.0
 
