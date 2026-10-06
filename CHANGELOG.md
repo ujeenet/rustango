@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `MediaManager::pool()` no longer panics off Postgres (#2070)
+
+It returns the `sql::Pool` on every backend; `pool_dyn()` is deprecated.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

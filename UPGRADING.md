@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `MediaManager::pool()` returns `&sql::Pool`
+
+**Breaking:** use `manager.pool().as_postgres()` where a `PgPool` was needed (#2070).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

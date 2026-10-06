@@ -808,7 +808,7 @@ async fn router_collection_contents_with_recursive_query() {
 
     // Cleanup all media in this test.
     sqlx::query("DELETE FROM rustango_media")
-        .execute(manager.pool())
+        .execute(manager.pool().as_postgres().unwrap())
         .await
         .ok();
 }

@@ -534,7 +534,7 @@ impl MediaPerms {
     /// grants and the rows always come from the same tenant (#1573).
     #[must_use]
     pub fn from_manager(manager: &MediaManager) -> Self {
-        Self::new(manager.pool_dyn().clone())
+        Self::new(manager.pool().clone())
     }
 
     /// Restrict `POST /uploads/begin` to these disks.
