@@ -157,6 +157,7 @@ untouched.
 ### MySQL migrate lock name changed
 
 The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.
+
 ### `manager(ext = ...)` is gone
 
 **Breaking:** drop the attribute and declare the trait yourself: `trait FooManagerExt: Sized { … }` plus `impl FooManagerExt for QuerySet<Foo>` (#2132).
@@ -166,6 +167,7 @@ The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rollin
 On a registered through model, `add` and `set` run its full `validate()`: `max_length`, `min`/`max`, `choices` and named validators, on every backend. A through model missing a manager column now gives `UnknownField` (#2136).
 
 On MySQL, an `add` skipped as a duplicate sets the connection's `LAST_INSERT_ID()`, as other skipped inserts already did.
+
 ### Audited conflict bulk inserts run on PG and SQLite
 
 On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does, except for an empty slice, which is now `Ok`. An audited model with no PK gets `MissingPrimaryKey` instead of `AuditUnsupported`. An audited `upsert` may now run two statements (#1795).
@@ -173,11 +175,13 @@ On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer 
 ### Audited models have `save_partial`
 
 `#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).
+
 ### One `through` table, one shape
 
 Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) are now a `MigrateError::Validation` in `makemigrations`, and a panic in the `SchemaSnapshot` builders (#2000). Give each its own `through`.
 
 `M2MTableSnapshot` equality and order now ignore which end is the source, and new snapshots put the end that sorts first as the source. A mirrored pair no longer rebuilds the junction.
+
 ### `ConfigError::Parse` holds a `TomlSyntaxError`
 
 **Breaking:** its `source` is now `config::TomlSyntaxError` (message and line only), not `toml::de::Error`. Read `message()` / `line_col()` (#2108).

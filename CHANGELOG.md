@@ -23,6 +23,7 @@ Only data ops before the first DDL are in it; each DDL commits and later ops run
 ### Fixed — MySQL's migrate lock is per database (#1991)
 
 The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
+
 ### Fixed — M2M managers go through the ORM (#2136)
 
 `M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. `add` and `set` run the through model's full `validate()` on every backend, and `set` splits a list past the bind limit. A skipped MySQL `add` now sets the connection's `LAST_INSERT_ID()`.
@@ -34,6 +35,7 @@ Its empty trait could not take methods. The derive now refuses the attribute and
 ### Fixed — nothing in `src/` imports `__macro_internals` (#1516)
 
 `clear_user_perm` forwards to `clear_user_perm_pool`, and the guard now scans `src/` with `sql/mod.rs` as its one exception.
+
 ### Fixed — accurate upsert audit ops; audited conflict bulk inserts (#1795)
 
 An audited PG `upsert` on a `unique_together` target records `create` for a new row instead of always `update`. Audited `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` now run on PG and SQLite with one audit row per written row; an audited `bulk_update` past the bind limit is split.
@@ -41,6 +43,7 @@ An audited PG `upsert` on a `unique_together` target records `create` for a new 
 ### Fixed — audited models get `save_partial`; global-scope docs (#1744)
 
 Audited models had no `save_partial` / `save_partial_typed`; they now write a diff of only the saved fields. The docs say which methods skip global scopes.
+
 ### Fixed — a second shape for one M2M junction is refused (#2000)
 
 Relations sharing a `through` table must match up to which side is the source; a different one is a `makemigrations` error instead of taking the junction over and rebuilding it. Adding the mirrored side no longer rebuilds it either.
@@ -52,6 +55,7 @@ Before, only `create-api-key` did, and it mints a key.
 ### Fixed — `migrate-tenant-storage` checks only the target schema (#1864, partial)
 
 An empty target schema no longer passes the smoke check through `public.rustango_users`, so the Org row is reverted. The restore into a schema is still broken.
+
 ### Security — `WebhookSubscription` Debug hides the secret (#2116)
 
 `{:?}` prints `<redacted>` for the signing secret and only header names.
