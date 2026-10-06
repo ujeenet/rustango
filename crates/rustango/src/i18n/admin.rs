@@ -13,8 +13,8 @@
 //! (`…/export.json`), and gate **writes** on superuser — when session
 //! auth is configured (the default), the POST handler reads the live
 //! [`crate::admin::AdminSession`] from request extensions, rejects
-//! non-superusers with 403, and records the operator's username as
-//! `updated_by`. An admin mounted without session auth (open / proxied)
+//! non-superusers with 403, and records [`crate::admin::AdminSession::actor`]
+//! as `updated_by`. An admin mounted without session auth (open / proxied)
 //! has no superuser to check, so writes stay open there, consistent with
 //! the rest of that admin's surface. Reads (the grid + export) stay at
 //! the admin login gate.
@@ -345,7 +345,7 @@ async fn editor_post(
     // session in extensions; the task-local is the fallback. No session
     // at all means an admin mounted without auth, so writes stay open.
     let updated_by = match crate::admin::session::from_extensions(req.extensions()) {
-        Some(session) if session.is_superuser => session.username,
+        Some(session) if session.is_superuser => session.actor(),
         Some(_) => {
             return (
                 StatusCode::FORBIDDEN,

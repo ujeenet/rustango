@@ -351,11 +351,7 @@ async fn login_submit(
     let auth_hash = crate::session::PasswordFingerprint::of(&secret, stored_hash);
     let cookie_value = session::encode(
         &secret,
-        AdminSession {
-            user_id: id,
-            username: form.username.clone(),
-            is_superuser,
-        },
+        AdminSession::new(id, form.username.clone(), is_superuser),
         &auth_hash,
         sessions_revoked_at(&row).unwrap_or_default(),
     );
@@ -527,11 +523,11 @@ async fn change_password_submit(
         let auth_hash = crate::session::PasswordFingerprint::of(secret, &new_hash);
         let cookie_value = session::encode(
             secret,
-            AdminSession {
-                user_id: session.user_id,
-                username: session.username.clone(),
-                is_superuser: session.is_superuser,
-            },
+            AdminSession::new(
+                session.user_id,
+                session.username.clone(),
+                session.is_superuser,
+            ),
             &auth_hash,
             sessions_revoked_at(&row).unwrap_or_default(),
         );
@@ -1154,11 +1150,7 @@ mod prefix_tests {
     /// The 403 page signs out under the admin prefix (#1916).
     #[tokio::test]
     async fn forbidden_page_signs_out_under_the_prefix() {
-        let session = AdminSession {
-            user_id: 1,
-            username: "u".into(),
-            is_superuser: false,
-        };
+        let session = AdminSession::new(1, "u", false);
         let res = forbidden_page(&session, "/adm/logout");
         let body = axum::body::to_bytes(res.into_body(), 1 << 20)
             .await
@@ -1170,11 +1162,7 @@ mod prefix_tests {
     /// #1703 — its inline style carries the request's CSP nonce.
     #[tokio::test]
     async fn forbidden_page_style_carries_the_nonce() {
-        let session = AdminSession {
-            user_id: 1,
-            username: "u".into(),
-            is_superuser: false,
-        };
+        let session = AdminSession::new(1, "u", false);
         let res =
             crate::csp_nonce::scoped("N0nce", async { forbidden_page(&session, "/logout") }).await;
         let body = axum::body::to_bytes(res.into_body(), 1 << 20)

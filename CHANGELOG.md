@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - Tenant JWT access tokens end with their refresh family (replay revoke) and at the absolute session cap (#2119).
 - `tenancy::authenticate_*` no longer upgrade a weak hash before an app's second factor; call `PasswordVerified::complete` after it (#2093).
+- An impersonating operator is attributed by id: audit `source` is `operator:<id>:impersonating` (was `user:0`), and `AdminSession` carries `impersonated_by` instead of an `operator:<name>` username (#2110).
 
 ## [0.60.0] — 2026-10-02
 
