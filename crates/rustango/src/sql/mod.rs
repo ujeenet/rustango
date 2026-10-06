@@ -51,6 +51,8 @@ pub use hstore::HStore;
 pub use range::Range;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
+#[cfg(feature = "postgres")]
+pub(crate) use executor::insert_returning_on;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;

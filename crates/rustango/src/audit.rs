@@ -2020,7 +2020,7 @@ pub async fn upsert_returning_on(
     conn: &mut sqlx::PgConnection,
     query: &crate::core::InsertQuery,
 ) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
-    use crate::sql::__macro_internals::insert_returning_on;
+    use crate::sql::insert_returning_on;
     if !matches!(
         query.on_conflict,
         Some(crate::core::ConflictClause::DoUpdate { .. })
