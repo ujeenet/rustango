@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Render DDL outside the runner with `render_changes_between`
+
+`render_changes_split_with_dialect` has no before-snapshot, so on MySQL it emits `DROP COLUMN` without the FK drop and fails (1828). Use `migrate::render_changes_between(changes, before, after, dialect)` (#2026).
+
 ### MySQL migrate lock name changed
 
 The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.

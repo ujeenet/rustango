@@ -852,32 +852,15 @@ fn preview_migration(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, &mig.forward, &mig.snapshot, dialect, None)?;
-                // The runner looks these names up live; a migrate-built FK has this one.
-                if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-                    let has_fk = before
-                        .table(&fk.table)
-                        .and_then(|t| t.field(&fk.column))
-                        .is_some_and(|f| f.fk.is_some());
-                    if has_fk {
-                        let name = ddl::fk_constraint_name(&fk.table, &fk.column);
-                        statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
-                    }
-                }
-                // Apply drops the name it finds in the catalog; this is the usual one.
-                if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
-                    let name = ddl::unique_constraint_name(&u.table, &u.column);
-                    statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
-                }
-                statements.extend(step.batch.immediate);
-                if let Some(rebuild) = &step.batch.rebuild {
-                    statements.extend(rebuild.statements(dialect));
-                    statements.push(format!(
-                        "-- re-create the indexes and triggers of {}",
-                        rebuild.table()
-                    ));
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
+                let deferred = preview_schema_op(
+                    change,
+                    &mig.forward,
+                    &mig.snapshot,
+                    before,
+                    dialect,
+                    &mut statements,
+                )?;
+                deferred_fks.extend(deferred);
             }
             Operation::Data(d) => {
                 statements.push(d.sql.clone());
@@ -907,6 +890,74 @@ fn preview_migration(
         atomic: mig.atomic,
         statements,
     })
+}
+
+/// Render `change`, one of `ops`, as a preview: push its statements to
+/// `statements` and return its deferred FKs. `before` is the schema `ops`
+/// start from, for the FKs a MySQL column drop removes.
+fn preview_schema_op(
+    change: &super::SchemaChange,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+    before: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    statements: &mut Vec<String>,
+) -> Result<Vec<String>, MigrateError> {
+    let step = render_step(change, ops, after, dialect, None)?;
+    // The runner looks these names up live; a migrate-built FK has this one.
+    if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
+        let has_fk = before
+            .table(&fk.table)
+            .and_then(|t| t.field(&fk.column))
+            .is_some_and(|f| f.fk.is_some());
+        if has_fk {
+            let name = ddl::fk_constraint_name(&fk.table, &fk.column);
+            statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
+        }
+    }
+    // Apply drops the name it finds in the catalog; this is the usual one.
+    if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
+        let name = ddl::unique_constraint_name(&u.table, &u.column);
+        statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+    }
+    statements.extend(step.batch.immediate);
+    if let Some(rebuild) = &step.batch.rebuild {
+        statements.extend(rebuild.statements(dialect));
+        statements.push(format!(
+            "-- re-create the indexes and triggers of {}",
+            rebuild.table()
+        ));
+    }
+    Ok(step.batch.deferred_fks)
+}
+
+/// The DDL that moves `before` to `after` by `changes` on `dialect`, as
+/// `sqlmigrate` prints it: a MySQL column drop drops its FK first (#2026).
+///
+/// # Errors
+/// A change the dialect cannot render.
+pub fn render_changes_between(
+    changes: &[super::SchemaChange],
+    before: &SchemaSnapshot,
+    after: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Vec<String>, MigrateError> {
+    let ops: Vec<Operation> = changes.iter().cloned().map(Operation::Schema).collect();
+    let (mut statements, mut deferred) = (Vec::new(), Vec::new());
+    for op in &ops {
+        if let Operation::Schema(change) = op {
+            deferred.extend(preview_schema_op(
+                change,
+                &ops,
+                after,
+                before,
+                dialect,
+                &mut statements,
+            )?);
+        }
+    }
+    statements.extend(deferred);
+    Ok(statements)
 }
 
 #[cfg(feature = "postgres")]
@@ -3775,5 +3826,38 @@ mod tests {
         assert!(super::mysql_lock_taken(Some(1)).unwrap());
         assert!(!super::mysql_lock_taken(Some(0)).unwrap());
         assert!(super::mysql_lock_taken(None).is_err());
+    }
+
+    /// #2026 — MySQL refuses to drop an FK column (1828); its FK goes first.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn render_between_drops_the_fk_before_its_column() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let table = |with_fk: bool| {
+            let mut fields = vec![
+                serde_json::json!({ "name": "id", "column": "id", "ty": "i64",
+                "nullable": false, "primary_key": true }),
+            ];
+            if with_fk {
+                fields.push(
+                    serde_json::json!({ "name": "p", "column": "p_id", "ty": "i64",
+                    "nullable": true, "primary_key": false,
+                    "fk": { "kind": "fk", "to": "parent", "on": "id" } }),
+                );
+            }
+            serde_json::json!({ "name": "child", "model": "Child", "fields": fields })
+        };
+        let snap = |with_fk: bool| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [table(with_fk)] })).unwrap()
+        };
+        let drop = [SchemaChange::DropColumn {
+            table: "child".into(),
+            column: "p_id".into(),
+        }];
+        let out =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
+                .unwrap();
+        assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[1].contains("DROP COLUMN `p_id`"), "{out:?}");
     }
 }

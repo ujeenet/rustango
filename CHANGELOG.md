@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `render_changes_between` takes the before-snapshot (#2026)
+
+It renders a MySQL column drop with its FK drop first, which `render_changes_split_with_dialect` cannot see.
+
 ### Fixed — SQLite keeps CHECKs when a rebuild precedes a RenameTable (#2140)
 
 The rebuild reads the table's CHECKs under the name the migration renames it to.
