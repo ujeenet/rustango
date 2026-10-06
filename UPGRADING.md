@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MCP agent tokens
+
+**Breaking:** `issue_agent_token` takes the key's `secret_prefix`, `agent_token_still_valid_pool` takes it too, and `McpAgent` has a `secret_prefix` field. Agent JWTs minted before the upgrade are refused; clients re-mint (#1962).
+
 ### `MediaManager::pool()` returns `&sql::Pool`
 
 **Breaking:** use `manager.pool().as_postgres()` where a `PgPool` was needed (#2070).

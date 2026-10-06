@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — a rotated MCP agent secret ends its JWTs (#1962)
+
+Agent JWTs carry the key prefix and are refused once the secret rotates; skills and tools are re-read from the rows on every request.
+
 ### Fixed — `MediaManager::pool()` no longer panics off Postgres (#2070)
 
 It returns the `sql::Pool` on every backend; `pool_dyn()` is deprecated.
