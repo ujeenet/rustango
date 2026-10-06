@@ -29,6 +29,7 @@ Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt
 - The HTTPS redirect and SSO `redirect_uri`s take only a plain `host[:port]` from `Host`; `good.com@evil.com` gets a 400 or an SSO error (#2173).
 - `S3Storage`'s default client no longer follows redirects, so signed requests stay on the configured endpoint (#1780).
 - MCP: a tool call is audited before it runs, DB error text stays in the log, `new_password`-style keys are redacted, a reused request id keeps its cancel slot, a null `id` or wrong `jsonrpc` is an invalid request, Basic client credentials are form-decoded, and discovery URLs ignore a malformed `Host` (#1963).
+- `TenantAdminBuilder::impersonation_jti_store` takes a shared store for used handoff tokens and ended impersonations, so they hold across replicas (#2176).
 
 ## [0.60.0] — 2026-10-02
 
