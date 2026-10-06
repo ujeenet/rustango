@@ -92,6 +92,22 @@ It resolves the tenant through the mounted context auth uses, not `Tenant<Defaul
 
 A test now covers the opaque 500 with no observability or security headers.
 
+### Fixed — IPv6 `Host` headers keep their address (#2043)
+
+Tenant host lookup, the console handoff port, CSRF wildcards and URL host checks split `[::1]:8080` after the bracket, via one helper. A non-digit port (`good.com:1@evil.com`) is refused.
+
+### Fixed — `template_views_bulk_actions_live` builds without `postgres` (#2125)
+
+The PG-only suite is gated on `postgres`, so sqlite-only test builds compile.
+
+### Fixed — admin facet for an empty text value filters the list (#2081)
+
+It links `?<field>__isempty=1`, which the list reads; `?<field>=` still means no filter.
+
+### Fixed — `slugify` folds İ and Vietnamese letters (#2092)
+
+Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt"` gives `"viet"`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

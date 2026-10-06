@@ -202,6 +202,14 @@ A handler panic is now a 500, but layers on the `api` router (headers, request i
 
 Each tenant now has its own throttle budget; unknown tenants share one per client. `tenant_router` resolves the tenant through the mounted context auth uses, and takes no connection before the throttle (#2076).
 
+### Hosts with a non-digit port are refused
+
+`ALLOWED_HOSTS` (even `*`), tenant lookup, CSRF wildcards and `validate_url` now reject `host:port` where the port is not digits (#2043).
+
+### `slugify` output for some non-ASCII input
+
+`slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
