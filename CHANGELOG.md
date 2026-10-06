@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a second shape for one M2M junction is refused (#2000)
+
+Relations sharing a `through` table must match up to which side is the source; a different one panics instead of taking the junction over and rebuilding it.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

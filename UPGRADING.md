@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### One `through` table, one shape
+
+Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) now panic in `makemigrations` and the `SchemaSnapshot` builders (#2000). Give each its own `through`.
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

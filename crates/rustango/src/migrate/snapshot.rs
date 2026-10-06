@@ -739,7 +739,30 @@ fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec
             });
         }
     }
+    refuse_conflicting_junctions(&out);
     dedup_by_name(out, "M2M junction", |m| &m.through)
+}
+
+/// One table holds one pair of FKs, so declarations may differ only by
+/// which side is the source. Picking one by sort order lost rows (#2000).
+fn refuse_conflicting_junctions(out: &[M2MTableSnapshot]) {
+    fn ends(m: &M2MTableSnapshot) -> [(&str, &str); 2] {
+        let mut e = [(&*m.src_table, &*m.src_col), (&*m.dst_table, &*m.dst_col)];
+        e.sort_unstable();
+        e
+    }
+    for (i, a) in out.iter().enumerate() {
+        if let Some(b) = out[..i]
+            .iter()
+            .find(|b| b.through == a.through && ends(a) != ends(b))
+        {
+            panic!(
+                "M2M junction `{}` is declared with two shapes: {b:?} and {a:?}; \
+                 give each relation its own `through` table",
+                a.through
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1011,12 +1034,20 @@ mod composite_fk_snapshot_tests {
     #[test]
     fn shared_names_do_not_depend_on_model_order() {
         use crate::core::{CheckConstraint, ExclusionConstraint, IndexSchema, M2MRelation};
-        const M2M: &[M2MRelation] = &[M2MRelation::new(
+        const TAGS: &[M2MRelation] = &[M2MRelation::new(
             "tags",
             "tag",
             "shared_tags",
             "post_id",
             "tag_id",
+        )];
+        // The same junction declared from the other side.
+        const POSTS: &[M2MRelation] = &[M2MRelation::new(
+            "posts",
+            "post",
+            "shared_tags",
+            "tag_id",
+            "post_id",
         )];
         const CK: &[CheckConstraint] = &[CheckConstraint::new("shared_ck", "id > 0")];
         const EX: &[ExclusionConstraint] = &[ExclusionConstraint::new(
@@ -1025,25 +1056,51 @@ mod composite_fk_snapshot_tests {
             &[("id", "=")],
         )];
         const IX: &[IndexSchema] = &[IndexSchema::new("shared_ix", &["id"])];
-        const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+        const fn model(
+            name: &'static str,
+            table: &'static str,
+            m2m: &'static [M2MRelation],
+        ) -> ModelSchema {
             let mut s = ModelSchema::new(name, table);
-            s.m2m = M2M;
+            s.m2m = m2m;
             s.check_constraints = CK;
             s.exclusion_constraints = EX;
             s.indexes = IX;
             s
         }
-        static POST: ModelSchema = model("Post", "post");
-        static NOTE: ModelSchema = model("Note", "note");
-        let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
-        let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+        static POST: ModelSchema = model("Post", "post", TAGS);
+        static TAG: ModelSchema = model("Tag", "tag", POSTS);
+        let a = SchemaSnapshot::from_models(&[&POST, &TAG]);
+        let b = SchemaSnapshot::from_models(&[&TAG, &POST]);
         assert_eq!(a, b);
         assert_eq!(a.m2m_tables.len(), 1);
-        assert_eq!(a.m2m_tables[0].src_table, "note");
+        assert_eq!(a.m2m_tables[0].src_table, "post");
         assert_eq!(
             (a.checks.len(), a.excludes.len(), a.indexes.len()),
             (1, 1, 1)
         );
+    }
+
+    /// A new model that sorts first and reuses a junction must not take it over.
+    #[test]
+    #[should_panic(expected = "M2M junction `shared_tags` is declared with two shapes")]
+    fn a_second_junction_shape_is_refused() {
+        use crate::core::M2MRelation;
+        const TAGS: &[M2MRelation] = &[M2MRelation::new(
+            "tags",
+            "tag",
+            "shared_tags",
+            "post_id",
+            "tag_id",
+        )];
+        const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+            let mut s = ModelSchema::new(name, table);
+            s.m2m = TAGS;
+            s
+        }
+        static POST: ModelSchema = model("Post", "post");
+        static ARTICLE: ModelSchema = model("Article", "article");
+        let _ = SchemaSnapshot::from_models(&[&POST, &ARTICLE]);
     }
 }
 
