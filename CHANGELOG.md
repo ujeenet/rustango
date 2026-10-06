@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The tenant probe and the branding upload log the cause and show an opaque message, like the console's 500s.
 
+### Fixed — console errors speak to the operator (#1335)
+
+Schema-mode refusals name the storage-mode control, not a CLI flag or wire value. A connection check no longer names a Cargo feature or echoes an unknown-scheme URL, which can carry a password.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
