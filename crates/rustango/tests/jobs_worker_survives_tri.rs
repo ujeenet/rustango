@@ -445,8 +445,10 @@ pub struct Note {
 }
 
 /// Pool and seen UTC offset per token: a payload cannot carry a pool.
-fn note_pools() -> &'static Mutex<HashMap<String, (Pool, Option<i32>)>> {
-    static P: OnceLock<Mutex<HashMap<String, (Pool, Option<i32>)>>> = OnceLock::new();
+type NotePools = Mutex<HashMap<String, (Pool, Option<i32>)>>;
+
+fn note_pools() -> &'static NotePools {
+    static P: OnceLock<NotePools> = OnceLock::new();
     P.get_or_init(Mutex::default)
 }
 
