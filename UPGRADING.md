@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### `ConfigError::Parse` holds a `TomlSyntaxError`
+
+**Breaking:** its `source` is now `config::TomlSyntaxError` (message and line only), not `toml::de::Error`. Read `message()` / `line_col()` (#2108).
+
+### CBV CSRF cookies follow `CsrfConfig::secure`
+
+A CBV under `csrf::with_config` sets `Secure` per that config, not the session policy. Plain-HTTP dev needs `allow_insecure_for_dev()` (#2117).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`

@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `WebhookSubscription` Debug hides the secret (#2116)
+
+`{:?}` prints `<redacted>` for the signing secret and only header names.
+
+### Security — `redact` masks a password containing `@` (#2109)
+
+The userinfo ends at the last `@` before the path. `migrate` and `migrate-storage` logs use the same `redact`.
+
+### Security — config parse errors never quote the TOML line (#2108)
+
+`ConfigError::Parse` keeps only the message and line/column, in Display and Debug alike.
+
+### Security — CBV CSRF cookie follows `CsrfConfig::secure` (#2117)
+
+The cookie a CBV mints takes `Secure` from the CSRF layer's config, like the layer's own cookie.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
