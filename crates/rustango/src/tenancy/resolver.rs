@@ -727,7 +727,7 @@ fn host_of(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
     if let Some(value) = headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
             // `Host` header may include `:port` — strip it.
-            return Some(crate::urls::split_host_port(s).0.to_ascii_lowercase());
+            return crate::urls::split_host_port(s).map(|(h, _)| h.to_ascii_lowercase());
         }
     }
     uri.host().map(str::to_ascii_lowercase)

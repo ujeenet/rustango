@@ -354,8 +354,12 @@ fn origin_allowed_in(
 /// entry the operator believed covered it, and the symptom was a 403
 /// that reads as flaky rather than as a config problem (#1529).
 fn wildcard_matches(authority: &str, wild: &str) -> bool {
-    let (host, _) = crate::urls::split_host_port(authority);
-    let (wild_host, _) = crate::urls::split_host_port(wild);
+    let (Some((host, _)), Some((wild_host, _))) = (
+        crate::urls::split_host_port(authority),
+        crate::urls::split_host_port(wild),
+    ) else {
+        return false;
+    };
     if host == wild_host {
         return true;
     }

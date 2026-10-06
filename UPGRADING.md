@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Hosts with a non-digit port are refused
+
+`ALLOWED_HOSTS` (even `*`), tenant lookup, CSRF wildcards and `validate_url` now reject `host:port` where the port is not digits (#2043).
+
 ### `slugify` output for some non-ASCII input
 
 `slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).

@@ -2296,8 +2296,8 @@ fn handoff_port_suffix(
     env_port
         .filter(|p| usable(p))
         .or_else(|| {
-            host.and_then(|h| crate::urls::split_host_port(h).1)
-                .map(str::to_owned)
+            host.and_then(|h| crate::urls::split_host_port(h)?.1)
+                .map(|p| p.to_string())
                 .filter(|p| usable(p))
         })
         .map(|p| format!(":{p}"))
@@ -2362,6 +2362,10 @@ mod handoff_port_tests {
         assert_eq!(handoff_port_suffix(None, env, Some("ops:8080")), ":9000");
         assert_eq!(handoff_port_suffix(None, None, Some("ops:8080")), ":8080");
         assert_eq!(handoff_port_suffix(Some(443), None, Some("ops:8080")), "");
+        // A non-digit "port" cannot smuggle another host into the URL.
+        for bad in ["ops:@evil.com", "[::1]:@evil.com", "ops:1@evil.com:2"] {
+            assert_eq!(handoff_port_suffix(None, None, Some(bad)), "", "{bad}");
+        }
         // An IPv6 host's colons are not a port (#2043).
         assert_eq!(handoff_port_suffix(None, None, Some("[::1]")), "");
         assert_eq!(handoff_port_suffix(None, None, Some("[::1]:8080")), ":8080");

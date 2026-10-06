@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — IPv6 `Host` headers keep their address (#2043)
 
-Tenant host lookup, the console handoff port, CSRF wildcards and URL host checks split `[::1]:8080` after the bracket, via one helper.
+Tenant host lookup, the console handoff port, CSRF wildcards and URL host checks split `[::1]:8080` after the bracket, via one helper. A non-digit port (`good.com:1@evil.com`) is refused.
 
 ### Fixed — `template_views_bulk_actions_live` builds without `postgres` (#2125)
 
