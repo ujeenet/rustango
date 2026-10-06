@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `tenancy::authenticate_*` return `PasswordVerified`
+
+**Breaking:** `authenticate_user`, `authenticate_user_pool`, `authenticate_operator` and `authenticate_operator_pool` return `Option<PasswordVerified<_>>`. It derefs to the row; call `.complete(&pool)` (or `.complete_on(conn)`) after your second factor to store an upgraded hash (#2093).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
