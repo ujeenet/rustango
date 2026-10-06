@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin facet for an empty text value filters the list (#2081)
+
+It links `?<field>__isempty=1`, which the list reads; `?<field>=` still means no filter.
+
 ### Fixed — `slugify` folds İ and Vietnamese letters (#2092)
 
 Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt"` gives `"viet"`.
