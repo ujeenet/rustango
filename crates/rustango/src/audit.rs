@@ -2126,7 +2126,7 @@ where
             )
             .await?;
             let entries: Vec<PendingEntry> = rows.iter().map(|r| entry(r, op)).collect();
-            emit_many_tx(&mut tx, &entries).await?;
+            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
         }
     }
     tx.commit().await?;
