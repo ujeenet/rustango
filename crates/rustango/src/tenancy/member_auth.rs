@@ -465,12 +465,13 @@ impl Mount {
     }
 
     /// The absolute callback URL for a slug — must match at begin + callback.
-    fn callback_uri(&self, parts: &Parts, slug: &str) -> String {
-        format!(
+    /// `None` when the host is not plain `host[:port]` (#2173).
+    fn callback_uri(&self, parts: &Parts, slug: &str) -> Option<String> {
+        Some(format!(
             "{}{}/sso/{slug}/callback",
-            external_base(parts).trim_end_matches('/'),
+            external_base(parts)?.trim_end_matches('/'),
             self.url(&self.login),
-        )
+        ))
     }
 }
 
@@ -492,24 +493,27 @@ struct CallbackParams {
 ///
 /// The result MUST be byte-identical at begin and callback — the
 /// `redirect_uri` is part of the OAuth2 signature the IdP validates.
+/// `None` when the host is not plain `host[:port]` (#2173).
 #[must_use]
-pub(crate) fn external_base(parts: &Parts) -> String {
+pub(crate) fn external_base(parts: &Parts) -> Option<String> {
     let headers = &parts.headers;
-    let first = |v: &str| v.split(',').next().unwrap_or(v).trim().to_owned();
+    fn first(v: &str) -> &str {
+        v.split(',').next().unwrap_or(v).trim()
+    }
     let forwarded =
         |name: &str| crate::real_ip::trusted_forwarded(headers, &parts.extensions, name);
 
     let proto = forwarded("x-forwarded-proto").map(str::to_owned);
 
-    let host = forwarded("x-forwarded-host")
-        .map(str::to_owned)
+    let raw = forwarded("x-forwarded-host")
         .or_else(|| {
             headers
                 .get(header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .map(first)
         })
-        .unwrap_or_else(|| "localhost".to_owned());
+        .unwrap_or("localhost");
+    let host = crate::urls::HostAuthority::parse(raw)?.to_string();
 
     let scheme = proto.unwrap_or_else(|| {
         if let Some(s) = parts.uri.scheme_str() {
@@ -521,7 +525,7 @@ pub(crate) fn external_base(parts: &Parts) -> String {
         }
     });
 
-    format!("{scheme}://{host}")
+    Some(format!("{scheme}://{host}"))
 }
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
@@ -551,7 +555,9 @@ async fn sso_begin_in(
     };
     let pool = t.pool();
 
-    let redirect_uri = mount.callback_uri(&parts, slug);
+    let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
+        return sso_error("Sign-in is temporarily unavailable.", &mount);
+    };
     let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -640,7 +646,9 @@ async fn sso_callback_in(
 
     let pool = t.pool();
 
-    let redirect_uri = mount.callback_uri(&parts, slug);
+    let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
+        return clear_flow(sso_error("Sign-in is temporarily unavailable.", &mount));
+    };
     let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         _ => return clear_flow(sso_error("That sign-in method is not available.", &mount)),
@@ -1144,7 +1152,10 @@ mod tests {
             ("x-forwarded-host", "evil.example.com"),
             ("host", "gym.example.com"),
         ]);
-        assert_eq!(external_base(&parts), "https://gym.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://gym.example.com")
+        );
     }
 
     #[test]
@@ -1157,19 +1168,45 @@ mod tests {
         parts
             .extensions
             .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
-        assert_eq!(external_base(&parts), "https://g.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://g.example.com")
+        );
     }
 
     #[test]
     fn external_base_localhost_defaults_to_http() {
         let parts = parts_with(&[("host", "downtown.localhost:8080")]);
-        assert_eq!(external_base(&parts), "http://downtown.localhost:8080");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("http://downtown.localhost:8080")
+        );
     }
 
     #[test]
     fn external_base_public_host_defaults_to_https() {
         let parts = parts_with(&[("host", "gym.example.com")]);
-        assert_eq!(external_base(&parts), "https://gym.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://gym.example.com")
+        );
+    }
+
+    /// The `redirect_uri` never takes userinfo from the Host (#2173).
+    #[test]
+    fn external_base_refuses_a_host_with_userinfo() {
+        for host in ["good.com:1@evil.com:2", "good.com@evil.com"] {
+            assert_eq!(
+                external_base(&parts_with(&[("host", host)])),
+                None,
+                "{host}"
+            );
+        }
+        let mut parts = parts_with(&[("x-forwarded-host", "a@evil.com"), ("host", "gym.test")]);
+        parts
+            .extensions
+            .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
+        assert_eq!(external_base(&parts), None);
     }
 
     // ---- safe_landing -----------------------------------------------

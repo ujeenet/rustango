@@ -185,7 +185,7 @@ async fn resolve_by_slug(
 /// per-slug: `{scheme}://{host}{login_url}/sso/{slug}/callback`. Scheme
 /// honors `X-Forwarded-Proto` from a trusted proxy, else `https`.
 fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<String> {
-    let host = parts.headers.get(header::HOST)?.to_str().ok()?;
+    let host = crate::urls::HostAuthority::parse(parts.headers.get(header::HOST)?.to_str().ok()?)?;
     let scheme =
         crate::real_ip::trusted_forwarded(&parts.headers, &parts.extensions, "x-forwarded-proto")
             .unwrap_or("https");
@@ -418,5 +418,23 @@ mod tests {
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].login_url, "/admin/login/sso/okta");
+    }
+
+    /// The `redirect_uri` never takes userinfo from the Host (#2173).
+    #[test]
+    fn derive_redirect_refuses_a_host_with_userinfo() {
+        let routes = super::RouteConfig::default();
+        let parts = |host: &str| {
+            axum::http::Request::builder()
+                .header("host", host)
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        assert!(super::derive_redirect(&parts("good.com:1@evil.com:2"), &routes, "g").is_none());
+        assert!(super::derive_redirect(&parts("good.com@evil.com"), &routes, "g").is_none());
+        let ok = super::derive_redirect(&parts("good.com:8443"), &routes, "g").unwrap();
+        assert!(ok.starts_with("https://good.com:8443/"), "{ok}");
     }
 }

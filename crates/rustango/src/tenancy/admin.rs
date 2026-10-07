@@ -75,7 +75,8 @@ pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
     resolver: Arc<dyn OrgResolver>,
     show_only: Option<Vec<String>>,
     read_only: Vec<String>,
-    session: Option<Arc<TenantSessionConfig>>,
+    session: Option<TenantSessionConfig>,
+    jti_store: Option<Arc<dyn crate::jti_store::JtiStore>>,
     actions: Vec<RegisteredAction>,
     title: Option<String>,
     subtitle: Option<String>,
@@ -97,6 +98,19 @@ struct RegisteredAction {
 struct TenantSessionConfig {
     secret: tenant_console::SessionSecret,
     tera: Tera,
+    /// Used handoff tokens and ended impersonations; `None` is the
+    /// per-process [`JtiBlacklist::shared`] (#2176).
+    ///
+    /// [`JtiBlacklist::shared`]: super::impersonation_handoff::JtiBlacklist::shared
+    jti: Option<super::impersonation_handoff::JtiBlacklist>,
+}
+
+impl TenantSessionConfig {
+    fn jti(&self) -> &super::impersonation_handoff::JtiBlacklist {
+        self.jti
+            .as_ref()
+            .unwrap_or_else(|| super::impersonation_handoff::JtiBlacklist::shared())
+    }
 }
 
 impl<DB: Database> TenantAdminBuilder<DB> {
@@ -118,6 +132,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             show_only: None,
             read_only: Vec::new(),
             session: None,
+            jti_store: None,
             actions: Vec::new(),
             title: None,
             subtitle: None,
@@ -194,7 +209,21 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             include_str!("templates/tenant_change_password.html"),
         )
         .expect("tenant_change_password.html parses");
-        self.session = Some(Arc::new(TenantSessionConfig { secret, tera }));
+        self.session = Some(TenantSessionConfig {
+            secret,
+            tera,
+            jti: None,
+        });
+        self
+    }
+
+    /// Where used impersonation handoff tokens and ended impersonations
+    /// are kept. The default is per-process; with several replicas pass
+    /// a shared store such as Redis or the database (#2176). Call it before
+    /// or after [`Self::with_session`]; without a session it has no use.
+    #[must_use]
+    pub fn impersonation_jti_store(mut self, store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
+        self.jti_store = Some(store);
         self
     }
 
@@ -265,7 +294,17 @@ where
         let resolver = self.resolver;
         let show_only = Arc::new(self.show_only);
         let read_only = Arc::new(self.read_only);
-        let session = self.session;
+        let jti_store = self.jti_store;
+        if jti_store.is_some() && self.session.is_none() {
+            warn!(
+                target: "rustango::tenancy::admin",
+                "impersonation_jti_store is unused: the tenant admin has no with_session",
+            );
+        }
+        let session = self.session.map(|mut s| {
+            s.jti = jti_store.map(super::impersonation_handoff::JtiBlacklist::with_store);
+            Arc::new(s)
+        });
         let actions = Arc::new(self.actions);
         let title = Arc::new(self.title);
         let subtitle = Arc::new(self.subtitle);
@@ -828,10 +867,7 @@ async fn validate_session(
         let Some(sid) = payload.sid.as_deref() else {
             return SessionCheck::Anonymous;
         };
-        if super::impersonation_handoff::JtiBlacklist::shared()
-            .session_ended(sid)
-            .await
-        {
+        if cfg.jti().session_ended(sid).await {
             return SessionCheck::Anonymous;
         }
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
@@ -1256,7 +1292,7 @@ async fn redeem_impersonation_handoff(
     query: Option<&str>,
     registry: &crate::sql::Pool,
 ) -> Response {
-    use super::impersonation_handoff::{decode, JtiBlacklist};
+    use super::impersonation_handoff::decode;
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
@@ -1301,10 +1337,7 @@ async fn redeem_impersonation_handoff(
     }) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    if let Err(e) = JtiBlacklist::shared()
-        .mark_used(&payload.jti, payload.exp)
-        .await
-    {
+    if let Err(e) = cfg.jti().mark_used(&payload.jti, payload.exp).await {
         tracing::warn!(
             target: "rustango::tenancy::admin",
             slug = %org.slug,
@@ -1388,9 +1421,7 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
         ..
     }) = tenant_console::decode(&cfg.secret, slug, &value)
     {
-        super::impersonation_handoff::JtiBlacklist::shared()
-            .end_session(&sid, exp)
-            .await;
+        cfg.jti().end_session(&sid, exp).await;
     }
 }
 

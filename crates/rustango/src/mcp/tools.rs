@@ -76,10 +76,12 @@ impl std::fmt::Display for McpError {
 }
 impl std::error::Error for McpError {}
 
-/// A database error inside a handler becomes an internal error.
+/// A database error inside a handler becomes an internal error; its
+/// text is logged, not sent to the agent (#1963).
 impl From<crate::sql::ExecError> for McpError {
     fn from(e: crate::sql::ExecError) -> Self {
-        Self::internal(e.to_string())
+        let e = JsonRpcError::internal_logged(e);
+        Self::new(e.code, e.message)
     }
 }
 
@@ -185,9 +187,7 @@ pub(crate) async fn call_tool_with(
         ));
     }
 
-    // Copy what the audit and the scoping need, before `ctx` moves
-    // into the tool.
-    let pool = ctx.pool.clone();
+    // Copy what the scoping needs, before `ctx` moves into the tool.
     let tenant = ctx.agent.tenant.clone();
     let agent_id = ctx.agent.agent_id;
 
@@ -207,13 +207,13 @@ pub(crate) async fn call_tool_with(
         _cancel_guard = Some(guard);
     }
 
+    // Audit before the tool runs, so a call aborted mid-way still
+    // leaves its row (#1963). The arguments are redacted.
+    audit_tool_call(&ctx.pool, agent_id, &name, &args).await;
+
     // Catch a panic here. A buggy handler must not unwind into the
     // transport, which would drop the connection.
-    let outcome = crate::panic_guard::catch_unwind((tool.handler)(ctx, args.clone())).await;
-
-    // Audit every call that ran, whether it worked or not, with the
-    // arguments redacted.
-    audit_tool_call(&pool, agent_id, &name, &args).await;
+    let outcome = crate::panic_guard::catch_unwind((tool.handler)(ctx, args)).await;
 
     // A tool that ran and failed returns a successful
     // `CallToolResult` with `isError: true`, so the client can show
@@ -274,10 +274,8 @@ fn is_protocol_error(code: i64) -> bool {
     )
 }
 
-/// Argument names whose values are scrubbed before a call is
-/// audited, so no secret reaches the audit table. It is the
-/// access-log list, `access_log::default_redact_params`, plus a few
-/// names that matter here.
+/// Words whose values are scrubbed before a call is audited, so no
+/// secret reaches the audit table. A `_` entry is a run of words.
 const SENSITIVE_ARG_KEYS: &[&str] = &[
     "password",
     "passwd",
@@ -285,23 +283,52 @@ const SENSITIVE_ARG_KEYS: &[&str] = &[
     "secret",
     "api_key",
     "apikey",
-    "access_token",
-    "refresh_token",
     "signature",
     "auth",
     "authorization",
-    "client_secret",
     "private_key",
+    "otp",
+    "totp",
+    "code_verifier",
 ];
 
-/// Return a copy of `value` with every sensitive key's value
-/// replaced by `"[redacted]"`, at any depth. A key matches whole and
-/// ignoring case, so `token_count` is left alone.
-fn redact_json(value: &Value) -> Value {
-    fn is_sensitive(key: &str) -> bool {
-        let k = key.to_ascii_lowercase();
-        SENSITIVE_ARG_KEYS.iter().any(|s| *s == k)
+/// The lowercase words of a key, split on `_`, `-` and lower-to-upper
+/// case changes: `newPassword` is `new password`, `x-api-key` is `x api key`.
+fn key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in key.chars() {
+        let split = matches!(c, '_' | '-') || (prev_lower && c.is_ascii_uppercase());
+        if split && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if !matches!(c, '_' | '-') {
+            word.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
     }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// `true` when any run of the key's words is a sensitive entry. Errs
+/// toward hiding: `token_count` is redacted too (#1963).
+fn is_sensitive(key: &str) -> bool {
+    let words = key_words(key);
+    SENSITIVE_ARG_KEYS.iter().any(|entry| {
+        let want: Vec<&str> = entry.split('_').collect();
+        words
+            .windows(want.len())
+            .any(|w| w.iter().zip(&want).all(|(a, b)| a == b))
+    })
+}
+
+/// Return a copy of `value` with every sensitive key's value
+/// replaced by `"[redacted]"`, at any depth.
+fn redact_json(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()
@@ -331,7 +358,7 @@ async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
         changes: json!({ "tool": tool, "arguments": redact_json(args) }),
     };
     if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
-        tracing::debug!(error = %e, tool, "mcp tools/call audit not recorded");
+        tracing::warn!(error = %e, tool, "mcp tools/call audit not recorded");
     }
 }
 
@@ -389,7 +416,6 @@ mod tests {
             "username": "alice",
             "password": "hunter2",
             "API_KEY": "sk-123",
-            "token_count": 42,                       // not sensitive (exact match)
             "nested": { "client_secret": "shh", "ok": true },
             "list": [ { "secret": "s" }, { "keep": "v" } ],
         });
@@ -397,10 +423,56 @@ mod tests {
         assert_eq!(red["username"], "alice");
         assert_eq!(red["password"], "[redacted]");
         assert_eq!(red["API_KEY"], "[redacted]"); // case-insensitive
-        assert_eq!(red["token_count"], 42); // exact-match: kept
         assert_eq!(red["nested"]["client_secret"], "[redacted]");
         assert_eq!(red["nested"]["ok"], true);
         assert_eq!(red["list"][0]["secret"], "[redacted]");
         assert_eq!(red["list"][1]["keep"], "v");
+    }
+
+    /// A sensitive word anywhere in a snake, kebab or camel key is
+    /// redacted; `token_count` too, as hiding a count is harmless (#1963).
+    #[test]
+    fn redact_json_matches_a_sensitive_word_in_any_case_style() {
+        let hidden = [
+            "new_password",
+            "Confirm-Password",
+            "password_confirmation",
+            "newPassword",
+            "accessToken",
+            "clientSecret",
+            "privateKey",
+            "api-key",
+            "x-api-key",
+            "apiKey",
+            "secret_key",
+            "user_api_key",
+            "otp",
+            "token_count",
+        ];
+        let shown = [
+            "username",
+            "author",
+            "keyboard",
+            "page_size",
+            "passwords_match",
+            "oauth_provider",
+        ];
+        for k in hidden {
+            assert!(is_sensitive(k), "{k} must be redacted");
+        }
+        for k in shown {
+            assert!(!is_sensitive(k), "{k} must stay visible");
+        }
+    }
+
+    /// A database error reaches the log, not the agent (#1963).
+    #[test]
+    fn exec_error_text_is_not_sent_to_the_agent() {
+        let e: McpError = crate::sql::ExecError::from(crate::sql::sqlx::Error::Protocol(
+            "relation \"secret_table\" does not exist".into(),
+        ))
+        .into();
+        assert!(!e.message.contains("secret_table"), "{}", e.message);
+        assert_eq!(e.code, codes::INTERNAL_ERROR);
     }
 }

@@ -66,7 +66,7 @@ fn derive_bare_redirect(
     state: &AppState,
     slug: &str,
 ) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let host = crate::urls::HostAuthority::parse(headers.get(header::HOST)?.to_str().ok()?)?;
     let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .unwrap_or("https");
     Some(format!(

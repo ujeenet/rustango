@@ -45,10 +45,24 @@ pub(crate) async fn handle_message(
         Err(_) => return json_error(Value::Null, JsonRpcError::parse_error()),
     };
     let recovered_id = value.get("id").cloned().unwrap_or(Value::Null);
+    // MCP ids are never null; serde would read one as a notification (#1963).
+    let null_id = value.get("id").is_some_and(Value::is_null);
     let request: JsonRpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(e) => return json_error(recovered_id, JsonRpcError::invalid_request(e.to_string())),
     };
+    if request.jsonrpc != super::types::JSONRPC_VERSION {
+        return json_error(
+            recovered_id,
+            JsonRpcError::invalid_request("jsonrpc must be \"2.0\""),
+        );
+    }
+    if null_id {
+        return json_error(
+            Value::Null,
+            JsonRpcError::invalid_request("id must not be null"),
+        );
+    }
 
     if request.is_notification() {
         // `notifications/cancelled { requestId }` trips the cancel

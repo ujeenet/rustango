@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 
 use super::tools::McpContext;
-use super::types::{codes, JsonRpcError};
+use super::types::JsonRpcError;
 
 /// The log levels MCP allows, least severe first.
 const LOG_LEVELS: &[&str] = &[
@@ -67,7 +67,7 @@ pub async fn complete(ctx: &McpContext, params: Value) -> Result<Value, JsonRpcE
 
     let resources = crate::tenancy::resources_for_skills_pool(&ctx.pool, &ctx.agent.skills)
         .await
-        .map_err(|e| JsonRpcError::new(codes::INTERNAL_ERROR, e.to_string()))?;
+        .map_err(JsonRpcError::internal_logged)?;
     candidates.extend(resources.into_iter().map(|r| r.resource_uri));
 
     let mut values: Vec<String> = candidates

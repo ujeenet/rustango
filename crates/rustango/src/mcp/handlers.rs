@@ -131,6 +131,5 @@ fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
             version: env!("CARGO_PKG_VERSION"),
         },
     };
-    serde_json::to_value(result)
-        .map_err(|e| JsonRpcError::new(super::types::codes::INTERNAL_ERROR, e.to_string()))
+    serde_json::to_value(result).map_err(JsonRpcError::internal_logged)
 }
