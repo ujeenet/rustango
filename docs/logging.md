@@ -487,5 +487,5 @@ covers.
 - **Two subscribers, second one ignored.** `try_init` means first install wins.
   If you call `logging::setup()` *and* `Cli::with_logging()`, the
   settings-driven one loses. `install()` warns when this happens — look for
-  `[logging] settings ignored` on stderr. Under `#[rustango::main]`, add
+  `logging setup ignored` on stderr. Under `#[rustango::main]`, add
   `logging = false`.

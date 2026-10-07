@@ -90,7 +90,8 @@ REWRITE='
   my $example = $ARGV =~ m{^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs)$}
     && /^\s*(#|\/\/)/;
   unless ($example) {
-    # Our own manifest line, or a pin naming rustango: never a third-party dep.
+    # Our own manifest line, or a line naming rustango. A `[dependencies.foo]`
+    # table with its own `version = "X"` line still matches; check the list.
     s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g if /^\s*version\s*=/ || /rustango/;
     s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
     s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
