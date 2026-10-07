@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet OpenAPI lists every write status (#2207)
+
+PUT and PATCH now list `400` and the `204` sent when the updated row leaves the caller's scope; the `201` notes its empty body in the same case.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
