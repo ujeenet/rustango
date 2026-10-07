@@ -517,6 +517,7 @@ where
                             routes,
                             parts.uri.query(),
                             &parts.headers,
+                            &parts.extensions,
                             &pool,
                             &registry_pool,
                         )
@@ -531,6 +532,7 @@ where
                         routes,
                         parts.uri.query(),
                         &parts.headers,
+                        &parts.extensions,
                     )
                     .await
                     .into_response();
@@ -972,6 +974,7 @@ async fn login_form(
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
     headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
     #[cfg(feature = "admin-sso")] tenant_pool: &crate::sql::Pool,
     #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
 ) -> Response {
@@ -1042,8 +1045,7 @@ async fn login_form(
             None
         }
         None => {
-            let (token, cookie) =
-                crate::forms::csrf::ensure_token(headers, crate::forms::csrf::CSRF_COOKIE);
+            let (token, cookie) = crate::forms::csrf::ensure_token_under_layer(headers, extensions);
             ctx.insert("csrf_token", &token);
             cookie
         }
@@ -1129,7 +1131,11 @@ async fn login_submit(
     // session rather than replaying an existing one, which is what
     // makes "the victim is now inside the attacker's account" possible.
     #[cfg(feature = "csrf")]
-    if !crate::forms::csrf::verify_form_token(&headers, form.csrf.as_deref()) {
+    if !crate::forms::csrf::verify_form_token_under_layer(
+        &headers,
+        extensions,
+        form.csrf.as_deref(),
+    ) {
         return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
     }
 
