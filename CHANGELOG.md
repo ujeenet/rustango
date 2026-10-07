@@ -12,6 +12,10 @@ Emptying a cell that holds an override deletes that `(locale, key)` row, so the 
 
 A non-`Auto` integer PK with a `default` is created as `BIGINT`, not the rowid alias that skipped the default.
 
+### Fixed — ViewSet PATCH validates the row it overwrites (#2010)
+
+The cross-field check reads the row locked, and the UPDATE and its audit entry run in the same transaction.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

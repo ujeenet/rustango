@@ -158,6 +158,10 @@ untouched.
 
 New tables and migrations create a non-`Auto` integer PK with a `default` as `BIGINT`, so the default applies. Existing tables keep the rowid column until rebuilt (#2137).
 
+### ViewSet serializer PATCH runs in one transaction
+
+The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
