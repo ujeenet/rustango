@@ -38,7 +38,7 @@
 //! a short interval; the persisted edit is authoritative regardless.
 
 #[cfg(feature = "admin")]
-use crate::i18n::db::{all_pool, delete_key_pool, upsert_pool, Translation};
+use crate::i18n::db::{all_pool, delete_key_pool, delete_override, upsert_pool, Translation};
 // Only the `admin`-gated functions below take a pool, so the import follows
 // the same gate — it was unconditional and warned in every admin-less build.
 #[cfg(feature = "admin")]
@@ -258,11 +258,31 @@ pub fn changed_edits<'a>(
         .collect()
 }
 
-/// Upsert each edit that [`changed_edits`] keeps. Returns the count
-/// written. `updated_by` records the operator.
+/// The `(locale, key)` cells an operator emptied: a stored non-empty
+/// override posted back blank, so it falls back to the file (#2091).
+#[must_use]
+pub fn cleared_cells<'a>(
+    current: &[(String, String, String)],
+    edits: &'a [(String, String, String)],
+) -> Vec<(&'a str, &'a str)> {
+    edits
+        .iter()
+        .filter(|(l, k, v)| {
+            v.is_empty()
+                && current
+                    .iter()
+                    .any(|(cl, ck, cv)| cl == l && ck == k && !cv.is_empty())
+        })
+        .map(|(l, k, _)| (l.as_str(), k.as_str()))
+        .collect()
+}
+
+/// Upsert each edit that [`changed_edits`] keeps and delete each cell
+/// [`cleared_cells`] finds. Returns the count written or removed.
+/// `updated_by` records the operator.
 ///
 /// # Errors
-/// As the ORM upsert path ([`crate::sql::ExecError`]).
+/// As the ORM upsert and delete paths ([`crate::sql::ExecError`]).
 #[cfg(feature = "admin")]
 pub async fn apply_edits(
     pool: &Pool,
@@ -274,7 +294,11 @@ pub async fn apply_edits(
     for (locale, key, value) in &changed {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
-    Ok(changed.len())
+    let cleared = cleared_cells(&current, edits);
+    for (locale, key) in &cleared {
+        delete_override(pool, locale, key).await?;
+    }
+    Ok(changed.len() + cleared.len())
 }
 
 /// Delete each listed key (all locales) from the override layer. Returns

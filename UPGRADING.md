@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Translations editor: an emptied cell deletes its override
+
+`i18n::admin::apply_edits` now deletes a stored override posted back empty, and counts it in its return value (#2091).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

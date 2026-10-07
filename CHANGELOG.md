@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the translations editor clears one locale's override (#2091)
+
+Emptying a cell that holds an override deletes that `(locale, key)` row, so the locale falls back to its file.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
