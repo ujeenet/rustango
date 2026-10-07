@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Emptying a cell that holds an override deletes that `(locale, key)` row, so the locale falls back to its file.
 
+### Fixed — SQLite honours a DB default on an integer primary key (#2137)
+
+A non-`Auto` integer PK with a `default` is created as `BIGINT`, not the rowid alias that skipped the default.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

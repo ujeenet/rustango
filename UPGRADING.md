@@ -154,6 +154,10 @@ untouched.
 
 `i18n::admin::apply_edits` now deletes a stored override posted back empty, and counts it in its return value (#2091).
 
+### SQLite: defaulted integer PKs are `BIGINT`
+
+New tables and migrations create a non-`Auto` integer PK with a `default` as `BIGINT`, so the default applies. Existing tables keep the rowid column until rebuilt (#2137).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
