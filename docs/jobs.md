@@ -434,11 +434,21 @@ the process restarts. Tracked in
 
 **Ambient context: audit source and timezone only.** `InMemoryJobQueue`
 captures them at `dispatch` and the scheduler at `every()`, and each reinstalls
-them around the run. `PgJobQueue` does not yet: its jobs run as
-`AuditSource::System` with the default timezone, so carry the actor in the
-payload and re-enter the scope inside `run()` with `audit::with_source`. No
-queue carries a session or a tenant. Tracked in
-[#1229](https://github.com/ujeenet/rustango/issues/1229).
+them around the run. `PgJobQueue` stores them in `rustango_jobs.context`,
+which `ensure_table_pool` adds to an older table; a table without the column
+runs jobs as `AuditSource::System`. No queue carries a session or a tenant.
+
+A source set by the tenant admin names a user of that tenant, so it is
+recorded only on writes through the pool `tenancy::with_tenant` (or
+`for_each_tenant`) hands over for that tenant. Other writes, including ones
+through another pool inside it, record `system`:
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
 
 ---
 

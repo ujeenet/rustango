@@ -82,6 +82,42 @@ pub enum Pool {
     Sqlite(sqlx::SqlitePool),
 }
 
+/// Identity of a pool: the address of the pool state its clones share.
+/// The clone held here keeps that address from being reused, and unlike
+/// `connect_options()` it survives `set_connect_options`.
+#[derive(Clone)]
+pub(crate) struct PoolId(Pool);
+
+impl PoolId {
+    pub(crate) fn of(pool: &Pool) -> Self {
+        Self(pool.clone())
+    }
+
+    fn key(&self) -> *const () {
+        key_of(&self.0)
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+
+    /// `true` when `pool` is a clone of this one.
+    pub(crate) fn is(&self, pool: &Pool) -> bool {
+        self.key() == key_of(pool)
+    }
+}
+
+fn key_of(pool: &Pool) -> *const () {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => std::ptr::from_ref(p.options()).cast(),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => std::ptr::from_ref(p.options()).cast(),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => std::ptr::from_ref(p.options()).cast(),
+    }
+}
+
 /// Apply [`tuning`] to any backend's `PoolOptions`.
 ///
 /// A macro, not a function: sqlx's three `PoolOptions` types share

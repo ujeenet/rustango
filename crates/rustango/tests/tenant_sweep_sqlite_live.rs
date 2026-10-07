@@ -156,6 +156,7 @@ mod job_source {
     use super::*;
     use rustango::audit::{self, with_tenant_source, AuditSource};
     use rustango::jobs::{InMemoryJobQueue, Job, JobError, JobQueue as _};
+    use rustango::tenancy::with_tenant;
     use rustango::Model;
     use std::sync::OnceLock;
 
@@ -237,5 +238,90 @@ mod job_source {
         }
         assert_eq!(sources[0].as_deref(), Some("user:42"), "tenant A");
         assert_eq!(sources[1].as_deref(), Some("system"), "tenant B");
+    }
+
+    static POOLS_2123: OnceLock<(TenantPools<sqlx::Sqlite>, Org, Org)> = OnceLock::new();
+    static DONE_2123: Mutex<bool> = Mutex::new(false);
+
+    /// Writes to its own tenant through `with_tenant`, to the other one
+    /// the same way, to its own through a bare `scoped_pool_dyn`, then to
+    /// B's pool from inside A's scope.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct WriteOwnTenant;
+
+    #[async_trait::async_trait]
+    impl Job for WriteOwnTenant {
+        const NAME: &'static str = "sweep2123_own";
+        async fn run(&self) -> Result<(), JobError> {
+            let (pools, a, b) = POOLS_2123.get().unwrap();
+            let insert = |title: &'static str| {
+                move |pool: rustango::sql::Pool| async move {
+                    let mut note = Note {
+                        id: Auto::default(),
+                        title: title.into(),
+                    };
+                    note.insert_pool(&pool).await.expect("insert");
+                }
+            };
+            with_tenant(pools, a, insert("own")).await.expect("pool a");
+            with_tenant(pools, b, insert("other"))
+                .await
+                .expect("pool b");
+            insert("bare")(pools.scoped_pool_dyn(a).await.expect("pool a")).await;
+            // Tenant B's pool, captured inside A's scope.
+            let pool_b = pools.scoped_pool_dyn(b).await.expect("pool b");
+            with_tenant(pools, a, |_| insert("cross")(pool_b))
+                .await
+                .expect("pool a");
+            *DONE_2123.lock().unwrap() = true;
+            Ok(())
+        }
+    }
+
+    /// #2123 — a job writing to its own tenant through `with_tenant`
+    /// records the tenant user who dispatched it.
+    #[tokio::test]
+    async fn a_job_writing_to_its_own_tenant_keeps_the_user() {
+        let a = db_org("a_2123", &shared_mem("sweep2123_a"), true);
+        let b = db_org("b_2123", &shared_mem("sweep2123_b"), true);
+        let registry = registry_with(&[a.clone(), b.clone()]).await;
+        let (pools, a, b) =
+            POOLS_2123.get_or_init(|| (TenantPools::new(registry), a.clone(), b.clone()));
+        for org in [a, b] {
+            let pool = pools.scoped_pool_dyn(org).await.expect("tenant pool");
+            rustango::testkit::matrix::fresh_table::<Note>(&pool).await;
+            audit::ensure_table_pool(&pool).await.expect("audit table");
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<WriteOwnTenant>().await;
+        q.start().await;
+        let user = AuditSource::User { id: "42".into() };
+        with_tenant_source(user, "a_2123".into(), async {
+            q.dispatch(&WriteOwnTenant).await.unwrap();
+        })
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !*DONE_2123.lock().unwrap() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+        assert!(*DONE_2123.lock().unwrap(), "the job did not finish");
+
+        let source = |org: &'static Org, pk: &'static str| async move {
+            let pool = pools.scoped_pool_dyn(org).await.expect("tenant pool");
+            let rows = audit::fetch_for_entity_pool(&pool, "sweep1229_note", pk)
+                .await
+                .expect("audit rows");
+            rows.first().map(|e| e.source.clone())
+        };
+        assert_eq!(source(a, "1").await.as_deref(), Some("user:42"), "own");
+        assert_eq!(source(b, "1").await.as_deref(), Some("system"), "other");
+        assert_eq!(source(a, "2").await.as_deref(), Some("system"), "bare");
+        assert_eq!(
+            source(b, "2").await.as_deref(),
+            Some("system"),
+            "B inside A"
+        );
     }
 }

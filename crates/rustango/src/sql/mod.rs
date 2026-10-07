@@ -158,6 +158,7 @@ pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
+pub(crate) use pool::PoolId;
 pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
 /// The canonical `SQLite` timestamp encoder. Gated because its only

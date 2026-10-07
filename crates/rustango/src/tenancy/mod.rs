@@ -217,4 +217,6 @@ pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
 };
-pub use sweep::{active_tenants, for_each_tenant, SweepError, TenantOutcome, TenantSweep};
+pub use sweep::{
+    active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,
+};

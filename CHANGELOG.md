@@ -171,6 +171,14 @@ InnoDB accepts the clause and then blocks the parent delete; migrations now fail
 - MCP: a tool call is audited before it runs, DB error text stays in the log, `new_password`-style keys are redacted, a reused request id keeps its cancel slot, a null `id` or wrong `jsonrpc` is an invalid request, Basic client credentials are form-decoded, and discovery URLs ignore a malformed `Host` (#1963).
 - `TenantAdminBuilder::impersonation_jti_store` takes a shared store for used handoff tokens and ended impersonations, so they hold across replicas (#2176).
 
+### Fixed — `PgJobQueue` jobs run as their enqueuer (#1229)
+
+The enqueuer's audit source and timezone are stored in a new `rustango_jobs.context` column and reinstalled around the run, as `InMemoryJobQueue` already did. The transaction still does not cross.
+
+### Fixed — a job writing to its own tenant keeps the tenant user (#2123)
+
+New `tenancy::with_tenant(&pools, &org, |pool| …)` runs one step of `for_each_tenant`, so a source set by the tenant admin is recorded on writes through that tenant's pool instead of `system`. Writes through any other pool inside it still record `system`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)
