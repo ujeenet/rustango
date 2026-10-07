@@ -441,7 +441,7 @@ impl RunLog {
 ///
 /// # Errors
 /// A registry write failure.
-pub async fn append_event(
+pub async fn append_event_text(
     registry: &Pool,
     run_id: i64,
     seq: i64,
@@ -477,12 +477,51 @@ pub async fn attach_org(registry: &Pool, run_id: i64, org_id: i64) -> Result<(),
     Ok(())
 }
 
+/// [`append_event_text`] with untyped text, stored as given.
+///
+/// # Errors
+/// A registry write failure.
+#[deprecated(note = "use append_event_text / finish_run_text")]
+pub async fn append_event(
+    registry: &Pool,
+    run_id: i64,
+    seq: i64,
+    step: &str,
+    status: &str,
+    message: &str,
+) -> Result<(), TenancyError> {
+    append_event_text(
+        registry,
+        run_id,
+        seq,
+        step,
+        status,
+        &RunText(message.to_owned()),
+    )
+    .await
+}
+
+/// [`finish_run_text`] with untyped text, stored as given.
+///
+/// # Errors
+/// A registry write failure.
+#[deprecated(note = "use append_event_text / finish_run_text")]
+pub async fn finish_run(
+    registry: &Pool,
+    run_id: i64,
+    state: RunState,
+    error: Option<&str>,
+) -> Result<(), TenancyError> {
+    let error = error.map(|e| RunText(e.to_owned()));
+    finish_run_text(registry, run_id, state, error.as_ref()).await
+}
+
 /// Close a run. Only a `running` run changes, so one already closed as
 /// interrupted keeps that result (#1883).
 ///
 /// # Errors
 /// A registry write failure.
-pub async fn finish_run(
+pub async fn finish_run_text(
     registry: &Pool,
     run_id: i64,
     state: RunState,

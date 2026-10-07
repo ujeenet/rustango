@@ -54,7 +54,7 @@ where
         let mut seq = 1i64;
         while let Some((step, status, text)) = rx.recv().await {
             if let Err(e) =
-                store::append_event(&writer_registry, run_id, seq, step, status, &text).await
+                store::append_event_text(&writer_registry, run_id, seq, step, status, &text).await
             {
                 tracing::warn!(
                     target: "rustango::tenancy::migrate_run",
@@ -99,7 +99,7 @@ where
         .as_ref()
         .err()
         .map(|e| log.failure(slug.unwrap_or(""), "Migration failed", e));
-    if let Err(e) = store::finish_run(&registry, run_id, state, error.as_ref()).await {
+    if let Err(e) = store::finish_run_text(&registry, run_id, state, error.as_ref()).await {
         tracing::warn!(
             target: "rustango::tenancy::migrate_run",
             run_id, error = %e,

@@ -405,7 +405,7 @@ async fn pruning_removes_finished_runs_and_keeps_unfinished_ones() {
     .await
     .expect("open");
     let done_id = done.id.get().copied().expect("id");
-    store::append_event(
+    store::append_event_text(
         &registry_pool,
         done_id,
         1,
@@ -415,7 +415,7 @@ async fn pruning_removes_finished_runs_and_keeps_unfinished_ones() {
     )
     .await
     .expect("event");
-    store::finish_run(&registry_pool, done_id, RunState::Succeeded, None)
+    store::finish_run_text(&registry_pool, done_id, RunState::Succeeded, None)
         .await
         .expect("finish");
 
@@ -487,7 +487,7 @@ async fn stale_running_runs_are_reaped() {
             .await
             .unwrap();
     }
-    store::finish_run(&reg, done, RunState::Succeeded, None)
+    store::finish_run_text(&reg, done, RunState::Succeeded, None)
         .await
         .unwrap();
 
@@ -534,7 +534,7 @@ async fn a_reaped_run_is_not_flipped_back_by_its_task() {
             .unwrap(),
         1
     );
-    store::finish_run(&reg, id, RunState::Succeeded, None)
+    store::finish_run_text(&reg, id, RunState::Succeeded, None)
         .await
         .unwrap();
     let state = store::run_by_id(&reg, id).await.unwrap().unwrap().state;

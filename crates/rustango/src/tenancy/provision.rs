@@ -311,7 +311,7 @@ impl<'a> Reporter<'a> {
             return;
         };
         let seq = store.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = super::provision_store::append_event(
+        if let Err(e) = super::provision_store::append_event_text(
             store.registry,
             store.run_id,
             seq,
@@ -603,7 +603,7 @@ where
         Err(e) => (RunState::Failed, rep.run_error(Some(e))),
     };
     // No `attach_org` here: `Reporter::registered` linked the org already.
-    if let Err(e) = store::finish_run(&registry, run_id, state, error.as_ref()).await {
+    if let Err(e) = store::finish_run_text(&registry, run_id, state, error.as_ref()).await {
         tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
     }
 

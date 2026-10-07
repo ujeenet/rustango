@@ -66,7 +66,7 @@ Provision and console "Run migrations" runs store "`<name>` failed (…)" and lo
 
 ### Security — run-log text is a type; connection checks keep the driver's words out (#2212)
 
-`append_event` and `finish_run` take `RunText`, which cannot hold raw error text. A failed connection check stores the advice and endpoint and logs the driver detail. Each tenant's failure is logged once, under a `ref` the stored lines repeat.
+New `append_event_text` and `finish_run_text` take `RunText`, which cannot hold raw error text; `append_event` and `finish_run` are deprecated. A failed connection check stores the advice and endpoint and logs the driver detail. Each tenant's failure is logged once, under a `ref` the stored lines repeat.
 
 ### Security — `Settings` Debug redacts secrets
 

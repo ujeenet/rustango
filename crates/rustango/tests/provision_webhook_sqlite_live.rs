@@ -407,7 +407,7 @@ async fn a_delivery_that_loses_the_key_race_gets_the_twin_run() {
     .await
     .unwrap();
     let old_id = old.id.get().copied().unwrap();
-    store::finish_run(
+    store::finish_run_text(
         &registry,
         old_id,
         store::RunState::Failed,
@@ -665,7 +665,7 @@ async fn half_made(
             .await
             .unwrap();
     }
-    store::finish_run(
+    store::finish_run_text(
         &registry,
         run_id,
         store::RunState::Failed,
