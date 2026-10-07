@@ -435,9 +435,40 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
     );
 }
 
+/// Provisioning inside an `atomic` block joins it, so the block's rollback
+/// takes the new user and link back (#1460).
+async fn provision_inside_a_block_rolls_back(pool: &Pool) {
+    use rustango::sql::CounterPool as _;
+    let (p, key) = (pool.clone(), app_key());
+    let email = "inblock1460@example.com";
+    let res: Result<(), rustango::sql::ExecError> = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rustango::atomic!(pool, |_tx| {
+            let got =
+                find_or_provision_member(&p, &key, false, &profile("sub-1460", email), true).await;
+            assert!(matches!(got, Ok(MemberSignIn::Member(_))), "{got:?}");
+            Err(rustango::sql::ExecError::AtomicAborted)
+        }),
+    )
+    .await
+    .expect("deadlock");
+    assert!(res.is_err());
+    assert!(linked_user(pool, &app_key(), "sub-1460")
+        .await
+        .unwrap()
+        .is_none());
+    let users = User::objects()
+        .filter("email", email)
+        .count(pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 0, "the user outlived the block");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        provision_inside_a_block_rolls_back,
         key_matches_every_part,
         subject_match_is_exact,
         email_match_is_exact,

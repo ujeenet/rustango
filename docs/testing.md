@@ -151,7 +151,8 @@ The `Box::pin` is required, not stylistic: the bound is
 `for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
 which is how the closure gets to borrow `tx` across its own await points. An
 `atomic()` on the same pool inside the closure is a savepoint and rolls back too;
-drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`. The
+drop the guard before it, a `bulk_insert_pool` or a multi-statement write (audited
+`_pool` writes, M2M `set`, fixtures), or they fail with `NestedAtomic`. The
 closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
 rollback happens either way, so the `unwrap` is about your assertions, not
 about cleanup.

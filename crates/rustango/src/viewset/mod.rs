@@ -3171,19 +3171,32 @@ async fn create_many(
             }
         }
     }
+    // Read the rows back in the write's transaction: inside an open
+    // `atomic` block a pool read would not see them, or would wait for a
+    // second connection (#1460). A serializer renders through the pool,
+    // so it reads after the commit.
+    let mut created: Vec<Value> = Vec::with_capacity(pks.len());
+    if state.vs.serializer.is_none() {
+        for pk_val in &pks {
+            let q = scoped_pk_query(state, pk_field, pk_val.clone(), scope);
+            match crate::sql::select_one_row_as_json_tx(write.tx(), &q, &fields).await {
+                Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
+                Err(e) => {
+                    let _ = write.finish(false).await;
+                    return json_server_error("viewset::bulk_create::read_back", &e);
+                }
+            }
+        }
+    }
     if let Err(e) = write.finish(true).await {
         return json_server_error("viewset::bulk_create::commit", &e);
     }
-
-    // Read the rows back after the commit. They have to be committed to
-    // be visible here — `acq` is the pool, not the transaction — and
-    // atomicity is a property of the writes, which is the part that was
-    // missing.
-    let mut created: Vec<Value> = Vec::with_capacity(pks.len());
-    for pk_val in pks {
-        match fetch_by_pk_scoped(state, acq, pk_field, pk_val, &fields, scope).await {
-            Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
-            Err(e) => return json_server_error("viewset::bulk_create::read_back", &e),
+    if state.vs.serializer.is_some() {
+        for pk_val in pks {
+            match fetch_by_pk_scoped(state, acq, pk_field, pk_val, &fields, scope).await {
+                Ok(obj) => created.push(obj.unwrap_or(Value::Null)),
+                Err(e) => return json_server_error("viewset::bulk_create::read_back", &e),
+            }
         }
     }
 
@@ -3372,9 +3385,20 @@ async fn fetch_by_pk_scoped(
     fields: &[&'static crate::core::FieldSchema],
     scope: &[WhereExpr],
 ) -> Result<Option<Value>, crate::sql::ExecError> {
+    let select_q = scoped_pk_query(state, pk_field, pk_val, scope);
+    render_single(state, acq, &select_q, fields).await
+}
+
+/// The row at `pk_val`, narrowed to `scope`.
+fn scoped_pk_query(
+    state: &ViewSetState,
+    pk_field: &'static crate::core::FieldSchema,
+    pk_val: SqlValue,
+    scope: &[WhereExpr],
+) -> SelectQuery {
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     select_q.where_clause = narrow(select_q.where_clause, scope.to_vec());
-    render_single(state, acq, &select_q, fields).await
+    select_q
 }
 
 /// Render the rows matching `select_q` for a list response: through

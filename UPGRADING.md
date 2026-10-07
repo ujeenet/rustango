@@ -154,13 +154,19 @@ untouched.
 
 `sql::atomic_with(pool, Isolation::Serializable, f)` is new (#1460). A custom `Dialect` refuses every level until it implements `begin_isolated_sql`.
 
-### Audited writes inside `atomic` join the block
+### Multi-statement writes inside `atomic` join the block
 
-Inside an `atomic` block on the same pool, audited `save_pool` / `insert_pool` / `delete_pool`, M2M `set` and fixture loads now commit or roll back with the block (#1460). Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`.
+Inside an `atomic` block on the same pool these now run in a savepoint and commit or roll back with the block (#1460): audited `insert_pool` / `save_pool` / `save_partial` / `delete_pool` / `soft_delete` / `restore` / `truncate`, audited `update_all` / `delete_where` / `destroy` / `bulk_update` / bulk upserts, `audit::emit_many_pool`, M2M `set`, `fixtures::load_all_pool` / `load_into_pool`, `DatabaseCache::incr` on MySQL, SSO member provisioning, viewset bulk create, and the admin's audited edits and creates.
+
+Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`: drop the guard before the call.
+
+On SQLite they no longer take the write lock up front (`BEGIN IMMEDIATE`): the outer block began `DEFERRED`, so a block that reads before it writes can get `SQLITE_BUSY` under a concurrent writer. Write first in the block, or retry; a way to open `atomic` with `BEGIN IMMEDIATE` is planned for 0.61.0.
 
 ### Audited `_tx` writes now write audit rows
 
 `insert_tx`, `save_tx` and `delete_tx` on audited models add their audit row in the same transaction, like the `_pool` methods (#1460). Drop any manual audit emit you added after them.
+
+They now run extra statements: the audit insert, and a before-read for `save_tx`. `assert_num_queries` does not count those two, so a test pinning statement counts by other means will see more.
 
 ### Render DDL outside the runner with `render_changes_between`
 
