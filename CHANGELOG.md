@@ -81,6 +81,21 @@ The cross-field check reads the row locked, and the UPDATE and its audit entry r
 ### Fixed — two tenants can no longer claim one host at once (#2099)
 
 `add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused. A MySQL deadlock between two claims is retried once.
+### Fixed — media collection listing is paged (#1570)
+
+`GET /collections` takes `?limit=&offset=` (max 1000) through the new `list_collections_paged`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0. `list_collections` is deprecated and still unbounded.
+
+### Fixed — `GET /tags` reads one page of tags (#1570)
+
+It pages by slug through the new `MediaManager::list_tags` instead of counting every tag link for `popular_tags(1000)`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0.
+
+### Fixed — tagging costs a fixed number of queries (#1570)
+
+`tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs. `set_tags` retries its transaction when the server reports a deadlock, which two concurrent sets on MySQL hit.
+
+### Fixed — recursive collection listing past the bind limit (#1570)
+
+A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing; there, an `offset` above 10 000 is refused with 400.
 
 ## [0.60.1] — 2026-10-07
 

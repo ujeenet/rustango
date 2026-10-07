@@ -195,6 +195,21 @@ The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent P
 ### Host claims are transactional
 
 Tenant edit and create now insert and delete a claim row in `rustango_org_hosts` inside their transaction (#2099).
+### `GET /collections` returns at most 1000 rows
+
+It used to return every collection. Page with `?limit=&offset=`; with no `?limit` it returns 1000 now and 100 from 0.61.0. `MediaManager::list_collections` is deprecated in favour of `list_collections_paged` (#1570).
+
+### `GET /tags` is ordered by slug and paged
+
+It used to return up to 1000 tags by usage; it now returns them by slug, with `?limit=&offset=` (default 1000 now, 100 from 0.61.0). `GET /tags/popular` still orders by usage (#1570).
+
+### Wide recursive listings cap the offset
+
+When a subtree has more collections than the backend's bind limit, `list_in_collection_paged` and `GET /collections/{id}/contents?recursive=true` refuse an `offset` above 10 000 with 400 (#1570).
+
+### `tag` / `set_tags` take at most 1000 distinct slugs
+
+More returns `MediaError::Other` (HTTP 400) and changes nothing (#1570).
 
 ## 0.60.1
 
