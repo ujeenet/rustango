@@ -326,35 +326,22 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
 
     // `url.query` goes out only when the request had one. OTel says
     // to omit it otherwise, `tracing_layer` does the same, and a
-    // collector may reject an empty keyword field.
-    //
-    // One event callsite cannot drop a field, so the branch has to
-    // wrap the whole macro call. The macro keeps that from turning
-    // into six copies that drift apart.
+    // collector may reject an empty keyword field. A `None` field is
+    // not recorded, so one field list covers both shapes (#1493).
+    let url_query = (!query.is_empty()).then(|| tracing::field::display(&query));
+    // The level is part of the static callsite, hence the macro.
     macro_rules! emit {
         ($level:ident $(, $msg:literal)?) => {
-            if query.is_empty() {
-                tracing::$level!(
-                    "http.request.method" = %method,
-                    "url.path" = %path,
-                    "http.response.status_code" = status,
-                    duration_ms,
-                    "client.address" = %client_address,
-                    tenant = %tenant,
-                    $($msg,)?
-                );
-            } else {
-                tracing::$level!(
-                    "http.request.method" = %method,
-                    "url.path" = %path,
-                    "url.query" = %query,
-                    "http.response.status_code" = status,
-                    duration_ms,
-                    "client.address" = %client_address,
-                    tenant = %tenant,
-                    $($msg,)?
-                );
-            }
+            tracing::$level!(
+                "http.request.method" = %method,
+                "url.path" = %path,
+                "url.query" = url_query,
+                "http.response.status_code" = status,
+                duration_ms,
+                "client.address" = %client_address,
+                tenant = %tenant,
+                $($msg,)?
+            )
         };
     }
 
@@ -827,6 +814,47 @@ mod observability_mount_tests {
                 && out.contains("rid-1541"),
             "the panic was not logged with its request id:\n{out}"
         );
+    }
+
+    /// The access-log field names of one request, read from a JSON line.
+    async fn access_log_field_names(uri: &str) -> std::collections::BTreeSet<String> {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(buf.clone())
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = mount_observability(
+            Router::new().route("/", get(|| async { "ok" })),
+            Some(AccessLogLayer::default()),
+            default_redact_params(),
+        );
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        let out = buf.contents();
+        let line = out
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json line"))
+            .find(|v| v["target"] == "rustango::access_log")
+            .unwrap_or_else(|| panic!("no access-log line:\n{out}"));
+        line["fields"]
+            .as_object()
+            .expect("fields object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A query string adds `url.query` and changes nothing else (#1493).
+    #[tokio::test]
+    async fn a_query_adds_url_query_and_nothing_else() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let bare = access_log_field_names("/").await;
+        let mut with_query = access_log_field_names("/?page=2").await;
+        assert!(!bare.contains("url.query"), "{bare:?}");
+        assert!(with_query.remove("url.query"), "{with_query:?}");
+        assert_eq!(bare, with_query, "the two access-log shapes drifted apart");
     }
 
     /// The control: with a log configured, the span is there too.
