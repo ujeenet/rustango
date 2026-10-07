@@ -3875,9 +3875,9 @@ fn inherent_impl_tokens(
                     query: &#root::core::UpdateQuery,
                     only: ::core::option::Option<&::std::collections::HashSet<&'static str>>,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let mut _scope = #root::sql::__macro_internals::TxScope::begin(
+                    let mut _scope = #root::sql::TxScope::begin(
                         pool,
-                        #root::sql::__macro_internals::Begin::Deferred,
+                        #root::sql::Begin::Deferred,
                     )
                     .await?;
                     let _r = self.__rustango_save_with_diff_tx(_scope.tx(), query, only).await;
