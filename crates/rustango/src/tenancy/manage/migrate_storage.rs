@@ -21,8 +21,8 @@
 //! 2. Provision the target storage:
 //!    - schema → the restore creates it; it must not exist yet. The
 //!      registry user needs PG 15+ and `CREATEDB` (or a superuser on
-//!      13/14) for a staging database. Extensions are not copied:
-//!      create them in the registry first. An interrupted run can
+//!      13/14) for a staging database. The registry gets the source's
+//!      extensions it lacks, in `public`. An interrupted run can
 //!      leave a `rustango_stage_*` database to drop by hand.
 //!    - database → caller passes `--database-url`. Database must
 //!      already exist (we don't `CREATE DATABASE` — that's a
@@ -178,20 +178,26 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     let (source, target) = (Conn::new(&source_url), Conn::new(&target_url));
     match (&target_schema, &source_schema) {
         (Some(schema), _) => {
-            restore_into_schema(pools.registry(), &source, &target, schema).await?
+            restore_into_schema(pools.registry(), &source_url, &target, schema).await?
         }
         // A database-mode tenant lives in `public` (#2189).
         (None, Some(schema)) => {
             check_public_is_replaceable(&target_url).await?;
+            // The dump names their objects where the registry has them; they
+            // move with the tables into `public` (#2210).
+            let used = extensions_used_by(pools.registry(), schema).await?;
+            refuse_fixed(used.iter().filter(|e| !e.relocatable))?;
+            let before: Vec<String> = used.iter().flat_map(|e| e.create_in(&e.schema)).collect();
+            let mut after: Vec<String> = used.iter().flat_map(|e| e.move_to(&schema.0)).collect();
             // `--no-acl` drops the default grant, which other app roles need.
-            let then = [
+            after.extend([
                 "DROP SCHEMA public".to_owned(),
                 format!("ALTER SCHEMA {} RENAME TO public", quote_ident(&schema.0)),
                 "GRANT USAGE ON SCHEMA public TO PUBLIC".to_owned(),
-            ];
-            pg_dump_to_psql(&source, Some(schema), &target, &then)?;
+            ]);
+            pg_dump_to_psql(&source, Some(schema), &target, &before, &after)?;
         }
-        (None, None) => pg_dump_to_psql(&source, None, &target, &[])?,
+        (None, None) => pg_dump_to_psql(&source, None, &target, &[], &[])?,
     }
     writeln!(writer, "  data move OK")?;
 
@@ -387,15 +393,138 @@ impl std::fmt::Display for SchemaName {
     }
 }
 
+/// An extension as one database has it.
+struct Extension {
+    name: String,
+    schema: String,
+    relocatable: bool,
+}
+
+impl Extension {
+    fn create_in(&self, schema: &str) -> [String; 2] {
+        [
+            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
+            format!(
+                "CREATE EXTENSION IF NOT EXISTS {} WITH SCHEMA {} CASCADE",
+                quote_ident(&self.name),
+                quote_ident(schema)
+            ),
+        ]
+    }
+
+    fn move_to(&self, schema: &str) -> [String; 2] {
+        [
+            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
+            format!(
+                "ALTER EXTENSION {} SET SCHEMA {}",
+                quote_ident(&self.name),
+                quote_ident(schema)
+            ),
+        ]
+    }
+}
+
+const EXTENSIONS: &str = "SELECT DISTINCT e.extname, n.nspname, e.extrelocatable \
+     FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace";
+
+async fn fetch_extensions(
+    pool: &crate::sql::sqlx::PgPool,
+    sql: &str,
+    bind: &str,
+) -> Result<Vec<Extension>, TenancyError> {
+    let rows: Vec<(String, String, bool)> = crate::sql::sqlx::query_as(sql)
+        .bind(bind)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, schema, relocatable)| Extension {
+            name,
+            schema,
+            relocatable,
+        })
+        .collect())
+}
+
+/// The extensions whose objects `schema`'s tables, indexes or defaults use.
+async fn extensions_used_by(
+    pool: &crate::sql::sqlx::PgPool,
+    schema: &SchemaName,
+) -> Result<Vec<Extension>, TenancyError> {
+    let sql = format!(
+        "{EXTENSIONS} JOIN pg_depend m ON m.refobjid = e.oid AND m.deptype = 'e' \
+         JOIN pg_depend d ON d.refclassid = m.classid AND d.refobjid = m.objid \
+         WHERE (d.classid = 'pg_class'::regclass AND d.objid IN \
+                (SELECT oid FROM pg_class WHERE relnamespace = $1::text::regnamespace)) \
+            OR (d.classid = 'pg_attrdef'::regclass AND d.objid IN \
+                (SELECT a.oid FROM pg_attrdef a JOIN pg_class c ON c.oid = a.adrelid \
+                 WHERE c.relnamespace = $1::text::regnamespace)) \
+         ORDER BY 1"
+    );
+    fetch_extensions(pool, &sql, &schema.0).await
+}
+
+/// Refuse the extensions that would have to change schema but cannot.
+fn refuse_fixed<'e>(fixed: impl Iterator<Item = &'e Extension>) -> Result<(), TenancyError> {
+    let names: Vec<&str> = fixed.map(|e| e.name.as_str()).collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "extension(s) {} cannot change schema (not relocatable), so this tenant cannot move",
+        names.join(", ")
+    )))
+}
+
 /// Restore `source`'s `public` into `schema` on `target`. pg_dump names
 /// every object `public.`, so `public` is renamed in a staging database
-/// first (#1864).
+/// first (#1864). Its extensions go back where the registry has them, or
+/// to `public`, and the registry gets any it lacks (#2210).
 async fn restore_into_schema(
     registry: &crate::sql::sqlx::PgPool,
-    source: &Conn,
+    source_url: &str,
     target: &Conn,
     schema: &SchemaName,
 ) -> Result<(), TenancyError> {
+    use crate::sql::sqlx::postgres::PgPoolOptions;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(source_url)
+        .await?;
+    let sql = format!("{EXTENSIONS} WHERE e.extname <> $1 ORDER BY 1");
+    let extensions = fetch_extensions(&pool, &sql, "plpgsql").await;
+    pool.close().await;
+    let mut create = Vec::new();
+    let mut moves = vec![format!(
+        "ALTER SCHEMA public RENAME TO {}",
+        quote_ident(&schema.0)
+    )];
+    let mut fixed = Vec::new();
+    let sql = format!("{EXTENSIONS} WHERE e.extname = $1");
+    for e in extensions? {
+        let installed = fetch_extensions(registry, &sql, &e.name).await?;
+        let home = installed.into_iter().next().map_or_else(
+            || {
+                create.extend(e.create_in("public"));
+                "public".to_owned()
+            },
+            |r| r.schema,
+        );
+        // Where the rename leaves it in staging.
+        let at = if e.schema == "public" {
+            &schema.0
+        } else {
+            &e.schema
+        };
+        if *at != home {
+            moves.extend(e.move_to(&home));
+            if !e.relocatable {
+                fixed.push(e);
+            }
+        }
+    }
+    refuse_fixed(fixed.iter())?;
+
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -405,9 +534,9 @@ async fn restore_into_schema(
         .execute(registry)
         .await?;
     let stage = target.database(&staging);
-    let rename = format!("ALTER SCHEMA public RENAME TO {}", quote_ident(&schema.0));
-    let moved = pg_dump_to_psql(source, None, &stage, &[rename])
-        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target, &[]));
+    let source = Conn::new(source_url);
+    let moved = pg_dump_to_psql(&source, None, &stage, &[], &moves)
+        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target, &create, &[]));
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;
@@ -422,7 +551,8 @@ fn pg_dump_to_psql(
     source: &Conn,
     source_schema: Option<&SchemaName>,
     target: &Conn,
-    then: &[String],
+    before: &[String],
+    after: &[String],
 ) -> Result<(), TenancyError> {
     let mut dump_cmd = source.command("pg_dump");
     dump_cmd
@@ -440,9 +570,14 @@ fn pg_dump_to_psql(
     let dump_stdout = dump.stdout.take().expect("pg_dump stdout was piped");
 
     let mut restore_cmd = target.psql();
-    // `-f -` first: psql reads no stdin once `-c` is given (#1864).
-    restore_cmd.args(["--single-transaction", "-f", "-"]);
-    for stmt in then {
+    // psql reads no stdin once `-c` is given, so `-f -` (#1864); all in
+    // one transaction, in this order.
+    restore_cmd.arg("--single-transaction");
+    for stmt in before {
+        restore_cmd.arg("-c").arg(stmt);
+    }
+    restore_cmd.args(["-f", "-"]);
+    for stmt in after {
         restore_cmd.arg("-c").arg(stmt);
     }
     restore_cmd.stdin(dump_stdout);

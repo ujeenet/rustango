@@ -319,8 +319,12 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     assert_eq!(left, 0, "the failed restore left its schema");
 
     let src = PgPool::connect(&src_url).await.unwrap();
+    // Extension types and opclasses move too (#2210).
     for stmt in [
-        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
+        "CREATE EXTENSION IF NOT EXISTS citext",
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
+        "CREATE INDEX users_trgm ON rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO rustango_users (username) VALUES ('ann'), ('bob')",
     ] {
         sqlx_exec(&src, stmt).await;
@@ -329,7 +333,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     migrate().await.unwrap_or_else(|e| panic!("{e}"));
 
     let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
-        "SELECT username FROM t1864_moved.rustango_users ORDER BY id",
+        "SELECT username::text FROM t1864_moved.rustango_users WHERE username = 'ANN' \
+         OR username = 'Bob' ORDER BY id",
     )
     .fetch_all(&pool)
     .await
@@ -378,9 +383,13 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     sqlx_exec(&pool, drop_dst).await;
     sqlx_exec(&pool, "CREATE DATABASE rustango_t2189_dst").await;
     sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t2189_src CASCADE").await;
+    // Extension types and opclasses move too (#2210).
     for stmt in [
+        "CREATE EXTENSION IF NOT EXISTS citext",
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
         "CREATE SCHEMA t2189_src",
-        "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
+        "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
+        "CREATE INDEX users_trgm ON t2189_src.rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO t2189_src.rustango_users (username) VALUES ('ann'), ('bob')",
     ] {
         sqlx_exec(&pool, stmt).await;
@@ -447,11 +456,13 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     .await
     .unwrap();
     assert!(granted, "other roles lost USAGE on public");
-    let names: Vec<(String,)> =
-        rustango::sql::sqlx::query_as("SELECT username FROM public.rustango_users ORDER BY id")
-            .fetch_all(&dst)
-            .await
-            .unwrap();
+    let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
+        "SELECT username::text FROM rustango_users WHERE username = 'ANN' \
+             OR username = 'Bob' ORDER BY id",
+    )
+    .fetch_all(&dst)
+    .await
+    .unwrap();
     assert_eq!(names, [("ann".to_owned(),), ("bob".to_owned(),)]);
     let schemas: i64 = rustango::sql::sqlx::query_scalar(
         "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
