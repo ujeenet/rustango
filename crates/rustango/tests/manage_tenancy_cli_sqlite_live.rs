@@ -244,3 +244,60 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
         assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
     }
 }
+
+/// Trailing arguments and stray flags once ran the bare verb (#1952).
+#[tokio::test]
+async fn role_and_operator_verbs_refuse_extra_arguments() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    b.run(&["create-role", "acme", "editor"])
+        .await
+        .expect("role");
+    for args in [
+        &["assign-role", "acme", "bob", "editor", "junk"][..],
+        &["revoke-role", "acme", "bob", "editor", "junk"],
+        &["list-roles", "acme", "junk"],
+        &["list-operators", "-active"],
+        &["prewarm-pools", "-x"],
+    ] {
+        let res = b.run(args).await;
+        assert!(res.is_err(), "{args:?} ran: {res:?}");
+    }
+
+    for name in ["alice", "carol"] {
+        b.run(&["create-operator", name, "--password", "pw"])
+            .await
+            .expect("operator");
+    }
+    let res = b
+        .run(&["set-operator-active", "alice", "carol", "--off"])
+        .await;
+    assert!(res.is_err(), "a second username was ignored: {res:?}");
+    let list = b.run(&["list-operators"]).await.expect("list");
+    assert!(list.contains("2 active"), "{list}");
+}
+
+/// Flags may sit anywhere, and `--on --off` is refused (#1952).
+#[tokio::test]
+async fn user_verbs_take_flags_anywhere() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    let res = b
+        .run(&["set-superuser", "acme", "bob", "--on", "--off"])
+        .await;
+    assert!(res.is_err(), "contradicting flags ran: {res:?}");
+    let out = b
+        .run(&["set-superuser", "--off", "acme", "bob"])
+        .await
+        .expect("leading flag");
+    assert!(out.contains("is_superuser=false"), "{out}");
+    b.run(&["reset-password", "--password", "pw2", "acme", "bob"])
+        .await
+        .expect("leading flag");
+}

@@ -27,26 +27,23 @@ pub(super) async fn create_role_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "create-role <slug> <name> [--description <s>]";
+    let parsed = parse(
         args,
-        "create-role",
-        "slug",
-        "create-role <slug> <name> [--description <s>]",
+        &Spec {
+            verb: "create-role",
+            usage: USAGE,
+            switches: &[],
+            valued: &["--description"],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
-    let name = next_value(&mut iter, "<role-name>")?;
-    let mut description = String::new();
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--description" => description = next_value(&mut iter, "--description")?,
-            "--help" | "-h" => {
-                writeln!(w, "create-role <slug> <name> [--description <s>]")?;
-                return Ok(());
-            }
-            other => return Err(TenancyError::Validation(format!("unknown flag `{other}`"))),
-        }
-    }
+    let slug = parsed.required(0, USAGE)?;
+    let name = parsed.required(1, USAGE)?;
+    let description = parsed
+        .value("--description")?
+        .unwrap_or_default()
+        .to_owned();
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     let id = permissions::create_role_pool(&name, &description, &pool).await?;
     writeln!(w, "created role `{name}` (id={id}) on tenant `{slug}`")?;
@@ -63,9 +60,18 @@ pub(super) async fn list_roles_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(args, "list-roles", "slug", "list-roles <slug>")?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
+    const USAGE: &str = "list-roles <slug>";
+    let slug = parse(
+        args,
+        &Spec {
+            verb: "list-roles",
+            usage: USAGE,
+            switches: &[],
+            valued: &[],
+            max_positionals: 1,
+        },
+    )?
+    .required(0, USAGE)?;
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     // v0.38 — list via ORM + per-role count via separate fetches.
     // Trades one JOIN-with-GROUP-BY query for N+1 queries; for the
@@ -136,11 +142,20 @@ where
     } else {
         "revoke-role <slug> <username> <role-name>"
     };
-    reject_leading_flag(args, verb, "slug", usage)?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
-    let username = next_value(&mut iter, "<username>")?;
-    let role_name = next_value(&mut iter, "<role-name>")?;
+    // Trailing arguments were once ignored (#1952).
+    let parsed = parse(
+        args,
+        &Spec {
+            verb,
+            usage,
+            switches: &[],
+            valued: &[],
+            max_positionals: 3,
+        },
+    )?;
+    let slug = parsed.required(0, usage)?;
+    let username = parsed.required(1, usage)?;
+    let role_name = parsed.required(2, usage)?;
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     let user_id = user_id_by_username(&username, &pool).await?;
@@ -178,13 +193,12 @@ fn perm_args(args: &[String], verb: &str) -> Result<(String, String, String, boo
             max_positionals: 3,
         },
     )?;
-    let at = |i: usize| {
-        parsed
-            .positional(i)
-            .cloned()
-            .ok_or_else(|| TenancyError::Validation(format!("usage: {usage}")))
-    };
-    Ok((at(0)?, at(1)?, at(2)?, parsed.has("--role")))
+    Ok((
+        parsed.required(0, &usage)?,
+        parsed.required(1, &usage)?,
+        parsed.required(2, &usage)?,
+        parsed.has("--role"),
+    ))
 }
 
 pub(super) async fn grant_perm_cmd<W: Write + Send, DB: Database>(

@@ -220,7 +220,7 @@ where
             // database-mode tenant. Useful as a post-deploy hook
             // after credential rotation, or to validate that all
             // tenants are reachable before flipping a load balancer.
-            args::reject_extra_positionals(&args[1..], 0, "prewarm-pools")?;
+            args::no_args(&args[1..], "prewarm-pools")?;
             let report = pools.prewarm_database_tenants().await?;
             writeln!(
                 writer,

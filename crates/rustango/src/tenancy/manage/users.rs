@@ -303,37 +303,21 @@ pub(super) async fn set_superuser_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "set-superuser <slug> <username> [--on|--off]";
+    let parsed = parse(
         args,
-        "set-superuser",
-        "slug",
-        "set-superuser <slug> <username> [--on|--off]",
+        &Spec {
+            verb: "set-superuser",
+            usage: USAGE,
+            switches: &["--on", "--off"],
+            valued: &[],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation("set-superuser <slug> <username> [--on|--off]".into())
-    })?;
-    let username = iter
-        .next()
-        .cloned()
-        .ok_or_else(|| TenancyError::Validation("set-superuser requires a username".into()))?;
-    let mut on = true;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--on" => on = true,
-            "--off" => on = false,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "set-superuser <slug> <username> [--on|--off]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "set-superuser: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    // `--on --off` was last-wins; refused now, like every on/off verb.
+    let on = parsed.on_off()?.unwrap_or(true);
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     // v0.38 — UPDATE via tri-dialect raw_execute_pool. Dialect
     // emitter picks placeholders ($1/$2 on PG, ? on sqlite/mysql).
@@ -382,40 +366,21 @@ pub(super) async fn reset_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "reset-password <slug> <username> [--password <s> | --generate]";
+    let parsed = parse(
         args,
-        "reset-password",
-        "slug",
-        "reset-password <slug> <username> [--password <s> | --generate]",
+        &Spec {
+            verb: "reset-password",
+            usage: USAGE,
+            switches: &["--generate"],
+            valued: &["--password"],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation(
-            "reset-password <slug> <username> [--password <s> | --generate]".into(),
-        )
-    })?;
-    let username = iter
-        .next()
-        .cloned()
-        .ok_or_else(|| TenancyError::Validation("reset-password requires a username".into()))?;
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "reset-password <slug> <username> [--password <s> | --generate]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "reset-password: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "reset-password: --generate and --password are mutually exclusive".into(),
