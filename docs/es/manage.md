@@ -369,7 +369,7 @@ Escribe:
   config/default.toml                       (shared knobs)
   config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
-  system/migrations/                        (tenant template — framework tables, generated)
+  system/migrations/                        (framework tables, generated — commit them)
   src/{lib,main,models,views,urls}.rs
 ```
 
@@ -382,7 +382,7 @@ ellos llevan el ajuste del pool `[database]`, `[admin]`, `[mcp]` y la política
 [`check --deploy`](#check---deploy). El contenido por nivel está en
 [Scaffolding](scaffolding.md).
 
-La plantilla de tenant incluye una carpeta `system/migrations/` **vacía**. Las
+Todas las plantillas incluyen una carpeta `system/migrations/` **vacía**. Las
 propias tablas del framework (`rustango_orgs`, `rustango_users`,
 roles/permisos, …) se generan en ella a partir de los modelos compilados en el
 primer `cargo run -- migrate` — no hay un JSON de bootstrap incluido a mano.
@@ -423,7 +423,11 @@ parecido a los comandos `make:*` de Laravel (`make:controller`, `make:model`,
 …). Cada generador escribe en `src/<snake_name>.rs` (o `tests/<snake_name>.rs`
 para `make:test`) y:
 
-- Comprueba que el nombre es válido (PascalCase, letras/dígitos/guion bajo).
+- Comprueba que el nombre es válido (PascalCase, letras/dígitos/guion bajo) —
+  estos generadores emiten un **tipo**, así que el nombre es un nombre de tipo.
+  `make:test` es la excepción: emite un archivo de funciones de test, así que
+  acepta cualquier identificador de Rust y `make:test post_smoke` funciona como
+  se muestra abajo.
 - Lo convierte a snake_case para el nombre del archivo (`PostViewSet` →
   `post_view_set.rs`).
 - No sobrescribe un archivo existente.
@@ -499,8 +503,11 @@ un handler y que un worker ejecuta después.
 Lleva en sus campos todo lo que el job necesite.
 
 ```bash
-cargo run -- make:job EmailDigestJob
+cargo run -- make:job SendReceipt
 ```
+
+Para trabajo que se ejecuta con un temporizador en lugar de desde una cola,
+consulta `make:scheduled`.
 
 ### `make:scheduled <Name>`
 
@@ -806,7 +813,7 @@ como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
 ### `create-tenant <slug> [options]`
 
 Configura un nuevo tenant (cliente/org) y le aplica las migraciones de tenant. El
-`<slug>` es su identificador corto. Seguro de volver a ejecutar — llamarlo de
+`<slug>` es su identificador corto. **No** es seguro volver a ejecutarlo: llamarlo de
 nuevo sobre un slug existente se rechaza de entrada con ``tenant slug
 `<slug>` already exists`` (tenancy/provision.rs:599), antes de hacer nada más.
 

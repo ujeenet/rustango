@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — de/fr/es scaffolding, migrations, manage and getting-started match English (#2015)
+
+They now cover the committed `system/migrations/`, the scaffolded login-gated `admin_router` and `with_session_auth`. de/es `create-tenant` no longer says it is safe to re-run.
+
 ### Fixed — README links work on crates.io (#1405)
 
 crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.

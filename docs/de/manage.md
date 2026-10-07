@@ -376,7 +376,7 @@ Schreibt:
   config/default.toml                       (shared knobs)
   config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
-  system/migrations/                        (tenant template — framework tables, generated)
+  system/migrations/                        (framework tables, generated — commit them)
   src/{lib,main,models,views,urls}.rs
 ```
 
@@ -389,7 +389,7 @@ und sie sind es, was das Settings-Audit von
 [`check --deploy`](#check---deploy) liest. Die Inhalte pro Ebene stehen unter
 [Scaffolding](scaffolding.md).
 
-Die Tenant-Vorlage liefert einen **leeren** `system/migrations/`-Ordner. Die
+Jede Vorlage liefert einen **leeren** `system/migrations/`-Ordner. Die
 eigenen Tabellen des Frameworks (`rustango_orgs`, `rustango_users`,
 Rollen/Berechtigungen, …) werden beim ersten `cargo run -- migrate` aus den
 kompilierten Modellen dorthin generiert — es gibt kein handgeliefertes
@@ -431,7 +431,11 @@ Diese erstellen Startdateien für gängige Bausteine — sehr ähnlich zu Larave
 schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 `make:test`) und:
 
-- Prüft, ob der Name gültig ist (PascalCase, Buchstaben/Ziffern/Unterstrich).
+- Prüft, ob der Name gültig ist (PascalCase, Buchstaben/Ziffern/Unterstrich) —
+  diese Generatoren erzeugen einen **Typ**, also ist der Name ein Typname.
+  `make:test` ist die Ausnahme: Es erzeugt eine Datei mit Testfunktionen,
+  nimmt also jeden Rust-Bezeichner, und `make:test post_smoke` funktioniert
+  wie unten gezeigt.
 - Wandelt ihn für den Dateinamen in snake_case um (`PostViewSet` →
   `post_view_set.rs`).
 - Überschreibt keine bestehende Datei.
@@ -507,8 +511,11 @@ einem Handler in die Queue stellen und ein Worker später ausführt.
 Request-Kontext. Tragen Sie alles Nötige in den Feldern.
 
 ```bash
-cargo run -- make:job EmailDigestJob
+cargo run -- make:job SendReceipt
 ```
+
+Für Arbeit, die nach Zeitplan statt aus einer Warteschlange läuft, siehe
+`make:scheduled`.
 
 ### `make:scheduled <Name>`
 
@@ -819,7 +826,7 @@ nächsten Start als fehlgeschlagen markiert; ein Webhook-Retry mit derselben
 ### `create-tenant <slug> [options]`
 
 Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
-darauf an. Der `<slug>` ist sein kurzer Bezeichner. Sicher erneut ausführbar —
+darauf an. Der `<slug>` ist sein kurzer Bezeichner. **Nicht** sicher erneut ausführbar:
 ein erneuter Aufruf auf einem
 bestehenden Slug wird vorab mit ``tenant slug `<slug>` already exists``
 abgelehnt (tenancy/provision.rs:599), bevor sonst etwas passiert.
