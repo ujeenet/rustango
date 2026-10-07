@@ -2772,14 +2772,57 @@ fn render_step(
         .transpose()
         .map_err(MigrateError::Validation)?;
     use super::SchemaChange as SC;
+    // The changes SQLite makes by rebuilding the table.
+    let rebuilt = match change {
+        SC::DropColumn { table, .. }
+        | SC::AlterFkOnDelete { table, .. }
+        | SC::AlterColumnType { table, .. }
+        | SC::AlterColumnNullable { table, .. }
+        | SC::AlterColumnDefault { table, .. }
+        | SC::AlterColumnMaxLength { table, .. }
+        | SC::AlterColumnUnique { table, .. }
+        | SC::AddCheckConstraint { table, .. }
+        | SC::DropCheckConstraint { table, .. }
+        | SC::AddCompositeFk { table, .. }
+        | SC::DropCompositeFk { table, .. } => Some(table.as_str()),
+        _ => None,
+    };
+    // The changes MySQL makes by restating the whole column.
+    let modified = match change {
+        SC::AlterColumnType { table, .. }
+        | SC::AlterColumnNullable { table, .. }
+        | SC::AlterColumnDefault { table, .. }
+        | SC::AlterColumnMaxLength { table, .. }
+        | SC::AlterColumnUnique { table, .. } => Some(table.as_str()),
+        _ => None,
+    };
+    let reshaped = if dialect.alters_by_rebuild() {
+        rebuilt
+    } else {
+        modified.filter(|_| dialect.modifies_whole_column())
+    };
+    // The ops after `change`, which is borrowed from `ops`.
+    let later = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[i + 1..]);
+    // Both take the table's shape at this op, not at the end (#2121, #2149).
+    let (at, renamed) = match reshaped {
+        Some(table) if later.iter().any(|op| touches_table(op, table)) => {
+            let (at, last) = super::rebuild::snapshot_at(table, later, after)
+                .map_err(MigrateError::Validation)?;
+            (Some(at), last != table)
+        }
+        _ => (None, false),
+    };
+    let snap = at.as_ref().unwrap_or(after);
     let at_column = |table: &str, column: &str| ColumnRef {
         table: table.to_owned(),
         column: column.to_owned(),
-        keep: super::diff::declared_indexes(after, table),
+        keep: super::diff::declared_indexes(snap, table),
     };
     let has_fk = |table: &str, column: &str| {
-        after
-            .table(table)
+        snap.table(table)
             .and_then(|t| t.field(column))
             .is_some_and(|f| f.fk.is_some())
     };
@@ -2807,34 +2850,12 @@ fn render_step(
         } => Some(at_column(table, column)),
         _ => None,
     };
-    // The changes SQLite makes by rebuilding the table.
-    let rebuilt = match change {
-        SC::DropColumn { table, .. }
-        | SC::AlterFkOnDelete { table, .. }
-        | SC::AlterColumnType { table, .. }
-        | SC::AlterColumnNullable { table, .. }
-        | SC::AlterColumnDefault { table, .. }
-        | SC::AlterColumnMaxLength { table, .. }
-        | SC::AlterColumnUnique { table, .. }
-        | SC::AddCheckConstraint { table, .. }
-        | SC::DropCheckConstraint { table, .. }
-        | SC::AddCompositeFk { table, .. }
-        | SC::DropCompositeFk { table, .. } => Some(table.as_str()),
-        _ => None,
-    };
-    // The ops after `change`, which is borrowed from `ops`.
-    let later = ops
-        .iter()
-        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
-        .map_or(&[][..], |i| &ops[i + 1..]);
-    // A rebuild takes the table's shape at this op, not at the end (#2121).
-    let at = match rebuilt.filter(|_| dialect.alters_by_rebuild()) {
-        Some(table) if later.iter().any(|op| touches_table(op, table)) => Some(
-            super::rebuild::snapshot_at(table, later, after).map_err(MigrateError::Validation)?,
-        ),
-        _ => None,
-    };
-    let mut batch = render(at.as_ref().unwrap_or(after)).map_err(MigrateError::Validation)?;
+    let mut batch = render(snap).map_err(MigrateError::Validation)?;
+    // A deferred FK would run after the rename, under the old name.
+    if renamed && dialect.modifies_whole_column() {
+        let fks = std::mem::take(&mut batch.deferred_fks);
+        batch.immediate.extend(fks);
+    }
     // A rebuild already leaves every column the later ops drop.
     batch.rebuild = batch.rebuild.map(|r| {
         let dropped: Vec<&str> = later

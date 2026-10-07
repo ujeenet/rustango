@@ -1530,10 +1530,6 @@ async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
 /// #2140 — a rebuild before a RenameTable of the same table keeps its CHECK,
 /// which the final snapshot keys by the new name.
 async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
-    if pool.dialect().name() == "mysql" {
-        eprintln!("skipping — MySQL renders the alter against the final snapshot (#2149)");
-        return;
-    }
     let (t, u) = ("mad_rk_old", "mad_rk_new");
     let chain = Chain::new(pool, "rk", &[u, t]).await;
     let with = |name: &str, default: Value| {
@@ -1572,6 +1568,51 @@ async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
         "the CHECK survives on {}",
         pool.dialect().name()
     );
+}
+
+/// #2149 — an FK column's UNIQUE dropped before its table is renamed: MySQL
+/// still finds the FK that the index backs.
+async fn fk_unique_drop_before_rename(pool: &Pool) {
+    let (a, t, u) = ("mad_fr_author", "mad_fr_old", "mad_fr_new");
+    let chain = Chain::new(pool, "fr", &[u, t, a]).await;
+    let with = |name: &str, unique: bool| {
+        let mut owner = fk(a);
+        owner["unique"] = json!(unique);
+        json!({"tables": [table(a, vec![id()]),
+                          table(name, vec![id(), col("author_id", "i64", owner)])]})
+    };
+    chain.step(pool, with(t, true)).await.expect("initial");
+    chain
+        .hand(
+            pool,
+            with(u, false),
+            vec![
+                SchemaChange::AlterColumnUnique {
+                    table: t.into(),
+                    column: "author_id".into(),
+                    unique: false,
+                },
+                SchemaChange::RenameTable {
+                    old_name: t.into(),
+                    new_name: u.into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("drop unique then rename");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 1)"),
+            &[u, "id", "author_id"],
+        )
+        .await
+        .expect("no longer unique");
+    }
 }
 
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
@@ -2093,6 +2134,7 @@ tri_dialect_test!(
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,
         rebuild_before_rename_keeps_checks,
+        fk_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,

@@ -277,12 +277,12 @@ impl TableRebuild {
 
 /// `after` with `table` as it is after the op that `later` follows: its
 /// shape from [`shape_at`], and its CHECKs under that name (#2140) without
-/// the ones a later op adds.
+/// the ones a later op adds. Also returns the table's name at the end.
 pub(crate) fn snapshot_at(
     table: &str,
     later: &[super::Operation],
     after: &SchemaSnapshot,
-) -> Result<SchemaSnapshot, String> {
+) -> Result<(SchemaSnapshot, String), String> {
     use super::SchemaChange as SC;
     let (shape, last) = shape_at(table, later, after)?;
     let mut at = after.clone();
@@ -296,7 +296,7 @@ pub(crate) fn snapshot_at(
     for c in at.checks.iter_mut().filter(|c| c.table == last) {
         c.table = table.to_owned();
     }
-    Ok(at)
+    Ok((at, last))
 }
 
 /// `table`'s shape after the op that `later` follows, from the migration's

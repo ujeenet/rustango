@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL AlterColumn* before a RenameTable in one migration (#2149)
+
+The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
