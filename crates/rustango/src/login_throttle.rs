@@ -16,9 +16,10 @@
 //! Shared across scopes: the per-IP buckets, the account-lock store and
 //! the password-hashing queue ([`crate::passwords`]).
 //!
-//! State: the per-IP and global buckets are in-process; the account
-//! lock uses [`crate::account_lockout::shared`], which you can back
-//! with a shared cache at boot.
+//! State: the per-IP and global buckets are in-process unless built
+//! with [`LoginThrottle::with_cache`]; the account lock uses
+//! [`crate::account_lockout::shared`]. Back both with a shared cache at
+//! boot when you run more than one replica.
 //!
 //! Behind a reverse proxy, mount [`crate::real_ip::RealIpLayer`] with
 //! trusted proxies. Without it every client shares the proxy's per-IP
@@ -32,7 +33,9 @@ use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderMap};
 use axum::response::Response;
 
+use crate::cache::BoxedCache;
 use crate::rate_limit::RateLimitLayer;
+use crate::rate_limit_cache::CacheRateLimitLayer;
 
 /// Default failed attempts per IP per [`DEFAULT_IP_WINDOW_SECS`].
 pub const DEFAULT_IP_LIMIT: u32 = 20;
@@ -188,22 +191,141 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 
 struct Buckets {
     limits: LoginLimits,
-    ip: RateLimitLayer,
+    ip: Limit,
     /// Keyed by [`LoginScope::key`].
-    global: RateLimitLayer,
+    global: Limit,
+}
+
+/// Where one limit counts.
+enum Limit {
+    /// A token bucket in this process.
+    Memory(RateLimitLayer),
+    /// A fixed-window counter in a cache. On a cache error the per-IP
+    /// limit counts in `fallback` (fail closed); the global one, with
+    /// none, lets the attempt through (fail open).
+    Cache {
+        shared: CacheRateLimitLayer,
+        fallback: Option<RateLimitLayer>,
+    },
+}
+
+/// What [`Limit::take`] counted, so the refund goes to the same bucket.
+#[derive(Debug, Clone, Copy)]
+enum Spent {
+    Nothing,
+    Memory,
+    /// The cache window it was counted in.
+    Window(u64),
+}
+
+impl Limit {
+    async fn peek(&self, key: &str) -> Result<(), u64> {
+        match self {
+            Self::Memory(l) => l.peek(key).await,
+            Self::Cache { shared, fallback } => match shared.try_peek(key).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache read failed");
+                    match fallback {
+                        Some(l) => l.peek(key).await,
+                        None => Ok(()),
+                    }
+                }
+            },
+        }
+    }
+
+    async fn take(&self, key: &str) -> Result<Spent, u64> {
+        match self {
+            Self::Memory(l) => l.take(key).await.map(|_| Spent::Memory),
+            Self::Cache { shared, fallback } => match shared.try_take(key).await {
+                Ok(r) => r.map(|(_, window)| Spent::Window(window)),
+                Err(e) => {
+                    tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache incr failed");
+                    match fallback {
+                        Some(l) => l.take(key).await.map(|_| Spent::Memory),
+                        None => Ok(Spent::Nothing),
+                    }
+                }
+            },
+        }
+    }
+
+    async fn give_back(&self, key: &str, spent: Spent) {
+        match (self, spent) {
+            (
+                Self::Memory(l)
+                | Self::Cache {
+                    fallback: Some(l), ..
+                },
+                Spent::Memory,
+            ) => l.give_back(key).await,
+            (Self::Cache { shared, .. }, Spent::Window(w)) => shared.give_back_at(key, w).await,
+            _ => {}
+        }
+    }
+
+    fn cache(&self) -> Option<&BoxedCache> {
+        match self {
+            Self::Memory(_) => None,
+            Self::Cache { shared, .. } => Some(shared.cache()),
+        }
+    }
 }
 
 /// The login gate. Use [`shared`] unless you are testing.
 pub struct LoginThrottle(Arc<Buckets>);
 
 impl LoginThrottle {
+    /// Per-IP and global limits counted in this process.
     #[must_use]
     pub fn new(limits: LoginLimits) -> Self {
         Self(Arc::new(Buckets {
             limits,
-            ip: RateLimitLayer::per_ip(limits.ip_limit.max(1), limits.ip_window),
-            global: RateLimitLayer::global(limits.global_limit.max(1), limits.global_window),
+            ip: Limit::Memory(memory_ip(limits)),
+            global: Limit::Memory(memory_global(limits)),
         }))
+    }
+
+    /// Per-IP and global limits counted in `cache`, so every replica on
+    /// one Redis or database cache shares them (#1809). Fixed windows.
+    #[must_use]
+    pub fn with_cache(limits: LoginLimits, cache: BoxedCache) -> Self {
+        let ip = CacheRateLimitLayer::new(cache.clone(), limits.ip_limit.max(1), limits.ip_window);
+        let global =
+            CacheRateLimitLayer::new(cache, limits.global_limit.max(1), limits.global_window);
+        Self(Arc::new(Buckets {
+            limits,
+            ip: Limit::Cache {
+                shared: ip.key_prefix("login-ip"),
+                fallback: Some(memory_ip(limits)),
+            },
+            global: Limit::Cache {
+                shared: global.key_prefix("login-global"),
+                fallback: None,
+            },
+        }))
+    }
+
+    /// `true` when each replica counts its own per-IP and global limits.
+    #[must_use]
+    pub fn is_process_local(&self) -> bool {
+        self.0.ip.cache().is_none_or(|c| c.is_process_local())
+    }
+
+    /// The warning for limits that never count or count per process.
+    fn store_warning(&self) -> Option<&'static str> {
+        if self.0.ip.cache().is_some_and(|c| c.stores_nothing()) {
+            return Some(NULL_STORE_WARNING);
+        }
+        self.is_process_local().then_some(PROCESS_LOCAL_WARNING)
+    }
+
+    fn warn_once_on_weak_store(&self) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        if let Some(msg) = self.store_warning() {
+            WARNED.call_once(|| tracing::warn!(target: "rustango::rate_limit", "{msg}"));
+        }
     }
 
     /// The limits this gate enforces.
@@ -226,6 +348,7 @@ impl LoginThrottle {
         username: &str,
     ) -> Result<LoginAttempt, LoginRefused> {
         let throttled = |retry_after_secs| LoginRefused::Throttled { retry_after_secs };
+        self.warn_once_on_weak_store();
         let scope_key = scope.key();
         let per_request = scope.per_request();
         let mut keys = Vec::with_capacity(2);
@@ -235,29 +358,34 @@ impl LoginThrottle {
             keys.push(key);
         }
         let b = &self.0;
+        let mut ip_spent = Spent::Nothing;
         if let Some(ip) = &ip.0 {
             if per_request {
                 b.ip.peek(ip).await.map_err(throttled)?;
             } else {
-                b.ip.take(ip).await.map_err(throttled)?;
+                ip_spent = b.ip.take(ip).await.map_err(throttled)?;
             }
         }
         let global = if per_request {
-            b.global.peek(&scope_key).await
+            b.global.peek(&scope_key).await.map(|()| Spent::Nothing)
         } else {
-            b.global.take(&scope_key).await.map(|_| ())
+            b.global.take(&scope_key).await
         };
-        if let Err(secs) = global {
-            if let (false, Some(ip)) = (per_request, &ip.0) {
-                b.ip.give_back(ip).await;
+        let global_spent = match global {
+            Ok(spent) => spent,
+            Err(secs) => {
+                if let Some(ip) = &ip.0 {
+                    b.ip.give_back(ip, ip_spent).await;
+                }
+                return Err(throttled(secs));
             }
-            return Err(throttled(secs));
-        }
+        };
         Ok(LoginAttempt {
             buckets: Arc::clone(b),
             scope_key,
             ip: ip.0.clone(),
             per_request,
+            spent: (ip_spent, global_spent),
             keys,
         })
     }
@@ -293,6 +421,14 @@ impl LoginThrottle {
     }
 }
 
+fn memory_ip(limits: LoginLimits) -> RateLimitLayer {
+    RateLimitLayer::per_ip(limits.ip_limit.max(1), limits.ip_window)
+}
+
+fn memory_global(limits: LoginLimits) -> RateLimitLayer {
+    RateLimitLayer::global(limits.global_limit.max(1), limits.global_window)
+}
+
 async fn check_lock(key: &str) -> Result<(), LoginRefused> {
     let lockout = crate::account_lockout::shared();
     crate::account_lockout::warn_once_on_weak_store(lockout);
@@ -311,6 +447,8 @@ pub struct LoginAttempt {
     scope_key: String,
     ip: Option<String>,
     per_request: bool,
+    /// What `begin` counted per IP and globally, refunded on success.
+    spent: (Spent, Spent),
     /// Account-lock keys: the submitted name, then the stored one.
     keys: Vec<String>,
 }
@@ -366,12 +504,14 @@ impl LoginAttempt {
     }
 
     async fn give_back(&self) {
-        if !self.per_request {
-            if let Some(ip) = &self.ip {
-                self.buckets.ip.give_back(ip).await;
-            }
-            self.buckets.global.give_back(&self.scope_key).await;
+        let (ip_spent, global_spent) = self.spent;
+        if let Some(ip) = &self.ip {
+            self.buckets.ip.give_back(ip, ip_spent).await;
         }
+        self.buckets
+            .global
+            .give_back(&self.scope_key, global_spent)
+            .await;
     }
 }
 
@@ -388,10 +528,22 @@ fn account_key(scope_key: &str, username: &str) -> String {
     key
 }
 
-/// The per-IP and global buckets have no shared backend; `check --deploy` says so.
+/// `check --deploy` can't run the app's startup code, so it only advises.
 pub(crate) const PROCESS_LOCAL_NOTE: &str =
-    "login per-IP and global limits are counted per process: with N replicas each limit is N times \
-     higher; set `[auth] login_*` per replica or rate-limit logins at the proxy";
+    "login per-IP and global limits: unless your app installs \
+     `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` with a Redis or \
+     database cache, each replica counts its own, so N replicas allow N times each limit";
+
+/// Logged once, at the first login, when the limits count per process.
+const PROCESS_LOCAL_WARNING: &str =
+    "login per-IP and global limits are counted in process memory, so each replica allows its own \
+     attempts; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` \
+     with a Redis or database cache";
+
+/// Logged once when the limits sit on a cache that drops writes.
+const NULL_STORE_WARNING: &str =
+    "login per-IP and global limits use a cache that stores nothing (`NullCache`), so they never \
+     count; use a Redis, database or in-memory cache";
 
 static SHARED: crate::boot_slot::BootSlot<LoginThrottle> = crate::boot_slot::BootSlot::new();
 
@@ -582,6 +734,116 @@ mod tests {
                 .await;
         }
         assert!(t.begin(&s, &ip("10.9.3.1"), "").await.is_err());
+    }
+
+    fn on_cache(cache: &BoxedCache, limits: LoginLimits) -> LoginThrottle {
+        LoginThrottle::with_cache(limits, cache.clone())
+    }
+
+    /// Two replicas on one cache share the per-IP and global limits (#1809).
+    #[tokio::test]
+    async fn replicas_on_one_cache_share_the_limits() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let limits = LoginLimits {
+            ip_limit: 2,
+            global_limit: 3,
+            ..LoginLimits::default()
+        };
+        let (a, b) = (on_cache(&cache, limits), on_cache(&cache, limits));
+        let s = tenant("t-shared");
+        let one = ip("10.9.4.1");
+        a.begin(&s, &one, "u").await.unwrap().failed().await;
+        b.begin(&s, &one, "v").await.unwrap().failed().await;
+        assert!(a.begin(&s, &one, "w").await.is_err(), "per-IP not shared");
+        b.begin(&s, &ip("10.9.4.2"), "x")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        let r = a.begin(&s, &ip("10.9.4.3"), "y").await;
+        assert!(r.is_err(), "global not shared");
+    }
+
+    /// On the cache, successes still give their tokens back.
+    #[tokio::test]
+    async fn cache_backed_successes_do_not_use_up_the_limits() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let t = on_cache(
+            &cache,
+            LoginLimits {
+                ip_limit: 2,
+                global_limit: 2,
+                ..LoginLimits::default()
+            },
+        );
+        for n in 0..10 {
+            let a = t
+                .begin(&tenant("t-ok2"), &ip("10.9.5.1"), &format!("ok{n}"))
+                .await;
+            a.unwrap().succeeded().await;
+        }
+    }
+
+    struct Down;
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for Down {
+        async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn set(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn exists(&self, _: &str) -> Result<bool, crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            Err(crate::cache::CacheError::Connection("down".into()))
+        }
+    }
+
+    /// A cache outage keeps the per-IP limit (in process) and opens the global one.
+    #[tokio::test]
+    async fn a_cache_outage_keeps_the_per_ip_limit() {
+        let cache: BoxedCache = Arc::new(Down);
+        let t = on_cache(
+            &cache,
+            LoginLimits {
+                ip_limit: 1,
+                global_limit: 1,
+                ..LoginLimits::default()
+            },
+        );
+        let s = tenant("t-down");
+        t.begin(&s, &ip("10.9.6.1"), "a")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        assert!(t.begin(&s, &ip("10.9.6.1"), "a").await.is_err());
+        assert!(t.begin(&s, &ip("10.9.6.2"), "b").await.is_ok());
+    }
+
+    #[test]
+    fn weak_stores_are_reported() {
+        let limits = LoginLimits::default();
+        let memory = LoginThrottle::new(limits);
+        assert!(memory.is_process_local());
+        assert_eq!(memory.store_warning(), Some(PROCESS_LOCAL_WARNING));
+        let null: BoxedCache = Arc::new(crate::cache::NullCache);
+        let null = LoginThrottle::with_cache(limits, null);
+        assert_eq!(null.store_warning(), Some(NULL_STORE_WARNING));
+        assert!(LoginThrottle::with_cache(limits, Arc::new(Down))
+            .store_warning()
+            .is_none());
     }
 
     #[test]

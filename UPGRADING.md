@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Login limits warn when they count per process (#1809)
+
+The first login logs a warning while the per-IP and global limits live in process memory; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` to share them.
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
