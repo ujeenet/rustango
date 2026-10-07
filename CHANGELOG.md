@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.1] — 2026-10-07
+
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
 
 A tenant that fails is reported and the rest are still seeded; the command exits non-zero if any failed.

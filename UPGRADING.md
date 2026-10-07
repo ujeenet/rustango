@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.1
+
 ### `seed-permissions` reports each failed tenant
 
 It no longer stops at the first failure; it prints a `failed` line per broken tenant and ends with `N of M tenant(s) failed` (#2156).
