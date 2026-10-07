@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name.
 
+### Fixed — parallel `create_collection` deadlocked on MySQL (#2182)
+
+The tombstone is looked up first and deleted by id; a DELETE by an unused slug gap-locked the index.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
