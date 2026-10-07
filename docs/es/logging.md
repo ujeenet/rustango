@@ -405,6 +405,12 @@ con una cabecera `traceparent` de W3C, también se registran `trace_id`,
 `parent_span_id` y `trace_flags`, que es lo que una capa
 `tracing-opentelemetry` recoge para unirse a la traza.
 
+El estado, el tamaño del cuerpo y la duración se registran cuando vuelve la
+respuesta, cuando los eventos de la petición ya están escritos. El subscriber
+`fmt` solo imprime los campos del span en los eventos, así que nunca muestra
+esos tres. Léelos en la línea del access log, o en una capa de OpenTelemetry,
+que lee el span al cerrarse.
+
 Merece la pena instalar esta capa aunque solo sea por el campo de inquilino:
 como los campos están en el *span*, cada evento emitido durante la petición —
 incluidos los del ORM — los lleva en su contexto de span, sin que ningún
