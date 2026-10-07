@@ -150,9 +150,13 @@ untouched.
 
 ## Unreleased
 
-### Audited writes inside `atomic` join the block
+### Multi-statement writes inside `atomic` join the block
 
-Inside an `atomic` block on the same pool, audited `save_pool` / `insert_pool` / `delete_pool`, M2M `set` and fixture loads now commit or roll back with the block (#1460). Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`.
+Inside an `atomic` block on the same pool these now run in a savepoint and commit or roll back with the block (#1460): audited `insert_pool` / `save_pool` / `save_partial` / `delete_pool` / `soft_delete` / `restore` / `truncate`, audited `update_all` / `delete_where` / `destroy` / `bulk_update` / bulk upserts, `audit::emit_many_pool`, M2M `set`, `fixtures::load_all_pool` / `load_into_pool`, `DatabaseCache::incr` on MySQL, SSO member provisioning, viewset bulk create, and the admin's audited edits and creates.
+
+Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`: drop the guard before the call.
+
+On SQLite they no longer take the write lock up front (`BEGIN IMMEDIATE`): the outer block began `DEFERRED`, so a block that reads before it writes can get `SQLITE_BUSY` under a concurrent writer. Write first in the block, or retry; a way to open `atomic` with `BEGIN IMMEDIATE` is planned for 0.61.0.
 
 ### Audited `_tx` writes now write audit rows
 

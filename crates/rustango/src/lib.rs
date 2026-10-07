@@ -1267,12 +1267,16 @@ pub use rustango_macros::main;
 /// crates without forcing the user to add them to their `Cargo.toml`.
 /// Not part of the public API — names here may change between minors.
 #[doc(hidden)]
-#[cfg(feature = "runtime")]
 pub mod __private_runtime {
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
+    #[cfg(feature = "runtime")]
     pub use tokio;
+    #[cfg(feature = "runtime")]
     pub use tracing_subscriber;
+
+    /// The derive's audited `save_pool` transaction, on every backend.
+    pub use crate::sql::executor::{Begin, TxScope};
 }
 
 /// Proc-macros crate, re-exported. End users normally reach

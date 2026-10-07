@@ -425,7 +425,9 @@ async fn end_savepoint(
     .await
 }
 
-/// How a [`TxScope`] of its own begins.
+/// How a [`TxScope`] of its own begins. As a savepoint it is ignored: the
+/// outer `atomic` began `DEFERRED`, so on SQLite a read-then-write there can
+/// fail with `SQLITE_BUSY` at once under a concurrent writer.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

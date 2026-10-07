@@ -9,7 +9,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use rustango::audit::{self, AuditLog};
-use rustango::sql::{Auto, CounterPool as _, ExecError, Pool, SqlError};
+use rustango::sql::{Auto, CounterPool as _, ExecError, FetcherPool as _, Pool, SqlError};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -214,9 +214,62 @@ async fn cache_incr_joins_the_block(pool: &Pool) {
     }
 }
 
+/// Holding the block's guard across a joining write is refused, not a hang.
+async fn held_guard_is_refused(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        let guard = tx.lock().await?;
+        let mut doc = Doc {
+            id: Auto::default(),
+            title: "a".into(),
+        };
+        let res = doc.insert_pool(&q).await;
+        assert!(matches!(res, Err(ExecError::NestedAtomic)), "{res:?}");
+        drop(guard);
+        doc.insert_pool(&q).await
+    }))
+    .await
+    .expect("commits after the guard is dropped");
+    assert_eq!(Doc::objects().count(pool).await.unwrap(), 1);
+}
+
+/// A scope dropped mid-savepoint is rolled back; the block stays usable.
+async fn dropped_scope_rolls_back(pool: &Pool) {
+    use rustango::__private_runtime::{Begin, TxScope};
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |tx| {
+        let mut scope = TxScope::begin(&q, Begin::Deferred).await?;
+        let gone = Plain {
+            id: 1,
+            label: "gone".into(),
+        };
+        gone.insert_tx(scope.tx()).await?;
+        drop(scope);
+        let kept = Plain {
+            id: 2,
+            label: "kept".into(),
+        };
+        kept.insert_tx(&mut *tx.lock().await?).await
+    }))
+    .await
+    .expect("commits");
+    let ids: Vec<i64> = Plain::objects()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec![2]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        held_guard_is_refused,
+        dropped_scope_rolls_back,
         audited_writes_join_the_block,
         m2m_set_joins_the_block,
         fixtures_join_the_block,
