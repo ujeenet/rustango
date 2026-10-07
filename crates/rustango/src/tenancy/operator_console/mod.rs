@@ -416,9 +416,32 @@ fn server_error(context: &str, e: &dyn std::fmt::Display) -> Response<Body> {
 /// Operator text for a failure whose cause is logged, not shown (#2034).
 /// The log line names the org, so the operator can find it.
 fn withheld(context: &str, slug: &str, what: &str, e: &dyn std::fmt::Display) -> String {
-    let body = tracing::error_span!("operator_console", org = %slug)
-        .in_scope(|| crate::error::server_error_body(context, e));
+    withheld_in(
+        &tracing::error_span!("operator_console", org = %slug),
+        context,
+        what,
+        e,
+    )
+}
+
+/// [`withheld`] logged under `span`, for a failure that is not about one org.
+fn withheld_in(
+    span: &tracing::Span,
+    context: &str,
+    what: &str,
+    e: &dyn std::fmt::Display,
+) -> String {
+    let body = span.in_scope(|| crate::error::server_error_body(context, e));
     format!("{what} ({body})")
+}
+
+/// The text of an error the operator can act on; `None` for a cause to withhold (#2171).
+fn user_facing(e: &super::TenancyError) -> Option<String> {
+    matches!(
+        e,
+        super::TenancyError::Validation(_) | super::TenancyError::Busy
+    )
+    .then(|| e.to_string())
 }
 
 fn default_tenant_handoff_url() -> String {
@@ -1053,7 +1076,15 @@ async fn prewarm_pools(
     };
     let report = match pools.prewarm().await {
         Ok(r) => r,
-        Err(e) => return orgs_notice(&format!("pre-warm failed: {e}"), true),
+        Err(e) => {
+            let msg = withheld_in(
+                &tracing::error_span!("operator_console", operator = %op.username),
+                "operator_console::prewarm",
+                "Pre-warm failed",
+                &e,
+            );
+            return orgs_notice(&msg, true);
+        }
     };
 
     let mut detail = serde_json::Map::new();
@@ -1457,7 +1488,14 @@ async fn change_password_submit(
         Err(super::TenancyError::Busy) => {
             return crate::login_throttle::LoginRefused::Busy.into_response()
         }
-        Err(e) => return redir_err(&format!("hash failed: {e}")),
+        Err(e) => {
+            return redir_err(&withheld_in(
+                &tracing::error_span!("operator_console", operator = %op.username),
+                "operator_console::change_password",
+                "Could not hash the password",
+                &e,
+            ))
+        }
     };
     op_row.password_hash = new_hash;
     op_row.password_changed_at = Some(chrono::Utc::now());
@@ -1875,7 +1913,12 @@ async fn org_edit_submit(
     let applied =
         match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
             Ok(a) => a,
-            Err(e) => return redirect_with_error(&slug, &e.to_string()),
+            Err(e) => {
+                let msg = user_facing(&e).unwrap_or_else(|| {
+                    withheld("operator_console::org_edit", &slug, "Could not save", &e)
+                });
+                return redirect_with_error(&slug, &msg);
+            }
         };
     let database_url_changed = applied.database_url_rotated;
 
