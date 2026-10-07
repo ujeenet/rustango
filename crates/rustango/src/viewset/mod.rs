@@ -3258,7 +3258,9 @@ async fn update_inner(
                 Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
                 Err(e) => return json_server_error("viewset::update::validate", &e),
             };
-            locked = Some(tx);
+            // A model audited only on a pool updates there, unlocked,
+            // rather than lose its audit entry.
+            locked = crate::audit::TxUpdate::for_model(state.vs.schema).map(|u| (u, tx));
             checked
         }
         _ => serializer_validate(&state, &json),
@@ -3300,7 +3302,7 @@ async fn update_inner(
     };
 
     let updated = match locked.as_mut() {
-        Some(tx) => crate::audit::update_one_tx(tx, &acq.pool, &query, pk_val.clone()).await,
+        Some((u, tx)) => u.run(tx, &acq.pool, &query, pk_val.clone()).await,
         None => acq.update(&query).await,
     };
     match updated {
@@ -3313,7 +3315,7 @@ async fn update_inner(
             return json_error(status, &msg);
         }
     }
-    if let Some(tx) = locked {
+    if let Some((_, tx)) = locked {
         if let Err(e) = tx.commit().await {
             return json_server_error("viewset::update::commit", &e);
         }

@@ -1832,30 +1832,54 @@ pub type AuditedUpdateRecord = for<'a, 't> fn(
     Box<dyn std::future::Future<Output = Result<(), crate::sql::ExecError>> + Send + 'a>,
 >;
 
-/// Run a one-row `query` inside `tx`, so it writes over the row `tx`
-/// locked; an audited model gets its entry from the row `pk` re-read (#2010).
-///
-/// # Errors
-/// As [`crate::sql::update_tx`], plus the audit write.
+/// A one-row update that can run inside a caller's transaction with its
+/// audit entry (#2010). Absent for a model whose audit runs only on a pool.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
-pub(crate) async fn update_one_tx(
-    tx: &mut crate::sql::PoolTx<'_>,
-    pool: &crate::sql::Pool,
-    query: &crate::core::UpdateQuery,
-    pk: crate::core::SqlValue,
-) -> Result<u64, crate::sql::ExecError> {
-    let n = crate::sql::update_tx(tx, query).await?;
-    let record =
-        crate::core::ModelEntry::for_schema(query.model).and_then(|e| e.audited_update_record());
-    if let (true, Some(record)) = (n > 0, record) {
-        writing_via(pool, record(tx, pk))
-            .await
-            .map_err(|e| crate::sql::ExecError::AuditWrite {
-                table: query.model.table,
-                source: Box::new(e),
-            })?;
+#[derive(Clone, Copy)]
+pub(crate) struct TxUpdate(Option<AuditedUpdateRecord>);
+
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+impl TxUpdate {
+    /// `None` when `model` audits updates but has no in-transaction
+    /// recorder (a hand-written `ModelEntry`): its update must go through
+    /// [`update`], or its audit entry would be lost.
+    pub(crate) fn for_model(model: &crate::core::ModelSchema) -> Option<Self> {
+        Self::for_entry(crate::core::ModelEntry::for_schema(model))
     }
-    Ok(n)
+
+    fn for_entry(entry: Option<&crate::core::ModelEntry>) -> Option<Self> {
+        let Some(entry) = entry else {
+            return Some(Self(None));
+        };
+        match (entry.audited_update_record(), entry.audited_update()) {
+            (Some(record), _) => Some(Self(Some(record))),
+            (None, Some(_)) => None,
+            (None, None) => Some(Self(None)),
+        }
+    }
+
+    /// Run `query` in `tx`, then record the row `pk` re-read.
+    ///
+    /// # Errors
+    /// As [`crate::sql::update_tx`], plus the audit write.
+    pub(crate) async fn run(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pool: &crate::sql::Pool,
+        query: &crate::core::UpdateQuery,
+        pk: crate::core::SqlValue,
+    ) -> Result<u64, crate::sql::ExecError> {
+        let n = crate::sql::update_tx(tx, query).await?;
+        if let (true, Some(record)) = (n > 0, self.0) {
+            writing_via(pool, record(tx, pk)).await.map_err(|e| {
+                crate::sql::ExecError::AuditWrite {
+                    table: query.model.table,
+                    source: Box::new(e),
+                }
+            })?;
+        }
+        Ok(n)
+    }
 }
 
 /// Emit a `Create` entry for the row with primary key `pk`, read in `tx`.
@@ -2476,4 +2500,32 @@ async fn finish_update_with_audit_diff(
         emit_one_tx(tx, via, &entry).await?;
     }
     Ok(_affected)
+}
+
+#[cfg(test)]
+mod tx_update_tests {
+    use super::*;
+
+    fn runner<'a>(
+        _: &'a crate::sql::Pool,
+        _: &'a crate::core::UpdateQuery,
+        _: AuditOp,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+    > {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// A hand-written entry with a pool runner but no recorder keeps its
+    /// audit: no in-transaction update for it (#2010 review).
+    #[test]
+    fn a_pool_only_audited_update_never_runs_in_a_transaction() {
+        use crate::core::{Model as _, ModelEntry};
+        let schema = crate::i18n::db::Translation::SCHEMA;
+        let audited =
+            ModelEntry::new(schema, "app").with_audited(|| Some(runner as AuditedUpdate), || None);
+        assert!(TxUpdate::for_entry(Some(&audited)).is_none());
+        assert!(TxUpdate::for_entry(Some(&ModelEntry::new(schema, "app"))).is_some());
+        assert!(TxUpdate::for_entry(None).is_some());
+    }
 }

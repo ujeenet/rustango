@@ -152,7 +152,7 @@ untouched.
 
 ### Translations editor: an emptied cell deletes its override
 
-`i18n::admin::apply_edits` now deletes a stored override posted back empty, and counts it in its return value (#2091).
+The grid posts each shown value as a hidden `orig:<locale>:<key>` field; a cell shown non-empty and posted blank is deleted. A custom editor form must post those fields too, and can call `i18n::admin::apply_form` (#2091).
 
 ### SQLite: defaulted integer PKs are `BIGINT`
 
@@ -160,7 +160,7 @@ New tables and migrations create a non-`Auto` integer PK with a `default` as `BI
 
 ### ViewSet serializer PATCH runs in one transaction
 
-The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010).
+The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010). A hand-written `ModelEntry` with an audited update runner but no `with_audited_update_record` keeps the old unlocked update, so its audit entry is still written.
 
 ### Host claims are transactional
 

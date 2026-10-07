@@ -9,7 +9,9 @@ use rustango::core::Column as _;
 use rustango::sql::{Auto, FetcherPool as _, Pool};
 use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
 use rustango::tenancy::org_edit::{apply, OrgPatch};
-use rustango::tenancy::{BackendKind, Org, OrgHost, StorageMode, TenancyError, TenantPools};
+use rustango::tenancy::{
+    add_host, BackendKind, HostError, Org, OrgHost, StorageMode, TenancyError, TenantPools,
+};
 use rustango::tri_dialect_test;
 
 async fn setup(pool: &Pool) {
@@ -123,11 +125,59 @@ async fn create_refuses_a_host_claimed_meanwhile(pool: &Pool) {
     assert_eq!(base_host(pool, &slug).await, None);
 }
 
+/// Exactly one of two results won; the other is the "taken" refusal.
+fn one_wins<T: std::fmt::Debug, E: std::fmt::Debug>(
+    a: &Result<T, E>,
+    b: &Result<T, E>,
+    taken: impl Fn(&E) -> bool,
+) {
+    let refused = |r: &Result<T, E>| r.as_ref().err().is_some_and(&taken);
+    assert!(
+        (a.is_ok() && refused(b)) || (b.is_ok() && refused(a)),
+        "{a:?} / {b:?}"
+    );
+}
+
+/// Two extra-host claims of one free host at once: MySQL deadlocks the
+/// pair, and the loser must retry into "taken", not a driver error.
+async fn two_extra_claims_at_once_one_wins(pool: &Pool) {
+    let (a, b) = (name("extra-a"), name("extra-b"));
+    org(pool, &a).await;
+    org(pool, &b).await;
+    for i in 0..5 {
+        let host = format!("{}-{i}.example.test", name("extra"));
+        let (ra, rb) = tokio::join!(add_host(pool, &a, &host), add_host(pool, &b, &host));
+        one_wins(&ra, &rb, |e| matches!(e, HostError::Taken(_)));
+    }
+}
+
+/// Two tenants set one free base host at once: the claim row is gone by
+/// commit, so only the claim's lock keeps the second out.
+async fn two_base_claims_at_once_one_wins(pool: &Pool) {
+    let (a, b) = (name("base-a"), name("base-b"));
+    org(pool, &a).await;
+    org(pool, &b).await;
+    for i in 0..5 {
+        let patch = OrgPatch {
+            host_pattern: Some(format!("{}-{i}.example.test", name("base"))),
+            ..OrgPatch::default()
+        };
+        let (ra, rb) = tokio::join!(apply(pool, &a, &patch), apply(pool, &b, &patch));
+        one_wins(
+            &ra,
+            &rb,
+            |e| matches!(e, TenancyError::Validation(m) if m.contains("already used")),
+        );
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
         edit_refuses_a_host_claimed_meanwhile,
         create_refuses_a_host_claimed_meanwhile,
+        two_extra_claims_at_once_one_wins,
+        two_base_claims_at_once_one_wins,
     ],
 }

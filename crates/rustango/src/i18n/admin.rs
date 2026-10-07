@@ -140,11 +140,13 @@ pub fn render_editor(
         h.push_str(&format!("<tr><td>{}</td>", escape(&row.key)));
         for (i, loc) in locales.iter().enumerate() {
             let val = row.values.get(i).and_then(Option::as_deref).unwrap_or("");
+            // `orig:` carries the shown value, so a save clears only what it saw (#2091).
             h.push_str(&format!(
-                "<td><input name=\"tr:{}:{}\" value=\"{}\"></td>",
-                escape(loc),
-                escape(&row.key),
-                escape(val)
+                "<td><input name=\"tr:{l}:{k}\" value=\"{v}\">\
+                 <input type=\"hidden\" name=\"orig:{l}:{k}\" value=\"{v}\"></td>",
+                l = escape(loc),
+                k = escape(&row.key),
+                v = escape(val)
             ));
         }
         // Per-row "delete this key" (removes every locale's override).
@@ -258,31 +260,48 @@ pub fn changed_edits<'a>(
         .collect()
 }
 
-/// The `(locale, key)` cells an operator emptied: a stored non-empty
-/// override posted back blank, so it falls back to the file (#2091).
+/// Parse the hidden `orig:<locale>:<key>` fields: the values the page
+/// showed, as `(locale, key, value)`.
+#[must_use]
+pub fn parse_shown(form: &[(String, String)]) -> Vec<(String, String, String)> {
+    form.iter()
+        .filter_map(|(name, value)| {
+            let (locale, key) = name.strip_prefix("orig:")?.split_once(':')?;
+            (!locale.is_empty() && !key.is_empty())
+                .then(|| (locale.to_owned(), key.to_owned(), value.clone()))
+        })
+        .collect()
+}
+
+/// The `(locale, key)` cells an operator emptied: shown non-empty, posted
+/// back blank (#2091). A gap filled by someone else after the page loaded
+/// was shown blank, so it is never cleared.
 #[must_use]
 pub fn cleared_cells<'a>(
-    current: &[(String, String, String)],
+    shown: &[(String, String, String)],
     edits: &'a [(String, String, String)],
 ) -> Vec<(&'a str, &'a str)> {
+    let shown: std::collections::HashMap<(&str, &str), &str> = shown
+        .iter()
+        .map(|(l, k, v)| ((l.as_str(), k.as_str()), v.as_str()))
+        .collect();
     edits
         .iter()
         .filter(|(l, k, v)| {
             v.is_empty()
-                && current
-                    .iter()
-                    .any(|(cl, ck, cv)| cl == l && ck == k && !cv.is_empty())
+                && shown
+                    .get(&(l.as_str(), k.as_str()))
+                    .is_some_and(|s| !s.is_empty())
         })
         .map(|(l, k, _)| (l.as_str(), k.as_str()))
         .collect()
 }
 
-/// Upsert each edit that [`changed_edits`] keeps and delete each cell
-/// [`cleared_cells`] finds. Returns the count written or removed.
-/// `updated_by` records the operator.
+/// Upsert each edit that [`changed_edits`] keeps. Returns the count
+/// written. `updated_by` records the operator.
 ///
 /// # Errors
-/// As the ORM upsert and delete paths ([`crate::sql::ExecError`]).
+/// As the ORM upsert path ([`crate::sql::ExecError`]).
 #[cfg(feature = "admin")]
 pub async fn apply_edits(
     pool: &Pool,
@@ -294,11 +313,45 @@ pub async fn apply_edits(
     for (locale, key, value) in &changed {
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
-    let cleared = cleared_cells(&current, edits);
-    for (locale, key) in &cleared {
-        delete_override(pool, locale, key).await?;
+    Ok(changed.len())
+}
+
+/// Delete each `(locale, key)` override, so those locales fall back to
+/// their files (#2091). Returns the rows removed.
+///
+/// # Errors
+/// As the ORM delete path ([`crate::sql::ExecError`]).
+#[cfg(feature = "admin")]
+pub async fn apply_clears(
+    pool: &Pool,
+    cells: &[(&str, &str)],
+) -> Result<u64, crate::sql::ExecError> {
+    let mut removed = 0;
+    for (locale, key) in cells {
+        removed += delete_override(pool, locale, key).await?;
     }
-    Ok(changed.len() + cleared.len())
+    Ok(removed)
+}
+
+/// Apply one editor POST body: edits and the new key, emptied cells,
+/// then the delete-checked keys, so a key both edited and checked ends
+/// up deleted.
+///
+/// # Errors
+/// As the ORM write paths ([`crate::sql::ExecError`]).
+#[cfg(feature = "admin")]
+pub async fn apply_form(
+    pool: &Pool,
+    form: &[(String, String)],
+    updated_by: &str,
+) -> Result<(), crate::sql::ExecError> {
+    let mut edits = parse_edits(form);
+    let shown = parse_shown(form);
+    apply_clears(pool, &cleared_cells(&shown, &edits)).await?;
+    edits.extend(parse_new_key(form));
+    apply_edits(pool, &edits, updated_by).await?;
+    apply_deletes(pool, &parse_deletes(form)).await?;
+    Ok(())
 }
 
 /// Delete each listed key (all locales) from the override layer. Returns
@@ -386,17 +439,7 @@ async fn editor_post(
     };
     let form: Vec<(String, String)> = serde_urlencoded::from_bytes(&body).unwrap_or_default();
 
-    // Edits + the new key are upserts; deletes run last so a key that's
-    // both edited and delete-checked in the same submit ends up deleted.
-    let mut edits = parse_edits(&form);
-    edits.extend(parse_new_key(&form));
-    let deletes = parse_deletes(&form);
-    let result = async {
-        apply_edits(&pool, &edits, &updated_by).await?;
-        apply_deletes(&pool, &deletes).await
-    }
-    .await;
-    if let Err(e) = result {
+    if let Err(e) = apply_form(&pool, &form, &updated_by).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("save translations: {e}"),

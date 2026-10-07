@@ -228,17 +228,16 @@ pub(crate) async fn apply_values(
             value: crate::core::SqlValue::String(slug.to_owned()),
         }]),
     };
-    let mut tx = crate::sql::write_transaction_pool(registry).await?;
-    if let Some(host) = &claim {
-        crate::tenancy::org_host::claim_host(
-            &mut tx,
-            host,
-            existing_id,
-            crate::tenancy::org_host::HostRole::Base,
-        )
-        .await
-        .map_err(crate::tenancy::org_host::claim_error)?;
-    }
+    use crate::tenancy::org_host::{claim_error, claim_host, Claimant};
+    let mut tx = match &claim {
+        Some(host) => {
+            claim_host(registry, host, Claimant::Base(existing_id))
+                .await
+                .map_err(claim_error)?
+                .tx
+        }
+        None => crate::sql::write_transaction_pool(registry).await?,
+    };
     crate::sql::update_tx(&mut tx, &update).await?;
     tx.commit().await?;
 

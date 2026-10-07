@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — the translations editor clears one locale's override (#2091)
 
-Emptying a cell that holds an override deletes that `(locale, key)` row, so the locale falls back to its file.
+Emptying a cell the page showed non-empty deletes that `(locale, key)` row, so the locale falls back to its file. A gap someone filled after the page loaded is kept.
 
 ### Fixed — SQLite honours a DB default on an integer primary key (#2137)
 
@@ -18,7 +18,7 @@ The cross-field check reads the row locked, and the UPDATE and its audit entry r
 
 ### Fixed — two tenants can no longer claim one host at once (#2099)
 
-`add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused.
+`add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused. A MySQL deadlock between two claims is retried once.
 
 ## [0.60.1] — 2026-10-07
 
