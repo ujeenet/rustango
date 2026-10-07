@@ -16,6 +16,10 @@ A non-`Auto` integer PK with a `default` is created as `BIGINT`, not the rowid a
 
 The cross-field check reads the row locked, and the UPDATE and its audit entry run in the same transaction.
 
+### Fixed — two tenants can no longer claim one host at once (#2099)
+
+`add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

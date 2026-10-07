@@ -168,6 +168,7 @@ pub(crate) async fn apply_values(
     let mut set: Vec<crate::core::Assignment> = Vec::new();
     let mut touched: Vec<&'static str> = Vec::new();
     let mut database_url_rotated = false;
+    let mut claim: Option<String> = None;
     for (column, value) in values {
         let value = match (column, value) {
             // Blank keeps the current URL; it is a credential, never cleared here.
@@ -181,13 +182,8 @@ pub(crate) async fn apply_values(
                 // Store the normalized form so it matches a `Host` header byte-for-byte.
                 let host = crate::tenancy::provision::validate_host_pattern(&v)
                     .map_err(TenancyError::Validation)?;
-                if crate::tenancy::org_host::host_claimed(registry, &host, Some(existing_id))
-                    .await?
-                {
-                    return Err(TenancyError::Validation(format!(
-                        "host `{host}` is already used by another tenant"
-                    )));
-                }
+                // Claimed in the UPDATE's transaction below (#2099).
+                claim = Some(host.clone());
                 SqlValue::String(host)
             }
             ("path_prefix", SqlValue::String(v)) => {
@@ -232,7 +228,19 @@ pub(crate) async fn apply_values(
             value: crate::core::SqlValue::String(slug.to_owned()),
         }]),
     };
-    crate::sql::update_pool(registry, &update).await?;
+    let mut tx = crate::sql::write_transaction_pool(registry).await?;
+    if let Some(host) = &claim {
+        crate::tenancy::org_host::claim_host(
+            &mut tx,
+            host,
+            existing_id,
+            crate::tenancy::org_host::HostRole::Base,
+        )
+        .await
+        .map_err(crate::tenancy::org_host::claim_error)?;
+    }
+    crate::sql::update_tx(&mut tx, &update).await?;
+    tx.commit().await?;
 
     // Before anything else acts on the write — see the module docs.
     crate::tenancy::invalidate_org_cache();

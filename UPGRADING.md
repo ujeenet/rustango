@@ -162,6 +162,10 @@ New tables and migrations create a non-`Auto` integer PK with a `default` as `BI
 
 The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010).
 
+### Host claims are transactional
+
+Tenant edit and create now insert and delete a claim row in `rustango_org_hosts` inside their transaction (#2099).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

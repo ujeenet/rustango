@@ -679,8 +679,8 @@ where
     rep.step(ProvisionStep::RegisterOrg, StepStatus::Started)
         .await;
     let mut org = new_org_row(request, schema_name);
-    if let Err(e) = org.insert_pool(&registry).await {
-        return rep.fail(ProvisionStep::RegisterOrg, e.into()).await;
+    if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
+        return rep.fail(ProvisionStep::RegisterOrg, e).await;
     }
     // This pod sees the new tenant immediately; others converge on the
     // registry fingerprint (see `resolver::sync_org_generation`).
