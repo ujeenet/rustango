@@ -134,6 +134,7 @@ The no-op write now targets a non-auto-increment column, so two rows of one batc
 ### Fixed — ViewSet OpenAPI lists the 409 conflict response on create and update (#2164)
 
 POST, PUT and PATCH map a unique violation to 409; the spec now says so.
+
 ### Fixed — ViewSet OpenAPI lists every write status (#2207)
 
 PUT and PATCH now list `400` and the `204` sent when the updated row leaves the caller's scope; the `201` notes its empty body in the same case.
