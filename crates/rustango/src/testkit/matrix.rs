@@ -791,9 +791,9 @@ mod tests {
             let pool = pool.clone();
             let barrier = Arc::clone(&barrier);
             tasks.push(tokio::spawn(async move {
-                let crate::sql::Pool::Sqlite(sq) = &pool else {
-                    unreachable!("sqlite_file_pool returns a SQLite pool")
-                };
+                let sq = pool
+                    .as_sqlite()
+                    .expect("sqlite_file_pool returns a SQLite pool");
                 // Hold a connection, and do not let go until every task
                 // holds one too.
                 let mut conn = sq.acquire().await.expect("acquire");
