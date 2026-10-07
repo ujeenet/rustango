@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `#[rustango::main]` installs through `logging::Setup`
+
+Same output as before. If a subscriber is already installed, it now warns on stderr instead of staying silent (#1493).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

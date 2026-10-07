@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — logging follow-ups from the #1479 reviews (#1493)
+
+The access log writes its field list once; query redaction no longer allocates for a clean query; `#[rustango::main]` installs through `logging::Setup`; `bin/bump-version.sh` no longer rewrites a third-party dep pinned at our version. `docs/logging.md` now says `fmt` never shows the span's status, size and duration.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
