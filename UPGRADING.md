@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Error text no longer echoes secrets
+
+`PoolError::UnsupportedScheme` holds just the scheme (empty if none), not the URL (#2172). `ConfigError::Shape` reads `` `section.key`: expected <type> `` and no longer quotes the value (#2159). Update any test that matched the old text.
+
+### Admin CSRF cookie follows an outer `csrf::with_config` layer
+
+The admin and tenant login forms now set and check that layer's cookie name, not always `rustango_csrf` (#2160).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

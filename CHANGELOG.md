@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — `PoolError::UnsupportedScheme` holds the scheme only (#2172)
+
+It used to hold the whole URL, password included.
+
+### Security — `ConfigError::Shape` never quotes the value (#2159)
+
+It names the key and the expected type; the TOML value can be a secret.
+
+### Security — webhook Debug shows the URL origin and header names only (#2161)
+
+`WebhookSubscription` and `WebhookEvent` no longer print the URL path, query or a header value.
+
+### Security — operator console withholds driver text on every redirect (#2171)
+
+Operator, decommission, pre-warm, org-edit and password-hash failures log the cause and show an opaque message.
+
+### Fixed — admin CSRF follows the outer layer's cookie (#2160)
+
+Under `csrf::with_config`, admin pages and both login forms set and check that layer's cookie name and `Secure` flag; POSTs no longer 403.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
