@@ -154,6 +154,8 @@ untouched.
 
 `insert_tx`, `save_tx` and `delete_tx` on audited models add their audit row in the same transaction, like the `_pool` methods (#1460). Drop any manual audit emit you added after them.
 
+They now run extra statements: the audit insert, and a before-read for `save_tx`. `assert_num_queries` does not count those two, so a test pinning statement counts by other means will see more.
+
 ### Render DDL outside the runner with `render_changes_between`
 
 `render_changes_split_with_dialect` has no before-snapshot, so on MySQL it emits `DROP COLUMN` without the FK drop and fails (1828). Use `migrate::render_changes_between(changes, before, after, dialect)` (#2026).

@@ -234,6 +234,8 @@ struct Block {
     callbacks: Mutex<Vec<Callback>>,
     /// Set after the outermost commit: `on_commit` then runs at once.
     committed: AtomicBool,
+    /// `&Pool` calls this block already warned about.
+    warned: Mutex<BTreeSet<&'static str>>,
 }
 
 impl Block {
@@ -353,16 +355,23 @@ pub(crate) fn in_block(pool: &Pool) -> bool {
         .unwrap_or(false)
 }
 
-/// Warn, once per `op`, that `op` ran on `pool` while an [`atomic`] block
-/// on it is open: it takes another connection, outside the block (#1460).
+/// Warn, once per `op` and block, that `op` ran on `pool` while an
+/// [`atomic`] block on it is open: it takes another connection (#1460).
 pub(crate) fn warn_if_in_block(pool: &Pool, op: &'static str) {
-    static WARNED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
-    if in_block(pool)
-        && WARNED
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(op)
-    {
+    let id = PoolId(pool.clone());
+    let first = BLOCK
+        .try_with(|b| {
+            std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
+                .find(|b| b.pool.same(&id))
+                .is_some_and(|b| {
+                    b.warned
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(op)
+                })
+        })
+        .unwrap_or(false);
+    if first {
         tracing::warn!(
             target: "rustango::atomic",
             op,
@@ -425,7 +434,7 @@ pub(crate) fn warn_if_in_block(pool: &Pool, op: &'static str) {
 ///
 /// **`&Pool` calls inside the block** (`fetch(&pool)`, `save_pool`, …) run
 /// on another connection, outside the block, and can deadlock a small
-/// pool. Each kind logs one `rustango::atomic` warning; use the `_tx` helpers.
+/// pool. Each kind logs one `rustango::atomic` warning per block; use the `_tx` helpers.
 ///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
@@ -556,6 +565,7 @@ where
         enclosing,
         callbacks: Mutex::new(Vec::new()),
         committed: AtomicBool::new(false),
+        warned: Mutex::new(BTreeSet::new()),
     });
     let handle = AtomicTx {
         block: Arc::clone(&block),
@@ -653,6 +663,7 @@ where
         enclosing,
         callbacks: Mutex::new(Vec::new()),
         committed: AtomicBool::new(false),
+        warned: Mutex::new(BTreeSet::new()),
     });
     let handle = AtomicTx {
         block: Arc::clone(&block),
@@ -786,7 +797,7 @@ pub fn on_commit_pending() -> usize {
 mod tests {
     use super::*;
 
-    /// A `&Pool` call inside a block on that pool warns, once (#1460).
+    /// A `&Pool` call inside a block on that pool warns once per block (#1460).
     #[tokio::test]
     async fn pool_call_inside_block_warns_once() {
         let out = crate::testkit::CaptureWriter::default();
@@ -806,18 +817,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.contents(), "", "outside a block");
-        let p = pool.clone();
-        atomic(&pool, move |_tx| {
-            Box::pin(async move {
-                for _ in 0..2 {
-                    crate::sql::raw_execute_pool(&p, "SELECT 1", Vec::new()).await?;
-                }
-                Ok(())
+        for _ in 0..2 {
+            let p = pool.clone();
+            atomic(&pool, move |_tx| {
+                Box::pin(async move {
+                    for _ in 0..2 {
+                        crate::sql::raw_execute_pool(&p, "SELECT 1", Vec::new()).await?;
+                    }
+                    Ok(())
+                })
             })
-        })
-        .await
-        .unwrap();
+            .await
+            .unwrap();
+        }
         let logs = out.contents();
-        assert_eq!(logs.matches("raw_execute_pool").count(), 1, "{logs}");
+        assert_eq!(logs.matches("raw_execute_pool").count(), 2, "{logs}");
     }
 }
