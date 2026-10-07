@@ -50,7 +50,7 @@ use axum::body::Body;
 use axum::extract::{Extension, FromRequestParts, Path, Query, Request};
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use base64::Engine;
@@ -66,7 +66,7 @@ use crate::sso::link::{
     ProviderKey,
 };
 use crate::sso::provider::resolve_by_slug;
-use crate::sso::{build_provider, open_flow, seal_flow, NormalizedUser};
+use crate::sso::{build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser};
 use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
@@ -406,12 +406,73 @@ where
     Tenant<DB>: FromRequestParts<()> + Send,
 {
     let login = config.login_base.trim_end_matches('/').to_owned();
-    let begin_path = format!("{login}/sso/{{slug}}");
-    let callback_path = format!("{login}/sso/{{slug}}/callback");
-    Router::new()
-        .route(&begin_path, get(sso_begin::<DB>))
-        .route(&callback_path, get(sso_callback::<DB>))
-        .layer(Extension(config))
+    let mut router = Router::new();
+    // A path-prefix tenant reaches the same routes under its prefix (#2145).
+    for mount in ["", "/{prefix}"] {
+        router = router
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}"),
+                get(sso_begin::<DB>),
+            )
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}/callback"),
+                get(sso_callback::<DB>),
+            );
+    }
+    router.layer(Extension(config))
+}
+
+/// Path params; `prefix` is set on the path-prefix tenant routes.
+#[derive(Deserialize)]
+struct SsoPath {
+    slug: String,
+    prefix: Option<String>,
+}
+
+/// Where this request's member routes live: `/` or the tenant's path
+/// prefix. Every URL and cookie path the handlers emit goes through it (#2145).
+struct Mount {
+    /// `/` or the prefix (`/acme`), no trailing slash.
+    path: String,
+    /// `login_base` without a trailing slash.
+    login: String,
+}
+
+impl Mount {
+    /// `None` when a prefixed route matched a path outside the prefix.
+    fn of(t: &TenantScope, sso: &SsoPath, parts: &Parts, login_base: &str) -> Option<Self> {
+        let path = super::routes::cookie_path(&t.org, parts.uri.path());
+        (sso.prefix.is_none() || path != "/").then(|| Self {
+            path: path.to_owned(),
+            login: login_base.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// A site-absolute path as seen under this mount.
+    fn url(&self, site_path: &str) -> String {
+        if self.path == "/" {
+            site_path.to_owned()
+        } else {
+            format!("{}{site_path}", self.path)
+        }
+    }
+
+    fn login_url(&self) -> String {
+        match self.url(&self.login) {
+            u if u.is_empty() => "/".to_owned(),
+            u => u,
+        }
+    }
+
+    /// The absolute callback URL for a slug — must match at begin + callback.
+    /// `None` when the host is not plain `host[:port]` (#2173).
+    fn callback_uri(&self, parts: &Parts, slug: &str) -> Option<String> {
+        Some(format!(
+            "{}{}/sso/{slug}/callback",
+            external_base(parts)?.trim_end_matches('/'),
+            self.url(&self.login),
+        ))
+    }
 }
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`),
@@ -432,24 +493,27 @@ struct CallbackParams {
 ///
 /// The result MUST be byte-identical at begin and callback — the
 /// `redirect_uri` is part of the OAuth2 signature the IdP validates.
+/// `None` when the host is not plain `host[:port]` (#2173).
 #[must_use]
-pub(crate) fn external_base(parts: &Parts) -> String {
+pub(crate) fn external_base(parts: &Parts) -> Option<String> {
     let headers = &parts.headers;
-    let first = |v: &str| v.split(',').next().unwrap_or(v).trim().to_owned();
+    fn first(v: &str) -> &str {
+        v.split(',').next().unwrap_or(v).trim()
+    }
     let forwarded =
         |name: &str| crate::real_ip::trusted_forwarded(headers, &parts.extensions, name);
 
     let proto = forwarded("x-forwarded-proto").map(str::to_owned);
 
-    let host = forwarded("x-forwarded-host")
-        .map(str::to_owned)
+    let raw = forwarded("x-forwarded-host")
         .or_else(|| {
             headers
                 .get(header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .map(first)
         })
-        .unwrap_or_else(|| "localhost".to_owned());
+        .unwrap_or("localhost");
+    let host = crate::urls::HostAuthority::parse(raw)?.to_string();
 
     let scheme = proto.unwrap_or_else(|| {
         if let Some(s) = parts.uri.scheme_str() {
@@ -461,52 +525,48 @@ pub(crate) fn external_base(parts: &Parts) -> String {
         }
     });
 
-    format!("{scheme}://{host}")
-}
-
-/// The absolute callback URL for a slug — must match at begin + callback.
-fn callback_uri(parts: &Parts, login_base: &str, slug: &str) -> String {
-    format!(
-        "{}/{}/sso/{}/callback",
-        external_base(parts).trim_end_matches('/'),
-        login_base.trim_matches('/'),
-        slug,
-    )
+    Some(format!("{scheme}://{host}"))
 }
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
 /// the IdP, seal the flow into the transient flow cookie.
 fn sso_begin<DB: Database>(
     t: Tenant<DB>,
-    Path(slug): Path<String>,
+    Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     req: Request,
 ) -> impl std::future::Future<Output = Response> + Send {
-    sso_begin_in(t.into(), slug, config, req)
+    sso_begin_in(t.into(), sso, config, req)
 }
 
 async fn sso_begin_in(
     t: TenantScope,
-    slug: String,
+    sso: SsoPath,
     config: MemberAuthConfig,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
+    let Some(mount) = Mount::of(&t, &sso, &parts, &config.login_base) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let slug = sso.slug.as_str();
     let Some(secret) = session_secret(&parts) else {
-        return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
+        return sso_error("Sign-in is temporarily unavailable.", &mount);
     };
     let pool = t.pool();
 
-    let redirect_uri = callback_uri(&parts, &config.login_base, &slug);
-    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
+    let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
+        return sso_error("Sign-in is temporarily unavailable.", &mount);
+    };
+    let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(slug, "SSO provider not found / disabled");
-            return sso_error("That sign-in method is not available.", &config.login_base);
+            return sso_error("That sign-in method is not available.", &mount);
         }
         Err(e) => {
             tracing::error!(error = %e, slug, "resolve_by_slug failed");
-            return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
+            return sso_error("Sign-in is temporarily unavailable.", &mount);
         }
     };
 
@@ -514,15 +574,19 @@ async fn sso_begin_in(
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, slug, "build_provider failed");
-            return sso_error("Sign-in is temporarily unavailable.", &config.login_base);
+            return sso_error("Sign-in is temporarily unavailable.", &mount);
         }
     };
 
     let (authorize_url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, secret.key());
-    let path = super::routes::cookie_path(&t.org, parts.uri.path());
+    let sealed = seal_flow(
+        &flow,
+        FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
+        secret.key(),
+    );
     let flow_cookie = format!(
         "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
+        path = mount.path,
         s = secure_suffix(),
     );
     redirect_with_cookie(&authorize_url, &flow_cookie)
@@ -532,71 +596,68 @@ async fn sso_begin_in(
 /// find-or-provision the member, mint the member session cookie.
 fn sso_callback<DB: Database>(
     t: Tenant<DB>,
-    Path(slug): Path<String>,
+    Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,
     req: Request,
 ) -> impl std::future::Future<Output = Response> + Send {
-    sso_callback_in(t.into(), slug, config, params, req)
+    sso_callback_in(t.into(), sso, config, params, req)
 }
 
 async fn sso_callback_in(
     t: TenantScope,
-    slug: String,
+    sso: SsoPath,
     config: MemberAuthConfig,
     params: CallbackParams,
     req: Request,
 ) -> Response {
     let (parts, _body) = req.into_parts();
-    let login_base = &config.login_base;
-    let path = super::routes::cookie_path(&t.org, parts.uri.path()).to_owned();
-    let clear_flow = |resp: Response| clear_flow(resp, &path);
+    let Some(mount) = Mount::of(&t, &sso, &parts, &config.login_base) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let slug = sso.slug.as_str();
+    let clear_flow = |resp: Response| clear_flow(resp, &mount.path);
     let Some(secret) = session_secret(&parts) else {
-        return sso_error("Sign-in is temporarily unavailable.", login_base);
+        return sso_error("Sign-in is temporarily unavailable.", &mount);
     };
 
     if let Some(err) = params.error {
         tracing::warn!(slug, error = %err, "IdP returned an error");
-        return sso_error("Sign-in was cancelled or denied.", login_base);
+        return sso_error("Sign-in was cancelled or denied.", &mount);
     }
     let (Some(code), Some(state)) = (params.code, params.state) else {
-        return sso_error("Malformed sign-in response.", login_base);
+        return sso_error("Malformed sign-in response.", &mount);
     };
 
     let Some(sealed) = extract_cookie(&parts, FLOW_COOKIE) else {
-        return sso_error(
-            "Your sign-in session expired. Please try again.",
-            login_base,
-        );
+        return sso_error("Your sign-in session expired. Please try again.", &mount);
     };
-    let flow = match open_flow(&sealed, secret.key()) {
+    let flow = match open_flow(
+        &sealed,
+        FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
+        secret.key(),
+    ) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
-            return sso_error(
-                "Your sign-in session expired. Please try again.",
-                login_base,
-            );
+            return sso_error("Your sign-in session expired. Please try again.", &mount);
         }
     };
 
     let pool = t.pool();
 
-    let redirect_uri = callback_uri(&parts, login_base, &slug);
-    let resolved = match resolve_by_slug(pool, &slug, redirect_uri).await {
+    let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
+        return clear_flow(sso_error("Sign-in is temporarily unavailable.", &mount));
+    };
+    let resolved = match resolve_by_slug(pool, slug, redirect_uri).await {
         Ok(Some(r)) => r,
-        _ => {
-            return clear_flow(sso_error(
-                "That sign-in method is not available.",
-                login_base,
-            ))
-        }
+        _ => return clear_flow(sso_error("That sign-in method is not available.", &mount)),
     };
     let provider = match build_provider(&resolved.sso).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "build_provider failed on callback");
-            return clear_flow(sso_error("Sign-in is temporarily unavailable.", login_base));
+            return clear_flow(sso_error("Sign-in is temporarily unavailable.", &mount));
         }
     };
 
@@ -604,7 +665,7 @@ async fn sso_callback_in(
         Ok((user, _tokens)) => user,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
-            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
+            return clear_flow(sso_error("Sign-in failed. Please try again.", &mount));
         }
     };
 
@@ -622,42 +683,48 @@ async fn sso_callback_in(
         Ok(MemberSignIn::NotLinked) => {
             return clear_flow(sso_error(
                 "This sign-in is not linked to your account. Please contact your administrator.",
-                login_base,
+                &mount,
             ));
         }
         Ok(MemberSignIn::NoAccount) => {
             return clear_flow(sso_error(
                 "There is no account for this sign-in. Please contact your administrator.",
-                login_base,
+                &mount,
             ));
         }
         Ok(MemberSignIn::Inactive) => {
             return clear_flow(sso_error(
                 "This account is disabled. Please contact your administrator.",
-                login_base,
+                &mount,
             ));
         }
         Ok(MemberSignIn::Unverified) => {
             return clear_flow(sso_error(
                 "Your identity provider did not return a verified email.",
-                login_base,
+                &mount,
             ));
         }
         Ok(_) => {
-            return clear_flow(sso_error("Sign-in failed. Please try again.", login_base));
+            return clear_flow(sso_error("Sign-in failed. Please try again.", &mount));
         }
         Err(e) => {
             tracing::error!(error = %e, "find-or-provision member failed");
-            return clear_flow(sso_error("Could not complete sign-in.", login_base));
+            return clear_flow(sso_error("Could not complete sign-in.", &mount));
         }
     };
 
     let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
         tracing::warn!(member_id, "member missing or inactive after sign-in");
-        return clear_flow(sso_error("Could not complete sign-in.", login_base));
+        return clear_flow(sso_error("Could not complete sign-in.", &mount));
     };
-    let cookie = mint_cookie_at(&secret, &member, &t.org.slug, config.session_ttl, &path);
-    let landing = safe_landing(params.next.as_deref(), &config.landing_url);
+    let cookie = mint_cookie_at(
+        &secret,
+        &member,
+        &t.org.slug,
+        config.session_ttl,
+        &mount.path,
+    );
+    let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
 
@@ -935,13 +1002,9 @@ fn clear_flow(mut resp: Response, path: &str) -> Response {
 
 /// Minimal self-contained HTML error page for SSO failures — no
 /// template dependency, so it renders even when tenant templates are
-/// missing. Links back to `login_base`.
-fn sso_error(message: &str, login_base: &str) -> Response {
-    let back = if login_base.is_empty() {
-        "/"
-    } else {
-        login_base
-    };
+/// missing. Links back to the login page under `mount`.
+fn sso_error(message: &str, mount: &Mount) -> Response {
+    let back = mount.login_url();
     let html = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Sign-in error</title>\
          <body style=\"font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem\">\
@@ -1089,7 +1152,10 @@ mod tests {
             ("x-forwarded-host", "evil.example.com"),
             ("host", "gym.example.com"),
         ]);
-        assert_eq!(external_base(&parts), "https://gym.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://gym.example.com")
+        );
     }
 
     #[test]
@@ -1102,19 +1168,45 @@ mod tests {
         parts
             .extensions
             .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
-        assert_eq!(external_base(&parts), "https://g.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://g.example.com")
+        );
     }
 
     #[test]
     fn external_base_localhost_defaults_to_http() {
         let parts = parts_with(&[("host", "downtown.localhost:8080")]);
-        assert_eq!(external_base(&parts), "http://downtown.localhost:8080");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("http://downtown.localhost:8080")
+        );
     }
 
     #[test]
     fn external_base_public_host_defaults_to_https() {
         let parts = parts_with(&[("host", "gym.example.com")]);
-        assert_eq!(external_base(&parts), "https://gym.example.com");
+        assert_eq!(
+            external_base(&parts).as_deref(),
+            Some("https://gym.example.com")
+        );
+    }
+
+    /// The `redirect_uri` never takes userinfo from the Host (#2173).
+    #[test]
+    fn external_base_refuses_a_host_with_userinfo() {
+        for host in ["good.com:1@evil.com:2", "good.com@evil.com"] {
+            assert_eq!(
+                external_base(&parts_with(&[("host", host)])),
+                None,
+                "{host}"
+            );
+        }
+        let mut parts = parts_with(&[("x-forwarded-host", "a@evil.com"), ("host", "gym.test")]);
+        parts
+            .extensions
+            .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
+        assert_eq!(external_base(&parts), None);
     }
 
     // ---- safe_landing -----------------------------------------------

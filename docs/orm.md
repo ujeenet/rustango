@@ -28,7 +28,6 @@ Recent releases added a batch of features that aren't yet woven into every secti
 - **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (#524, v0.42).
 - **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validate now, mutate the prepared write set, commit when ready.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — emits an empty marker trait next to the model. It adds no methods: put your query shortcuts on your own extension trait over `QuerySet<Foo>`, as `crates/rustango/src/manager.rs` shows.
 - **`manage makemigrations --merge`** (#346, v0.42) — a merge node that reunites divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
 
 The CHANGELOG carries the full ticket index for each release.
@@ -1586,6 +1585,8 @@ let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await
 
 These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
 
+Global scopes apply to every `QuerySet` and to the `Model` shortcuts built on one (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). They do not apply to `Model::truncate`, which empties the whole table, or to the instance methods keyed by the primary key (`save_pool`, `save_partial`, `delete_pool`, `soft_delete`, `restore`): those act on the row you already hold.
+
 ---
 
 ## Audit trail
@@ -1612,6 +1613,8 @@ with_source(
 ```
 
 The admin's per-row history panel reads from this table; the cross-model feed is at `/__audit`.
+
+Rows the database deletes or changes through an FK `on_delete` action (`cascade`, `set_null`, `set_default`) are not audited, and neither are the child tables PostgreSQL's `Model::truncate` empties with `CASCADE`. Delete such children yourself first if they need audit rows; full cascade audit is planned for 0.61.0.
 
 Cleanup:
 

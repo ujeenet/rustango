@@ -54,6 +54,7 @@ fn agent_with(tools: Vec<String>) -> McpAgent {
         tools,
         user_id: None,
         jti: "t".into(),
+        secret_prefix: String::new(),
     }
 }
 

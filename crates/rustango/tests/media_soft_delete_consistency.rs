@@ -478,7 +478,7 @@ async fn a_failed_storage_delete_does_not_take_the_row_with_it() {
     let row = rustango::sql::raw_query_pool::<(i64,)>(
         "SELECT id FROM rustango_media WHERE id = ?",
         vec![rustango::core::SqlValue::I64(id)],
-        mgr.pool_dyn(),
+        mgr.pool(),
     )
     .await
     .expect("read back");
@@ -560,7 +560,7 @@ async fn purging_from_an_unregistered_disk_is_not_a_silent_success() {
     let row = rustango::sql::raw_query_pool::<(i64,)>(
         "SELECT id FROM rustango_media WHERE id = ?",
         vec![rustango::core::SqlValue::I64(id)],
-        mgr.pool_dyn(),
+        mgr.pool(),
     )
     .await
     .expect("read back");

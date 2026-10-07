@@ -45,6 +45,7 @@ async fn ctx() -> McpContext {
             tools: vec!["work".into()],
             user_id: None,
             jti: "t".into(),
+            secret_prefix: String::new(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),
         cancel: rustango::mcp::CancelToken::never(),

@@ -1,7 +1,8 @@
 //! #1843 — a panicking job does not kill its worker and counts as a run;
 //! a long job is not run twice by a reclaim, and a worker that lost its
 //! lease does not finish the row for the worker that holds it now.
-//! #1677: a queue restarts after `shutdown`.
+//! #1677: a queue restarts after `shutdown`. #1229: a job runs with
+//! its enqueuer's audit source and timezone.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -433,10 +434,243 @@ async fn a_dropped_queue_stops_its_workers(pool: &Pool) {
     assert_eq!(the_row(pool).await, (0, false), "nor to lock it");
 }
 
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "jobs1229_note", app = "jobs1229", audit(track = "title"))]
+#[allow(dead_code)]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+
+/// Pool and seen UTC offset per token: a payload cannot carry a pool.
+type NotePools = Mutex<HashMap<String, (Pool, Option<i32>)>>;
+
+fn note_pools() -> &'static NotePools {
+    static P: OnceLock<NotePools> = OnceLock::new();
+    P.get_or_init(Mutex::default)
+}
+
+/// Writes one audited note titled `token`.
+#[derive(Serialize, Deserialize)]
+struct WriteNote {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for WriteNote {
+    const NAME: &'static str = "tri1229:write_note";
+    async fn run(&self) -> Result<(), JobError> {
+        let offset = rustango::i18n::timezone::current_offset().local_minus_utc();
+        let pool = {
+            let mut p = note_pools().lock().unwrap();
+            let e = p.get_mut(&self.token).expect("pool");
+            e.1 = Some(offset);
+            e.0.clone()
+        };
+        let mut note = Note {
+            id: rustango::sql::Auto::default(),
+            title: self.token.clone(),
+        };
+        note.insert_pool(&pool)
+            .await
+            .map_err(|e| JobError::Fatal(e.to_string()))
+    }
+}
+
+async fn note_setup(pool: &Pool) {
+    use rustango::audit::{self, AuditLog};
+    rustango::testkit::matrix::fresh_table::<Note>(pool).await;
+    audit::ensure_table_pool(pool).await.expect("audit table");
+    AuditLog::delete_where("entity_table", "jobs1229_note", pool)
+        .await
+        .expect("clear audit rows");
+}
+
+/// Dispatch a `WriteNote` as `user` in UTC+3, or with no scope at all.
+async fn dispatch_note(q: &PgJobQueue, pool: &Pool, tok: &str, user: Option<&str>) {
+    use rustango::audit::{with_source, AuditSource};
+    note_pools()
+        .lock()
+        .unwrap()
+        .insert(tok.to_owned(), (pool.clone(), None));
+    let job = WriteNote {
+        token: tok.to_owned(),
+    };
+    match user {
+        Some(id) => {
+            let three_h = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+            let source = AuditSource::User { id: id.into() };
+            with_source(source, async {
+                rustango::i18n::timezone::with_offset(three_h, q.dispatch(&job)).await
+            })
+            .await
+        }
+        None => q.dispatch(&job).await,
+    }
+    .unwrap();
+}
+
+/// The audit source and UTC offset the job for `tok` ran with.
+async fn ran_as(pool: &Pool, tok: &str) -> (String, i32) {
+    use rustango::sql::FetcherPool as _;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for {tok}");
+        let notes = Note::objects()
+            .filter("title", tok)
+            .fetch(pool)
+            .await
+            .expect("fetch");
+        if let Some(note) = notes.first() {
+            let pk = note.id.get().expect("pk").to_string();
+            let rows = rustango::audit::fetch_for_entity_pool(pool, "jobs1229_note", &pk)
+                .await
+                .expect("audit rows");
+            if let Some(e) = rows.first() {
+                let offset = note_pools().lock().unwrap()[tok].1.expect("offset");
+                return (e.source.clone(), offset);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// #1229 — a `PgJobQueue` job runs with its enqueuer's audit source and
+/// timezone; one enqueued outside any scope stays `system` in UTC.
+async fn a_database_job_runs_as_its_enqueuer(pool: &Pool) {
+    note_setup(pool).await;
+    let (by_user, by_nobody) = (token(pool, "ctx_user"), token(pool, "ctx_nobody"));
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<WriteNote>().await;
+    q.start().await;
+    dispatch_note(&q, pool, &by_user, Some("42")).await;
+    dispatch_note(&q, pool, &by_nobody, None).await;
+    let user = ran_as(pool, &by_user).await;
+    let nobody = ran_as(pool, &by_nobody).await;
+    q.shutdown().await;
+    assert_eq!(user, ("user:42".to_owned(), 3 * 3600));
+    assert_eq!(nobody, ("system".to_owned(), 0));
+}
+
+/// #1229 — a table without `context` still runs jobs, as `system`;
+/// `ensure_table_pool` adds the column and the context then crosses.
+async fn an_older_table_gets_the_column_from_ensure_table(pool: &Pool) {
+    note_setup(pool).await;
+    rustango::sql::raw_execute_pool(
+        pool,
+        "ALTER TABLE rustango_jobs DROP COLUMN context",
+        Vec::new(),
+    )
+    .await
+    .expect("drop the column");
+    let (before, after) = (token(pool, "ctx_old"), token(pool, "ctx_ensured"));
+
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<WriteNote>().await;
+    q.start().await;
+    dispatch_note(&q, pool, &before, Some("7")).await;
+    let old = ran_as(pool, &before).await;
+    q.shutdown().await;
+    assert_eq!(old.0, "system", "no column, no context");
+
+    PgJobQueue::ensure_table_pool(pool).await.expect("ensure");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<WriteNote>().await;
+    q.start().await;
+    dispatch_note(&q, pool, &after, Some("7")).await;
+    let ensured = ran_as(pool, &after).await;
+    q.shutdown().await;
+    assert_eq!(ensured.0, "user:7");
+}
+
+/// #1229 — a `context` column of another type is not used: the job
+/// still runs, as `system`, and dispatch does not fail.
+async fn a_wrong_typed_context_column_runs_as_system(pool: &Pool) {
+    note_setup(pool).await;
+    // One connection: another SQLite connection may still parse against
+    // the schema from before the DROP.
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    for sql in [
+        "ALTER TABLE rustango_jobs DROP COLUMN context",
+        "ALTER TABLE rustango_jobs ADD COLUMN context INTEGER",
+    ] {
+        rustango::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    tx.commit().await.expect("commit");
+    let tok = token(pool, "ctx_wrong_type");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<WriteNote>().await;
+    q.start().await;
+    dispatch_note(&q, pool, &tok, Some("7")).await;
+    let ran = ran_as(pool, &tok).await;
+    q.shutdown().await;
+    assert_eq!(ran.0, "system");
+}
+
+/// #1229 — re-running `ensure_table_pool` on a current table takes no
+/// lock: a no-op `ADD COLUMN` on PG would wait behind any reader.
+async fn ensure_table_does_not_wait_behind_a_reader(pool: &Pool) {
+    // A SQLite transaction holds the database's write lock.
+    if pool.dialect().name() == "sqlite" {
+        return;
+    }
+    let mut reader = rustango::sql::transaction_pool(pool).await.expect("tx");
+    rustango::sql::raw_execute_tx(
+        &mut reader,
+        "SELECT COUNT(*) FROM rustango_jobs",
+        Vec::new(),
+    )
+    .await
+    .expect("read");
+    let ensured =
+        tokio::time::timeout(Duration::from_secs(3), PgJobQueue::ensure_table_pool(pool)).await;
+    reader.rollback().await.expect("rollback");
+    ensured
+        .expect("ensure_table_pool waited for the reader")
+        .expect("ensure");
+}
+
+/// #2123 — a job a tenant-A user dispatched records `system` on a write
+/// made outside `with_tenant(A)`: the target tenant is unknown there.
+async fn a_tenant_bound_job_outside_with_tenant_is_system(pool: &Pool) {
+    #[cfg(not(feature = "tenancy"))]
+    let _ = pool;
+    #[cfg(feature = "tenancy")]
+    {
+        use rustango::audit::{with_tenant_source, AuditSource};
+        note_setup(pool).await;
+        let tok = token(pool, "ctx_tenant_a");
+        note_pools()
+            .lock()
+            .unwrap()
+            .insert(tok.clone(), (pool.clone(), None));
+        let q = queue(pool, 1, Duration::from_secs(60)).await;
+        q.register::<WriteNote>().await;
+        q.start().await;
+        let user = AuditSource::User { id: "42".into() };
+        with_tenant_source(user, "a".into(), async {
+            q.dispatch(&WriteNote { token: tok.clone() }).await.unwrap();
+        })
+        .await;
+        let ran = ran_as(pool, &tok).await;
+        q.shutdown().await;
+        assert_eq!(ran.0, "system");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        ensure_table_does_not_wait_behind_a_reader,
+        a_wrong_typed_context_column_runs_as_system,
+        a_tenant_bound_job_outside_with_tenant_is_system,
+        a_database_job_runs_as_its_enqueuer,
+        an_older_table_gets_the_column_from_ensure_table,
         a_panicking_job_keeps_the_worker,
         attempt_counts_at_pickup,
         a_row_out_of_attempts_is_dead_lettered_not_run,

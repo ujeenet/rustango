@@ -154,7 +154,7 @@ fn contents(uri: &str, mime: &str, text: String) -> Value {
 }
 
 fn internal(e: crate::tenancy::AgentError) -> JsonRpcError {
-    JsonRpcError::new(codes::INTERNAL_ERROR, e.to_string())
+    JsonRpcError::internal_logged(e)
 }
 
 /// Register a resource that every authenticated agent can read, with

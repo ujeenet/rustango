@@ -178,9 +178,85 @@ inventory::submit! {
     }
 }
 
+/// A row whose password matched, before any second factor. A weak stored
+/// hash is replaced only by `complete`, so a password alone cannot change
+/// the fingerprint that ends the user's other sessions (#2093).
+/// Fingerprint a session from the hash `complete` returns, not this one.
+#[must_use = "call `complete` once every factor has passed"]
+#[derive(Debug)]
+pub struct PasswordVerified<T> {
+    row: T,
+    /// A current-cost hash of the same password, stored by `complete`.
+    upgrade: Option<String>,
+}
+
+impl<T> std::ops::Deref for PasswordVerified<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.row
+    }
+}
+
+impl PasswordVerified<User> {
+    /// The user, its weak hash upgraded. Call after the second factor.
+    #[must_use]
+    pub async fn complete(self, pool: &crate::sql::Pool) -> User {
+        let Self { mut row, upgrade } = self;
+        if let Some(new) = upgrade {
+            let id = row.id.get().copied().unwrap_or_default();
+            row.password_hash = crate::passwords::store_rehash(
+                pool,
+                <User as crate::core::Model>::SCHEMA,
+                id,
+                &row.password_hash,
+                new,
+            )
+            .await;
+        }
+        row
+    }
+
+    /// [`Self::complete`] on a schema-scoped connection.
+    #[cfg(feature = "postgres")]
+    #[must_use]
+    pub async fn complete_on(self, conn: &mut PgConnection) -> User {
+        let Self { mut row, upgrade } = self;
+        if let Some(new) = upgrade {
+            let model = <User as crate::core::Model>::SCHEMA;
+            let id = row.id.get().copied().unwrap_or_default();
+            let q = crate::passwords::rehash_update(model, id, &row.password_hash, &new);
+            let applied = crate::sql::update_on(&mut *conn, &q).await;
+            row.password_hash =
+                crate::passwords::rehash_applied(applied, model, id, &row.password_hash, new);
+        }
+        row
+    }
+}
+
+impl PasswordVerified<Operator> {
+    /// The operator, its weak hash upgraded. Call after the second factor.
+    #[must_use]
+    pub async fn complete(self, registry: &crate::sql::Pool) -> Operator {
+        let Self { mut row, upgrade } = self;
+        if let Some(new) = upgrade {
+            let id = row.id.get().copied().unwrap_or_default();
+            row.password_hash = crate::passwords::store_rehash(
+                registry,
+                <Operator as crate::core::Model>::SCHEMA,
+                id,
+                &row.password_hash,
+                new,
+            )
+            .await;
+        }
+        row
+    }
+}
+
 /// Look up an operator by username and verify the password.
 ///
-/// Returns `Ok(Some(operator))` on success, `Ok(None)` for an unknown
+/// Returns `Ok(Some(_))` on success — call [`PasswordVerified::complete`]
+/// once any second factor passes — and `Ok(None)` for an unknown
 /// username, a wrong password, OR an inactive (`active = false`)
 /// operator — always the same `Ok(None)`. The unknown-username path
 /// runs a dummy Argon2 verify ([`password::verify_dummy_async`]) and the
@@ -197,7 +273,7 @@ pub async fn authenticate_operator(
     registry: &PgPool,
     username: &str,
     password: &str,
-) -> Result<Option<Operator>, TenancyError> {
+) -> Result<Option<PasswordVerified<Operator>>, TenancyError> {
     authenticate_operator_pool(
         &crate::sql::Pool::Postgres(registry.clone()),
         username,
@@ -218,9 +294,9 @@ pub async fn authenticate_operator_pool(
     registry: &crate::sql::Pool,
     username: &str,
     password: &str,
-) -> Result<Option<Operator>, TenancyError> {
+) -> Result<Option<PasswordVerified<Operator>>, TenancyError> {
     let op = find_operator(registry, username).await?;
-    check_operator_password(registry, op, password).await
+    check_operator_password(op, password).await
 }
 
 /// The operator row for `username`, active or not.
@@ -239,10 +315,9 @@ pub(crate) async fn find_operator(
 /// `Some(op)` when `op` is active and `password` matches; the same work
 /// for a missing row.
 pub(crate) async fn check_operator_password(
-    registry: &crate::sql::Pool,
     op: Option<Operator>,
     password: &str,
-) -> Result<Option<Operator>, TenancyError> {
+) -> Result<Option<PasswordVerified<Operator>>, TenancyError> {
     let Some(op) = op else {
         // H1: spend a verify's worth of work on the unknown-user path
         // so timing doesn't reveal whether the account exists.
@@ -251,21 +326,12 @@ pub(crate) async fn check_operator_password(
     };
     // Verify before the active check so active vs inactive accounts
     // take the same time (audit H1).
-    let mut op = op;
     let password_ok = password::verify_async(password, &op.password_hash).await?;
     if !op.active || !password_ok {
         return Ok(None);
     }
-    let id = op.id.get().copied().unwrap_or_default();
-    op.password_hash = crate::passwords::upgrade_stored_hash(
-        registry,
-        <Operator as crate::core::Model>::SCHEMA,
-        id,
-        password,
-        &op.password_hash,
-    )
-    .await;
-    Ok(Some(op))
+    let upgrade = crate::passwords::rehash_async(password, &op.password_hash).await;
+    Ok(Some(PasswordVerified { row: op, upgrade }))
 }
 
 /// Look up a tenant user by username and verify the password.
@@ -292,39 +358,13 @@ pub async fn authenticate_user(
     conn: &mut PgConnection,
     username: &str,
     password: &str,
-) -> Result<Option<User>, TenancyError> {
+) -> Result<Option<PasswordVerified<User>>, TenancyError> {
     // Through the ORM, so every column (cut-offs included) decodes or errors.
     let rows: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))
         .fetch_on(&mut *conn)
         .await?;
-    let Some(mut user) = rows.into_iter().next() else {
-        // H1: equalize timing for the unknown-user path.
-        password::verify_dummy_async(password).await?;
-        return Ok(None);
-    };
-    let password_ok = password::verify_async(password, &user.password_hash).await?;
-    if !user.active || !password_ok {
-        return Ok(None);
-    }
-    if let Some(new) = crate::passwords::rehash_async(password, &user.password_hash).await {
-        let id = user.id.get().copied().unwrap_or_default();
-        let q = crate::passwords::rehash_update(
-            <User as crate::core::Model>::SCHEMA,
-            id,
-            &user.password_hash,
-            &new,
-        );
-        let applied = crate::sql::update_on(&mut *conn, &q).await;
-        user.password_hash = crate::passwords::rehash_applied(
-            applied,
-            <User as crate::core::Model>::SCHEMA,
-            id,
-            &user.password_hash,
-            new,
-        );
-    }
-    Ok(Some(user))
+    check_user_password(rows.into_iter().next(), password).await
 }
 
 /// Tri-dialect counterpart of [`authenticate_user`] (v0.38). Takes the
@@ -350,14 +390,22 @@ pub async fn authenticate_user_pool(
     pool: &crate::sql::Pool,
     username: &str,
     password: &str,
-) -> Result<Option<User>, TenancyError> {
+) -> Result<Option<PasswordVerified<User>>, TenancyError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     let rows: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))
         .fetch(pool)
         .await?;
-    let Some(mut user) = rows.into_iter().next() else {
+    check_user_password(rows.into_iter().next(), password).await
+}
+
+/// [`check_operator_password`] for a tenant user.
+async fn check_user_password(
+    user: Option<User>,
+    password: &str,
+) -> Result<Option<PasswordVerified<User>>, TenancyError> {
+    let Some(user) = user else {
         // H1: equalize timing for the unknown-user path.
         password::verify_dummy_async(password).await?;
         return Ok(None);
@@ -366,16 +414,8 @@ pub async fn authenticate_user_pool(
     if !user.active || !password_ok {
         return Ok(None);
     }
-    let id = user.id.get().copied().unwrap_or_default();
-    user.password_hash = crate::passwords::upgrade_stored_hash(
-        pool,
-        <User as crate::core::Model>::SCHEMA,
-        id,
-        password,
-        &user.password_hash,
-    )
-    .await;
-    Ok(Some(user))
+    let upgrade = crate::passwords::rehash_async(password, &user.password_hash).await;
+    Ok(Some(PasswordVerified { row: user, upgrade }))
 }
 
 // ---------- Swappable user model ----------

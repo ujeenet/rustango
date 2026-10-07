@@ -359,21 +359,14 @@ impl MediaManager {
         &self.registry
     }
 
-    /// Postgres-only accessor. Use [`Self::pool_dyn`] instead.
-    ///
-    /// # Panics
-    /// If the manager wraps a non-Postgres pool.
-    #[cfg(feature = "postgres")]
+    /// The pool, on any backend; `.as_postgres()` for the PG one (#2070).
     #[must_use]
-    pub fn pool(&self) -> &PgPool {
-        match &self.pool {
-            crate::sql::Pool::Postgres(pg) => pg,
-            #[cfg(any(feature = "mysql", feature = "sqlite"))]
-            _ => panic!("MediaManager::pool() called on a non-PG manager; use pool_dyn() instead"),
-        }
+    pub fn pool(&self) -> &crate::sql::Pool {
+        &self.pool
     }
 
-    /// The pool as a [`crate::sql::Pool`], on any backend.
+    /// Same as [`Self::pool`].
+    #[deprecated(since = "0.60.1", note = "use `pool()`")]
     #[must_use]
     pub fn pool_dyn(&self) -> &crate::sql::Pool {
         &self.pool
@@ -913,7 +906,8 @@ impl MediaManager {
     ///
     /// # Errors
     /// `Db` for unique-constraint violations on `slug` or any other
-    /// underlying sqlx error.
+    /// underlying sqlx error. `Other("parent collection N is missing or
+    /// deleted")` when `parent` is.
     pub async fn create_collection(
         &self,
         name: impl Into<String>,
@@ -939,20 +933,50 @@ impl MediaManager {
             created_at: Auto::Unset,
             deleted_at: None,
         };
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        // IMMEDIATE on SQLite: this tx reads before it writes (#2180).
+        let mut tx = crate::sql::write_transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
+        // Locked until commit, so a concurrent `delete_collection` either
+        // sees this child or has already deleted the parent (#1573).
+        if let Some(p) = parent {
+            use crate::sql::FetcherTx as _;
+            let live = MediaCollection::objects()
+                .where_(MediaCollection::id.eq(p))
+                .where_(MediaCollection::deleted_at.is_null())
+                .select_for_update()
+                .fetch_tx(&mut tx)
+                .await
+                .map_err(media_err_from_exec)?;
+            if live.is_empty() {
+                tx.rollback().await?;
+                // Not "not found": the router would answer 404 for a bad body.
+                return Err(MediaError::Other(format!(
+                    "parent collection {p} is missing or deleted"
+                )));
+            }
+        }
         crate::sql::delete_tx(&mut tx, &tombstone)
             .await
             .map_err(media_err_from_exec)?;
         row.insert_tx(&mut tx).await.map_err(media_err_from_exec)?;
-        tx.commit().await?;
-        // Read back for the database-stamped `created_at`.
         let Auto::Set(id) = row.id else {
             return Err(MediaError::Other("collection INSERT returned no id".into()));
         };
-        self.get_collection(id)
-            .await?
+        // Read back for the database-stamped `created_at`, inside the tx:
+        // after commit a concurrent subtree delete may already have taken it.
+        let created = {
+            use crate::sql::FetcherTx as _;
+            MediaCollection::objects()
+                .where_(MediaCollection::id.eq(id))
+                .fetch_tx(&mut tx)
+                .await
+                .map_err(media_err_from_exec)?
+        };
+        tx.commit().await?;
+        created
+            .into_iter()
+            .next()
             .ok_or_else(|| MediaError::Other(format!("collection {id} vanished after INSERT")))
     }
 
@@ -1040,45 +1064,43 @@ impl MediaManager {
     /// [`Self::list_collections`], and [`Self::collection_path`] on
     /// any of them a permanent error.
     pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
-        // The **whole subtree**, not just this row. Reuses the same
-        // recursive walk `list_in_collection` uses, so the two agree
-        // about what "inside" means.
-        let mut ids = self.collect_descendant_ids(id).await?;
-        if !ids.contains(&id) {
-            // `collect_descendant_ids` filters already-deleted rows, so
-            // a re-delete would otherwise find nothing and skip the
-            // orphaning below.
-            ids.push(id);
-        }
-
-        // Media survives, as documented — it is orphaned, not deleted.
-        let orphan = Media::objects()
-            .where_(Media::collection_id.is_in(ids.iter().copied()))
-            .update()
-            .set("collection_id", crate::core::SqlValue::Null)
-            .compile()
-            .map_err(media_err_from_query)?;
-        let soft_delete = MediaCollection::objects()
-            .where_(MediaCollection::id.is_in(ids))
-            .update()
-            .set("deleted_at", Utc::now())
-            .compile()
-            .map_err(media_err_from_query)?;
-
         // Both statements in one transaction. Run separately, a
         // failure of the soft-delete leaves the orphaning committed:
         // the collection still live, every media row under it
         // orphaned, and the old `collection_id` recorded nowhere.
         // Both are database-only, so a transaction closes it.
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        // IMMEDIATE on SQLite: the walk reads before the writes (#2180).
+        let mut tx = crate::sql::write_transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        crate::sql::update_tx(&mut tx, &orphan)
-            .await
-            .map_err(media_err_from_exec)?;
-        crate::sql::update_tx(&mut tx, &soft_delete)
-            .await
-            .map_err(media_err_from_exec)?;
+        // One bind spare for `deleted_at`; a wide subtree is many `IN` lists.
+        let chunk = self.pool.dialect().max_bind_params() - 1;
+        // The **whole subtree**, walked inside the transaction so a
+        // child created mid-delete is not left under a dead parent.
+        let ids = lock_subtree_tx(&mut tx, id, chunk).await?;
+
+        let now = Utc::now();
+        for part in ids.chunks(chunk) {
+            // Media survives, as documented — it is orphaned, not deleted.
+            let orphan = Media::objects()
+                .where_(Media::collection_id.is_in(part.iter().copied()))
+                .update()
+                .set("collection_id", crate::core::SqlValue::Null)
+                .compile()
+                .map_err(media_err_from_query)?;
+            let soft_delete = MediaCollection::objects()
+                .where_(MediaCollection::id.is_in(part.iter().copied()))
+                .update()
+                .set("deleted_at", now)
+                .compile()
+                .map_err(media_err_from_query)?;
+            crate::sql::update_tx(&mut tx, &orphan)
+                .await
+                .map_err(media_err_from_exec)?;
+            crate::sql::update_tx(&mut tx, &soft_delete)
+                .await
+                .map_err(media_err_from_exec)?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1652,6 +1674,47 @@ fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
     media_err_from_exec(e.into())
 }
 
+/// `root` and its live descendants, each level locked `FOR UPDATE`, so a
+/// `create_collection` under any of them waits for `tx` (#1573).
+/// `chunk` caps the ids bound per `IN` list.
+async fn lock_subtree_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    root: i64,
+    chunk: usize,
+) -> Result<Vec<i64>, MediaError> {
+    use crate::sql::FetcherTx as _;
+    // Even a deleted root: a re-delete still orphans its media.
+    MediaCollection::objects()
+        .where_(MediaCollection::id.eq(root))
+        .select_for_update()
+        .fetch_tx(tx)
+        .await
+        .map_err(media_err_from_exec)?;
+    let mut ids = vec![root];
+    // Guards against a parent_id cycle.
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut level = vec![root];
+    while !level.is_empty() {
+        let mut next = Vec::new();
+        for part in level.chunks(chunk) {
+            let children = MediaCollection::objects()
+                .where_(MediaCollection::parent_id.is_in(part.iter().copied()))
+                .where_(MediaCollection::deleted_at.is_null())
+                .select_for_update()
+                .fetch_tx(tx)
+                .await
+                .map_err(media_err_from_exec)?;
+            next.extend(children.into_iter().filter_map(|c| match c.id {
+                Auto::Set(id) if seen.insert(id) => Some(id),
+                _ => None,
+            }));
+        }
+        ids.extend(&next);
+        level = next;
+    }
+    Ok(ids)
+}
+
 /// Decode one `popular_tags` row: a `MediaTag` plus the aggregate
 /// `use_count`. `MediaTag`'s derived `FromRow` reads only the model's
 /// own columns, so `use_count` is read here. One helper per backend.
@@ -1768,6 +1831,15 @@ pub const DEFAULT_DISK: &str = DEFAULT_DISK_NAME;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2070 — `pool()` on a non-PG manager returns its pool, no panic.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn pool_works_on_a_sqlite_manager() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let m = MediaManager::new_pool(pool, StorageRegistry::new());
+        assert!(m.pool().as_sqlite().is_some());
+    }
 
     #[test]
     fn media_status_round_trips_through_string() {

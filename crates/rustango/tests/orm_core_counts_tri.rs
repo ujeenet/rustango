@@ -691,6 +691,22 @@ async fn bulk_insert_rolled_back_with_outer(pool: &Pool, n: i64) {
     );
 }
 
+/// `bulk_insert_pool` checks field limits like `insert_pool` (#2153).
+async fn bulk_insert_checks_field_limits(pool: &Pool) {
+    let long = SqlValue::String("x".repeat(41));
+    let q = BulkInsertQuery::new(
+        Author::SCHEMA,
+        vec!["id", "name"],
+        vec![vec![SqlValue::I64(9), long]],
+    );
+    let err = bulk_insert_pool(pool, &q).await.unwrap_err();
+    assert!(
+        matches!(err, ExecError::Query(QueryError::MaxLengthExceeded { .. })),
+        "{err:?}"
+    );
+    assert_eq!(Author::objects().count(pool).await.unwrap(), 2);
+}
+
 /// Compile-only chain for the multi-hop alias test; never gets a table.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "occ_region")]
@@ -806,6 +822,7 @@ tri_dialect_test! {
         float_division_keeps_fraction,
         bulk_insert_rolls_back_every_batch,
         bulk_insert_joins_outer_atomic,
+        bulk_insert_checks_field_limits,
     ],
 }
 

@@ -75,7 +75,8 @@ pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
     resolver: Arc<dyn OrgResolver>,
     show_only: Option<Vec<String>>,
     read_only: Vec<String>,
-    session: Option<Arc<TenantSessionConfig>>,
+    session: Option<TenantSessionConfig>,
+    jti_store: Option<Arc<dyn crate::jti_store::JtiStore>>,
     actions: Vec<RegisteredAction>,
     title: Option<String>,
     subtitle: Option<String>,
@@ -97,6 +98,19 @@ struct RegisteredAction {
 struct TenantSessionConfig {
     secret: tenant_console::SessionSecret,
     tera: Tera,
+    /// Used handoff tokens and ended impersonations; `None` is the
+    /// per-process [`JtiBlacklist::shared`] (#2176).
+    ///
+    /// [`JtiBlacklist::shared`]: super::impersonation_handoff::JtiBlacklist::shared
+    jti: Option<super::impersonation_handoff::JtiBlacklist>,
+}
+
+impl TenantSessionConfig {
+    fn jti(&self) -> &super::impersonation_handoff::JtiBlacklist {
+        self.jti
+            .as_ref()
+            .unwrap_or_else(|| super::impersonation_handoff::JtiBlacklist::shared())
+    }
 }
 
 impl<DB: Database> TenantAdminBuilder<DB> {
@@ -118,6 +132,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             show_only: None,
             read_only: Vec::new(),
             session: None,
+            jti_store: None,
             actions: Vec::new(),
             title: None,
             subtitle: None,
@@ -194,7 +209,21 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             include_str!("templates/tenant_change_password.html"),
         )
         .expect("tenant_change_password.html parses");
-        self.session = Some(Arc::new(TenantSessionConfig { secret, tera }));
+        self.session = Some(TenantSessionConfig {
+            secret,
+            tera,
+            jti: None,
+        });
+        self
+    }
+
+    /// Where used impersonation handoff tokens and ended impersonations
+    /// are kept. The default is per-process; with several replicas pass
+    /// a shared store such as Redis or the database (#2176). Call it before
+    /// or after [`Self::with_session`]; without a session it has no use.
+    #[must_use]
+    pub fn impersonation_jti_store(mut self, store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
+        self.jti_store = Some(store);
         self
     }
 
@@ -265,7 +294,17 @@ where
         let resolver = self.resolver;
         let show_only = Arc::new(self.show_only);
         let read_only = Arc::new(self.read_only);
-        let session = self.session;
+        let jti_store = self.jti_store;
+        if jti_store.is_some() && self.session.is_none() {
+            warn!(
+                target: "rustango::tenancy::admin",
+                "impersonation_jti_store is unused: the tenant admin has no with_session",
+            );
+        }
+        let session = self.session.map(|mut s| {
+            s.jti = jti_store.map(super::impersonation_handoff::JtiBlacklist::with_store);
+            Arc::new(s)
+        });
         let actions = Arc::new(self.actions);
         let title = Arc::new(self.title);
         let subtitle = Arc::new(self.subtitle);
@@ -393,15 +432,9 @@ where
     // Per-tenant auth is opt-in. Without `with_session`, every request
     // goes straight to the inner admin.
     let mut user_perms: Option<std::collections::HashSet<String>> = None;
-    let mut session_user_id: Option<i64> = None;
-    // Chrome session info threaded into the inner admin so the sidebar
-    // renders "Signed in as <username>" + the Logout button.
-    let mut session_username: Option<String> = None;
-    let mut session_is_superuser = false;
-    // Set when the operator console minted this session. Drives the
-    // impersonation banner, and makes writes record
-    // `operator:<id>:impersonating` in the audit log.
-    let mut impersonated_by: Option<i64> = None;
+    // Who the session acts as: the chrome, the audit source and the
+    // impersonation banner all come from it.
+    let mut actor: Option<SessionActor> = None;
     if let Some(cfg) = session {
         let path = parts.uri.path().to_owned();
         let method = parts.method.clone();
@@ -458,6 +491,7 @@ where
                 }
                 if !rest.is_empty() && !rest.contains('/') {
                     return super::sso::tenant_sso_begin(
+                        &org,
                         rest,
                         &cfg.secret,
                         &pool,
@@ -531,20 +565,23 @@ where
                 Some(routes.logout_url.as_str()),
             );
             // End the user's sessions everywhere. An impersonation logout
-            // leaves the operator's console session alone.
+            // ends only that impersonation.
+            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
             let revoked =
                 match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
                     .await
                 {
                     SessionCheck::Authenticated {
-                        user_id,
-                        impersonated_by: None,
-                        sessions_revoked_at,
+                        actor:
+                            SessionActor::User {
+                                id,
+                                sessions_revoked_at,
+                                ..
+                            },
                         iat,
-                        ..
                     } => crate::session::revoke_sessions::<super::auth::User>(
                         &pool,
-                        user_id,
+                        id,
                         sessions_revoked_at,
                         iat,
                     )
@@ -577,23 +614,23 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
+            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
             return end_impersonation_response(cookie_path);
         }
 
         // Private surface — require a valid session cookie.
         match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool()).await {
-            SessionCheck::Authenticated {
-                is_superuser,
-                user_id,
-                username,
-                impersonated_by: imp_by,
-                ..
-            } => {
-                session_user_id = Some(user_id);
-                session_username = Some(username);
-                session_is_superuser = is_superuser;
-                impersonated_by = imp_by;
-                if !is_superuser {
+            SessionCheck::Authenticated { actor: who, .. } => {
+                let regular_user = match &who {
+                    SessionActor::User {
+                        id,
+                        is_superuser: false,
+                        ..
+                    } => Some(*id),
+                    _ => None,
+                };
+                actor = Some(who);
+                if let Some(user_id) = regular_user {
                     // Fetch the user's effective codenames once per request
                     // and thread them into the inner admin builder so
                     // individual views can check add/change/delete/view perms
@@ -634,7 +671,11 @@ where
         // an authenticated session (handled above) — anonymous
         // visitors are bounced to the login page.
         if path == routes.change_password_url {
-            let user_id = session_user_id.unwrap_or(0);
+            // An impersonation has no tenant user; 0 matches no row.
+            let user_id = match &actor {
+                Some(SessionActor::User { id, .. }) => *id,
+                _ => 0,
+            };
             return match parts.method {
                 axum::http::Method::GET => {
                     change_password_form(&org, cfg, brand_storage, routes, parts.uri.query())
@@ -662,7 +703,7 @@ where
         subtitle,
         &org,
         brand_storage,
-        impersonated_by,
+        actor.as_ref().and_then(SessionActor::impersonated_by),
         routes.admin_url.as_str(),
         routes.change_password_url.as_str(),
         routes.logout_url.as_str(),
@@ -688,11 +729,7 @@ where
     // Same two places the bare admin's `require_session` puts it:
     // request extensions (handlers, custom views) and the task-local
     // (chrome).
-    let admin_session = session_user_id.map(|uid| crate::admin::session::AdminSession {
-        user_id: uid,
-        username: session_username.clone().unwrap_or_default(),
-        is_superuser: session_is_superuser,
-    });
+    let admin_session = actor.as_ref().map(SessionActor::admin_session);
     if let Some(sess) = &admin_session {
         parts.extensions.insert(sess.clone());
     }
@@ -707,17 +744,10 @@ where
         }
     };
     let audited = async {
-        if let Some(uid) = session_user_id {
-            // The id is this tenant's user: bind it, so work this
-            // request hands off does not stamp it on other tenants' rows.
-            crate::audit::with_tenant_source(
-                crate::audit::AuditSource::User {
-                    id: uid.to_string(),
-                },
-                org.slug.clone(),
-                dispatch,
-            )
-            .await
+        if let Some(who) = &actor {
+            // Bound to this tenant, so work this request hands off does
+            // not stamp it on other tenants' rows.
+            crate::audit::with_tenant_source(who.audit_source(), org.slug.clone(), dispatch).await
         } else {
             dispatch.await
         }
@@ -742,29 +772,54 @@ where
 
 enum SessionCheck {
     Authenticated {
-        is_superuser: bool,
-        /// Tenant-side `rustango_users.id` of the authenticated user.
-        /// Threaded into `audit::with_source(User { id })` for the
-        /// duration of the inner-router dispatch so any audited
-        /// write picks up the user-attribution automatically.
-        user_id: i64,
-        /// Username of the authenticated user (`operator:<username>` for
-        /// an operator-impersonation session, which has no tenant user).
-        /// Threaded into the inner admin's chrome session so the
-        /// sidebar renders "Signed in as <username>" + Logout.
-        username: String,
-        /// `Some(operator_id)` when this session was minted by
-        /// the operator console's "Open admin as superuser →"
-        /// flow (#78). Drives the impersonation banner +
-        /// audit-log `source` shape.
-        impersonated_by: Option<i64>,
-        /// The tenant user's cut-off, for logout (#1855). `None` when impersonating.
-        sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+        actor: SessionActor,
         /// The cookie's issued-at, so logout's cut-off covers it (#1855).
         iat: i64,
     },
     Anonymous,
     Error(String),
+}
+
+/// Who a live session acts as. An impersonating operator is named by id
+/// only: a tenant user can take any username (#2110).
+#[derive(Debug)]
+enum SessionActor {
+    User {
+        /// This tenant's `rustango_users.id`.
+        id: i64,
+        username: String,
+        is_superuser: bool,
+        /// The user's cut-off, for logout (#1855).
+        sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// An operator from the console's "Open admin as superuser" (#78).
+    Operator { id: i64 },
+}
+
+impl SessionActor {
+    fn impersonated_by(&self) -> Option<i64> {
+        match self {
+            Self::User { .. } => None,
+            Self::Operator { id } => Some(*id),
+        }
+    }
+
+    /// The `source` audited writes record; the same as `updated_by`.
+    fn audit_source(&self) -> crate::audit::AuditSource {
+        self.admin_session().actor()
+    }
+
+    fn admin_session(&self) -> crate::admin::session::AdminSession {
+        match self {
+            Self::User {
+                id,
+                username,
+                is_superuser,
+                ..
+            } => crate::admin::session::AdminSession::new(*id, username.clone(), *is_superuser),
+            Self::Operator { id } => crate::admin::session::AdminSession::impersonation(*id),
+        }
+    }
 }
 
 /// Read the user id out of a session cookie, so the logout signal can
@@ -808,6 +863,13 @@ async fn validate_session(
     // superuser. Re-check on every request that the operator still
     // exists, is active and has the same password.
     if let Some(operator_id) = payload.imp {
+        // No `sid` means a pre-#2038 cookie that no logout can revoke.
+        let Some(sid) = payload.sid.as_deref() else {
+            return SessionCheck::Anonymous;
+        };
+        if cfg.jti().session_ended(sid).await {
+            return SessionCheck::Anonymous;
+        }
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
             .fetch(registry_pool)
@@ -837,12 +899,7 @@ async fn validate_session(
                     ) =>
             {
                 SessionCheck::Authenticated {
-                    is_superuser: true,
-                    user_id: 0,
-                    // Names the operator in `updated_by` and the sidebar (#1939).
-                    username: format!("operator:{}", op.username),
-                    impersonated_by: Some(operator_id),
-                    sessions_revoked_at: None,
+                    actor: SessionActor::Operator { id: operator_id },
                     iat: payload.iat,
                 }
             }
@@ -887,11 +944,12 @@ async fn validate_session(
         return SessionCheck::Anonymous;
     }
     SessionCheck::Authenticated {
-        is_superuser: user.is_superuser,
-        user_id: payload.uid,
-        username: user.username.clone(),
-        impersonated_by: None,
-        sessions_revoked_at: user.sessions_revoked_at,
+        actor: SessionActor::User {
+            id: payload.uid,
+            username: user.username,
+            is_superuser: user.is_superuser,
+            sessions_revoked_at: user.sessions_revoked_at,
+        },
         iat: payload.iat,
     }
 }
@@ -1234,7 +1292,7 @@ async fn redeem_impersonation_handoff(
     query: Option<&str>,
     registry: &crate::sql::Pool,
 ) -> Response {
-    use super::impersonation_handoff::{decode, JtiBlacklist};
+    use super::impersonation_handoff::decode;
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
@@ -1279,10 +1337,7 @@ async fn redeem_impersonation_handoff(
     }) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    if let Err(e) = JtiBlacklist::shared()
-        .mark_used(&payload.jti, payload.exp)
-        .await
-    {
+    if let Err(e) = cfg.jti().mark_used(&payload.jti, payload.exp).await {
         tracing::warn!(
             target: "rustango::tenancy::admin",
             slug = %org.slug,
@@ -1297,8 +1352,13 @@ async fn redeem_impersonation_handoff(
     // so browsers accept it on localhost too.
     let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
-    let mut session =
-        TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs, payload.pwf);
+    let mut session = TenantSessionPayload::impersonation(
+        payload.op,
+        &org.slug,
+        ttl_secs,
+        payload.pwf,
+        payload.jti,
+    );
     // The session dates from the handoff's mint, on the console's clock.
     session.iat = payload.iat;
     let cookie_value = tenant_console::encode(&cfg.secret, &session);
@@ -1348,6 +1408,23 @@ fn extract_token_param(query: &str) -> Option<String> {
     None
 }
 
+/// Revoke the request's impersonation cookie, if it is one; the
+/// operator stays signed in to the console (#2038).
+async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, slug: &str) {
+    let Some(value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+        return;
+    };
+    if let Ok(TenantSessionPayload {
+        imp: Some(_),
+        sid: Some(sid),
+        exp,
+        ..
+    }) = tenant_console::decode(&cfg.secret, slug, &value)
+    {
+        cfg.jti().end_session(&sid, exp).await;
+    }
+}
+
 /// Clear the impersonation cookie and send the browser back to the
 /// operator console. The operator's own apex session cookie is left
 /// alone, so they stay signed in there.
@@ -1356,7 +1433,7 @@ fn extract_token_param(query: &str) -> Option<String> {
 /// `RUSTANGO_TENANT_SCHEME` and `RUSTANGO_TENANT_PORT`. With none of
 /// them set it falls back to `/`, which still clears the cookie.
 fn end_impersonation_response(cookie_path: &str) -> Response {
-    // Also the legacy `Path=/` one: impersonation has no server-side revoke.
+    // Also the legacy `Path=/` one, from before the cookie was path-scoped.
     let mut paths = vec![cookie_path];
     if cookie_path != "/" {
         paths.push("/");

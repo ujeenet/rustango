@@ -4,6 +4,183 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.1] — 2026-10-07
+
+### Fixed — `seed-permissions` seeds every tenant (#2156)
+
+A tenant that fails is reported and the rest are still seeded; the command exits non-zero if any failed.
+
+### Fixed — MySQL migrate reports data committed before a failing DDL (#2151)
+
+MySQL commits the open transaction at the first DDL, so a failure there now returns `PartiallyApplied` with what committed, not a plain driver error. Unapply reports it the same way.
+
+### Fixed — `bulk_insert_pool` checks field limits (#2153)
+
+Rows are checked like `insert_pool` before any SQL runs: `max_length`, `min`/`max`, `choices`, named validators, and `UnknownField` for a column the model lacks.
+
+### Added — `render_changes_between` takes the before-snapshot (#2026)
+
+It renders a MySQL column drop with its FK drop first, which `render_changes_split_with_dialect` cannot see.
+
+### Fixed — SQLite keeps CHECKs when a rebuild precedes a RenameTable (#2140)
+
+The rebuild reads the table's CHECKs under the name the migration renames it to.
+
+### Fixed — a re-created system index on a project-owned table (#2139)
+
+An index a later system step drops and creates again is restored on the project's copy of the table.
+
+### Fixed — MySQL atomic-migration warning says what the transaction covers (#1660)
+
+Only data ops before the first DDL are in it; each DDL commits and later ops run in autocommit. The warning no longer mentions RunPython.
+
+### Fixed — MySQL's migrate lock is per database (#1991)
+
+The `GET_LOCK` name carries a hash of `DATABASE()`, so tenant databases on one server no longer wait on each other's migrations.
+
+### Fixed — M2M managers go through the ORM (#2136)
+
+`M2MManager` and `GenericM2MManager` compile their queries with the dialect emitters instead of hand-built SQL. `add` and `set` run the through model's full `validate()` on every backend, and `set` splits a list past the bind limit. A skipped MySQL `add` now sets the connection's `LAST_INSERT_ID()`.
+
+### Removed — `#[rustango(manager(ext = ...))]` (#2132)
+
+Its empty trait could not take methods. The derive now refuses the attribute and points to a trait of your own over `QuerySet<Foo>`.
+
+### Fixed — nothing in `src/` imports `__macro_internals` (#1516)
+
+`clear_user_perm` forwards to `clear_user_perm_pool`, and the guard now scans `src/` with `sql/mod.rs` as its one exception.
+
+### Fixed — accurate upsert audit ops; audited conflict bulk inserts (#1795)
+
+An audited PG `upsert` on a `unique_together` target records `create` for a new row instead of always `update`. Audited `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` now run on PG and SQLite with one audit row per written row; an audited `bulk_update` past the bind limit is split.
+
+### Fixed — audited models get `save_partial`; global-scope docs (#1744)
+
+Audited models had no `save_partial` / `save_partial_typed`; they now write a diff of only the saved fields. The docs say which methods skip global scopes.
+
+### Fixed — a second shape for one M2M junction is refused (#2000)
+
+Relations sharing a `through` table must match up to which side is the source; a different one is a `makemigrations` error instead of taking the junction over and rebuilding it. Adding the mirrored side no longer rebuilds it either.
+
+### Fixed — `seed-permissions` recreates `rustango_api_keys` and its FK (#1731)
+
+Before, only `create-api-key` did, and it mints a key.
+
+### Fixed — `migrate-tenant-storage` checks only the target schema (#1864, partial)
+
+An empty target schema no longer passes the smoke check through `public.rustango_users`, so the Org row is reverted. The restore into a schema is still broken.
+
+### Security — `WebhookSubscription` Debug hides the secret (#2116)
+
+`{:?}` prints `<redacted>` for the signing secret and only header names.
+
+### Security — `redact` masks a password containing `@` (#2109)
+
+The userinfo ends at the last `@` before the path, and an `@` in the query no longer hides `password=`. `migrate`, `about` and `migrate-storage` use the same `redact`.
+
+### Security — config parse errors never quote the TOML line (#2108)
+
+`ConfigError::Parse` keeps only the message and line/column, in Display and Debug alike.
+
+### Security — CBV CSRF cookie follows `CsrfConfig::secure` (#2117)
+
+CBV and admin cookies take `Secure` from an explicit `with_config`; under a default `layer()` they follow the session policy, like that layer's own cookie.
+
+### Fixed — ViewSet answers a duplicate key with 409 (#2075)
+
+Create, bulk create and update return `409 conflict` on a unique or primary-key violation, not `400`.
+
+### Fixed — ViewSet throttle budgets are per tenant (#2076)
+
+Under `tenant_router` the throttle key includes the tenant, so one client no longer shares a budget across tenants.
+
+### Fixed — `server::AppBuilder::serve` catches handler panics (#2069)
+
+A panicking handler is a logged opaque `500`, as under `Cli` and `server::Builder`, not a dropped connection.
+
+### Fixed — ViewSet `tenant_router` works on every backend and pins no connection (#2163)
+
+It resolves the tenant through the mounted context auth uses, not `Tenant<DefaultTenantDb>`, and holds no PG connection the handler never used.
+
+### Tests — `server::Builder` panic catch with observability off (#2105)
+
+A test now covers the opaque 500 with no observability or security headers.
+
+### Fixed — IPv6 `Host` headers keep their address (#2043)
+
+Tenant host lookup, the console handoff port, CSRF wildcards and URL host checks split `[::1]:8080` after the bracket, via one helper. A non-digit port (`good.com:1@evil.com`) is refused.
+
+### Fixed — `template_views_bulk_actions_live` builds without `postgres` (#2125)
+
+The PG-only suite is gated on `postgres`, so sqlite-only test builds compile.
+
+### Fixed — admin facet for an empty text value filters the list (#2081)
+
+It links `?<field>__isempty=1`, which the list reads; `?<field>=` still means no filter.
+
+### Fixed — `slugify` folds İ and Vietnamese letters (#2092)
+
+Accented letters fold via NFKD, so `"İstanbul"` gives `"istanbul"` and `"Việt"` gives `"viet"`.
+
+### Security — operator console withholds driver text in probe and branding errors (#2034)
+
+The tenant probe and the branding upload log the cause and the org slug, and show an opaque message, like the console's 500s. A too-large or cut-off upload says so instead.
+
+### Fixed — console errors speak to the operator (#1335)
+
+Schema-mode refusals name the storage-mode control, not a CLI flag or wire value. A connection check no longer names a Cargo feature or echoes an unknown-scheme URL, which can carry a password.
+
+### Fixed — operator console works under a path prefix (#2007)
+
+Nested with `Router::nest`, its links, forms, scripts and redirects keep the prefix.
+
+### Security
+
+- Tenant JWT access tokens end with their refresh family (replay revoke or logout) and at the absolute session cap. Each bearer request reads the JTI store once more (#2119).
+- `tenancy::authenticate_*` no longer upgrade a weak hash before an app's second factor; call `PasswordVerified::complete` after it (#2093).
+- An impersonating operator is attributed by id: audit `source` is `operator:<id>:impersonating` (was `user:0`), and `AdminSession` carries `impersonated_by` instead of an `operator:<name>` username. The i18n editor's `updated_by` is now `user:<id>` or `operator:<id>:impersonating` (was the username or `operator:<name>`), so a username cannot pose as an operator (#2110).
+- Ending an impersonation (its button or logout) revokes that cookie server-side, leaving the operator signed in (#2038).
+
+### Fixed — member SSO under a path-prefix tenant (#2145)
+
+`member_sso_router` also serves `/<prefix>{login_base}/sso/…`, and the IdP callback URL keeps the prefix.
+
+### Security — SSO flow cookie bound to tenant and provider (#1992)
+
+A flow begun for one tenant's provider, on one sign-in surface, is refused at any other callback. `seal_flow` / `open_flow` take a `FlowScope`.
+
+### Security — a rotated MCP agent secret ends its JWTs (#1962)
+
+Agent JWTs carry the key prefix and are refused once the secret rotates; skills and tools are re-read from the rows on every request.
+
+### Fixed — `MediaManager::pool()` no longer panics off Postgres (#2070)
+
+It returns the `sql::Pool` on every backend; `pool_dyn()` is deprecated.
+
+### Fixed — no `on_delete` and `NO ACTION` no longer diff (#1573)
+
+`makemigrations` treats them as the same FK, so it writes no no-op `AlterFkOnDelete` (a full table rebuild on SQLite).
+
+### Fixed — media collection delete races a create (#1573)
+
+`delete_collection` walks and locks the subtree inside its transaction; `create_collection` locks the parent and refuses a missing or deleted one.
+
+### Fixed — `on_delete = "set_default"` is refused on MySQL (#1573)
+
+InnoDB accepts the clause and then blocks the parent delete; migrations now fail with an error instead. New `Dialect::supports_on_delete_set_default`.
+- The HTTPS redirect and SSO `redirect_uri`s take only a plain `host[:port]` from `Host`; `good.com@evil.com` gets a 400 or an SSO error (#2173).
+- `S3Storage`'s default client no longer follows redirects, so signed requests stay on the configured endpoint (#1780).
+- MCP: a tool call is audited before it runs, DB error text stays in the log, `new_password`-style keys are redacted, a reused request id keeps its cancel slot, a null `id` or wrong `jsonrpc` is an invalid request, Basic client credentials are form-decoded, and discovery URLs ignore a malformed `Host` (#1963).
+- `TenantAdminBuilder::impersonation_jti_store` takes a shared store for used handoff tokens and ended impersonations, so they hold across replicas (#2176).
+
+### Fixed — `PgJobQueue` jobs run as their enqueuer (#1229)
+
+The enqueuer's audit source and timezone are stored in a new `rustango_jobs.context` column and reinstalled around the run, as `InMemoryJobQueue` already did. The transaction still does not cross.
+
+### Fixed — a job writing to its own tenant keeps the tenant user (#2123)
+
+New `tenancy::with_tenant(&pools, &org, |pool| …)` runs one step of `for_each_tenant`, so a source set by the tenant admin is recorded on writes through that tenant's pool instead of `system`. Writes through any other pool inside it still record `system`.
+
 ## [0.60.0] — 2026-10-02
 
 ### Security — `JwtAuth::verify_for_tenant` checks the session (#2118)

@@ -24,17 +24,17 @@
 //!
 //! A source set by the tenant admin (or `audit::with_tenant_source`) names a user of that tenant, so it
 //! is recorded only where writes are known to go there (a
-//! `for_each_tenant` pass over it); elsewhere, the registry included,
-//! it reads as `system`.
+//! `tenancy::with_tenant` or `for_each_tenant` pass over it); elsewhere,
+//! the registry included, it reads as `system`.
 //!
 //! ## Where it is carried
 //!
 //! - `jobs::InMemoryJobQueue` captures at `dispatch`.
 //! - `scheduler::Scheduler` captures at `every()`: a tick has no caller,
 //!   so registration is the hand-off.
-//! - **`jobs::pg::PgJobQueue` does not**: its envelope is a
-//!   `rustango_jobs` row, so it needs a column first (#1229). Treat a
-//!   `System` source on its rows as "unknown", not "the framework".
+//! - `jobs::pg::PgJobQueue` stores it in `rustango_jobs.context` at
+//!   `dispatch`. A table without that column (a hand-written migration
+//!   not yet updated) runs jobs with no context, as before.
 //!
 //! ## What the source does not tell you
 //!
@@ -71,6 +71,45 @@ impl TaskContext {
         self.source.as_ref().map(CapturedSource::source)
     }
 
+    /// The stored form for a queue whose envelope is a row; `None`
+    /// when nothing was set, so the column stays NULL.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn to_stored(&self) -> Option<serde_json::Value> {
+        if self.source.is_none() && self.offset.is_none() {
+            return None;
+        }
+        let stored = Stored {
+            source: self.source.as_ref().map(|s| StoredSource::from(s.source())),
+            tenant: self
+                .source
+                .as_ref()
+                .and_then(|s| s.tenant().map(str::to_owned)),
+            offset: self.offset.map(|o| o.local_minus_utc()),
+        };
+        serde_json::to_value(stored).ok()
+    }
+
+    /// Read back [`Self::to_stored`]. Anything unreadable gives the
+    /// empty context: the job runs as `system`, never as a guess.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn from_stored(value: Option<serde_json::Value>) -> Self {
+        let empty = Self {
+            source: None,
+            offset: None,
+        };
+        let Some(value) = value else { return empty };
+        let Ok(stored) = serde_json::from_value::<Stored>(value) else {
+            tracing::warn!(target: "rustango::jobs", "unreadable job context; running as system");
+            return empty;
+        };
+        Self {
+            source: stored
+                .source
+                .map(|s| CapturedSource::from_parts(s.into(), stored.tenant)),
+            offset: stored.offset.and_then(chrono::FixedOffset::east_opt),
+        }
+    }
+
     /// Run `fut` with this context installed.
     pub async fn install<F, T>(self, fut: F) -> T
     where
@@ -85,6 +124,49 @@ impl TaskContext {
         match self.source {
             Some(source) => source.scope(fut).await,
             None => fut.await,
+        }
+    }
+}
+
+/// `rustango_jobs.context`. A fixed shape of its own, so changing
+/// `AuditSource` cannot silently change what old rows decode to.
+#[cfg(feature = "jobs-postgres")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    source: Option<StoredSource>,
+    tenant: Option<String>,
+    offset: Option<i32>,
+}
+
+#[cfg(feature = "jobs-postgres")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum StoredSource {
+    System,
+    User { id: String },
+    Custom { label: String },
+}
+
+#[cfg(feature = "jobs-postgres")]
+impl From<&AuditSource> for StoredSource {
+    fn from(s: &AuditSource) -> Self {
+        match s {
+            AuditSource::System => Self::System,
+            AuditSource::User { id } => Self::User { id: id.clone() },
+            AuditSource::Custom(label) => Self::Custom {
+                label: label.clone(),
+            },
+        }
+    }
+}
+
+#[cfg(feature = "jobs-postgres")]
+impl From<StoredSource> for AuditSource {
+    fn from(s: StoredSource) -> Self {
+        match s {
+            StoredSource::System => Self::System,
+            StoredSource::User { id } => Self::User { id },
+            StoredSource::Custom { label } => Self::Custom(label),
         }
     }
 }
@@ -138,10 +220,12 @@ mod tests {
         .await;
         let tokens = tokio::spawn(ctx.install(async {
             let unknown = current_source().as_token();
-            let in_a = writing_to_tenant("a".into(), async { current_source().as_token() }).await;
-            let in_b = writing_to_tenant("b".into(), async { current_source().as_token() }).await;
+            let in_a =
+                writing_to_tenant("a".into(), None, async { current_source().as_token() }).await;
+            let in_b =
+                writing_to_tenant("b".into(), None, async { current_source().as_token() }).await;
             let explicit = with_source(AuditSource::Custom("cli".into()), async {
-                writing_to_tenant("b".into(), async { current_source().as_token() }).await
+                writing_to_tenant("b".into(), None, async { current_source().as_token() }).await
             })
             .await;
             (unknown, in_a, in_b, explicit)
@@ -152,6 +236,36 @@ mod tests {
         assert_eq!(tokens.1, "user:42");
         assert_eq!(tokens.2, "system", "tenant B must not get A's user id");
         assert_eq!(tokens.3, "cli", "an explicit source is not bound");
+    }
+
+    /// The stored form keeps source, tenant binding and offset; an
+    /// empty context stores NULL and garbage reads back as empty.
+    #[cfg(all(feature = "jobs-postgres", feature = "tenancy"))]
+    #[tokio::test]
+    async fn stored_context_round_trips() {
+        use crate::audit::{with_tenant_source, writing_to_tenant};
+        let offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+        let ctx = with_tenant_source(AuditSource::User { id: "42".into() }, "a".into(), async {
+            crate::i18n::timezone::with_offset(offset, async { TaskContext::capture() }).await
+        })
+        .await;
+        let back = TaskContext::from_stored(ctx.to_stored());
+        assert_eq!(back.offset, Some(offset));
+        let (in_a, in_b) = back
+            .install(async {
+                (
+                    writing_to_tenant("a".into(), None, async { current_source().as_token() })
+                        .await,
+                    writing_to_tenant("b".into(), None, async { current_source().as_token() })
+                        .await,
+                )
+            })
+            .await;
+        assert_eq!((in_a.as_str(), in_b.as_str()), ("user:42", "system"));
+
+        assert!(TaskContext::capture().to_stored().is_none());
+        let junk = TaskContext::from_stored(Some(serde_json::json!({"source": 7})));
+        assert!(junk.source().is_none() && junk.offset.is_none());
     }
 
     /// The whole point: a spawned task sees the captured context, which

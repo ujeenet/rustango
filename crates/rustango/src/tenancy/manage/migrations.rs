@@ -174,7 +174,7 @@ fn write_tenant_report<W: Write>(
 }
 
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
-fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
+pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
     if failed == 0 {
         return Ok(());
     }

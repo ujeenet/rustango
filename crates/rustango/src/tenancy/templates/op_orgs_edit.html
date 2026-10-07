@@ -3,7 +3,7 @@
 {% block content %}
 
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/orgs">Organizations</a>
+  <a href="{{ console_prefix }}/orgs">Organizations</a>
   <span class="sep">›</span>
   <code>{{ slug }}</code>
   <span class="sep">›</span>
@@ -29,11 +29,11 @@
     a link from here, or nothing reaches it. -#}
 {#- A div, not a p — see op_orgs.html: a `<form>` closes an open `<p>`. -#}
 <div class="page-actions">
-  <a href="/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
+  <a href="{{ console_prefix }}/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
   <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
   <span id="probe-result"></span>
   {% if provisioning_enabled %}
-  <form method="post" action="/orgs/{{ slug }}/migrate" class="inline-form"
+  <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/migrate" class="inline-form"
         data-confirm="Run migrations for {{ slug }}?">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Run migrations</button>
@@ -41,7 +41,7 @@
   {% endif %}
 </div>
 
-<form method="post" action="/orgs/{{ slug }}/edit" class="edit-form">
+<form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/edit" class="edit-form">
   {{ csrf_input | default(value='') | safe }}
 
   <fieldset class="section locked">
@@ -73,11 +73,11 @@
 
   <div class="form-actions">
     <button type="submit" class="btn btn-primary">Save</button>
-    <a href="/orgs" class="btn-link">Cancel</a>
+    <a href="{{ console_prefix }}/orgs" class="btn-link">Cancel</a>
   </div>
 </form>
 
-<form method="post" action="/orgs/{{ slug }}/edit/branding" enctype="multipart/form-data" class="edit-form" id="branding-form">
+<form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/edit/branding" enctype="multipart/form-data" class="edit-form" id="branding-form">
   <fieldset class="section">
     <legend>Branding assets</legend>
     <table>
@@ -112,7 +112,7 @@
    wasn't enabled at boot (the operator console route only
    mounts when the tenant session secret is shared). #}
 {% if impersonate_enabled %}
-<form method="post" action="/orgs/{{ slug }}/impersonate" class="edit-form">
+<form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/impersonate" class="edit-form">
   {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Impersonate (sign in as superuser)</legend>
@@ -138,7 +138,7 @@
 <fieldset class="section danger">
   <legend>Decommission</legend>
 
-  <form method="post" action="/orgs/{{ slug }}/deactivate" class="inline-form"
+  <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/deactivate" class="inline-form"
         data-confirm="Deactivate {{ slug }}? It stops serving immediately; nothing is destroyed.">
     {{ csrf_input | default(value='') | safe }}
     <button type="submit" class="btn btn-secondary">Deactivate</button>
@@ -148,7 +148,7 @@
 
   <hr class="danger-rule">
 
-  <form method="post" action="/orgs/{{ slug }}/purge" class="edit-form">
+  <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/purge" class="edit-form">
     {{ csrf_input | default(value='') | safe }}
     <p class="danger-lead"><strong>Purge — permanent.</strong>
     Drops this tenant's schema or database and removes its registry row.
@@ -188,7 +188,7 @@
     e.target.disabled = true;
     out.textContent = "checking…";
     try {
-      const res = await fetch("/orgs/{{ slug }}/test-connection", {
+      const res = await fetch(consoleUrl("/orgs/{{ slug }}/test-connection"), {
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken() },
       });

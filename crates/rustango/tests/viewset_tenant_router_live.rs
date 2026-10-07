@@ -28,6 +28,7 @@ use rustango::extractors::TenantContext;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
     session::SessionSecret, ChainResolver, HeaderResolver, Org, StorageMode, TenantPools,
+    TenantPoolsConfig,
 };
 use rustango::viewset::ViewSet;
 use rustango::{migrate as rmig, Model};
@@ -137,17 +138,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     };
     org.insert(&pool).await.unwrap();
 
-    // Header-based resolver so the test doesn't need DNS — same shape
-    // tenant_admin_live.rs uses.
-    let pools = Arc::new(TenantPools::new(pool.clone()));
-    let resolver = ChainResolver::new().push(HeaderResolver::default());
-    let ctx = Arc::new(TenantContext {
-        pools,
-        resolver,
-        session_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec()),
-        operator_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-y".to_vec()),
-    });
-    let _ = &pool; // silence unused-warning if the test no longer needs the raw pool
+    let ctx = tenant_ctx(&pool);
 
     // The full v0.30 builder chain — unsupported in the v1
     // tenant_router. If any of these silently no-op, the assertions
@@ -164,6 +155,103 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     let app = app.merge(template_views_router());
     let app = app.layer(Extension(ctx));
     (slug, pool, app)
+}
+
+/// Header-based resolver so the test doesn't need DNS — same shape
+/// tenant_admin_live.rs uses.
+fn tenant_ctx(pool: &sqlx::PgPool) -> Arc<TenantContext> {
+    Arc::new(TenantContext {
+        pools: Arc::new(TenantPools::new(pool.clone())),
+        resolver: ChainResolver::new().push(HeaderResolver::default()),
+        session_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec()),
+        operator_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-y".to_vec()),
+    })
+}
+
+/// #2076 — one client's spent budget on one tenant leaves another's intact.
+#[tokio::test]
+async fn throttle_budgets_are_per_tenant() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    let (slug_a, pool, _app) = fixture(pool).await;
+    let slug_b = unique("vstest");
+    let mut org_b = Org {
+        slug: slug_b.clone(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        database_url: Some(std::env::var("DATABASE_URL").unwrap()),
+        ..rustango::testkit::org()
+    };
+    org_b.insert(&pool).await.unwrap();
+    let app = ViewSet::for_model(Widget::SCHEMA)
+        .throttle_all(1, 60)
+        .tenant_router("/api/widgets")
+        .layer(Extension(tenant_ctx(&pool)));
+
+    let status = |slug: &str| {
+        let req = req_get("/api/widgets", slug);
+        let app = app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(status(&slug_a).await, StatusCode::OK);
+    assert_eq!(status(&slug_a).await, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        status(&slug_b).await,
+        StatusCode::OK,
+        "tenant B shares A's budget"
+    );
+}
+
+/// A throttled app with one tenant whose database is unreachable.
+async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
+    let pool = pool().await?;
+    let (_slug, pool, _app) = fixture(pool).await;
+    let dead = unique("vsdead");
+    let mut org = Org {
+        slug: dead.clone(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        database_url: Some("postgres://nobody:x@127.0.0.1:1/none".into()),
+        ..rustango::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+    let mut ctx = Arc::into_inner(tenant_ctx(&pool)).unwrap();
+    ctx.pools = Arc::new(TenantPools::new(pool).config(TenantPoolsConfig {
+        database_pool_acquire_timeout: std::time::Duration::from_secs(1),
+        ..TenantPoolsConfig::default()
+    }));
+    let app = ViewSet::for_model(Widget::SCHEMA)
+        .throttle_all(1, 60)
+        .tenant_router("/api/widgets")
+        .layer(Extension(Arc::new(ctx)));
+    Some((dead, app))
+}
+
+/// Review of #2162 — the 429 comes before the tenant pool is touched.
+#[tokio::test]
+async fn a_throttled_request_never_connects_to_the_tenant() {
+    let _g = live_lock().lock().await;
+    let Some((dead, app)) = throttled_with_dead_tenant().await else {
+        return;
+    };
+    let first = app.clone().oneshot(req_get("/api/widgets", &dead)).await;
+    assert_eq!(first.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let second = app.oneshot(req_get("/api/widgets", &dead)).await;
+    assert_eq!(second.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// Review of #2162 — unknown tenants share one throttled bucket per client.
+#[tokio::test]
+async fn unknown_tenants_are_throttled() {
+    let _g = live_lock().lock().await;
+    let Some((_dead, app)) = throttled_with_dead_tenant().await else {
+        return;
+    };
+    for (slug, want) in [
+        ("no-such-a", StatusCode::NOT_FOUND),
+        ("no-such-b", StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        let resp = app.clone().oneshot(req_get("/api/widgets", slug)).await;
+        assert_eq!(resp.unwrap().status(), want, "{slug}");
+    }
 }
 
 /// Tenant template views on the same model, for the bad-URL-PK 404 (#1950).

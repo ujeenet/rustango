@@ -143,6 +143,20 @@ async fn noop_save_writes_no_audit_row(pool: &Pool) {
     assert_eq!(audit_rows(pool).await, 2);
 }
 
+/// An audited `save_partial` diffs only the fields it writes (#1744).
+async fn save_partial_audits_only_its_fields(pool: &Pool) {
+    let mut note = insert_note(pool).await;
+    let pk = note.id.get().expect("pk assigned").to_string();
+    note.title = "partial".into();
+    note.deleted_at = Some(Utc::now());
+    assert_eq!(note.save_partial(&["title"], pool).await.unwrap(), 1);
+    assert_eq!(audit_rows(pool).await, 2);
+    let changes = &entries(pool, &pk).await[0].changes;
+    assert_eq!(changes["title"]["before"], "hello");
+    assert_eq!(changes["title"]["after"], "partial");
+    assert!(changes.get("deleted_at").is_none(), "{changes}");
+}
+
 async fn failed_pre_read_fails_the_save(pool: &Pool) {
     // SQLite reads a missing double-quoted column as a string literal,
     // so its pre-read cannot be made to fail this way.
@@ -449,6 +463,7 @@ tri_dialect_test! {
         delete_writes_one_row,
         no_row_changed_writes_no_audit_row,
         noop_save_writes_no_audit_row,
+        save_partial_audits_only_its_fields,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
         pg_macro_save_skips_noop_and_fails_on_pre_read,

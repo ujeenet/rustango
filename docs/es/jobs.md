@@ -435,11 +435,22 @@ no obtienen workers hasta que el proceso se reinicia. Seguimiento en
 
 **Contexto ambiental: solo fuente de auditoría y zona horaria.**
 `InMemoryJobQueue` los captura en `dispatch` y el scheduler en `every()`, y
-ambos los reinstalan alrededor de la ejecución. `PgJobQueue` aún no: sus
-trabajos corren como `AuditSource::System` con la zona horaria por defecto —
-lleva el actor en el payload y vuelve a entrar en el scope dentro de `run()`
-con `audit::with_source`. Ninguna cola lleva sesión ni tenant. Seguimiento en
-[#1229](https://github.com/ujeenet/rustango/issues/1229).
+ambos los reinstalan alrededor de la ejecución. `PgJobQueue` los guarda en
+`rustango_jobs.context`; `ensure_table_pool` añade la columna a una tabla
+antigua. Sin la columna, los trabajos corren como `AuditSource::System`.
+Ninguna cola lleva sesión ni tenant.
+
+Una fuente del admin del tenant nombra a un usuario de ese tenant, así que solo
+se registra en escrituras por el pool que `tenancy::with_tenant` (o
+`for_each_tenant`) entrega para ese tenant. Las demás escrituras, también las
+hechas por otro pool dentro, registran `system`:
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
 
 ---
 

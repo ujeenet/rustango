@@ -99,9 +99,14 @@ fn strip_scheme(endpoint: &str) -> &str {
 impl S3Storage {
     #[must_use]
     pub fn new(cfg: S3Config) -> Self {
+        // A redirect could take signed requests to a host the config never named (#1780).
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client builds");
         Self {
             cfg,
-            http: reqwest::Client::new(),
+            http,
             signing_key: std::sync::Mutex::new(None),
             #[cfg(test)]
             derivations: std::sync::atomic::AtomicUsize::new(0),
@@ -134,7 +139,7 @@ impl S3Storage {
     }
 
     /// Use your own reqwest client, for custom timeouts, proxies or
-    /// TLS roots.
+    /// TLS roots. Turn its redirects off, as the default client does.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = http;
@@ -959,6 +964,11 @@ mod tests {
 
     /// Answer one request with `status`; yields the raw request head.
     async fn mock(status: u16) -> (String, tokio::task::JoinHandle<String>) {
+        mock_with(status, String::new()).await
+    }
+
+    /// [`mock`] with extra response header lines, each ending in `\r\n`.
+    async fn mock_with(status: u16, extra: String) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -992,8 +1002,9 @@ mod tests {
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            let reply =
-                format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let reply = format!(
+                "HTTP/1.1 {status} X\r\n{extra}content-length: 0\r\nconnection: close\r\n\r\n"
+            );
             sock.write_all(reply.as_bytes()).await.unwrap();
             head
         });
@@ -1098,6 +1109,20 @@ mod tests {
                 "{status} read as a plain answer"
             );
         }
+    }
+
+    /// A redirect is an answer, not a hop to the host it names (#1780).
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let elsewhere = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/stolen", elsewhere.local_addr().unwrap());
+        let (ep, _req) = mock_with(307, format!("location: {target}\r\n")).await;
+        let storage = mock_storage(ep);
+        let call = tokio::time::timeout(std::time::Duration::from_secs(2), storage.exists("a.png"));
+        // A followed redirect hangs on `elsewhere`, which never answers.
+        assert!(matches!(call.await, Ok(Err(_))));
+        let hop = tokio::time::timeout(std::time::Duration::from_millis(300), elsewhere.accept());
+        assert!(hop.await.is_err(), "the redirect was followed");
     }
 
     #[test]

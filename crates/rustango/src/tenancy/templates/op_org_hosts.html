@@ -1,7 +1,7 @@
 {% extends "op_layout.html" %}
 {% block title %}Hostnames for {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span><a href="/orgs/{{ slug }}/edit">{{ slug }}</a><span class="sep">/</span>Hostnames</p>
+<p class="breadcrumb"><a href="{{ console_prefix }}/orgs">Organizations</a><span class="sep">/</span><a href="{{ console_prefix }}/orgs/{{ slug }}/edit">{{ slug }}</a><span class="sep">/</span>Hostnames</p>
 <h1>Hostnames for <code>{{ slug }}</code></h1>
 <p class="lead">Every hostname this tenant answers on. Each is matched
 exactly against the <code>Host</code> header, so a hostname belongs to
@@ -46,9 +46,9 @@ one tenant only.</p>
             is nothing here to toggle or delete. Saying where it *is*
             editable beats showing disabled buttons. -#}
         {% if h.is_base %}
-        <span class="field-helper">set on the <a href="/orgs/{{ slug }}/edit">edit page</a></span>
+        <span class="field-helper">set on the <a href="{{ console_prefix }}/orgs/{{ slug }}/edit">edit page</a></span>
         {% else %}
-        <form method="post" action="/orgs/{{ slug }}/hosts/toggle" class="inline-form">
+        <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/hosts/toggle" class="inline-form">
           {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="hostname" value="{{ h.hostname }}">
           {% if h.enabled %}
@@ -58,7 +58,7 @@ one tenant only.</p>
           <button type="submit" class="btn btn-secondary">Serve</button>
           {% endif %}
         </form>
-        <form method="post" action="/orgs/{{ slug }}/hosts/remove" class="inline-form"
+        <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/hosts/remove" class="inline-form"
               data-confirm="Remove {{ h.hostname }}? Traffic to it stops resolving to {{ slug }}.">
           {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="hostname" value="{{ h.hostname }}">
@@ -71,7 +71,7 @@ one tenant only.</p>
   </tbody>
 </table>
 
-<form method="post" action="/orgs/{{ slug }}/hosts/add" class="edit-form">
+<form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/hosts/add" class="edit-form">
   {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Add a hostname</legend>
@@ -104,7 +104,7 @@ one tenant only.</p>
   </fieldset>
   <p class="form-actions">
     <button type="submit" class="btn btn-primary">Add hostname</button>
-    <a href="/orgs/{{ slug }}/edit" class="btn-link">Back to tenant</a>
+    <a href="{{ console_prefix }}/orgs/{{ slug }}/edit" class="btn-link">Back to tenant</a>
   </p>
 </form>
 {% endblock %}

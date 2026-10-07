@@ -132,7 +132,8 @@ async fn admin_created_user_can_log_in(pool: &Pool) {
     assert!(!detail.contains(&user.password_hash), "{detail}");
 }
 
-/// A login over a hash weaker than today's cost stores a fresh one.
+/// A login over a hash weaker than today's cost stores a fresh one, but
+/// only once it completes: a password alone writes nothing (#2093).
 async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
     use rustango::passwords::needs_rehash;
     use rustango::sql::UpdaterPool as _;
@@ -148,8 +149,18 @@ async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
         .execute_pool(pool)
         .await
         .unwrap();
-    assert!(logs_in(pool, &name, "pw-weak-hash").await);
+    let verified = authenticate_user_pool(pool, &name, "pw-weak-hash")
+        .await
+        .unwrap()
+        .expect("right password");
+    assert_eq!(
+        user_named(pool, &name).await.password_hash,
+        WEAK,
+        "the password alone stored a new hash"
+    );
+    let user = verified.complete(pool).await;
     let new = user_named(pool, &name).await.password_hash;
+    assert_eq!(user.password_hash, new);
     assert_ne!(new, WEAK, "the weak hash is still stored");
     assert!(!needs_rehash(&new), "{new}");
     assert!(logs_in(pool, &name, "pw-weak-hash").await);

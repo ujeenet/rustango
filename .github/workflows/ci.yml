@@ -931,6 +931,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_decommission_sqlite_live
       # #1341 — pre-warming pools from the console, which was CLI-only.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_errors_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_mount_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_store_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,testkit --test org_hosts_sqlite_live
@@ -1273,7 +1275,7 @@ jobs:
             GRANT ALL PRIVILEGES ON \`rustango\_%\`.* TO 'rustango'@'%';
             FLUSH PRIVILEGES;"
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
-      - run: cargo test -p rustango --features mysql,jobs-postgres,testkit --test jobs_worker_survives_tri
+      - run: cargo test -p rustango --features mysql,jobs-postgres,testkit,tenancy --test jobs_worker_survives_tri
       - run: cargo test -p rustango --features mysql --test mysql_live
       # Again under --all-features. #1277: MySQL enforces FKs and has no
       # `DROP TABLE … CASCADE`, so `drop_all_pool` failed whenever it dropped
@@ -1344,6 +1346,8 @@ jobs:
       - run: >-
           cargo test -p rustango --features mysql,media,testkit
           --test media_tags_mysql_live -- --test-threads=1
+      # #1573 — collection delete/create under concurrent row locks.
+      - run: cargo test -p rustango --features mysql,media,testkit --test media_collection_race_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that

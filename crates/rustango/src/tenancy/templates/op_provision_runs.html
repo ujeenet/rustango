@@ -1,7 +1,7 @@
 {% extends "op_layout.html" %}
 {% block title %}Provisioning runs — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span>Provisioning runs</p>
+<p class="breadcrumb"><a href="{{ console_prefix }}/orgs">Organizations</a><span class="sep">/</span>Provisioning runs</p>
 <h1>Provisioning runs</h1>
 <p class="lead">Every attempt to stand up a tenant, newest first —
 including the ones that failed, which leave the tenant inactive until
@@ -14,7 +14,7 @@ somebody finishes or removes it.</p>
         this branch so an empty page still offers a way back. -#}
     {% if page > 1 %}No runs on page {{ page }}.
     {% else %}No tenant has been provisioned through this console yet.
-    <a class="btn-link" href="/orgs/new">Create one</a>.
+    <a class="btn-link" href="{{ console_prefix }}/orgs/new">Create one</a>.
     {% endif %}
   </div>
 {% else %}
@@ -32,7 +32,7 @@ somebody finishes or removes it.</p>
   <tbody>
     {% for r in runs %}
     <tr>
-      <td><a class="btn-link" href="/orgs/provision/{{ r.id }}">#{{ r.id }}</a></td>
+      <td><a class="btn-link" href="{{ console_prefix }}/orgs/provision/{{ r.id }}">#{{ r.id }}</a></td>
       {#- A slug may be 63 characters, which would otherwise set the
           column's width for every other row. -#}
       <td class="wrap-anywhere">

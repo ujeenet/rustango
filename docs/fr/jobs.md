@@ -443,11 +443,22 @@ processus. Suivi dans
 
 **Contexte ambiant : source d'audit et fuseau horaire seulement.**
 `InMemoryJobQueue` les capture au `dispatch` et le scheduler à `every()`, et
-les réinstalle autour de l'exécution. `PgJobQueue` pas encore : ses tâches
-tournent en `AuditSource::System` avec le fuseau par défaut — emportez l'acteur
-dans le payload et ré-entrez le scope dans `run()` avec `audit::with_source`.
-Aucune file ne porte de session ni de tenant. Suivi dans
-[#1229](https://github.com/ujeenet/rustango/issues/1229).
+les réinstalle autour de l'exécution. `PgJobQueue` les stocke dans
+`rustango_jobs.context` ; `ensure_table_pool` ajoute la colonne à une table
+plus ancienne. Sans la colonne, les tâches tournent en `AuditSource::System`.
+Aucune file ne porte de session ni de tenant.
+
+Une source posée par l'admin du tenant nomme un utilisateur de ce tenant : elle
+n'est enregistrée que sur les écritures faites par le pool que
+`tenancy::with_tenant` (ou `for_each_tenant`) fournit pour ce tenant. Les autres
+écritures, y compris par un autre pool à l'intérieur, enregistrent `system` :
+
+```rust
+rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
+    note.insert_pool(&pool).await
+})
+.await??;
+```
 
 ---
 
