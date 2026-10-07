@@ -964,7 +964,7 @@ pub fn config_dev_settings_toml(name: &str, backend: Backend) -> String {
 [database]
 # Matches docker-compose.yml and .env.example. Host is `localhost`, not
 # the compose service name: this tier runs the app on the host against
-# the container.
+# the container. Not read to connect yet: pools use DATABASE_URL from .env.
 url = "{url}"
 
 [server]

@@ -579,6 +579,16 @@ impl Cli {
             }
         }
 
+        // Say so rather than let a parsed-and-dropped key look applied (#1379).
+        let inert = s.inert_keys();
+        if !inert.is_empty() {
+            tracing::warn!(
+                target: "rustango::manage",
+                keys = %inert.join(", "),
+                "these settings have no effect yet; see the config docs"
+            );
+        }
+
         // `[tenancy] apex_domain` was parsed and dropped (#1379).
         // Process-wide like the cookie policy below; env still wins.
         #[cfg(feature = "tenancy")]
