@@ -1251,18 +1251,26 @@ impl InsertQuery {
     /// [`QueryError::UnknownField`] if a column is not a field on
     /// `model`.
     pub fn validate(&self) -> Result<(), QueryError> {
-        for (column, value) in self.columns.iter().zip(self.values.iter()) {
-            let field =
-                self.model
-                    .field_by_column(column)
-                    .ok_or_else(|| QueryError::UnknownField {
-                        model: self.model.name,
-                        field: (*column).to_owned(),
-                    })?;
-            validate_value(self.model.name, field, value)?;
-        }
-        Ok(())
+        validate_row(self.model, &self.columns, &self.values)
     }
+}
+
+/// The one field-limit check behind every INSERT row (#2153).
+fn validate_row(
+    model: &'static ModelSchema,
+    columns: &[&'static str],
+    values: &[SqlValue],
+) -> Result<(), QueryError> {
+    for (column, value) in columns.iter().zip(values) {
+        let field = model
+            .field_by_column(column)
+            .ok_or_else(|| QueryError::UnknownField {
+                model: model.name,
+                field: (*column).to_owned(),
+            })?;
+        validate_value(model.name, field, value)?;
+    }
+    Ok(())
 }
 
 /// Compiled multi-row `INSERT` — one round trip for N rows.
@@ -1361,19 +1369,9 @@ impl BulkInsertQuery {
     /// # Errors
     /// As [`InsertQuery::validate`].
     pub fn validate(&self) -> Result<(), QueryError> {
-        for row in &self.rows {
-            for (column, value) in self.columns.iter().zip(row.iter()) {
-                let field =
-                    self.model
-                        .field_by_column(column)
-                        .ok_or_else(|| QueryError::UnknownField {
-                            model: self.model.name,
-                            field: (*column).to_owned(),
-                        })?;
-                validate_value(self.model.name, field, value)?;
-            }
-        }
-        Ok(())
+        self.rows
+            .iter()
+            .try_for_each(|row| validate_row(self.model, &self.columns, row))
     }
 }
 

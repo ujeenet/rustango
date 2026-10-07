@@ -2961,11 +2961,112 @@ async fn pg_statements(
 }
 
 /// Where a migration's transaction records it in the ledger.
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
 #[derive(Clone, Copy)]
 enum LedgerWrite<'a> {
     Insert(&'a str),
     Delete(&'a str),
+}
+
+/// Run `ops` on MySQL in a transaction that only covers data ops before the
+/// first DDL; a failure after it is `PartiallyApplied` (#1588, #2151).
+#[cfg(feature = "mysql")]
+async fn atomic_mysql(
+    my: &sqlx::MySqlPool,
+    name: &str,
+    ops: &[Operation],
+    after: &SchemaSnapshot,
+    schema: Option<&str>,
+    ledger: LedgerWrite<'_>,
+) -> Result<(), MigrateError> {
+    let mut tx = my.begin().await?;
+    let mut deferred_fks: Vec<String> = Vec::new();
+    // What has already committed when something fails.
+    //
+    // Once a DDL statement was sent, every finished operation
+    // is committed, so a failure then is reported with what it
+    // left behind (#1588, #2151). Before that it rolls back.
+    let total = ops.len();
+    let mut applied = 0usize;
+    let mut ddl_applied = 0usize;
+    let mut ddl_sent = false;
+    // Wrap a driver error with what survived it.
+    macro_rules! stuck {
+        ($e:expr) => {{
+            let e: sqlx::Error = $e;
+            if !ddl_sent || (applied == 0 && ddl_applied == 0) {
+                MigrateError::Driver(e)
+            } else {
+                MigrateError::PartiallyApplied {
+                    migration: name.to_owned(),
+                    applied,
+                    total,
+                    ddl_applied,
+                    source: Box::new(e),
+                }
+            }
+        }};
+    }
+    for op in ops {
+        match op {
+            Operation::Schema(change) => {
+                let step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
+                let stmts = mysql_statements(&mut tx, &step)
+                    .await
+                    .map_err(|e| stuck!(e))?;
+                // Counted per *statement*, not per operation:
+                // one operation can render several, and each
+                // auto-commits on its own, so an operation
+                // that fails halfway has still left the
+                // earlier ones applied.
+                for stmt in stmts {
+                    // DDL that fails to parse does not commit;
+                    // commit first so the count holds either way.
+                    if !ddl_sent {
+                        tx.commit().await?;
+                        // Committed now: a failed `begin` must say so.
+                        ddl_sent = true;
+                        tx = my.begin().await.map_err(|e| stuck!(e))?;
+                    }
+                    sqlx::query(&stmt)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| stuck!(e))?;
+                    ddl_applied += 1;
+                }
+                deferred_fks.extend(step.batch.deferred_fks);
+            }
+            Operation::Data(d) => {
+                sqlx::query(&d.sql)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| stuck!(e))?;
+            }
+            Operation::Callback(c) => return Err(callback_in_atomic(name, c)),
+        }
+        applied += 1;
+    }
+    for stmt in deferred_fks {
+        sqlx::query(&stmt)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| stuck!(e))?;
+    }
+    match ledger {
+        LedgerWrite::Insert(ledger) => sqlx::query(&ledger_insert_sql(&crate::sql::MySql, ledger))
+            .bind(name)
+            .bind(chrono::Utc::now())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| stuck!(e))?,
+        LedgerWrite::Delete(ledger) => sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| stuck!(e))?,
+    };
+    tx.commit().await.map_err(|e| stuck!(e))?;
+    Ok(())
 }
 
 /// Run `ops` on SQLite in one transaction, FK enforcement off around it
@@ -3090,10 +3191,7 @@ async fn apply_atomic_pool(
         allow(unused_variables)
     )]
     let schema = super::ensure::creation_schema(pool).await?;
-    #[cfg_attr(
-        not(any(feature = "postgres", feature = "mysql")),
-        allow(unused_variables)
-    )]
+    #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
     let dialect = pool.dialect();
     match pool {
         #[cfg(feature = "postgres")]
@@ -3134,7 +3232,7 @@ async fn apply_atomic_pool(
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             // MySQL commits implicitly on every DDL statement and does not
-            // roll DDL back (#559). The BEGIN below covers only data ops
+            // roll DDL back (#559). `atomic_mysql`'s BEGIN covers only data ops
             // before the first DDL; every op after it runs in autocommit (#1660).
             tracing::warn!(
                 migration = %mig.name,
@@ -3142,87 +3240,15 @@ async fn apply_atomic_pool(
                  data operations before the first DDL. A failure after it leaves the \
                  migration partially applied and needs manual recovery (#559)."
             );
-            let mut tx = my.begin().await?;
-            let mut deferred_fks: Vec<String> = Vec::new();
-            // What has already committed when something fails.
-            //
-            // `applied` counts operations that finished; `ddl_applied`
-            // counts how many of those were DDL, and that is the number
-            // that decides whether the failure is recoverable. A driver
-            // error with `ddl_applied == 0` rolls back cleanly and is
-            // reported unchanged; above zero, the schema has moved and
-            // the ledger has not, so the operator needs to be told that
-            // and told how to get out (#1588).
-            let total = mig.forward.len();
-            let mut applied = 0usize;
-            let mut ddl_applied = 0usize;
-            // Wrap a driver error with what survived it.
-            macro_rules! stuck {
-                ($e:expr) => {{
-                    let e: sqlx::Error = $e;
-                    if ddl_applied == 0 {
-                        MigrateError::Driver(e)
-                    } else {
-                        MigrateError::PartiallyApplied {
-                            migration: mig.name.clone(),
-                            applied,
-                            total,
-                            ddl_applied,
-                            source: Box::new(e),
-                        }
-                    }
-                }};
-            }
-            for op in &mig.forward {
-                match op {
-                    Operation::Schema(change) => {
-                        let step = render_step(
-                            change,
-                            &mig.forward,
-                            &mig.snapshot,
-                            dialect,
-                            schema.as_deref(),
-                        )?;
-                        let stmts = mysql_statements(&mut tx, &step)
-                            .await
-                            .map_err(|e| stuck!(e))?;
-                        // Counted per *statement*, not per operation:
-                        // one operation can render several, and each
-                        // auto-commits on its own, so an operation
-                        // that fails halfway has still left the
-                        // earlier ones applied.
-                        for stmt in stmts {
-                            sqlx::query(&stmt)
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(|e| stuck!(e))?;
-                            ddl_applied += 1;
-                        }
-                        deferred_fks.extend(step.batch.deferred_fks);
-                    }
-                    Operation::Data(d) => {
-                        sqlx::query(&d.sql)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| stuck!(e))?;
-                    }
-                    Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
-                }
-                applied += 1;
-            }
-            for stmt in deferred_fks {
-                sqlx::query(&stmt)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| stuck!(e))?;
-            }
-            sqlx::query(&ledger_insert_sql(&crate::sql::MySql, ledger))
-                .bind(&mig.name)
-                .bind(chrono::Utc::now())
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| stuck!(e))?;
-            tx.commit().await.map_err(|e| stuck!(e))?;
+            atomic_mysql(
+                my,
+                &mig.name,
+                &mig.forward,
+                &mig.snapshot,
+                schema.as_deref(),
+                LedgerWrite::Insert(ledger),
+            )
+            .await?;
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -3681,37 +3707,15 @@ async fn unapply_atomic_pool(
                  covers data operations before the first DDL. A failure after it leaves \
                  the schema half-reverted and needs manual recovery (#559)."
             );
-            let mut tx = my.begin().await?;
-            let mut deferred_fks: Vec<String> = Vec::new();
-            for op in inverted {
-                match op {
-                    Operation::Schema(change) => {
-                        let step = render_step(
-                            change,
-                            inverted,
-                            snapshot,
-                            pool.dialect(),
-                            schema.as_deref(),
-                        )?;
-                        for stmt in mysql_statements(&mut tx, &step).await? {
-                            sqlx::query(&stmt).execute(&mut *tx).await?;
-                        }
-                        deferred_fks.extend(step.batch.deferred_fks);
-                    }
-                    Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
-                    }
-                    Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
-                }
-            }
-            for stmt in deferred_fks {
-                sqlx::query(&stmt).execute(&mut *tx).await?;
-            }
-            sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
-                .bind(&target.name)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
+            atomic_mysql(
+                my,
+                &target.name,
+                inverted,
+                snapshot,
+                schema.as_deref(),
+                LedgerWrite::Delete(ledger),
+            )
+            .await?;
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {

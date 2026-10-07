@@ -150,6 +150,20 @@ untouched.
 
 ## Unreleased
 
+### `seed-permissions` reports each failed tenant
+
+It no longer stops at the first failure; it prints a `failed` line per broken tenant and ends with `N of M tenant(s) failed` (#2156).
+
+### MySQL `PartiallyApplied` can report zero DDL
+
+It is now also raised when only data operations committed, so `ddl_applied` can be 0, and by atomic unapply too (#2151).
+
+Data operations before a DDL that fails to parse are now committed; they used to roll back. The error reports them.
+
+### `bulk_insert_pool` validates rows
+
+It and the `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` model methods now return `ExecError::Query` for a row that breaks a field rule (`max_length`, `min`/`max`, `choices`, named validators) or names an unknown column (`UnknownField`), as `insert_pool` does (#2153).
+
 ### Render DDL outside the runner with `render_changes_between`
 
 `render_changes_split_with_dialect` has no before-snapshot, so on MySQL it emits `DROP COLUMN` without the FK drop and fails (1828). Use `migrate::render_changes_between(changes, before, after, dialect)` (#2026).

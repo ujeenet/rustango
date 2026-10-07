@@ -33,13 +33,13 @@ pub enum MigrateError {
     #[error("another run held the migrate lock for over {0:?}; nothing was applied")]
     LockTimeout(std::time::Duration),
 
-    /// A migration failed **after** committing DDL that cannot be
-    /// rolled back. The schema moved and the ledger did not.
+    /// A migration failed **after** MySQL committed part of it. The
+    /// database moved and the ledger did not.
     ///
-    /// MySQL commits every DDL statement at once, so the transaction
-    /// around an `atomic: true` migration only protects the data
-    /// operations between them. If an operation fails after earlier
-    /// DDL ran, that DDL stays applied and no ledger row is written.
+    /// MySQL commits the open transaction at the first DDL statement,
+    /// even one that fails, and runs later operations in autocommit. So
+    /// the transaction around an `atomic: true` migration only protects
+    /// the data operations before the first DDL.
     ///
     /// **Re-running does not fix this.** The migration replays from
     /// the top and fails in a new way, because its earlier work is
@@ -47,16 +47,16 @@ pub enum MigrateError {
     /// migration, then run `manage migrate --fake <name>` once they
     /// match.
     ///
-    /// Raised **only** when DDL really committed. If nothing but data
-    /// operations ran before the failure, the transaction rolls back
-    /// and the driver error is returned unchanged.
+    /// Raised **only** when something really committed. A failure
+    /// before the first DDL statement rolls back and returns the
+    /// driver error unchanged.
     #[error(
-        "migration `{migration}` failed after completing {applied} of {total} operations, \
-         having already committed {ddl_applied} DDL statement(s).\n\
-         MySQL commits DDL immediately, so those {ddl_applied} are still applied and the \
-         transaction could not undo them. The ledger row was not written, so re-running \
-         replays from the top and will fail differently.\n\
-         Recovery: inspect the schema against this migration, then \
+        "migration `{migration}` failed after committing {applied} of {total} operations \
+         and {ddl_applied} DDL statement(s).\n\
+         MySQL commits the open transaction at the first DDL statement, so that work is \
+         still applied and could not be undone. The ledger row was not written, so \
+         re-running replays from the top and will fail differently.\n\
+         Recovery: inspect the database against this migration, then \
          `manage migrate --fake {migration}` once it matches (add `--all-tenants` under \
          tenancy).\n\
          Cause: {source}"
@@ -64,15 +64,15 @@ pub enum MigrateError {
     PartiallyApplied {
         /// The migration that moved the schema without recording it.
         migration: String,
-        /// Operations that ran to completion before the failure.
+        /// Operations that ran to completion, and so committed, before
+        /// the failure.
         applied: usize,
         /// Operations in the migration.
         total: usize,
         /// DDL **statements** committed before the failure. Counted
         /// per statement, not per operation: one operation can render
-        /// several, and each commits on its own. At zero the
-        /// transaction rolled back cleanly and this variant is not
-        /// raised.
+        /// several, and each commits on its own. Can be zero when only
+        /// data operations committed (#2151).
         ddl_applied: usize,
         /// The driver error that stopped it.
         source: Box<sqlx::Error>,
