@@ -274,10 +274,8 @@ fn is_protocol_error(code: i64) -> bool {
     )
 }
 
-/// Argument names whose values are scrubbed before a call is
-/// audited, so no secret reaches the audit table. It is the
-/// access-log list, `access_log::default_redact_params`, plus a few
-/// names that matter here.
+/// Words whose values are scrubbed before a call is audited, so no
+/// secret reaches the audit table. A `_` entry is a run of words.
 const SENSITIVE_ARG_KEYS: &[&str] = &[
     "password",
     "passwd",
@@ -285,31 +283,52 @@ const SENSITIVE_ARG_KEYS: &[&str] = &[
     "secret",
     "api_key",
     "apikey",
-    "access_token",
-    "refresh_token",
     "signature",
     "auth",
     "authorization",
-    "client_secret",
     "private_key",
     "otp",
     "totp",
-    "id_token",
     "code_verifier",
 ];
 
-/// Return a copy of `value` with every sensitive key's value
-/// replaced by `"[redacted]"`, at any depth. A key matches whole or
-/// as its last `_`/`-` part, ignoring case: `new_password` is redacted,
-/// `token_count` is left alone (#1963).
-fn redact_json(value: &Value) -> Value {
-    fn is_sensitive(key: &str) -> bool {
-        let k = key.to_ascii_lowercase();
-        SENSITIVE_ARG_KEYS.iter().any(|s| {
-            k.strip_suffix(s)
-                .is_some_and(|head| head.is_empty() || head.ends_with(['_', '-']))
-        })
+/// The lowercase words of a key, split on `_`, `-` and lower-to-upper
+/// case changes: `newPassword` is `new password`, `x-api-key` is `x api key`.
+fn key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in key.chars() {
+        let split = matches!(c, '_' | '-') || (prev_lower && c.is_ascii_uppercase());
+        if split && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if !matches!(c, '_' | '-') {
+            word.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
     }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// `true` when any run of the key's words is a sensitive entry. Errs
+/// toward hiding: `token_count` is redacted too (#1963).
+fn is_sensitive(key: &str) -> bool {
+    let words = key_words(key);
+    SENSITIVE_ARG_KEYS.iter().any(|entry| {
+        let want: Vec<&str> = entry.split('_').collect();
+        words
+            .windows(want.len())
+            .any(|w| w.iter().zip(&want).all(|(a, b)| a == b))
+    })
+}
+
+/// Return a copy of `value` with every sensitive key's value
+/// replaced by `"[redacted]"`, at any depth.
+fn redact_json(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()
@@ -339,7 +358,7 @@ async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
         changes: json!({ "tool": tool, "arguments": redact_json(args) }),
     };
     if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
-        tracing::debug!(error = %e, tool, "mcp tools/call audit not recorded");
+        tracing::warn!(error = %e, tool, "mcp tools/call audit not recorded");
     }
 }
 
@@ -397,7 +416,6 @@ mod tests {
             "username": "alice",
             "password": "hunter2",
             "API_KEY": "sk-123",
-            "token_count": 42,                       // not sensitive (exact match)
             "nested": { "client_secret": "shh", "ok": true },
             "list": [ { "secret": "s" }, { "keep": "v" } ],
         });
@@ -405,25 +423,46 @@ mod tests {
         assert_eq!(red["username"], "alice");
         assert_eq!(red["password"], "[redacted]");
         assert_eq!(red["API_KEY"], "[redacted]"); // case-insensitive
-        assert_eq!(red["token_count"], 42); // exact-match: kept
         assert_eq!(red["nested"]["client_secret"], "[redacted]");
         assert_eq!(red["nested"]["ok"], true);
         assert_eq!(red["list"][0]["secret"], "[redacted]");
         assert_eq!(red["list"][1]["keep"], "v");
     }
 
-    /// A sensitive name with a prefix is still redacted (#1963).
+    /// A sensitive word anywhere in a snake, kebab or camel key is
+    /// redacted; `token_count` too, as hiding a count is harmless (#1963).
     #[test]
-    fn redact_json_matches_a_sensitive_suffix() {
-        let red = redact_json(&json!({
-            "new_password": "p", "Confirm-Password": "p", "otp": "123456",
-            "user_api_key": "k", "token_count": 1, "passwords_match": true,
-        }));
-        for k in ["new_password", "Confirm-Password", "otp", "user_api_key"] {
-            assert_eq!(red[k], "[redacted]", "{k}");
+    fn redact_json_matches_a_sensitive_word_in_any_case_style() {
+        let hidden = [
+            "new_password",
+            "Confirm-Password",
+            "password_confirmation",
+            "newPassword",
+            "accessToken",
+            "clientSecret",
+            "privateKey",
+            "api-key",
+            "x-api-key",
+            "apiKey",
+            "secret_key",
+            "user_api_key",
+            "otp",
+            "token_count",
+        ];
+        let shown = [
+            "username",
+            "author",
+            "keyboard",
+            "page_size",
+            "passwords_match",
+            "oauth_provider",
+        ];
+        for k in hidden {
+            assert!(is_sensitive(k), "{k} must be redacted");
         }
-        assert_eq!(red["token_count"], 1);
-        assert_eq!(red["passwords_match"], true);
+        for k in shown {
+            assert!(!is_sensitive(k), "{k} must stay visible");
+        }
     }
 
     /// A database error reaches the log, not the agent (#1963).

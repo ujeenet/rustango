@@ -176,7 +176,7 @@ untouched.
 
 ### `S3Storage` does not follow redirects
 
-A 3xx from the endpoint is now an error. Point `S3Config` at the bucket's own region endpoint (#1780).
+A 3xx from the endpoint is now an error. Point `S3Config` at the bucket's own region endpoint (#1780). A client passed to `with_http` keeps its own redirect policy; turn redirects off on it too.
 
 ### MCP JSON-RPC checks
 

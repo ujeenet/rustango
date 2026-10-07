@@ -219,7 +219,8 @@ impl<DB: Database> TenantAdminBuilder<DB> {
 
     /// Where used impersonation handoff tokens and ended impersonations
     /// are kept. The default is per-process; with several replicas pass
-    /// a shared store such as Redis or the database (#2176).
+    /// a shared store such as Redis or the database (#2176). Call it before
+    /// or after [`Self::with_session`]; without a session it has no use.
     #[must_use]
     pub fn impersonation_jti_store(mut self, store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
         self.jti_store = Some(store);
@@ -294,6 +295,12 @@ where
         let show_only = Arc::new(self.show_only);
         let read_only = Arc::new(self.read_only);
         let jti_store = self.jti_store;
+        if jti_store.is_some() && self.session.is_none() {
+            warn!(
+                target: "rustango::tenancy::admin",
+                "impersonation_jti_store is unused: the tenant admin has no with_session",
+            );
+        }
         let session = self.session.map(|mut s| {
             s.jti = jti_store.map(super::impersonation_handoff::JtiBlacklist::with_store);
             Arc::new(s)

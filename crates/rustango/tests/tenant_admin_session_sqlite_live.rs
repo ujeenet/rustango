@@ -560,57 +560,77 @@ async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
     );
 }
 
-/// The tenant admin with its own handoff/revoke store.
-fn admin_with_jti(env: &Env, store: Arc<dyn rustango::jti_store::JtiStore>) -> axum::Router {
+/// The tenant admin with its own handoff/revoke store, set before or
+/// after `with_session`.
+fn admin_with_jti(
+    env: &Env,
+    store: Arc<dyn rustango::jti_store::JtiStore>,
+    store_first: bool,
+) -> axum::Router {
     let reg_url = format!(
         "sqlite://{}?mode=rwc",
         env._dir.path().join("reg.db").display()
     );
-    TenantAdminBuilder::new(
+    let b = TenantAdminBuilder::new(
         env.pools.clone(),
         reg_url,
         ChainResolver::new().push(SubdomainResolver::new("app.test")),
     )
-    .routes(RouteConfig::legacy())
-    .with_session(env.secret.clone())
-    .impersonation_jti_store(store)
-    .build()
+    .routes(RouteConfig::legacy());
+    let b = if store_first {
+        b.impersonation_jti_store(store)
+            .with_session(env.secret.clone())
+    } else {
+        b.with_session(env.secret.clone())
+            .impersonation_jti_store(store)
+    };
+    b.build()
 }
 
 /// A plugged store holds the used handoff and the ended impersonation,
-/// and only that store is read (#2176).
+/// whatever the builder call order, and only that store is read (#2176).
 #[tokio::test]
 async fn a_plugged_jti_store_backs_the_impersonation_revoke() {
     use rustango::jti_store::{InMemoryJtiStore, JtiStore as _};
     let mut env = boot().await;
-    let store = Arc::new(InMemoryJtiStore::new());
-    env.admin = admin_with_jti(&env, store.clone());
+    for store_first in [false, true] {
+        let store = Arc::new(InMemoryJtiStore::new());
+        env.admin = admin_with_jti(&env, store.clone(), store_first);
 
-    let (_, location) = start_impersonation(&env).await;
-    let handoff = &location[location
-        .find("/__impersonation_handoff")
-        .expect("handoff url")..];
-    let redeemed = env.get(handoff, "").await;
-    let cookie = redeemed.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    assert_eq!(store.approx_size().await, Some(1), "the handoff jti");
+        let (_, location) = start_impersonation(&env).await;
+        let handoff = &location[location
+            .find("/__impersonation_handoff")
+            .expect("handoff url")..];
+        let redeemed = env.get(handoff, "").await;
+        let cookie = redeemed.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            store.approx_size().await,
+            Some(1),
+            "{store_first}: the handoff jti"
+        );
 
-    let ended = env.post("/__admin/__end-impersonation", &cookie, "").await;
-    assert!(ended.status().is_redirection(), "{}", ended.status());
-    assert_eq!(store.approx_size().await, Some(2), "the ended session");
-    assert_eq!(
-        env.get("/__admin/", &cookie).await.status(),
-        StatusCode::SEE_OTHER
-    );
+        let ended = env.post("/__admin/__end-impersonation", &cookie, "").await;
+        assert!(ended.status().is_redirection(), "{}", ended.status());
+        assert_eq!(
+            store.approx_size().await,
+            Some(2),
+            "{store_first}: the ended session"
+        );
+        assert_eq!(
+            env.get("/__admin/", &cookie).await.status(),
+            StatusCode::SEE_OTHER
+        );
 
-    // A replica with another store never saw the revoke.
-    env.admin = admin_with_jti(&env, Arc::new(InMemoryJtiStore::new()));
-    assert_eq!(env.get("/__admin/", &cookie).await.status(), StatusCode::OK);
+        // A replica with another store never saw the revoke.
+        env.admin = admin_with_jti(&env, Arc::new(InMemoryJtiStore::new()), store_first);
+        assert_eq!(env.get("/__admin/", &cookie).await.status(), StatusCode::OK);
+    }
 }
 
 /// The tenant change-password form applies the shared 8-character rule (#1874).

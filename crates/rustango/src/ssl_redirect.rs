@@ -153,6 +153,8 @@ async fn handle(cfg: Arc<SslRedirectLayer>, req: Request<Body>, next: Next) -> R
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
+        // HTTP/2 sends `:authority`, not `Host`.
+        .or_else(|| req.uri().authority().map(|a| a.as_str()))
         .and_then(crate::urls::HostAuthority::parse)
     else {
         let mut resp = Response::new(Body::from("invalid Host header"));
