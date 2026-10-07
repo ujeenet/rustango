@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — flaky SQLite file-pool test on Windows (#2205)
+
+The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
