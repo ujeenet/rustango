@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — MySQL AlterColumn* before a RenameTable in one migration (#2149)
 
-The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name.
+The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name. An `AlterFkOnDelete` before a rename works on MySQL and PG too.
 
 ### Fixed — parallel `create_collection` deadlocked on MySQL (#2182)
 

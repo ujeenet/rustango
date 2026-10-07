@@ -276,27 +276,53 @@ impl TableRebuild {
 }
 
 /// `after` with `table` as it is after the op that `later` follows: its
-/// shape from [`shape_at`], and its CHECKs under that name (#2140) without
-/// the ones a later op adds. Also returns the table's name at the end.
+/// shape from [`shape_at`], its CHECKs and indexes under that name (#2140)
+/// without the ones a later op adds, and its FK targets under their names
+/// then. Also returns whether a later rename touches it, so its FKs cannot
+/// wait for the end of the migration (#2149).
 pub(crate) fn snapshot_at(
     table: &str,
     later: &[super::Operation],
     after: &SchemaSnapshot,
-) -> Result<(SchemaSnapshot, String), String> {
+) -> Result<(SchemaSnapshot, bool), String> {
+    use super::Operation as Op;
     use super::SchemaChange as SC;
-    let (shape, last) = shape_at(table, later, after)?;
+    let (mut shape, last) = shape_at(table, later, after)?;
+    let mut renamed = last != table;
+    // Undo the later renames of its FK targets, last first.
+    for op in later.iter().rev() {
+        let Op::Schema(SC::RenameTable { old_name, new_name }) = op else {
+            continue;
+        };
+        let fks = shape.fields.iter_mut().filter_map(|f| f.fk.as_mut());
+        let targets = fks
+            .map(|r| &mut r.to)
+            .chain(shape.composite_fks.iter_mut().map(|c| &mut c.to));
+        for to in targets.filter(|to| *to == new_name) {
+            to.clone_from(old_name);
+            renamed = true;
+        }
+    }
     let mut at = after.clone();
     at.tables.retain(|t| t.name != table);
     at.tables.push(shape);
     at.checks.retain(|c| {
-        !later.iter().any(|op| {
-            matches!(op, super::Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
-        })
+        !later.iter().any(
+            |op| matches!(op, Op::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name),
+        )
     });
     for c in at.checks.iter_mut().filter(|c| c.table == last) {
         c.table = table.to_owned();
     }
-    Ok((at, last))
+    at.indexes.retain(|i| {
+        !later
+            .iter()
+            .any(|op| matches!(op, Op::Schema(SC::CreateIndex { name, .. }) if *name == i.name))
+    });
+    for i in at.indexes.iter_mut().filter(|i| i.table == last) {
+        i.table = table.to_owned();
+    }
+    Ok((at, renamed))
 }
 
 /// `table`'s shape after the op that `later` follows, from the migration's
@@ -382,7 +408,9 @@ fn shape_at(
             | SC::DropCheckConstraint { .. }
             | SC::RenameTable { .. }
             | SC::CreateIndex { .. }
-            | SC::DropIndex { .. } => {}
+            | SC::DropIndex { .. }
+            | SC::AddExclusionConstraint { .. }
+            | SC::DropExclusionConstraint { .. } => {}
             other => {
                 return Err(format!(
                     "`{table}` is rebuilt before a later `{other:?}` on it in the same \

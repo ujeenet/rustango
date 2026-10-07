@@ -20,7 +20,10 @@
 //! 1. Look up `Org` by slug. Validate target ≠ current storage_mode.
 //! 2. Provision the target storage:
 //!    - schema → the restore creates it; it must not exist yet. The
-//!      registry user needs `CREATEDB` for a staging database.
+//!      registry user needs PG 15+ and `CREATEDB` (or a superuser on
+//!      13/14) for a staging database. Extensions are not copied:
+//!      create them in the registry first. An interrupted run can
+//!      leave a `rustango_stage_*` database to drop by hand.
 //!    - database → caller passes `--database-url`. Database must
 //!      already exist (we don't `CREATE DATABASE` — that's a
 //!      single-statement decision the operator should own).
@@ -129,12 +132,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         StorageMode::Database => None,
     };
     let target_schema = match parsed.target {
-        StorageMode::Schema => Some(
-            parsed
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| parsed.slug.clone()),
-        ),
+        StorageMode::Schema => Some(SchemaName::parse(
+            parsed.schema_name.as_deref().unwrap_or(&parsed.slug),
+        )?),
         StorageMode::Database => None,
     };
     let target_url = match parsed.target {
@@ -159,8 +159,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     if let Some(s) = &target_schema {
         writeln!(
             writer,
-            "  target: {} (schema `{s}`)",
-            redact_url(&target_url)
+            "  target: {} (schema `{}`)",
+            redact_url(&target_url),
+            s.0
         )?;
     } else {
         writeln!(writer, "  target: {}", redact_url(&target_url))?;
@@ -182,9 +183,19 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     writeln!(writer, "  data move OK")?;
 
     // Before the Org row moves, so a bad restore leaves it in place.
-    smoke_check(&target_url, target_schema.as_deref())
-        .await
-        .map_err(|e| TenancyError::Validation(format!("smoke-check failed: {e}")))?;
+    let target_name = target_schema.as_ref().map(|s| s.0.as_str());
+    if let Err(e) = smoke_check(&target_url, target_name).await {
+        // The restore created it, so a rerun would hit "schema exists".
+        if let Some(s) = target_name {
+            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
+            crate::sql::sqlx::query(&drop)
+                .execute(pools.registry())
+                .await?;
+        }
+        return Err(TenancyError::Validation(format!(
+            "smoke-check failed: {e}; the restored schema was dropped"
+        )));
+    }
     writeln!(writer, "  smoke-check OK")?;
 
     // 5. Update Org row.
@@ -194,7 +205,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         StorageMode::Schema => None,
     };
     let new_schema_name = match parsed.target {
-        StorageMode::Schema => target_schema.clone(),
+        StorageMode::Schema => target_schema.map(|s| s.0),
         StorageMode::Database => None,
     };
     org.storage_mode = new_storage_mode;
@@ -342,6 +353,18 @@ impl Conn {
     }
 }
 
+/// A target schema name that provisioning accepts (`[a-z0-9_-]`), so
+/// pg_dump's `--schema` pattern can neither fold its case nor match it
+/// as a wildcard.
+struct SchemaName(String);
+
+impl SchemaName {
+    fn parse(name: &str) -> Result<Self, TenancyError> {
+        crate::tenancy::provision::validate_schema_name(name).map_err(TenancyError::Validation)?;
+        Ok(Self(name.to_owned()))
+    }
+}
+
 /// Restore `source`'s `public` into `schema` on `target`. pg_dump names
 /// every object `public.`, so `public` is renamed in a staging database
 /// first (#1864).
@@ -349,8 +372,9 @@ async fn restore_into_schema(
     registry: &crate::sql::sqlx::PgPool,
     source: &Conn,
     target: &Conn,
-    schema: &str,
+    schema: &SchemaName,
 ) -> Result<(), TenancyError> {
+    let schema = schema.0.as_str();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -552,6 +576,15 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// pg_dump reads `--schema` as a pattern; only literal names pass.
+    #[test]
+    fn schema_name_is_a_literal() {
+        assert!(SchemaName::parse("acme_2-x").is_ok());
+        for bad in ["", "Acme", "a*", "a.b", "a?", "a\"b", &"a".repeat(64)] {
+            assert!(SchemaName::parse(bad).is_err(), "{bad}");
+        }
     }
 
     /// #1864 — the password goes to `PGPASSWORD`, never argv.

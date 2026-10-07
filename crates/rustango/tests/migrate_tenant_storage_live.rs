@@ -274,15 +274,6 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t1864_moved CASCADE").await;
     let (base, _) = registry_url.rsplit_once('/').unwrap();
     let src_url = format!("{base}/rustango_t1864_src");
-    let src = PgPool::connect(&src_url).await.unwrap();
-    for stmt in [
-        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
-        "INSERT INTO rustango_users (username) VALUES ('ann'), ('bob')",
-    ] {
-        sqlx_exec(&src, stmt).await;
-    }
-    src.close().await;
-
     let mut org = Org {
         id: Auto::default(),
         slug: "t1864".into(),
@@ -299,23 +290,43 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     org.insert(&pool).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
-    let mut buf = Vec::<u8>::new();
-    let res = run_with_writer(
-        &pools,
-        &registry_url,
-        &std::env::temp_dir(),
-        args(&[
-            "migrate-tenant-storage",
-            "t1864",
-            "--to",
-            "schema",
-            "--schema-name",
-            "t1864_moved",
-        ]),
-        &mut buf,
+    let migrate = || async {
+        run_with_writer(
+            &pools,
+            &registry_url,
+            std::path::Path::new("."),
+            args(&[
+                "migrate-tenant-storage",
+                "t1864",
+                "--to",
+                "schema",
+                "--schema-name",
+                "t1864_moved",
+            ]),
+            &mut Vec::<u8>::new(),
+        )
+        .await
+    };
+    // No `rustango_users`: the smoke check fails and drops what it restored.
+    let err = migrate().await.unwrap_err();
+    assert!(err.to_string().contains("dropped"), "{err}");
+    let left: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't1864_moved'",
     )
-    .await;
-    res.unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&buf)));
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "the failed restore left its schema");
+
+    let src = PgPool::connect(&src_url).await.unwrap();
+    for stmt in [
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
+        "INSERT INTO rustango_users (username) VALUES ('ann'), ('bob')",
+    ] {
+        sqlx_exec(&src, stmt).await;
+    }
+    src.close().await;
+    migrate().await.unwrap_or_else(|e| panic!("{e}"));
 
     let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
         "SELECT username FROM t1864_moved.rustango_users ORDER BY id",

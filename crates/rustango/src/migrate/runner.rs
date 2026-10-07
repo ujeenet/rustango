@@ -2796,10 +2796,16 @@ fn render_step(
         | SC::AlterColumnUnique { table, .. } => Some(table.as_str()),
         _ => None,
     };
-    let reshaped = if dialect.alters_by_rebuild() {
-        rebuilt
-    } else {
-        modified.filter(|_| dialect.modifies_whole_column())
+    let reshaped = match change {
+        // Every backend looks up their FK or declared indexes by table name.
+        SC::AlterFkOnDelete { table, .. }
+        | SC::AlterColumnUnique {
+            table,
+            unique: false,
+            ..
+        } => Some(table.as_str()),
+        _ if dialect.alters_by_rebuild() => rebuilt,
+        _ => modified.filter(|_| dialect.modifies_whole_column()),
     };
     // The ops after `change`, which is borrowed from `ops`.
     let later = ops
@@ -2809,9 +2815,9 @@ fn render_step(
     // Both take the table's shape at this op, not at the end (#2121, #2149).
     let (at, renamed) = match reshaped {
         Some(table) if later.iter().any(|op| touches_table(op, table)) => {
-            let (at, last) = super::rebuild::snapshot_at(table, later, after)
+            let (at, renamed) = super::rebuild::snapshot_at(table, later, after)
                 .map_err(MigrateError::Validation)?;
-            (Some(at), last != table)
+            (Some(at), renamed)
         }
         _ => (None, false),
     };
@@ -2851,8 +2857,8 @@ fn render_step(
         _ => None,
     };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
-    // A deferred FK would run after the rename, under the old name.
-    if renamed && dialect.modifies_whole_column() {
+    // Its FKs carry the names at this op, which a later rename changes.
+    if renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
