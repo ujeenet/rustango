@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL batch upserts merge rows that collide in one statement
+
+A `DoUpdate` batch with two rows on the same unique key now keeps the last one, as SQLite does; Postgres still rejects it (#2200).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

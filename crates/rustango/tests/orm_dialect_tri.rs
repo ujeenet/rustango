@@ -5,7 +5,8 @@
 
 use rustango::core::joins::aliased;
 use rustango::core::{
-    AggregateExpr, ConflictClause, InsertQuery, Model as _, Op, SearchClause, SqlValue, WhereExpr,
+    AggregateExpr, BulkInsertQuery, ConflictClause, InsertQuery, Model as _, Op, SearchClause,
+    SqlValue, WhereExpr,
 };
 use rustango::sql::{
     Auto, CounterPool as _, FetcherPool as _, InsertReturningPool, Pool, UpdaterPool as _,
@@ -230,6 +231,53 @@ async fn upsert_reports_the_updated_row(pool: &Pool) {
         .expect("upsert");
     assert_eq!(reported_id(r), a_id, "the id must name the updated row");
     assert_eq!(posts(pool).await[0].title, "A2");
+}
+
+fn post_rows(rows: &[(&str, &str)]) -> BulkInsertQuery {
+    let rows = rows
+        .iter()
+        .map(|(s, t)| vec![SqlValue::from(*s), SqlValue::from(*t)])
+        .collect();
+    BulkInsertQuery::new(Post::SCHEMA, vec!["slug", "title"], rows)
+}
+
+/// #2200: MySQL failed with 1869 when two rows of one batch collided.
+async fn batch_conflicts_inside_one_insert(pool: &Pool) {
+    let mysql = pool.dialect().name() == "mysql";
+    // Exact duplicates: the first row wins on every backend.
+    let q = post_rows(&[("x", "1"), ("x", "2"), ("y", "3")]).on_conflict_do_nothing();
+    rustango::sql::bulk_insert_pool(pool, &q)
+        .await
+        .expect("do nothing, exact duplicates");
+    let got: Vec<(String, String)> = posts(pool)
+        .await
+        .into_iter()
+        .map(|p| (p.slug, p.title))
+        .collect();
+    assert_eq!(got, [("x".into(), "1".into()), ("y".into(), "3".into())]);
+
+    // Case variants collide only under MySQL's ci collation.
+    let q = post_rows(&[("c", "1"), ("C", "2")]).on_conflict_do_nothing();
+    rustango::sql::bulk_insert_pool(pool, &q)
+        .await
+        .expect("do nothing, case variants");
+    let q = post_rows(&[("d", "1"), ("D", "2")]).on_conflict_do_update(&["slug"], &["title"]);
+    rustango::sql::bulk_insert_pool(pool, &q)
+        .await
+        .expect("do update, case variants");
+    let got: Vec<(String, String)> = posts(pool)
+        .await
+        .into_iter()
+        .skip(2)
+        .map(|p| (p.slug, p.title))
+        .collect();
+    let want: Vec<(&str, &str)> = if mysql {
+        vec![("c", "1"), ("d", "2")]
+    } else {
+        vec![("c", "1"), ("C", "2"), ("d", "1"), ("D", "2")]
+    };
+    let got: Vec<(&str, &str)> = got.iter().map(|(s, t)| (s.as_str(), t.as_str())).collect();
+    assert_eq!(got, want);
 }
 
 /// #1888: PG typed an all-NULL VALUES column as text.
@@ -583,6 +631,7 @@ tri_dialect_test! {
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,
         upsert_reports_the_updated_row,
+        batch_conflicts_inside_one_insert,
         bulk_update_sets_null_in_every_row,
         union_keeps_the_first_branch_join,
         union_values_list_flat_in_a_subquery,

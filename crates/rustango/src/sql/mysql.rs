@@ -8,7 +8,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
+    FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -571,13 +571,13 @@ impl Dialect for MySql {
     /// ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `b` = VALUES(`b`)
     /// ```
     ///
-    /// `DoNothing` becomes a PK self-assignment, which skips the
+    /// `DoNothing` becomes a self-assignment, which skips the
     /// duplicate. `INSERT IGNORE` would do that too, but it also hides
     /// every other error. The assignment also sets
     /// [`SKIPPED_INSERT_ID`]: sqlx sets `CLIENT_FOUND_ROWS`, so a skip
     /// reports 1 affected row, the same as an insert.
     ///
-    /// On an auto-increment PK, `DoUpdate` adds `pk = LAST_INSERT_ID(pk)`
+    /// On an auto-increment PK, `DoUpdate` also calls `LAST_INSERT_ID(pk)`
     /// so `LAST_INSERT_ID()` names the updated row, not a stale one.
     fn write_conflict_clause(
         &self,
@@ -585,17 +585,10 @@ impl Dialect for MySql {
         model: &ModelSchema,
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
-        let pk = model.primary_key().or_else(|| model.fields.first());
         match conflict {
             ConflictClause::DoNothing => {
-                let pivot = pk.ok_or(SqlError::MissingPrimaryKey)?.column;
                 sql.push_str(" ON DUPLICATE KEY UPDATE ");
-                write_my_ident(sql, pivot);
-                sql.push_str(&format!(" = IF(LAST_INSERT_ID({SKIPPED_INSERT_ID}), "));
-                write_my_ident(sql, pivot);
-                sql.push_str(", ");
-                write_my_ident(sql, pivot);
-                sql.push(')');
+                write_my_insert_id_marker(sql, model, &SKIPPED_INSERT_ID.to_string())?;
             }
             ConflictClause::DoUpdate {
                 target,
@@ -621,11 +614,10 @@ impl Dialect for MySql {
                     sql.push(')');
                 }
                 if let Some(pk) = model.primary_key().filter(|f| f.is_serial()) {
+                    let mut id = String::new();
+                    write_my_ident(&mut id, pk.column);
                     sql.push_str(", ");
-                    write_my_ident(sql, pk.column);
-                    sql.push_str(" = LAST_INSERT_ID(");
-                    write_my_ident(sql, pk.column);
-                    sql.push(')');
+                    write_my_insert_id_marker(sql, model, &id)?;
                 }
             }
         }
@@ -722,6 +714,33 @@ fn write_my_ident(sql: &mut String, name: &str) {
         }
     }
     sql.push('`');
+}
+
+/// `<col> = IF(LAST_INSERT_ID(<id>), <col>, <col>)`: a no-op write that
+/// sets the insert id. `<col>` is never the auto-increment column, whose
+/// assignment fails with 1869 once two rows of one batch collide (#2200).
+fn write_my_insert_id_marker(
+    sql: &mut String,
+    model: &ModelSchema,
+    id: &str,
+) -> Result<(), SqlError> {
+    let plain = |f: &&FieldSchema| !f.is_serial() && f.generated_as.is_none();
+    let pivot = model
+        .primary_key()
+        .filter(plain)
+        .or_else(|| model.fields.iter().find(plain))
+        .or_else(|| model.primary_key())
+        .ok_or(SqlError::MissingPrimaryKey)?
+        .column;
+    write_my_ident(sql, pivot);
+    sql.push_str(" = IF(LAST_INSERT_ID(");
+    sql.push_str(id);
+    sql.push_str("), ");
+    write_my_ident(sql, pivot);
+    sql.push_str(", ");
+    write_my_ident(sql, pivot);
+    sql.push(')');
+    Ok(())
 }
 
 /// Shared body of [`MySql::write_json_has_any_keys`] /
@@ -995,7 +1014,25 @@ mod tests {
             .unwrap();
         assert_eq!(
             sql,
-            " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `id` = LAST_INSERT_ID(`id`)"
+            " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`), `a` = IF(LAST_INSERT_ID(`id`), `a`, `a`)"
+        );
+    }
+
+    /// #2200: assigning the auto-increment PK fails with 1869 in a batch.
+    #[test]
+    fn conflict_do_nothing_on_auto_pk_assigns_another_column() {
+        let model = with_pk(
+            empty_model_with("t", &[("id", FieldType::I64), ("code", FieldType::String)]),
+            "id",
+            true,
+        );
+        let mut sql = String::new();
+        MySql
+            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
+            .unwrap();
+        assert_eq!(
+            sql,
+            " ON DUPLICATE KEY UPDATE `code` = IF(LAST_INSERT_ID(18446744073709551615), `code`, `code`)"
         );
     }
 

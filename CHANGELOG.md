@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL `DoNothing`/`DoUpdate` on an auto-increment PK no longer fails with 1869 (#2200)
+
+The no-op write now targets a non-auto-increment column, so two rows of one batch that hit the same unique key are skipped or merged.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
