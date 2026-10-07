@@ -51,8 +51,9 @@ pub enum PoolError {
     Connect(String),
 
     /// URL didn't start with a recognized scheme (`postgres://`,
-    /// `postgresql://`, `mysql://`, or `sqlite:`).
-    #[error("unsupported scheme in URL `{0}` — expected postgres://, mysql://, or sqlite:")]
+    /// `postgresql://`, `mysql://`, or `sqlite:`). Holds the scheme
+    /// only: the rest of the URL can carry a password (#2172).
+    #[error("unsupported URL scheme `{0}` — expected postgres://, mysql://, or sqlite:")]
     UnsupportedScheme(String),
 
     /// The URL names a backend whose Cargo feature is off.
@@ -67,6 +68,23 @@ pub enum PoolError {
 
     #[error(transparent)]
     Env(#[from] EnvError),
+}
+
+impl PoolError {
+    /// The scheme, or empty when the text before `:` is not one (#2172).
+    fn unsupported_scheme(url: &str) -> Self {
+        let scheme = match url.split_once(':') {
+            Some((s, _))
+                if !s.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+            {
+                s.to_owned()
+            }
+            _ => String::new(),
+        };
+        Self::UnsupportedScheme(scheme)
+    }
 }
 
 /// A wrapper around any sqlx pool rustango supports. Cloning is
@@ -167,7 +185,7 @@ impl Pool {
             "postgres" | "postgresql" => Self::connect_postgres_inner(url).await,
             "mysql" => Self::connect_mysql_inner(url).await,
             "sqlite" => Self::connect_sqlite_inner(url).await,
-            _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
+            _ => Err(PoolError::unsupported_scheme(url)),
         }
     }
 
@@ -275,9 +293,7 @@ impl Pool {
                 scheme: "sqlite",
                 feature: "sqlite",
             })),
-            _ => Err(ConnectFail::Pool(PoolError::UnsupportedScheme(
-                url.to_owned(),
-            ))),
+            _ => Err(ConnectFail::Pool(PoolError::unsupported_scheme(url))),
         }
     }
 
@@ -325,7 +341,7 @@ impl Pool {
                 scheme: "sqlite",
                 feature: "sqlite",
             }),
-            _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
+            _ => Err(PoolError::unsupported_scheme(url)),
         }
     }
 
@@ -1034,8 +1050,24 @@ mod tests {
     async fn unrecognized_scheme_errors_clearly() {
         let err = Pool::connect("oracle://user@host/db").await.unwrap_err();
         match err {
-            PoolError::UnsupportedScheme(s) => assert!(s.starts_with("oracle://")),
+            PoolError::UnsupportedScheme(s) => assert_eq!(s, "oracle"),
             other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    /// #2172 — the error keeps the scheme, never the password.
+    #[tokio::test]
+    async fn an_unsupported_scheme_error_drops_the_password() {
+        let errs = [
+            Pool::connect("oracle://u:hunter2@h/db").await.unwrap_err(),
+            Pool::connect_with_timeout("oracle://u:hunter2@h/db", Duration::from_secs(1))
+                .await
+                .unwrap_err(),
+            Pool::connect_lazy("postgresql//u:hunter2@h/db").unwrap_err(),
+        ];
+        for err in errs {
+            let shown = format!("{err} {err:?}");
+            assert!(!shown.contains("hunter2"), "{shown}");
         }
     }
 
