@@ -114,6 +114,13 @@ The access log writes its field list once; query redaction no longer allocates f
 ### Fixed — flaky SQLite file-pool test on Windows (#2205)
 
 The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.
+### Fixed — MySQL `DoNothing`/`DoUpdate` on an auto-increment PK no longer fails with 1869 (#2200)
+
+The no-op write now targets a non-auto-increment column, so two rows of one batch that hit the same unique key are skipped or merged.
+
+### Fixed — ViewSet OpenAPI lists the 409 conflict response on create and update (#2164)
+
+POST, PUT and PATCH map a unique violation to 409; the spec now says so.
 
 ## [0.60.1] — 2026-10-07
 

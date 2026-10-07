@@ -26,6 +26,11 @@ use super::{PaginationStyle, ViewSet};
 use crate::core::{FieldType, WriteKind};
 use crate::forms::absent_is_missing;
 
+/// A write that hits a unique key answers 409 (`write_failure`, #2164).
+fn conflict() -> Response {
+    Response::new("conflicts with an existing row")
+}
+
 /// Which write a request schema describes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Body {
@@ -89,7 +94,8 @@ impl ViewSet {
                     "201",
                     Response::new("created").json_content(Schema::ref_(item_ref)),
                 )
-                .response("400", Response::new("validation error"));
+                .response("400", Response::new("validation error"))
+                .response("409", conflict());
             p = p.post(create_op);
         }
 
@@ -175,7 +181,8 @@ impl ViewSet {
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
-                .response("404", Response::new("not found"));
+                .response("404", Response::new("not found"))
+                .response("409", conflict());
             p = p.put(update_op);
 
             let patch_op = Operation::new()
@@ -187,7 +194,8 @@ impl ViewSet {
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
-                .response("404", Response::new("not found"));
+                .response("404", Response::new("not found"))
+                .response("409", conflict());
             p = p.patch(patch_op);
 
             let destroy_op = Operation::new()
@@ -726,6 +734,28 @@ mod tests {
             v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/Post"
         );
+    }
+
+    /// #2164: create and update map a unique violation to 409.
+    #[test]
+    fn writes_list_the_conflict_response() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let item = &paths
+            .iter()
+            .find(|(p, _)| p == "/api/posts/{pk}")
+            .unwrap()
+            .1;
+        for (name, op) in [
+            ("POST", &coll.post),
+            ("PUT", &item.put),
+            ("PATCH", &item.patch),
+        ] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            assert!(v["responses"]["409"].is_object(), "{name}: {v}");
+        }
+        let v = serde_json::to_value(item.delete.as_ref().unwrap()).unwrap();
+        assert!(v["responses"]["409"].is_null(), "DELETE");
     }
 
     fn body_schema(op: Option<&crate::openapi::Operation>) -> serde_json::Value {

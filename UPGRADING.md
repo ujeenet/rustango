@@ -217,6 +217,9 @@ More returns `MediaError::Other` (HTTP 400) and changes nothing (#1570).
 ### `#[rustango::main]` installs through `logging::Setup`
 
 Same output as before. If a subscriber is already installed, it now warns on stderr instead of staying silent (#1493).
+### MySQL batch upserts merge rows that collide in one statement
+
+A `DoUpdate` batch with two rows on the same unique key now keeps the last one, as SQLite does; Postgres still rejects it (#2200).
 
 ## 0.60.1
 
