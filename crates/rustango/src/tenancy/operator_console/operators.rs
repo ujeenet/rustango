@@ -256,7 +256,8 @@ pub(super) async fn operator_create(
     let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
         Err(e) => {
-            let msg = super::user_facing(&e)
+            let msg = e
+                .user_facing()
                 .unwrap_or_else(|| withheld(&op, "Could not hash the password", &e));
             return back_err(&state, &op, &msg).await;
         }
@@ -354,7 +355,8 @@ pub(super) async fn operator_reset_password(
     let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
         Err(e) => {
-            let msg = super::user_facing(&e)
+            let msg = e
+                .user_facing()
                 .unwrap_or_else(|| withheld(&op, "Could not hash the password", &e));
             return back_err(&state, &op, &msg).await;
         }

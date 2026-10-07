@@ -425,7 +425,7 @@ fn withheld(context: &str, slug: &str, what: &str, e: &dyn std::fmt::Display) ->
 }
 
 /// [`withheld`] logged under `span`, for a failure that is not about one org.
-fn withheld_in(
+pub(crate) fn withheld_in(
     span: &tracing::Span,
     context: &str,
     what: &str,
@@ -433,15 +433,6 @@ fn withheld_in(
 ) -> String {
     let body = span.in_scope(|| crate::error::server_error_body(context, e));
     format!("{what} ({body})")
-}
-
-/// The text of an error the operator can act on; `None` for a cause to withhold (#2171).
-fn user_facing(e: &super::TenancyError) -> Option<String> {
-    matches!(
-        e,
-        super::TenancyError::Validation(_) | super::TenancyError::Busy
-    )
-    .then(|| e.to_string())
 }
 
 fn default_tenant_handoff_url() -> String {
@@ -1914,7 +1905,7 @@ async fn org_edit_submit(
         match crate::tenancy::org_edit::apply_values(&state.registry, &slug, collected).await {
             Ok(a) => a,
             Err(e) => {
-                let msg = user_facing(&e).unwrap_or_else(|| {
+                let msg = e.user_facing().unwrap_or_else(|| {
                     withheld("operator_console::org_edit", &slug, "Could not save", &e)
                 });
                 return redirect_with_error(&slug, &msg);

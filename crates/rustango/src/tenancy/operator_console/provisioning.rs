@@ -37,7 +37,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use tera::Context;
 
-use super::{inject_op_brand, user_facing, withheld, withheld_in, ConsoleState};
+use super::{inject_op_brand, withheld, withheld_in, ConsoleState};
 use crate::sql::connect_diagnosis::redact;
 use crate::tenancy::auth;
 use crate::tenancy::org::{BackendKind, StorageMode};
@@ -248,7 +248,7 @@ pub(super) async fn org_new_submit(
         // because there is nothing to watch. Re-render with the
         // operator's input intact so they can fix one field.
         Err(e) => {
-            let msg = user_facing(&e).unwrap_or_else(|| {
+            let msg = e.user_facing().unwrap_or_else(|| {
                 withheld(
                     "operator_console::provision",
                     &request.slug,

@@ -24,6 +24,10 @@ Operator, decommission, pre-warm, org-edit and password-hash failures log the ca
 
 A failed `provision()` and a failed run read show an opaque message; the cause is logged.
 
+### Security — provisioning run log stores operator-safe failure text (#2198)
+
+A failed step's event and the run's `error` keep validation text, else "Step failed (…)"; the cause is logged with the org slug and run id.
+
 ### Security — `Settings` Debug redacts secrets
 
 `database.url` and `cache.redis_url` show without their password; `sso.client_secret` and `mail.smtp_password` show as `<redacted>`.

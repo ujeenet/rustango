@@ -224,6 +224,10 @@ pub(super) struct Reporter<'a> {
 struct RunStore<'a> {
     registry: &'a crate::sql::Pool,
     run_id: i64,
+    /// Names the run in the log line of a withheld failure.
+    slug: String,
+    /// The operator-safe text of the last failure, for the run's `error`.
+    failure: std::sync::Mutex<Option<String>>,
     /// Next `seq`. Dense and per-run, because `Last-Event-ID` counts
     /// from it.
     seq: std::sync::atomic::AtomicI64,
@@ -240,10 +244,17 @@ impl<'a> Reporter<'a> {
     }
 
     /// Also persist to `run_id` in the registry.
-    pub(super) fn persisting(mut self, registry: &'a crate::sql::Pool, run_id: i64) -> Self {
+    pub(super) fn persisting(
+        mut self,
+        registry: &'a crate::sql::Pool,
+        run_id: i64,
+        slug: &str,
+    ) -> Self {
         self.store = Some(RunStore {
             registry,
             run_id,
+            slug: slug.to_owned(),
+            failure: std::sync::Mutex::new(None),
             seq: std::sync::atomic::AtomicI64::new(1),
             buffered: std::sync::Mutex::new(Vec::new()),
         });
@@ -338,8 +349,38 @@ impl Reporter<'_> {
     /// explanation — which is the state the whole event stream exists
     /// to prevent.
     async fn fail<T>(&self, at: ProvisionStep, e: TenancyError) -> Result<T, TenancyError> {
-        self.step(at, StepStatus::Failed(e.to_string())).await;
+        self.step_failed(at, e.to_string(), e.user_facing()).await;
         Err(e)
+    }
+
+    /// A failed step. The observer gets `cause`; the store gets `shown`,
+    /// or an opaque text with the cause logged, since operators read it (#2198).
+    async fn step_failed(&self, step: ProvisionStep, cause: String, shown: Option<String>) {
+        if let Some(store) = &self.store {
+            let safe = shown.unwrap_or_else(|| {
+                super::operator_console::withheld_in(
+                    &tracing::error_span!("provision", org = %store.slug, run_id = store.run_id),
+                    "tenancy::provision",
+                    "Step failed",
+                    &cause,
+                )
+            });
+            self.write(step.as_str(), "failed", &safe).await;
+            if let Ok(mut last) = store.failure.lock() {
+                *last = Some(safe);
+            }
+        }
+        self.notify(ProvisionEvent::Step {
+            step,
+            status: StepStatus::Failed(cause),
+        });
+    }
+
+    /// The operator-safe text of the last failed step.
+    fn last_failure(&self) -> Option<String> {
+        self.store
+            .as_ref()
+            .and_then(|s| s.failure.lock().ok().and_then(|f| f.clone()))
     }
 
     /// A migration event from the tenant's own run. Buffered rather
@@ -555,18 +596,33 @@ where
     use super::provision_store::{self as store, RunState};
 
     let registry = pools.registry_pool();
-    let mut rep = Reporter::new(observer).persisting(&registry, run_id);
+    let mut rep = Reporter::new(observer).persisting(&registry, run_id, &request.slug);
     rep.resume = resume;
     let result = provision_reported(pools, registry_url, dir, request, &rep).await;
 
     // Close the run whatever happened, error paths included. A run
     // stuck at `running` is the ambiguity this table removes.
+    // The stored error is operator-safe; the failed step logged the cause (#2198).
     let (state, error) = match &result {
         Ok(outcome) => match &outcome.migrations {
-            MigrationsOutcome::Failed(e) => (RunState::Failed, Some(e.clone())),
+            MigrationsOutcome::Failed(_) => (RunState::Failed, rep.last_failure()),
             _ => (RunState::Succeeded, None),
         },
-        Err(e) => (RunState::Failed, Some(e.to_string())),
+        Err(e) => (
+            RunState::Failed,
+            Some(
+                e.user_facing()
+                    .or_else(|| rep.last_failure())
+                    .unwrap_or_else(|| {
+                        crate::tenancy::operator_console::withheld_in(
+                            &tracing::error_span!("provision", org = %request.slug, run_id),
+                            "tenancy::provision",
+                            "Provisioning failed",
+                            e,
+                        )
+                    }),
+            ),
+        ),
     };
     // No `attach_org` here: `Reporter::registered` linked the org already.
     if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
@@ -719,7 +775,7 @@ where
         rep.flush().await;
         match &outcome {
             MigrationsOutcome::Failed(e) => {
-                rep.step(ProvisionStep::Migrate, StepStatus::Failed(e.clone()))
+                rep.step_failed(ProvisionStep::Migrate, e.clone(), None)
                     .await;
             }
             _ => rep.step(ProvisionStep::Migrate, StepStatus::Ok).await,

@@ -158,6 +158,10 @@ untouched.
 
 The admin and tenant login forms now set and check that layer's cookie name, not always `rustango_csrf` (#2160).
 
+### Provisioning runs store operator-safe failure text
+
+New failed steps and runs store validation text or "Step failed (internal server error)"; the cause goes to the log (#2198). Rows already in `rustango_provisioning_events` and `rustango_provisioning_runs` keep their old text; clear them if they hold driver errors.
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

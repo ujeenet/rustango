@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use super::super::auth;
 use super::super::decommission::Action;
-use super::{urlencoding_lite, user_facing, withheld, ConsoleState};
+use super::{urlencoding_lite, withheld, ConsoleState};
 
 #[derive(Deserialize)]
 pub(super) struct PurgeForm {
@@ -51,7 +51,7 @@ pub(super) async fn deactivate(
             back_to_orgs(Some(&msg), None)
         }
         Err(e) => {
-            let msg = user_facing(&e).unwrap_or_else(|| {
+            let msg = e.user_facing().unwrap_or_else(|| {
                 withheld(
                     "operator_console::deactivate",
                     &slug,
@@ -115,7 +115,7 @@ pub(super) async fn purge(
         // Back to the tenant, not the list: it still exists, and the
         // reason usually names something to change.
         Err(e) => {
-            let msg = user_facing(&e).unwrap_or_else(|| {
+            let msg = e.user_facing().unwrap_or_else(|| {
                 withheld("operator_console::purge", &slug, "Could not purge", &e)
             });
             back_to_tenant(&slug, &msg)

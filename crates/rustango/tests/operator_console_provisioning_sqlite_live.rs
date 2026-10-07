@@ -1092,6 +1092,27 @@ async fn a_failed_create_withholds_the_driver_text() {
         "driver text leaked: {html}"
     );
     assert!(html.contains("Could not create the tenant"), "{html}");
+
+    // #2198 — the run's stored log says the step failed, not why.
+    for uri in ["/orgs/provision/1", "/orgs/provision/1/stream"] {
+        let resp = b
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), body_of(resp))
+            .await
+            .expect("the run is finished");
+        assert!(!body.contains("no such table"), "{uri} leaked: {body}");
+        assert!(body.contains("Step failed"), "{uri}: {body}");
+    }
 }
 
 /// #2193 — a stream whose store read fails sends an opaque `error` event.
