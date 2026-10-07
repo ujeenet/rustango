@@ -104,6 +104,10 @@ const MAX_LIST_LIMIT: i64 = 1000;
 const MAX_TAGS_PER_CALL: usize = MAX_LIST_LIMIT as usize;
 const _: () = assert!(MAX_TAGS_PER_CALL * 2 <= 32766);
 
+/// Largest offset a recursive listing takes once its subtree needs more
+/// than one `IN` list: each list then loads `offset + limit` rows.
+const MAX_WIDE_OFFSET: i64 = 10_000;
+
 /// Rows [`MediaManager::purge_pending`] deletes per call.
 ///
 /// Bounds how much one run does: the sweep reads this many rows, then
@@ -1019,29 +1023,28 @@ impl MediaManager {
         Ok(rows.into_iter().next())
     }
 
-    /// List non-deleted collections, roots first, then by `(parent_id, name)`
-    /// so siblings group together — handy for tree-renderers.
+    /// List every non-deleted collection, roots first, then by
+    /// `(parent_id, name)` so siblings group together — handy for tree-renderers.
     ///
-    /// **Returns at most [`DEFAULT_LIST_CAP`] rows** (100). Use
-    /// [`Self::list_collections_paged`] to choose the page.
+    /// Unbounded: one row per collection.
+    #[deprecated(note = "use list_collections_paged")]
     pub async fn list_collections(&self) -> Result<Vec<MediaCollection>, MediaError> {
-        self.list_collections_paged(DEFAULT_LIST_CAP, 0).await
+        use crate::sql::FetcherPool as _;
+        live_collections()
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
     }
 
-    /// [`Self::list_collections`] with an explicit page; `limit` is
-    /// clamped to `1..=MAX_LIST_LIMIT`.
+    /// One page of [`Self::list_collections`]; `limit` is clamped to
+    /// `1..=MAX_LIST_LIMIT`.
     pub async fn list_collections_paged(
         &self,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MediaCollection>, MediaError> {
-        use crate::core::NullsOrder;
         use crate::sql::FetcherPool as _;
-        MediaCollection::objects()
-            .where_(MediaCollection::deleted_at.is_null())
-            .order_by_with_nulls(&[("parent_id", false, NullsOrder::First)])
-            // `id` makes the order total, so pages neither repeat nor skip.
-            .order_by(&[("name", false), ("id", false)])
+        live_collections()
             .limit(limit.clamp(1, MAX_LIST_LIMIT))
             .offset(offset.max(0))
             .fetch(&self.pool)
@@ -1167,6 +1170,10 @@ impl MediaManager {
     ///
     /// `limit` is clamped to `1..=MAX_LIST_LIMIT`, matching
     /// [`Self::list_with_tag`].
+    ///
+    /// # Errors
+    /// `Other` (HTTP 400) for an `offset` above 10 000 when the subtree
+    /// has more collections than the backend's bind limit.
     pub async fn list_in_collection_paged(
         &self,
         collection_id: i64,
@@ -1192,7 +1199,13 @@ impl MediaManager {
         let parts: Vec<&[i64]> = ids.chunks(self.pool.dialect().max_bind_params()).collect();
         let (lim_each, off_each) = match parts.len() {
             1 => (lim, off),
-            _ => (off.saturating_add(lim), 0),
+            // Each chunk loads `off + lim` rows, so the offset is capped.
+            _ if off > MAX_WIDE_OFFSET => {
+                return Err(MediaError::Other(format!(
+                    "offset {off} is above {MAX_WIDE_OFFSET} on a subtree this wide"
+                )));
+            }
+            _ => (off + lim, 0),
         };
         let mut rows: Vec<Media> = Vec::new();
         for part in &parts {
@@ -1342,6 +1355,9 @@ impl MediaManager {
 
     /// Ids of the tags named by `slugs`, creating missing ones, in
     /// three statements however many slugs there are.
+    ///
+    /// On MySQL a slug that differs from a stored one only in case
+    /// (`Mixed` vs `mixed`) costs 2 more: an insert that skips, and a re-read.
     async fn ensure_tag_ids(&self, slugs: &[&str]) -> Result<Vec<i64>, MediaError> {
         let mut slugs = slugs.to_vec();
         slugs.sort_unstable();
@@ -1382,10 +1398,10 @@ impl MediaManager {
         )
         .on_conflict_do_nothing();
         if let Err(e) = crate::sql::bulk_insert_pool(&self.pool, &insert).await {
-            if !is_mysql_same_batch_conflict(&e) {
+            if !is_mysql_batch_retryable(&e) {
                 return Err(media_err_from_exec(e));
             }
-            // Two new slugs equal under MySQL's collation: one at a time.
+            // Two new slugs equal under MySQL's collation, or a deadlock: one at a time.
             for s in &missing {
                 self.ensure_tag(s).await?;
             }
@@ -1442,7 +1458,19 @@ impl MediaManager {
         // over from a failed set is harmless: `popular_tags` counts
         // links, so it reports zero uses.
         let tag_ids = self.ensure_tag_ids(slugs).await?;
+        // MySQL's empty-range DELETE takes a gap lock that a concurrent
+        // set on the next media row deadlocks with; the loser is retried.
+        let mut attempt = 0;
+        loop {
+            match self.replace_links(media_id, &tag_ids).await {
+                Err(MediaError::Db(e)) if is_deadlock(&e) && attempt < 2 => attempt += 1,
+                r => return r,
+            }
+        }
+    }
 
+    /// The delete + insert half of [`Self::set_tags`], in one transaction.
+    async fn replace_links(&self, media_id: i64, tag_ids: &[i64]) -> Result<(), MediaError> {
         let p1 = self.pool.dialect().placeholder(1);
         let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
 
@@ -1456,7 +1484,7 @@ impl MediaManager {
         )
         .await
         .map_err(media_err_from_exec)?;
-        crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, &tag_ids))
+        crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, tag_ids))
             .await
             .map_err(media_err_from_exec)?;
         tx.commit().await?;
@@ -1723,6 +1751,15 @@ fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
     media_err_from_exec(e.into())
 }
 
+/// Live collections, roots first; `id` makes the order total for paging.
+fn live_collections() -> crate::query::QuerySet<MediaCollection> {
+    use crate::core::NullsOrder;
+    MediaCollection::objects()
+        .where_(MediaCollection::deleted_at.is_null())
+        .order_by_with_nulls(&[("parent_id", false, NullsOrder::First)])
+        .order_by(&[("name", false), ("id", false)])
+}
+
 /// The `(uploaded_at, id)` the listings sort on, descending.
 fn media_order_key(m: &Media) -> (Option<DateTime<Utc>>, i64) {
     let at = match m.uploaded_at {
@@ -1769,13 +1806,20 @@ fn tag_ids_of(tags: &[MediaTag]) -> Vec<i64> {
     ids
 }
 
-/// MySQL 1869: a skip-on-conflict insert met a row it inserted itself.
-fn is_mysql_same_batch_conflict(e: &crate::sql::ExecError) -> bool {
+/// A deadlock the server rolled back: MySQL 1213 (SQLSTATE 40001), PG 40P01.
+fn is_deadlock(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(d)
+        if matches!(d.code().as_deref(), Some("40001" | "40P01")))
+}
+
+/// MySQL 1869 (a skip-on-conflict insert met a row it inserted itself)
+/// or 1213 (deadlock with a concurrent batch on the same slugs).
+fn is_mysql_batch_retryable(e: &crate::sql::ExecError) -> bool {
     #[cfg(feature = "mysql")]
     if let crate::sql::ExecError::Driver(sqlx::Error::Database(d)) = e {
         return d
             .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-            .is_some_and(|m| m.number() == 1869);
+            .is_some_and(|m| matches!(m.number(), 1869 | 1213));
     }
     let _ = e;
     false

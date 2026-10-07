@@ -233,7 +233,7 @@ async fn wide_subtree_is_chunked(pool: &Pool) {
     );
     bulk_insert_pool(pool, &q).await.expect("seed a wide level");
     mgr.delete_collection(root).await.expect("chunked delete");
-    let live = mgr.list_collections().await.expect("list");
+    let live = mgr.list_collections_paged(1000, 0).await.expect("list");
     assert!(live.is_empty(), "{} live after the delete", live.len());
 }
 
@@ -281,7 +281,7 @@ async fn concurrent_writes_stay_consistent(pool: &Pool) {
             }
             Err(e) => panic!("delete: {e}"),
         }
-        let live = mgr.list_collections().await.expect("list");
+        let live = mgr.list_collections_paged(1000, 0).await.expect("list");
         let ids: std::collections::HashSet<_> = live
             .iter()
             .filter_map(|c| match c.id {

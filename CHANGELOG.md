@@ -6,19 +6,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — media collection listing is paged (#1570)
 
-`list_collections` and `GET /collections` return 100 rows by default; `list_collections_paged` and `?limit=&offset=` (max 1000) choose the page.
+`GET /collections` takes `?limit=&offset=` (max 1000) through the new `list_collections_paged`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0. `list_collections` is deprecated and still unbounded.
 
 ### Fixed — `GET /tags` reads one page of tags (#1570)
 
-It pages by slug through the new `MediaManager::list_tags` instead of counting every tag link for `popular_tags(1000)`.
+It pages by slug through the new `MediaManager::list_tags` instead of counting every tag link for `popular_tags(1000)`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0.
 
 ### Fixed — tagging costs a fixed number of queries (#1570)
 
-`tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs.
+`tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs. `set_tags` retries its transaction when the server reports a deadlock, which two concurrent sets on MySQL hit.
 
 ### Fixed — recursive collection listing past the bind limit (#1570)
 
-A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing.
+A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing; there, an `offset` above 10 000 is refused with 400.
 
 ## [0.60.1] — 2026-10-07
 

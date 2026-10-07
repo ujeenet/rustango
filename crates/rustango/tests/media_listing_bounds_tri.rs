@@ -113,24 +113,25 @@ fn ids(rows: &[Media]) -> Vec<i64> {
         .collect()
 }
 
-/// `GET /collections` and `list_collections` return one page, in one query.
+/// `list_collections` stays unbounded; the route and `_paged` return a page.
 async fn collections_are_paged(pool: &Pool) {
     let mgr = manager(pool);
-    seed_collections(pool, "c", 105, None).await;
+    seed_collections(pool, "c", 1001, None).await;
 
-    let (all, queries) = QueryCounter::scope(async {
-        let all = mgr.list_collections().await.expect("list");
-        (all, QueryCounter::current())
+    #[allow(deprecated)]
+    let all = mgr.list_collections().await.expect("list");
+    assert_eq!(all.len(), 1001, "list_collections is unbounded in 0.60.x");
+    let (page, queries) = QueryCounter::scope(async {
+        let page = mgr.list_collections_paged(50, 1000).await.expect("page");
+        (page, QueryCounter::current())
     })
     .await;
-    assert_eq!((all.len(), queries), (100, 1), "rows, queries");
-    let page = mgr.list_collections_paged(50, 100).await.expect("page");
-    assert_eq!(page.len(), 5);
+    assert_eq!((page.len(), queries), (1, 1), "rows, queries");
     let wide = mgr.list_collections_paged(5000, 0).await.expect("wide");
-    assert_eq!(wide.len(), 105);
+    assert_eq!(wide.len(), 1000, "clamped to 1000");
 
     let (rows, queries) = get_rows(&mgr, "/collections").await;
-    assert_eq!((rows.len(), queries), (100, 1), "rows, queries");
+    assert_eq!((rows.len(), queries), (1000, 1), "default page, queries");
     let (rows, _) = get_rows(&mgr, "/collections?limit=2&offset=1").await;
     let slugs: Vec<&str> = rows.iter().map(|r| r["slug"].as_str().unwrap()).collect();
     assert_eq!(slugs, ["c00001", "c00002"]);
@@ -139,7 +140,7 @@ async fn collections_are_paged(pool: &Pool) {
 /// `GET /tags` reads one page of tags by slug, in one query.
 async fn tags_are_paged(pool: &Pool) {
     let mgr = manager(pool);
-    let rows = (0..105)
+    let rows = (0..1001)
         .map(|i| {
             let slug = format!("t{i:05}");
             vec![SqlValue::String(slug.clone()), SqlValue::String(slug)]
@@ -149,7 +150,7 @@ async fn tags_are_paged(pool: &Pool) {
     bulk_insert_pool(pool, &q).await.expect("seed tags");
 
     let (rows, queries) = get_rows(&mgr, "/tags").await;
-    assert_eq!((rows.len(), queries), (100, 1), "rows, queries");
+    assert_eq!((rows.len(), queries), (1000, 1), "default page, queries");
     let (rows, _) = get_rows(&mgr, "/tags?limit=2&offset=1").await;
     let slugs: Vec<&str> = rows.iter().map(|r| r["slug"].as_str().unwrap()).collect();
     assert_eq!(slugs, ["t00001", "t00002"]);
@@ -223,6 +224,26 @@ async fn case_variants_resolve(pool: &Pool) {
     );
 }
 
+/// Concurrent `set_tags` creating overlapping new tags both succeed.
+async fn parallel_set_tags_overlap(pool: &Pool) {
+    if pool.dialect().name() == "sqlite" {
+        return; // One writer at a time.
+    }
+    let mgr = manager(pool);
+    for round in 0..20 {
+        let (a, b) = (seed_media(&mgr, None).await, seed_media(&mgr, None).await);
+        let left: Vec<String> = (0..40).map(|i| format!("p{round}-{i:02}")).collect();
+        let right: Vec<String> = (20..60).map(|i| format!("p{round}-{i:02}")).collect();
+        let left: Vec<&str> = left.iter().map(String::as_str).collect();
+        let right: Vec<&str> = right.iter().map(String::as_str).collect();
+        let (ra, rb) = tokio::join!(mgr.set_tags(a, &left), mgr.set_tags(b, &right));
+        ra.expect("left set_tags");
+        rb.expect("right set_tags");
+        assert_eq!(mgr.tags_for(a).await.unwrap().len(), 40);
+        assert_eq!(mgr.tags_for(b).await.unwrap().len(), 40);
+    }
+}
+
 /// A subtree wider than the bind cap still lists one correct page.
 async fn recursive_listing_spans_bind_cap(pool: &Pool) {
     let mgr = manager(pool);
@@ -270,6 +291,17 @@ async fn recursive_listing_spans_bind_cap(pool: &Pool) {
     assert_eq!(ids(&second), vec![older]);
     let both = mgr.list_in_collection(root, true).await.expect("all");
     assert_eq!(ids(&both), vec![newer, older]);
+
+    // Each chunk would load offset + limit rows, so a wide offset is refused.
+    let edge = mgr.list_in_collection_paged(root, true, 1, 10_000).await;
+    assert!(edge.expect("offset at the cap").is_empty());
+    let r = mgr.list_in_collection_paged(root, true, 1, 10_001).await;
+    assert!(matches!(r, Err(MediaError::Other(_))), "{r:?}");
+    let uri = format!("/collections/{root}/contents?recursive=true&limit=1&offset=10001");
+    let app = media_router_with(mgr.clone(), AllowAll);
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.expect("router answers");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 tri_dialect_test!(
@@ -279,6 +311,7 @@ tri_dialect_test!(
         tags_are_paged,
         tagging_is_batched,
         case_variants_resolve,
+        parallel_set_tags_overlap,
         recursive_listing_spans_bind_cap,
     ]
 );

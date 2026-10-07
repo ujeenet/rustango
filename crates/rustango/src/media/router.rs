@@ -59,12 +59,12 @@
 //! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. |
 //! | DELETE | `/media/{id}/tags/{slug}`         | Remove a single tag. |
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
-//! | GET    | `/collections`                    | Non-deleted collections, paged. `?limit=N&offset=N` (default 100, max 1000). |
+//! | GET    | `/collections`                    | Non-deleted collections, paged. `?limit=N&offset=N` (default and max 1000). |
 //! | GET    | `/collections/{id}`               | Single collection. |
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` includes sub-folders. Authorized as `Read(CollectionContents { recursive })` — a media read, not a collection read. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside is orphaned, not deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)`. |
-//! | GET    | `/tags`                           | Tags by slug, paged. `?limit=N&offset=N` (default 100, max 1000). |
+//! | GET    | `/tags`                           | Tags by slug, paged. `?limit=N&offset=N` (default and max 1000). |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |
 //! | GET    | `/tags/{slug}/media`              | Media carrying the tag. `?limit=N&offset=N`. |
 //!
@@ -1217,14 +1217,20 @@ struct ListWithTagQuery {
     offset: i64,
 }
 
+fn max_list_limit() -> i64 {
+    super::MAX_LIST_LIMIT
+}
+
 fn default_limit() -> i64 {
     50
 }
 
 #[derive(Debug, Deserialize)]
 struct PageQuery {
-    /// Clamped server-side to `1..=1000`; absent means the default page.
-    limit: Option<i64>,
+    /// Clamped server-side to `1..=1000`. Absent means 1000 in 0.60.x,
+    /// so no client gets fewer rows than before; 100 from 0.61.0.
+    #[serde(default = "max_list_limit")]
+    limit: i64,
     #[serde(default)]
     offset: i64,
 }
@@ -1361,8 +1367,7 @@ async fn list_collections_handler(
     State(manager): State<Arc<MediaManager>>,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<CollectionResponse>>, MediaError> {
-    let limit = q.limit.unwrap_or(super::DEFAULT_LIST_CAP);
-    let cs = manager.list_collections_paged(limit, q.offset).await?;
+    let cs = manager.list_collections_paged(q.limit, q.offset).await?;
     Ok(Json(cs.into_iter().map(Into::into).collect()))
 }
 
@@ -1431,8 +1436,7 @@ async fn list_tags_handler(
     State(manager): State<Arc<MediaManager>>,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<TagResponse>>, MediaError> {
-    let limit = q.limit.unwrap_or(super::DEFAULT_LIST_CAP);
-    let tags = manager.list_tags(limit, q.offset).await?;
+    let tags = manager.list_tags(q.limit, q.offset).await?;
     Ok(Json(tags.into_iter().map(Into::into).collect()))
 }
 
