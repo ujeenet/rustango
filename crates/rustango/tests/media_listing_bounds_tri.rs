@@ -136,9 +136,29 @@ async fn collections_are_paged(pool: &Pool) {
     assert_eq!(slugs, ["c00001", "c00002"]);
 }
 
+/// `GET /tags` reads one page of tags by slug, in one query.
+async fn tags_are_paged(pool: &Pool) {
+    let mgr = manager(pool);
+    let rows = (0..105)
+        .map(|i| {
+            let slug = format!("t{i:05}");
+            vec![SqlValue::String(slug.clone()), SqlValue::String(slug)]
+        })
+        .collect();
+    let q = BulkInsertQuery::new(MediaTag::SCHEMA, vec!["name", "slug"], rows);
+    bulk_insert_pool(pool, &q).await.expect("seed tags");
+
+    let (rows, queries) = get_rows(&mgr, "/tags").await;
+    assert_eq!((rows.len(), queries), (100, 1), "rows, queries");
+    let (rows, _) = get_rows(&mgr, "/tags?limit=2&offset=1").await;
+    let slugs: Vec<&str> = rows.iter().map(|r| r["slug"].as_str().unwrap()).collect();
+    assert_eq!(slugs, ["t00001", "t00002"]);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
         collections_are_paged,
+        tags_are_paged,
     ]
 );

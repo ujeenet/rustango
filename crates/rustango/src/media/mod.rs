@@ -1537,8 +1537,26 @@ impl MediaManager {
         Ok(rows)
     }
 
+    /// Tags by slug, one page. `limit` is clamped to `1..=MAX_LIST_LIMIT`.
+    ///
+    /// Reads only the tag table, so a page costs the same however many
+    /// links exist — unlike [`Self::popular_tags`].
+    pub async fn list_tags(&self, limit: i64, offset: i64) -> Result<Vec<MediaTag>, MediaError> {
+        use crate::sql::FetcherPool as _;
+        MediaTag::objects()
+            .order_by(&[("slug", false)])
+            .limit(limit.clamp(1, MAX_LIST_LIMIT))
+            .offset(offset.max(0))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
+    }
+
     /// Top tags by usage count, descending. Limit clamped to
     /// `1..=`[`MAX_LIST_LIMIT`].
+    ///
+    /// The count aggregates every link before the limit applies, so the
+    /// cost grows with the link table, not the page.
     pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
         let p = self.pool.dialect().placeholder(1);
         let sql = format!(

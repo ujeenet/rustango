@@ -64,7 +64,7 @@
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` includes sub-folders. Authorized as `Read(CollectionContents { recursive })` — a media read, not a collection read. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside is orphaned, not deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)`. |
-//! | GET    | `/tags`                           | All tags. |
+//! | GET    | `/tags`                           | Tags by slug, paged. `?limit=N&offset=N` (default 100, max 1000). |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |
 //! | GET    | `/tags/{slug}/media`              | Media carrying the tag. `?limit=N&offset=N`. |
 //!
@@ -1429,11 +1429,11 @@ async fn create_tag_handler(
 
 async fn list_tags_handler(
     State(manager): State<Arc<MediaManager>>,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<TagResponse>>, MediaError> {
-    // The manager has no `list_all_tags`; `popular_tags` with a high
-    // limit covers the same ground, sorted by usage.
-    let pairs = manager.popular_tags(1000).await?;
-    Ok(Json(pairs.into_iter().map(|(t, _)| t.into()).collect()))
+    let limit = q.limit.unwrap_or(super::DEFAULT_LIST_CAP);
+    let tags = manager.list_tags(limit, q.offset).await?;
+    Ok(Json(tags.into_iter().map(Into::into).collect()))
 }
 
 async fn popular_tags_handler(

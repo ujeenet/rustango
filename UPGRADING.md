@@ -154,6 +154,10 @@ untouched.
 
 `MediaManager::list_collections` and `GET /collections` return at most 100 rows. Use `list_collections_paged(limit, offset)` or `?limit=&offset=` (max 1000) to read the rest (#1570).
 
+### `GET /tags` is ordered by slug and paged
+
+It used to return up to 1000 tags by usage; it now returns 100 by slug, with `?limit=&offset=`. `GET /tags/popular` still orders by usage (#1570).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
