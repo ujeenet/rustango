@@ -265,16 +265,30 @@ async fn batch_conflicts_inside_one_insert(pool: &Pool) {
     rustango::sql::bulk_insert_pool(pool, &q)
         .await
         .expect("do update, case variants");
+    // The PK's insert id rides in the `slug` assignment; it must still get the new value.
+    let q = post_rows(&[("e", "1"), ("E", "2"), ("x", "9")])
+        .on_conflict_do_update(&["slug"], &["slug", "title"]);
+    rustango::sql::bulk_insert_pool(pool, &q)
+        .await
+        .expect("do update of the conflict column");
     let got: Vec<(String, String)> = posts(pool)
         .await
         .into_iter()
-        .skip(2)
         .map(|p| (p.slug, p.title))
         .collect();
     let want: Vec<(&str, &str)> = if mysql {
-        vec![("c", "1"), ("d", "2")]
+        vec![("x", "9"), ("y", "3"), ("c", "1"), ("d", "2"), ("E", "2")]
     } else {
-        vec![("c", "1"), ("C", "2"), ("d", "1"), ("D", "2")]
+        vec![
+            ("x", "9"),
+            ("y", "3"),
+            ("c", "1"),
+            ("C", "2"),
+            ("d", "1"),
+            ("D", "2"),
+            ("e", "1"),
+            ("E", "2"),
+        ]
     };
     let got: Vec<(&str, &str)> = got.iter().map(|(s, t)| (s.as_str(), t.as_str())).collect();
     assert_eq!(got, want);
