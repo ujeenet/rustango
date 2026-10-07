@@ -2388,6 +2388,7 @@ mod sql_type_tests {
         }
     }
 
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
     fn not_null() -> Vec<SchemaChange> {
         vec![SchemaChange::AlterColumnNullable {
             table: "t".into(),

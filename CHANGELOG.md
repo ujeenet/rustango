@@ -96,6 +96,12 @@ It pages by slug through the new `MediaManager::list_tags` instead of counting e
 ### Fixed — recursive collection listing past the bind limit (#1570)
 
 A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing; there, an `offset` above 10 000 is refused with 400.
+### Fixed — test hygiene (#2165, #2166, #1945, #1941)
+
+- The FileCache add race test backdates its entry instead of waiting on a 1 ms wall-clock TTL (#2165).
+- One-backend builds compile their tests under `-D warnings`: typed `Pool` accessors replace irrefutable patterns (#2166).
+- `cache_db_long_keys_tri` gives each scenario its own table, so parallel runs no longer drop each other's (#1945).
+- Test-only helpers are gated on the features that use them (#1941).
 
 ## [0.60.1] — 2026-10-07
 
