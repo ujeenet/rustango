@@ -352,38 +352,10 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `[logging]` settings actually take effect (#1465).
     let logging_prologue = if parse_logging(&args) {
         quote! {
-            use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
-            // Colour only when stdout is a terminal, and never under
-            // `NO_COLOR` — `Color::Auto`'s rule, called rather than
-            // copied.
-            //
-            // This was inlined at first, on a comment claiming
-            // `rustango::logging` is gated on `admin` + `tenancy`. It is
-            // not: `pub mod logging` is ungated and its contents are
-            // `runtime`-gated — the same feature that gates this macro
-            // (`pub use rustango_macros::main` is `#[cfg(feature =
-            // "runtime")]`). So wherever this expands, `Color` is
-            // reachable, and the copy was justified by a gate that does
-            // not exist. `should_colour` carries a deliberate
-            // `NO_COLOR`-set-but-empty subtlety that the inline happened
-            // to match today and nothing kept matching tomorrow.
-            //
-            // Without any of it the subscriber inherits
-            // tracing-subscriber's default, `cfg!(feature = "ansi")` —
-            // true since the framework turned that feature on — so
-            // `./app > app.log` and every container redirecting stdout
-            // collected escape codes. `Setup::install` has its own
-            // check; this is the default entrypoint and had none.
-            let __ansi = #root::logging::Color::Auto.should_colour();
-            // `try_init` so duplicate installers (e.g. tests already
-            // holding a subscriber) don't panic.
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
-                )
-                .with_ansi(__ansi)
-                .try_init();
+            // `Setup`'s defaults, not a copy of them: filter, format and
+            // the `Color::Auto` rule live in one place (#1493).
+            // `logging` and this macro share the `runtime` gate.
+            let _ = #root::logging::Setup::new().install();
         }
     } else {
         quote! {}
@@ -13553,7 +13525,7 @@ mod main_attr_tests {
     fn logging_false_emits_no_subscriber() {
         let out = expand("logging = false");
         assert!(
-            !out.contains("tracing_subscriber"),
+            !out.contains("logging :: Setup"),
             "`logging = false` must not install a subscriber:\n{out}",
         );
         assert!(
@@ -13569,7 +13541,7 @@ mod main_attr_tests {
         // leaving every default project with no logging at all.
         let out = expand("");
         assert!(
-            out.contains("tracing_subscriber"),
+            out.contains("logging :: Setup"),
             "the default entrypoint must still install one:\n{out}",
         );
     }
@@ -13577,7 +13549,7 @@ mod main_attr_tests {
     #[test]
     fn logging_false_composes_with_flavor() {
         let out = expand("flavor = \"current_thread\", logging = false");
-        assert!(!out.contains("tracing_subscriber"), "{out}");
+        assert!(!out.contains("logging :: Setup"), "{out}");
         assert!(out.contains("new_current_thread"), "{out}");
     }
 
