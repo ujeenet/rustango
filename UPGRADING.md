@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `migrate-tenant-storage --to schema` needs `CREATEDB`
+
+It restores through a staging database on the registry server, and the target schema must not exist yet (#1864).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

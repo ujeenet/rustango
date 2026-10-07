@@ -19,20 +19,21 @@
 //!
 //! 1. Look up `Org` by slug. Validate target ≠ current storage_mode.
 //! 2. Provision the target storage:
-//!    - schema → ensure `CREATE SCHEMA IF NOT EXISTS <name>` on the
-//!      registry DB.
+//!    - schema → the restore creates it; it must not exist yet. The
+//!      registry user needs `CREATEDB` for a staging database.
 //!    - database → caller passes `--database-url`. Database must
 //!      already exist (we don't `CREATE DATABASE` — that's a
 //!      single-statement decision the operator should own).
 //! 3. `pg_dump` the source (schema-scoped or full DB), pipe into
-//!    `psql` against the target.
-//! 4. Single-statement transaction: `UPDATE rustango_orgs SET
+//!    `psql` against the target. Into a schema it goes through a
+//!    staging database that renames `public` first.
+//! 4. Smoke check: `SELECT 1 FROM <schema>.rustango_users LIMIT 1`
+//!    against the new location, before the Org row moves.
+//! 5. Single-statement transaction: `UPDATE rustango_orgs SET
 //!    storage_mode = ?, database_url = ?, schema_name = ? WHERE
 //!    slug = ?`.
-//! 5. `TenantPools::invalidate(slug)` so the next request rebuilds
+//! 6. `TenantPools::invalidate(slug)` so the next request rebuilds
 //!    the cached pool against the new storage.
-//! 6. Smoke check: `SELECT 1 FROM rustango_users LIMIT 1` against the
-//!    new location. Failure here triggers a best-effort revert.
 //!
 //! Shells out to `pg_dump` and `psql` — operators must have both on
 //! PATH. We considered an in-Rust dump implementation; pg_dump is
@@ -46,8 +47,7 @@
 //!   operator can `purge-tenant --purge-database` (database-mode
 //!   source) or manually `DROP SCHEMA` (schema-mode source) when
 //!   they're confident the new side is healthy.
-//! * It does NOT create the target database. Schema-mode targets
-//!   land via `CREATE SCHEMA IF NOT EXISTS`; database-mode targets
+//! * It does NOT create the target database. Database-mode targets
 //!   need `createdb` / `CREATE DATABASE` to have run already.
 //! * It does NOT verify the data row counts match between source
 //!   and target — only that the new location is reachable. Strict
@@ -171,25 +171,21 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         return Ok(());
     }
 
-    // 3. Provision the target.
-    if let Some(target) = &target_schema {
-        let stmt = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(target));
-        crate::sql::sqlx::query(&stmt)
-            .execute(pools.registry())
-            .await?;
-        writeln!(writer, "  ensured target schema `{target}`")?;
-    }
-
-    // 4. Dump → restore. Streams pg_dump stdout into psql stdin so
+    // 3-4. Dump → restore. Streams pg_dump stdout into psql stdin so
     // we never buffer the full snapshot in memory.
     writeln!(writer, "  starting pg_dump → psql pipe…")?;
-    pg_dump_to_psql(
-        &source_url,
-        source_schema.as_deref(),
-        &target_url,
-        target_schema.as_deref(),
-    )?;
+    let (source, target) = (Conn::new(&source_url), Conn::new(&target_url));
+    match &target_schema {
+        Some(schema) => restore_into_schema(pools.registry(), &source, &target, schema).await?,
+        None => pg_dump_to_psql(&source, source_schema.as_deref(), &target)?,
+    }
     writeln!(writer, "  data move OK")?;
+
+    // Before the Org row moves, so a bad restore leaves it in place.
+    smoke_check(&target_url, target_schema.as_deref())
+        .await
+        .map_err(|e| TenancyError::Validation(format!("smoke-check failed: {e}")))?;
+    writeln!(writer, "  smoke-check OK")?;
 
     // 5. Update Org row.
     let new_storage_mode = parsed.target.as_str().into();
@@ -201,39 +197,19 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         StorageMode::Schema => target_schema.clone(),
         StorageMode::Database => None,
     };
-    let prior_storage_mode = org.storage_mode.clone();
-    let prior_database_url = org.database_url.clone();
-    let prior_schema_name = org.schema_name.clone();
     org.storage_mode = new_storage_mode;
-    org.database_url = new_database_url.clone();
-    org.schema_name = new_schema_name.clone();
+    org.database_url = new_database_url;
+    org.schema_name = new_schema_name;
     org.save(pools.registry()).await?;
     writeln!(writer, "  Org row updated")?;
 
-    // 6. Evict cached pool, smoke-check the new location.
+    // 6. Evict the cached pool.
     pools.invalidate(&parsed.slug).await;
     writeln!(
         writer,
         "  running servers switch to the new location within {} s (their tenant cache TTL)",
         crate::tenancy::resolver::CACHE_TTL.as_secs()
     )?;
-
-    if let Err(e) = smoke_check(&target_url, target_schema.as_deref()).await {
-        writeln!(
-            writer,
-            "  smoke-check FAILED: {e} — reverting Org row to {prior_storage_mode}"
-        )?;
-        org.storage_mode = prior_storage_mode;
-        org.database_url = prior_database_url;
-        org.schema_name = prior_schema_name;
-        let _ = org.save(pools.registry()).await;
-        pools.invalidate(&parsed.slug).await;
-        return Err(TenancyError::Validation(format!(
-            "smoke-check failed against new storage; Org row reverted: {e}"
-        )));
-    }
-
-    writeln!(writer, "  smoke-check OK")?;
     writeln!(
         writer,
         "  ✓ migrated `{}` to {} mode. Source data still at the old location — `purge-tenant --purge-database` or DROP SCHEMA when ready.",
@@ -291,18 +267,125 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
     })
 }
 
-/// Pipe `pg_dump <source>` into `psql <target>`. When the source is
-/// schema-scoped, pass `--schema=<name>` to pg_dump. When the target
-/// is schema-scoped, prepend a `SET search_path TO <name>, public;`
-/// statement to the restore stream so unqualified objects land in
-/// the right schema.
-fn pg_dump_to_psql(
-    source_url: &str,
-    source_schema: Option<&str>,
-    target_url: &str,
-    target_schema: Option<&str>,
+/// A libpq connection: the URL for argv, the password for `PGPASSWORD`,
+/// so it never shows in `ps` (#1864).
+struct Conn {
+    url: String,
+    password: Option<String>,
+}
+
+impl Conn {
+    fn new(url: &str) -> Self {
+        use crate::url_codec::percent_decode_path as decode;
+        let mut password = None;
+        let url = match crate::sql::connect_diagnosis::split_userinfo(url) {
+            Some((scheme, userinfo, host)) => match userinfo.split_once(':') {
+                Some((user, pw)) => {
+                    password = Some(decode(pw));
+                    format!("{scheme}://{user}@{host}")
+                }
+                None => url.to_owned(),
+            },
+            None => url.to_owned(),
+        };
+        // libpq also reads `?password=`.
+        let (base, query) = url.split_once('?').unwrap_or((&url, ""));
+        let kept: Vec<&str> = query
+            .split('&')
+            .filter(|kv| match kv.split_once('=') {
+                Some((k, v)) if decode(k) == "password" => {
+                    password = Some(decode(v));
+                    false
+                }
+                _ => !kv.is_empty(),
+            })
+            .collect();
+        let url = if kept.is_empty() {
+            base.to_owned()
+        } else {
+            format!("{base}?{}", kept.join("&"))
+        };
+        Self { url, password }
+    }
+
+    /// The same server and credentials, database `db`.
+    fn database(&self, db: &str) -> Self {
+        let (base, query) = self
+            .url
+            .split_once('?')
+            .map_or((&*self.url, None), |(b, q)| (b, Some(q)));
+        let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
+        let host = rest.split_once('/').map_or(rest, |(h, _)| h);
+        let mut url = format!("{scheme}://{host}/{db}");
+        if let Some(q) = query {
+            url = format!("{url}?{q}");
+        }
+        Self {
+            url,
+            password: self.password.clone(),
+        }
+    }
+
+    fn command(&self, program: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program);
+        if let Some(p) = &self.password {
+            cmd.env("PGPASSWORD", p);
+        }
+        cmd.arg("--dbname").arg(&self.url);
+        cmd
+    }
+
+    fn psql(&self) -> std::process::Command {
+        let mut cmd = self.command("psql");
+        cmd.args(["--quiet", "--no-psqlrc", "-v", "ON_ERROR_STOP=1"]);
+        cmd
+    }
+}
+
+/// Restore `source`'s `public` into `schema` on `target`. pg_dump names
+/// every object `public.`, so `public` is renamed in a staging database
+/// first (#1864).
+async fn restore_into_schema(
+    registry: &crate::sql::sqlx::PgPool,
+    source: &Conn,
+    target: &Conn,
+    schema: &str,
 ) -> Result<(), TenancyError> {
-    let mut dump_cmd = std::process::Command::new("pg_dump");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let staging = format!("rustango_stage_{nanos}");
+    let quoted = quote_ident(&staging);
+    crate::sql::sqlx::query(&format!("CREATE DATABASE {quoted}"))
+        .execute(registry)
+        .await?;
+    let stage = target.database(&staging);
+    let moved = pg_dump_to_psql(source, None, &stage)
+        .and_then(|()| {
+            let mut rename = stage.psql();
+            rename.arg("-c").arg(format!(
+                "ALTER SCHEMA public RENAME TO {}",
+                quote_ident(schema)
+            ));
+            run(rename, "psql rename")
+        })
+        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target));
+    let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
+        .execute(registry)
+        .await;
+    moved?;
+    dropped?;
+    Ok(())
+}
+
+/// Pipe `pg_dump <source>` into `psql <target>` in one transaction. When
+/// the source is schema-scoped, pass `--schema=<name>` to pg_dump.
+fn pg_dump_to_psql(
+    source: &Conn,
+    source_schema: Option<&str>,
+    target: &Conn,
+) -> Result<(), TenancyError> {
+    let mut dump_cmd = source.command("pg_dump");
     dump_cmd
         .arg("--no-owner")
         .arg("--no-acl")
@@ -312,82 +395,65 @@ fn pg_dump_to_psql(
     if let Some(s) = source_schema {
         dump_cmd.arg(format!("--schema={s}"));
     }
-    dump_cmd.arg(source_url);
     dump_cmd.stdout(Stdio::piped());
     dump_cmd.stderr(Stdio::piped());
-    let mut dump = dump_cmd.spawn().map_err(|e| {
-        TenancyError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("failed to spawn `pg_dump`: {e} — install Postgres client tools?"),
-        ))
-    })?;
+    let mut dump = spawn(&mut dump_cmd, "pg_dump")?;
     let dump_stdout = dump.stdout.take().expect("pg_dump stdout was piped");
 
-    let mut restore_cmd = std::process::Command::new("psql");
-    restore_cmd
-        .arg("--quiet")
-        .arg("--no-psqlrc")
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1");
-    if let Some(s) = target_schema {
-        // Prepend a search_path SET so the dump's CREATE TABLE / etc.
-        // land in the target schema. pg_dump writes tables with their
-        // SOURCE schema qualified — when we set --schema on the
-        // source side that's the source schema name. To rename into a
-        // different target schema, we'd need sed-style rewrite; for
-        // the same-name case (slug → slug, the default), no rewrite
-        // is needed and the schema_name is identical on both sides.
-        restore_cmd.arg("-c");
-        restore_cmd.arg(format!("SET search_path TO {}, public", quote_ident(s)));
-    }
-    restore_cmd.arg(target_url);
+    let mut restore_cmd = target.psql();
+    restore_cmd.arg("--single-transaction");
     restore_cmd.stdin(dump_stdout);
-    restore_cmd.stderr(Stdio::piped());
-    let mut restore = restore_cmd.spawn().map_err(|e| {
-        TenancyError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("failed to spawn `psql`: {e} — install Postgres client tools?"),
-        ))
-    })?;
-
+    let restored = run(restore_cmd, "psql restore");
     let dump_status = dump.wait().map_err(TenancyError::Io)?;
-    let restore_status = restore.wait().map_err(TenancyError::Io)?;
-
+    // A failed restore closes the pipe, which fails the dump too.
+    restored?;
     if !dump_status.success() {
-        let stderr = dump
-            .stderr
-            .take()
-            .map(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
         return Err(TenancyError::Validation(format!(
             "pg_dump failed (exit {:?}): {}",
             dump_status.code(),
-            stderr.lines().take(6).collect::<Vec<_>>().join(" | ")
-        )));
-    }
-    if !restore_status.success() {
-        let stderr = restore
-            .stderr
-            .take()
-            .map(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
-        return Err(TenancyError::Validation(format!(
-            "psql restore failed (exit {:?}): {}",
-            restore_status.code(),
-            stderr.lines().take(6).collect::<Vec<_>>().join(" | ")
+            stderr_of(&mut dump)
         )));
     }
     Ok(())
+}
+
+fn spawn(cmd: &mut std::process::Command, what: &str) -> Result<std::process::Child, TenancyError> {
+    cmd.spawn().map_err(|e| {
+        TenancyError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("failed to spawn `{what}`: {e} — install Postgres client tools?"),
+        ))
+    })
+}
+
+/// Run `cmd` to the end; a non-zero exit is an error with its stderr.
+fn run(mut cmd: std::process::Command, what: &str) -> Result<(), TenancyError> {
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+    let child = spawn(&mut cmd, what)?;
+    // Our copy of a piped stdin would keep its writer from seeing EPIPE.
+    drop(cmd);
+    let out = child.wait_with_output().map_err(TenancyError::Io)?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "{what} failed (exit {:?}): {}",
+        out.status.code(),
+        first_lines(&String::from_utf8_lossy(&out.stderr))
+    )))
+}
+
+fn stderr_of(child: &mut std::process::Child) -> String {
+    use std::io::Read;
+    let mut buf = String::new();
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut buf);
+    }
+    first_lines(&buf)
+}
+
+fn first_lines(s: &str) -> String {
+    s.lines().take(6).collect::<Vec<_>>().join(" | ")
 }
 
 /// Check `rustango_users` is reachable at the new location; rows or not.
@@ -486,6 +552,23 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// #1864 — the password goes to `PGPASSWORD`, never argv.
+    #[test]
+    fn conn_keeps_the_password_out_of_the_url() {
+        let c = Conn::new("postgres://al:p%40ss@w/rd@h:5432/app?sslmode=require");
+        assert_eq!(c.url, "postgres://al@h:5432/app?sslmode=require");
+        assert_eq!(c.password.as_deref(), Some("p@ss@w/rd"));
+        let c = Conn::new("postgres://al@h/app?password=s%3Dx&sslmode=disable");
+        assert_eq!(c.url, "postgres://al@h/app?sslmode=disable");
+        assert_eq!(c.password.as_deref(), Some("s=x"));
+        let c = Conn::new("postgres://h/app").database("stage");
+        assert_eq!((c.url.as_str(), c.password), ("postgres://h/stage", None));
+        let c = Conn::new("postgres://al:pw@h/app?sslmode=require").database("stage");
+        assert_eq!(c.url, "postgres://al@h/stage?sslmode=require");
+        let argv: Vec<_> = c.command("psql").get_args().map(|a| a.to_owned()).collect();
+        assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
     /// #1864 — an empty target schema fails even with `public.rustango_users`

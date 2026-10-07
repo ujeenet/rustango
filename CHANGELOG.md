@@ -12,6 +12,10 @@ The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no lon
 
 The tombstone is looked up first and deleted by id; a DELETE by an unused slug gap-locked the index.
 
+### Fixed — `migrate-tenant-storage --to schema` restores the data (#1864)
+
+`psql -c` ignored the piped dump. The dump now goes through a staging database that renames `public` to the target schema; the smoke check runs before the Org row moves, and passwords go in `PGPASSWORD`, not argv.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
