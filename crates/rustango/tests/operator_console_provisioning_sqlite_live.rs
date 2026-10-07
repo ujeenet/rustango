@@ -1218,3 +1218,51 @@ async fn a_failed_migration_withholds_the_driver_text() {
         assert!(!body.contains("boom_missing_tbl"), "{uri} leaked: {body}");
     }
 }
+
+/// #2212 — a failed connection check shows the advice, not the driver's words.
+#[tokio::test]
+async fn a_failed_connection_check_withholds_the_driver_text() {
+    let b = boot().await;
+    let missing = b._tmp.path().join("no-such-dir").join("x.db");
+    let form = format!(
+        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        unique("unreachable"),
+        form_encode(&format!("sqlite://{}?mode=ro", missing.display()))
+    );
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let form_html = body_of(resp).await;
+    let run_html = body_of(
+        b.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs/provision/1")
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    for (page, html) in [("form", &form_html), ("run", &run_html)] {
+        assert!(html.contains("(tried "), "{page} lost the advice: {html}");
+        assert!(!html.contains("driver said"), "{page} leaked: {html}");
+        assert!(!html.contains("unable to open"), "{page} leaked: {html}");
+    }
+}

@@ -136,6 +136,15 @@ impl ConnectDiagnosis {
     }
 }
 
+impl ConnectDiagnosis {
+    /// The advice and the endpoint, without the driver's text: for
+    /// anything stored or shown past the person probing (#2212).
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!("{} (tried {})", self.fault.advice(), self.endpoint)
+    }
+}
+
 impl fmt::Display for ConnectDiagnosis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Advice first: it is the part that is actionable, and the part

@@ -405,9 +405,16 @@ async fn pruning_removes_finished_runs_and_keeps_unfinished_ones() {
     .await
     .expect("open");
     let done_id = done.id.get().copied().expect("id");
-    store::append_event(&registry_pool, done_id, 1, "validate", "ok", "")
-        .await
-        .expect("event");
+    store::append_event(
+        &registry_pool,
+        done_id,
+        1,
+        "validate",
+        "ok",
+        &store::RunText::default(),
+    )
+    .await
+    .expect("event");
     store::finish_run(&registry_pool, done_id, RunState::Succeeded, None)
         .await
         .expect("finish");

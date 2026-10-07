@@ -407,9 +407,14 @@ async fn a_delivery_that_loses_the_key_race_gets_the_twin_run() {
     .await
     .unwrap();
     let old_id = old.id.get().copied().unwrap();
-    store::finish_run(&registry, old_id, store::RunState::Failed, Some("pod died"))
-        .await
-        .unwrap();
+    store::finish_run(
+        &registry,
+        old_id,
+        store::RunState::Failed,
+        Some(&store::RunText::fixed("pod died")),
+    )
+    .await
+    .unwrap();
     let trigger = r#"CREATE TRIGGER twin AFTER UPDATE OF idempotency_key ON rustango_provisioning_runs
         WHEN OLD.idempotency_key = 'evt-twin' AND NEW.idempotency_key IS NULL
         BEGIN
@@ -660,9 +665,14 @@ async fn half_made(
             .await
             .unwrap();
     }
-    store::finish_run(&registry, run_id, store::RunState::Failed, Some("pod died"))
-        .await
-        .unwrap();
+    store::finish_run(
+        &registry,
+        run_id,
+        store::RunState::Failed,
+        Some(&store::RunText::fixed("pod died")),
+    )
+    .await
+    .unwrap();
     org.id.get().copied().unwrap()
 }
 

@@ -182,6 +182,10 @@ The admin and tenant login forms now set and check that layer's cookie name, not
 
 New failed steps and runs store validation text or "Step failed (internal server error)"; the cause goes to the log (#2198). Rows already in `rustango_provisioning_events` and `rustango_provisioning_runs` keep their old text; clear them if they hold driver errors.
 
+### `provision_store::append_event` / `finish_run` take `RunText`
+
+The message and error are now `&RunText` / `Option<&RunText>`, built with `RunText::fixed`, `RunText::user_facing` or `RunText::default()`, so driver text cannot be stored (#2212). Replace `"text"` with `&RunText::fixed("text")`.
+
 ### Translations editor: an emptied cell deletes its override
 
 The grid posts each shown value as a hidden `orig:<locale>:<key>` field; a cell shown non-empty and posted blank is deleted. A custom editor form must post those fields too, and can call `i18n::admin::apply_form` (#2091).

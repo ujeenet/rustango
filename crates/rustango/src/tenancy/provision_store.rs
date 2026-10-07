@@ -259,6 +259,179 @@ pub async fn open_run(
     Ok(run)
 }
 
+/// Text an operator may read in a run log: the `message` of an event or
+/// a run's `error` (#2212).
+///
+/// Built only from fixed text, an operator-facing [`TenancyError`], or a
+/// cause [`RunLog`] logged and withheld, so driver text cannot be stored.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunText(String);
+
+impl RunText {
+    /// Fixed text, such as a step's reason for skipping.
+    #[must_use]
+    pub fn fixed(text: &'static str) -> Self {
+        Self(text.to_owned())
+    }
+
+    /// A validation (or busy) error's own text; `None` for a cause to withhold.
+    #[must_use]
+    pub fn user_facing(e: &TenancyError) -> Option<Self> {
+        e.user_facing().map(Self)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RunText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Renders a run's log lines and withholds failure causes. A cause is
+/// logged once per tenant, under a reference the stored text repeats.
+pub(crate) struct RunLog {
+    run_id: i64,
+    next_ref: std::sync::atomic::AtomicU32,
+    /// Tenant slug to the reference its first failure was logged under.
+    refs: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl RunLog {
+    pub(crate) fn new(run_id: i64) -> Self {
+        Self {
+            run_id,
+            next_ref: std::sync::atomic::AtomicU32::new(1),
+            refs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// `e`'s own text if the operator can act on it, else `what` with the cause withheld.
+    pub(crate) fn failure(&self, slug: &str, what: &'static str, e: &TenancyError) -> RunText {
+        RunText::user_facing(e).unwrap_or_else(|| self.withhold(slug, what.to_owned(), e))
+    }
+
+    /// `what` and a reference; `cause` is logged under it, once per tenant.
+    pub(crate) fn withheld(
+        &self,
+        slug: &str,
+        what: &'static str,
+        cause: &dyn std::fmt::Display,
+    ) -> RunText {
+        self.withhold(slug, what.to_owned(), cause)
+    }
+
+    fn withhold(&self, slug: &str, what: String, cause: &dyn std::fmt::Display) -> RunText {
+        let mut refs = self
+            .refs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reference) = refs.get(slug) {
+            return RunText(format!("{what} (ref {reference})"));
+        }
+        let n = self
+            .next_ref
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reference = format!("{}.{n}", self.run_id);
+        let body = tracing::error_span!(
+            "provisioning_run",
+            org = slug,
+            run_id = self.run_id,
+            reference = %reference
+        )
+        .in_scope(|| crate::error::server_error_body("tenancy::provisioning_run", cause));
+        refs.insert(slug.to_owned(), reference.clone());
+        RunText(format!("{what} ({body}; ref {reference})"))
+    }
+
+    /// The one renderer of a migration event: `(step, status, text)`.
+    /// Error text never reaches `text`; it goes through [`Self::withhold`].
+    pub(crate) fn migration(
+        &self,
+        event: &super::migrate::TenantMigrationEvent,
+    ) -> (&'static str, &'static str, RunText) {
+        use super::migrate::{Chain, TenantMigrationEvent as T};
+        use crate::migrate::{MigrationEvent as M, Outcome};
+        let chain_name = |c: Chain| match c {
+            Chain::System => "system",
+            Chain::Project => "app",
+        };
+        match event {
+            T::Planned { tenants } => (
+                "plan",
+                "info",
+                RunText(format!("{tenants} tenant(s) to migrate")),
+            ),
+            T::TenantStarted { slug, index, total } => (
+                "tenant",
+                "started",
+                RunText(format!("{slug} ({index}/{total})")),
+            ),
+            T::Migration { slug, chain, event } => {
+                let chain = chain_name(*chain);
+                match event {
+                    M::Planned { total } => (
+                        "migration",
+                        "info",
+                        RunText(format!("{slug} {chain}: {total} pending")),
+                    ),
+                    M::Started { name, .. } => (
+                        "migration",
+                        "info",
+                        RunText(format!("{slug} {chain}: {name} started")),
+                    ),
+                    M::Finished {
+                        name,
+                        outcome,
+                        elapsed,
+                        ..
+                    } => {
+                        let verb = match outcome {
+                            Outcome::Ran => "applied",
+                            Outcome::RanPartial { .. } => "applied (partial)",
+                            Outcome::Faked => "faked",
+                        };
+                        (
+                            "migration",
+                            "info",
+                            RunText(format!(
+                                "{slug} {chain}: {verb} {name} ({:.1}s)",
+                                elapsed.as_secs_f64()
+                            )),
+                        )
+                    }
+                    M::Failed { name, error, .. } => (
+                        "migration",
+                        "failed",
+                        self.withhold(slug, format!("{slug} {chain}: {name} failed"), error),
+                    ),
+                }
+            }
+            T::TenantFinished {
+                slug,
+                applied,
+                error,
+                ..
+            } => match error {
+                None => (
+                    "tenant",
+                    "ok",
+                    RunText(format!("{slug}: {applied} applied")),
+                ),
+                Some(e) => (
+                    "tenant",
+                    "failed",
+                    self.withhold(slug, format!("{slug} failed"), e),
+                ),
+            },
+        }
+    }
+}
+
 /// Append an event to a run.
 ///
 /// `seq` is supplied by the caller rather than computed here: the
@@ -274,7 +447,7 @@ pub async fn append_event(
     seq: i64,
     step: &str,
     status: &str,
-    message: &str,
+    message: &RunText,
 ) -> Result<(), TenancyError> {
     let mut event = ProvisioningEvent {
         id: Auto::default(),
@@ -282,7 +455,7 @@ pub async fn append_event(
         seq,
         step: step.to_owned(),
         status: status.to_owned(),
-        message: message.to_owned(),
+        message: message.as_str().to_owned(),
         at: Auto::default(),
     };
     event.insert_pool(registry).await?;
@@ -313,14 +486,14 @@ pub async fn finish_run(
     registry: &Pool,
     run_id: i64,
     state: RunState,
-    error: Option<&str>,
+    error: Option<&RunText>,
 ) -> Result<(), TenancyError> {
     ProvisioningRun::objects()
         .where_(ProvisioningRun::id.eq(run_id))
         .where_(ProvisioningRun::state.eq(RunState::Running.as_str().to_owned()))
         .update()
         .set("state", state.as_str())
-        .set("error", error)
+        .set("error", error.map(RunText::as_str))
         .set("finished_at", chrono::Utc::now())
         .execute_pool(registry)
         .await?;

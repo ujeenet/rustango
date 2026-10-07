@@ -64,6 +64,10 @@ A failed step's event and the run's `error` keep validation text, else "Step fai
 
 Provision and console "Run migrations" runs store "`<name>` failed (…)" and log the cause. Both now render migration events through one renderer, so provision runs log them as `plan` / `tenant` / `migration` steps.
 
+### Security — run-log text is a type; connection checks keep the driver's words out (#2212)
+
+`append_event` and `finish_run` take `RunText`, which cannot hold raw error text. A failed connection check stores the advice and endpoint and logs the driver detail. Each tenant's failure is logged once, under a `ref` the stored lines repeat.
+
 ### Security — `Settings` Debug redacts secrets
 
 `database.url` and `cache.redis_url` show without their password; `sso.client_secret` and `mail.smtp_password` show as `<redacted>`.
