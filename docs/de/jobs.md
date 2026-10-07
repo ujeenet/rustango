@@ -446,8 +446,9 @@ laufen Jobs als `AuditSource::System`. Keine Queue trägt eine Session oder eine
 Tenant.
 
 Eine Quelle aus dem Tenant-Admin nennt einen Benutzer dieses Tenants. Sie wird
-nur bei Schreibvorgängen über `tenancy::with_tenant` (oder `for_each_tenant`)
-für diesen Tenant erfasst; andere Schreibvorgänge erfassen `system`:
+nur bei Schreibvorgängen über den Pool erfasst, den `tenancy::with_tenant` (oder
+`for_each_tenant`) für diesen Tenant übergibt. Andere Schreibvorgänge, auch über
+einen anderen Pool darin, erfassen `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {

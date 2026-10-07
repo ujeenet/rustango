@@ -220,10 +220,12 @@ mod tests {
         .await;
         let tokens = tokio::spawn(ctx.install(async {
             let unknown = current_source().as_token();
-            let in_a = writing_to_tenant("a".into(), async { current_source().as_token() }).await;
-            let in_b = writing_to_tenant("b".into(), async { current_source().as_token() }).await;
+            let in_a =
+                writing_to_tenant("a".into(), None, async { current_source().as_token() }).await;
+            let in_b =
+                writing_to_tenant("b".into(), None, async { current_source().as_token() }).await;
             let explicit = with_source(AuditSource::Custom("cli".into()), async {
-                writing_to_tenant("b".into(), async { current_source().as_token() }).await
+                writing_to_tenant("b".into(), None, async { current_source().as_token() }).await
             })
             .await;
             (unknown, in_a, in_b, explicit)
@@ -252,8 +254,10 @@ mod tests {
         let (in_a, in_b) = back
             .install(async {
                 (
-                    writing_to_tenant("a".into(), async { current_source().as_token() }).await,
-                    writing_to_tenant("b".into(), async { current_source().as_token() }).await,
+                    writing_to_tenant("a".into(), None, async { current_source().as_token() })
+                        .await,
+                    writing_to_tenant("b".into(), None, async { current_source().as_token() })
+                        .await,
                 )
             })
             .await;

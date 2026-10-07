@@ -178,12 +178,24 @@ pub(crate) async fn live_columns(
     pool: &Pool,
     table: &str,
 ) -> Result<std::collections::HashSet<String>, super::MigrateError> {
+    Ok(live_column_types(pool, table).await?.into_keys().collect())
+}
+
+/// [`live_columns`] with each column's lowercased backend type token
+/// (`udt_name` on PG, `data_type` on MySQL, the declaration on SQLite).
+///
+/// # Errors
+/// Driver failures from the catalog read.
+pub(crate) async fn live_column_types(
+    pool: &Pool,
+    table: &str,
+) -> Result<std::collections::HashMap<String, String>, super::MigrateError> {
     // MySQL reads `""` as `DATABASE()`; SQLite ignores the schema.
     let schema = creation_schema(pool).await?.unwrap_or_default();
     Ok(super::inspectdb::list_columns(pool, &schema, table)
         .await?
         .into_iter()
-        .map(|c| c.name)
+        .map(|c| (c.name, c.udt_name.to_ascii_lowercase()))
         .collect())
 }
 

@@ -585,10 +585,90 @@ async fn an_older_table_gets_the_column_from_ensure_table(pool: &Pool) {
     assert_eq!(ensured.0, "user:7");
 }
 
+/// #1229 — a `context` column of another type is not used: the job
+/// still runs, as `system`, and dispatch does not fail.
+async fn a_wrong_typed_context_column_runs_as_system(pool: &Pool) {
+    note_setup(pool).await;
+    // One connection: another SQLite connection may still parse against
+    // the schema from before the DROP.
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("tx");
+    for sql in [
+        "ALTER TABLE rustango_jobs DROP COLUMN context",
+        "ALTER TABLE rustango_jobs ADD COLUMN context INTEGER",
+    ] {
+        rustango::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    tx.commit().await.expect("commit");
+    let tok = token(pool, "ctx_wrong_type");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<WriteNote>().await;
+    q.start().await;
+    dispatch_note(&q, pool, &tok, Some("7")).await;
+    let ran = ran_as(pool, &tok).await;
+    q.shutdown().await;
+    assert_eq!(ran.0, "system");
+}
+
+/// #1229 — re-running `ensure_table_pool` on a current table takes no
+/// lock: a no-op `ADD COLUMN` on PG would wait behind any reader.
+async fn ensure_table_does_not_wait_behind_a_reader(pool: &Pool) {
+    // A SQLite transaction holds the database's write lock.
+    if pool.dialect().name() == "sqlite" {
+        return;
+    }
+    let mut reader = rustango::sql::transaction_pool(pool).await.expect("tx");
+    rustango::sql::raw_execute_tx(
+        &mut reader,
+        "SELECT COUNT(*) FROM rustango_jobs",
+        Vec::new(),
+    )
+    .await
+    .expect("read");
+    let ensured =
+        tokio::time::timeout(Duration::from_secs(3), PgJobQueue::ensure_table_pool(pool)).await;
+    reader.rollback().await.expect("rollback");
+    ensured
+        .expect("ensure_table_pool waited for the reader")
+        .expect("ensure");
+}
+
+/// #2123 — a job a tenant-A user dispatched records `system` on a write
+/// made outside `with_tenant(A)`: the target tenant is unknown there.
+async fn a_tenant_bound_job_outside_with_tenant_is_system(pool: &Pool) {
+    #[cfg(not(feature = "tenancy"))]
+    let _ = pool;
+    #[cfg(feature = "tenancy")]
+    {
+        use rustango::audit::{with_tenant_source, AuditSource};
+        note_setup(pool).await;
+        let tok = token(pool, "ctx_tenant_a");
+        note_pools()
+            .lock()
+            .unwrap()
+            .insert(tok.clone(), (pool.clone(), None));
+        let q = queue(pool, 1, Duration::from_secs(60)).await;
+        q.register::<WriteNote>().await;
+        q.start().await;
+        let user = AuditSource::User { id: "42".into() };
+        with_tenant_source(user, "a".into(), async {
+            q.dispatch(&WriteNote { token: tok.clone() }).await.unwrap();
+        })
+        .await;
+        let ran = ran_as(pool, &tok).await;
+        q.shutdown().await;
+        assert_eq!(ran.0, "system");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        ensure_table_does_not_wait_behind_a_reader,
+        a_wrong_typed_context_column_runs_as_system,
+        a_tenant_bound_job_outside_with_tenant_is_system,
         a_database_job_runs_as_its_enqueuer,
         an_older_table_gets_the_column_from_ensure_table,
         a_panicking_job_keeps_the_worker,

@@ -439,8 +439,9 @@ which `ensure_table_pool` adds to an older table; a table without the column
 runs jobs as `AuditSource::System`. No queue carries a session or a tenant.
 
 A source set by the tenant admin names a user of that tenant, so it is
-recorded only on writes made through `tenancy::with_tenant` (or
-`for_each_tenant`) for that tenant. Other writes record `system`:
+recorded only on writes through the pool `tenancy::with_tenant` (or
+`for_each_tenant`) hands over for that tenant. Other writes, including ones
+through another pool inside it, record `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {

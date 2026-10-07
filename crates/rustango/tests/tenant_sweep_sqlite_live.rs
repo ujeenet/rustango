@@ -244,7 +244,8 @@ mod job_source {
     static DONE_2123: Mutex<bool> = Mutex::new(false);
 
     /// Writes to its own tenant through `with_tenant`, to the other one
-    /// the same way, then to its own through a bare `scoped_pool_dyn`.
+    /// the same way, to its own through a bare `scoped_pool_dyn`, then to
+    /// B's pool from inside A's scope.
     #[derive(serde::Serialize, serde::Deserialize)]
     struct WriteOwnTenant;
 
@@ -267,6 +268,11 @@ mod job_source {
                 .await
                 .expect("pool b");
             insert("bare")(pools.scoped_pool_dyn(a).await.expect("pool a")).await;
+            // Tenant B's pool, captured inside A's scope.
+            let pool_b = pools.scoped_pool_dyn(b).await.expect("pool b");
+            with_tenant(pools, a, |_| insert("cross")(pool_b))
+                .await
+                .expect("pool a");
             *DONE_2123.lock().unwrap() = true;
             Ok(())
         }
@@ -312,5 +318,10 @@ mod job_source {
         assert_eq!(source(a, "1").await.as_deref(), Some("user:42"), "own");
         assert_eq!(source(b, "1").await.as_deref(), Some("system"), "other");
         assert_eq!(source(a, "2").await.as_deref(), Some("system"), "bare");
+        assert_eq!(
+            source(b, "2").await.as_deref(),
+            Some("system"),
+            "B inside A"
+        );
     }
 }

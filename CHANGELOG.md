@@ -10,7 +10,7 @@ The enqueuer's audit source and timezone are stored in a new `rustango_jobs.cont
 
 ### Fixed — a job writing to its own tenant keeps the tenant user (#2123)
 
-New `tenancy::with_tenant(&pools, &org, |pool| …)` runs one step of `for_each_tenant`, so a source set by the tenant admin is recorded on that tenant's writes instead of `system`.
+New `tenancy::with_tenant(&pools, &org, |pool| …)` runs one step of `for_each_tenant`, so a source set by the tenant admin is recorded on writes through that tenant's pool instead of `system`. Writes through any other pool inside it still record `system`.
 
 ## [0.60.0] — 2026-10-02
 

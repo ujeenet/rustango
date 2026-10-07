@@ -449,8 +449,9 @@ plus ancienne. Sans la colonne, les tâches tournent en `AuditSource::System`.
 Aucune file ne porte de session ni de tenant.
 
 Une source posée par l'admin du tenant nomme un utilisateur de ce tenant : elle
-n'est enregistrée que sur les écritures faites via `tenancy::with_tenant` (ou
-`for_each_tenant`) pour ce tenant. Les autres écritures enregistrent `system` :
+n'est enregistrée que sur les écritures faites par le pool que
+`tenancy::with_tenant` (ou `for_each_tenant`) fournit pour ce tenant. Les autres
+écritures, y compris par un autre pool à l'intérieur, enregistrent `system` :
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {

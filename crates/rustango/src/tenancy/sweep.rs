@@ -139,8 +139,9 @@ where
 /// Run `f` against `org`'s own pool, as one step of [`for_each_tenant`].
 ///
 /// Write through this from a job: a tenant-bound audit source (the
-/// tenant admin's user) is recorded only on writes known to go to its
-/// tenant. A pool from `scoped_pool_dyn` alone records `system` (#2123).
+/// tenant admin's user) is recorded only on writes through `org`'s pool
+/// inside `f`. Any other pool, the registry or another tenant, records
+/// `system`, and so does a write outside `with_tenant` (#2123).
 ///
 /// # Errors
 /// As [`TenantPools::scoped_pool_dyn`]; `f`'s own result is in the `Ok`.
@@ -156,8 +157,9 @@ where
     Fut: std::future::Future<Output = T>,
 {
     let pool = pools.scoped_pool_dyn(org).await?;
-    // The pool exists only inside this scope, so the writes go to `org`.
-    Ok(crate::audit::writing_to_tenant(org.slug.clone(), f(pool)).await)
+    // Bound to this pool: a write through any other pool records `system`.
+    let scope = crate::audit::writing_to_tenant(org.slug.clone(), Some(&pool), f(pool.clone()));
+    Ok(scope.await)
 }
 
 /// Run `f` once per active tenant, against that tenant's own pool.

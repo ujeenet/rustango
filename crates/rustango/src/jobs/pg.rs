@@ -101,31 +101,52 @@ pub struct PgJobQueue {
     context_column: ContextColumn,
 }
 
-/// Whether `rustango_jobs` has the `context` column. A table from a
-/// hand-written migration may not; its jobs then run with no context.
+/// Whether `rustango_jobs` has a usable `context` column. A table from a
+/// hand-written migration may lack it or give it another type; its jobs
+/// then run with no context. Decided once per queue.
 #[derive(Clone, Default)]
 struct ContextColumn(Arc<tokio::sync::OnceCell<bool>>);
 
 impl ContextColumn {
     async fn present(&self, pool: &Pool) -> bool {
         let probe = || async {
-            let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
+            let cols = crate::migrate::ensure::live_column_types(pool, "rustango_jobs")
                 .await
                 .map_err(|_| ())?;
             // No table yet: ask again once `ensure_table_pool` ran.
             if cols.is_empty() {
                 return Err(());
             }
-            let present = cols.contains("context");
-            if !present {
-                tracing::warn!(
-                    "rustango_jobs has no `context` column; jobs run as `system`. \
-                     Call PgJobQueue::ensure_table_pool to add it (#1229)."
-                );
-            }
-            Ok(present)
+            let want = context_type(pool).to_ascii_lowercase();
+            let usable = match cols.get("context") {
+                Some(ty) if *ty == want => true,
+                Some(ty) => {
+                    tracing::warn!(
+                        "rustango_jobs.context is `{ty}`, not `{want}`; jobs run as `system`. \
+                         Fix the column type, then restart (#1229)."
+                    );
+                    false
+                }
+                None => {
+                    tracing::warn!(
+                        "rustango_jobs has no `context` column; jobs run as `system`. \
+                         Call PgJobQueue::ensure_table_pool, then restart (#1229)."
+                    );
+                    false
+                }
+            };
+            Ok(usable)
         };
         self.0.get_or_try_init(probe).await.is_ok_and(|p| *p)
+    }
+}
+
+/// The `context` column's type on `pool`'s backend.
+fn context_type(pool: &Pool) -> &'static str {
+    match pool.dialect().name() {
+        "mysql" => "JSON",
+        "sqlite" => "TEXT",
+        _ => "JSONB",
     }
 }
 
@@ -306,12 +327,17 @@ impl PgJobQueue {
         };
         crate::sql::run_ddl_idempotent(pool, &ddl).await?;
         // A table from before 0.60.1 lacks the context column (#1229).
-        let ty = match pool.dialect().name() {
-            "mysql" => "JSON",
-            "sqlite" => "TEXT",
-            _ => "JSONB",
-        };
-        let add = format!("ALTER TABLE rustango_jobs ADD COLUMN context {ty}");
+        // Look first: on PG even a no-op ADD COLUMN takes ACCESS EXCLUSIVE.
+        let cols = crate::migrate::ensure::live_columns(pool, "rustango_jobs")
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        if cols.contains("context") {
+            return Ok(());
+        }
+        let add = format!(
+            "ALTER TABLE rustango_jobs ADD COLUMN context {}",
+            context_type(pool)
+        );
         crate::migrate::ensure::run_statements(pool, &[add]).await
     }
 
@@ -557,7 +583,7 @@ async fn pick_one(
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
                 context: TaskContext::from_stored(if with_context {
-                    row.try_get("context")?
+                    decode_context(row.try_get("context"))
                 } else {
                     None
                 }),
@@ -601,7 +627,7 @@ async fn pick_one(
             tx.commit().await?;
             let payload_json: sqlx::types::Json<Value> = row.try_get("payload")?;
             let context: Option<sqlx::types::Json<Value>> = if with_context {
-                row.try_get("context")?
+                decode_context(row.try_get("context"))
             } else {
                 None
             };
@@ -649,7 +675,7 @@ async fn pick_one(
             let payload_text: String = row.try_get("payload")?;
             let payload: Value = serde_json::from_str(&payload_text).unwrap_or(Value::Null);
             let context: Option<String> = if with_context {
-                row.try_get("context")?
+                decode_context(row.try_get("context"))
             } else {
                 None
             };
@@ -665,6 +691,15 @@ async fn pick_one(
             }))
         }
     }
+}
+
+/// The row is already locked here: a bad `context` value must not stop
+/// the job, so it runs with no context instead.
+fn decode_context<T>(got: Result<Option<T>, sqlx::Error>) -> Option<T> {
+    got.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "unreadable job context; running as system");
+        None
+    })
 }
 
 async fn run_one(

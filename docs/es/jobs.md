@@ -441,8 +441,9 @@ antigua. Sin la columna, los trabajos corren como `AuditSource::System`.
 Ninguna cola lleva sesión ni tenant.
 
 Una fuente del admin del tenant nombra a un usuario de ese tenant, así que solo
-se registra en escrituras hechas con `tenancy::with_tenant` (o
-`for_each_tenant`) para ese tenant. Las demás escrituras registran `system`:
+se registra en escrituras por el pool que `tenancy::with_tenant` (o
+`for_each_tenant`) entrega para ese tenant. Las demás escrituras, también las
+hechas por otro pool dentro, registran `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {

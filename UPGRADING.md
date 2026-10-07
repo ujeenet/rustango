@@ -152,11 +152,17 @@ untouched.
 
 ### `rustango_jobs.context`
 
-`PgJobQueue::ensure_table_pool` adds a nullable `context` column (JSONB / JSON / TEXT). If you create the table in your own migration, add it there; until then jobs run as `system`, as before (#1229).
+`PgJobQueue::ensure_table_pool` adds a nullable `context` column (#1229). If you create the table in your own migration, add it there, then restart the workers:
+
+- PostgreSQL: `ALTER TABLE rustango_jobs ADD COLUMN context JSONB;`
+- MySQL: ``ALTER TABLE `rustango_jobs` ADD COLUMN `context` JSON;``
+- SQLite: `ALTER TABLE rustango_jobs ADD COLUMN context TEXT;`
+
+Without the column, or with another type, jobs run as `system`, as before. During a rolling deploy, 0.60.0 workers also run new rows as `system`.
 
 ### Tenant writes from a job
 
-A job dispatched from the tenant admin records its user only on writes made through `tenancy::with_tenant` for that tenant; a bare `scoped_pool_dyn` pool still records `system` (#2123).
+A job dispatched from the tenant admin records its user only on writes through the pool `tenancy::with_tenant` hands it for that tenant. Writes outside it, or through another pool inside it, record `system` (#2123).
 
 ## 0.60.0
 
