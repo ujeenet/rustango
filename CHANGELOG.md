@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — admin actions can require `delete` with `ActionPerm` (#1818)
+
+`register_action_with_perm(.., ActionPerm::Delete, ..)` checks `{table}.delete` and the `delete` hook instead of `change`; the tenant admin and server builders have it too.
+
 ### Added — `LoginThrottle::with_cache` shares login limits across replicas (#1809)
 
 The per-IP and global login limits can count in a Redis or database cache; the first login warns while they count per process.

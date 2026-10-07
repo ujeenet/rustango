@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Custom admin actions can require `delete` (#1818)
+
+Register an action that deletes with `register_action_with_perm(.., ActionPerm::Delete, ..)`; `register_action` still checks `change`.
+
 ### Login limits warn when they count per process (#1809)
 
 The first login logs a warning while the per-IP and global limits live in process memory; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` to share them.

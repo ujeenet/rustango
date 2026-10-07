@@ -62,11 +62,30 @@ pub type AdminActionFn = Arc<
     dyn for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync,
 >;
 
-/// Action registry: table name, then action name, then handler. The
+/// The permission a custom bulk action is checked against (#1818).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActionPerm {
+    /// An edit: `{table}.change` and the `change` object hook.
+    #[default]
+    Change,
+    /// A delete: `{table}.delete` and the `delete` object hook.
+    Delete,
+}
+
+/// A registered custom action: its handler and the permission it needs.
+#[derive(Clone)]
+pub(crate) struct RegisteredAction {
+    pub(crate) handler: AdminActionFn,
+    pub(crate) perm: ActionPerm,
+}
+
+/// Action registry: table name, then action name, then action. The
 /// action name **must** also be in the model's
 /// `admin(actions = "...")` allowlist. That attribute is the
 /// allowlist; this registry only holds the callables.
-pub(crate) type AdminActionRegistry = HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
+pub(crate) type AdminActionRegistry =
+    HashMap<&'static str, HashMap<&'static str, RegisteredAction>>;
 
 /// Set once this process builds an admin without
 /// [`Builder::with_session_auth`]; read by `check --deploy` (#1627).
@@ -593,8 +612,8 @@ impl Builder {
     /// anything else that runs over a batch of rows.
     ///
     /// It is gated like an edit: `{table}.change` plus the object hook
-    /// named after the action, never the `delete` one. An action that
-    /// deletes must refuse in that hook itself (#1818).
+    /// named after the action. An action that deletes should use
+    /// [`Self::register_action_with_perm`] with [`ActionPerm::Delete`].
     ///
     /// ```ignore
     /// use rustango::sql::sqlx::PgPool;
@@ -611,7 +630,7 @@ impl Builder {
     ///     .build();
     /// ```
     pub fn register_action<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         handler: F,
@@ -622,11 +641,31 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.config
-            .actions
-            .entry(model_table)
-            .or_default()
-            .insert(action_name, Arc::new(handler));
+        self.register_action_with_perm(model_table, action_name, ActionPerm::Change, handler)
+    }
+
+    /// [`Self::register_action`] checked against `perm` instead of
+    /// `change`, plus the object hook named after the action (#1818).
+    pub fn register_action_with_perm<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.config.actions.entry(model_table).or_default().insert(
+            action_name,
+            RegisteredAction {
+                handler: Arc::new(handler),
+                perm,
+            },
+        );
         self
     }
 
@@ -845,7 +884,7 @@ impl AppState {
     /// Look up a registered action handler. Returns `None` for the
     /// built-in `delete_selected`, which the caller handles itself,
     /// and for any unregistered name.
-    pub(crate) fn action_handler(&self, table: &str, action: &str) -> Option<AdminActionFn> {
+    pub(crate) fn action_handler(&self, table: &str, action: &str) -> Option<RegisteredAction> {
         self.config
             .actions
             .get(table)
