@@ -156,7 +156,7 @@ The target database's `public` must be empty, extensions included (the tenant's 
 
 ### `migrate-tenant-storage --to schema` needs PG 15+ with `CREATEDB`, or a superuser
 
-It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. The source's extensions (`citext`, `pg_trgm`, `vector`…) are created in the registry's `public` if it lacks them, which may need rights to create them; a non-relocatable one (PostGIS) is refused up front (#1864, #2210).
+It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. The extensions the tenant's objects use (`citext`, `pg_trgm`…) are created in the registry's `public` if it lacks them, but only trusted ones or those named with `--allow-extension <name>`; others, and a non-relocatable one (PostGIS), are refused up front. `--to database` applies the same rule on the target (#1864, #2210).
 
 ### The console connection probe returns JSON (#2144)
 

@@ -272,6 +272,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     sqlx_exec(&pool, drop_src).await;
     sqlx_exec(&pool, "CREATE DATABASE rustango_t1864_src").await;
     sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t1864_moved CASCADE").await;
+    // So the move has to create them (#2210).
+    for ext in ["citext", "pg_trgm", "dblink", "earthdistance", "cube"] {
+        sqlx_exec(&pool, &format!("DROP EXTENSION IF EXISTS {ext} CASCADE")).await;
+    }
     let (base, _) = registry_url.rsplit_once('/').unwrap();
     let src_url = format!("{base}/rustango_t1864_src");
     let mut org = Org {
@@ -307,6 +311,37 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         )
         .await
     };
+    let extension = |name: &'static str| {
+        let pool = pool.clone();
+        async move {
+            rustango::sql::sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_extension WHERE extname = $1",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+                == 1
+        }
+    };
+    // An untrusted extension the tenant uses is refused up front (#2210).
+    let src = PgPool::connect(&src_url).await.unwrap();
+    for stmt in [
+        "CREATE EXTENSION dblink",
+        "CREATE EXTENSION earthdistance CASCADE",
+        "CREATE TABLE places (id INT, at earth)",
+    ] {
+        sqlx_exec(&src, stmt).await;
+    }
+    let err = migrate().await.unwrap_err().to_string();
+    assert!(
+        err.contains("earthdistance") && err.contains("--allow-extension"),
+        "{err}"
+    );
+    assert!(!extension("earthdistance").await && !extension("cube").await);
+    sqlx_exec(&src, "DROP TABLE places").await;
+    src.close().await;
+
     // No `rustango_users`: the smoke check fails and drops what it restored.
     let err = migrate().await.unwrap_err();
     assert!(err.to_string().contains("dropped"), "{err}");
@@ -323,7 +358,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     for stmt in [
         "CREATE EXTENSION IF NOT EXISTS citext",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL, \
+         tags CITEXT[])",
         "CREATE INDEX users_trgm ON rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO rustango_users (username) VALUES ('ann'), ('bob')",
     ] {
@@ -331,6 +367,11 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     }
     src.close().await;
     migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    assert!(extension("citext").await && extension("pg_trgm").await);
+    assert!(
+        !extension("dblink").await && !extension("cube").await,
+        "an unused extension was installed"
+    );
 
     let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
         "SELECT username::text FROM t1864_moved.rustango_users WHERE username = 'ANN' \
@@ -356,6 +397,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     assert_eq!(moved[0].schema_name.as_deref(), Some("t1864_moved"));
 
     sqlx_exec(&pool, "DROP SCHEMA t1864_moved CASCADE").await;
+    sqlx_exec(&pool, "DROP EXTENSION citext, pg_trgm").await;
     sqlx_exec(&pool, drop_src).await;
     rustango::migrate::drop_all(&pool).await.unwrap();
 }
@@ -387,7 +429,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     for stmt in [
         "CREATE EXTENSION IF NOT EXISTS citext",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        "CREATE EXTENSION IF NOT EXISTS hstore",
         "CREATE SCHEMA t2189_src",
+        // Only an array of it: the extension is found through the element.
+        "CREATE TABLE t2189_src.notes (id INT, kv hstore[])",
         "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
         "CREATE INDEX users_trgm ON t2189_src.rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO t2189_src.rustango_users (username) VALUES ('ann'), ('bob')",
@@ -484,6 +529,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
 
     sqlx_exec(&pool, "DROP SCHEMA t2189_src CASCADE").await;
+    sqlx_exec(&pool, "DROP EXTENSION citext, pg_trgm, hstore").await;
     sqlx_exec(&pool, drop_dst).await;
     rustango::migrate::drop_all(&pool).await.unwrap();
 }

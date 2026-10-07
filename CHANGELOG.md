@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
 
-A `citext`, `pg_trgm` or `vector` column no longer fails the restore: the extension is created on the target and the restored objects use it, both ways.
+A `citext`, `pg_trgm` or `vector` column no longer fails the restore: the extension is created on the target and the restored objects use it, both ways. Only extensions the tenant uses are created, and only trusted ones unless `--allow-extension` names them.
 
 ### Fixed — `AddCompositeFk` before a `RenameTable` on MySQL and PG (#2190)
 
