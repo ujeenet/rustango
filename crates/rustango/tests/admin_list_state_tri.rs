@@ -1,7 +1,7 @@
 //! Admin list paging order, filter-keeping links, the mounted prefix,
 //! bool checkboxes, soft-deleted rows, filtered facet counts, encoded PK
-//! redirects, URL filter allow-list, NULL facets and capped actions on every
-//! backend (#1917 #1916 #1765 #1730 #1918 #2004 #1862 #2031 #2006 #2049).
+//! redirects, URL filter allow-list, NULL and empty facets and capped actions on
+//! every backend (#1917 #1916 #1765 #1730 #1918 #2004 #1862 #2031 #2006 #2049 #2081).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -64,6 +64,18 @@ pub struct Slugged {
     pub rank: Option<i64>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "adminls_tag", display = "name", admin(list_filter = "tag"))]
+#[allow(dead_code)]
+pub struct Tagged {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(max_length = 16)]
+    pub tag: String,
+}
+
 async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
     let s = Slugged {
         slug: slug.into(),
@@ -77,6 +89,7 @@ async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Slugged>(pool).await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Tagged>(pool).await;
 }
 
 fn kind_filters(value: &str) -> Vec<Filter> {
@@ -462,6 +475,27 @@ async fn null_facet_lists_the_null_rows(pool: &Pool) {
     assert!(body.contains(r#"href="/adm/adminls_slug""#), "{body}");
 }
 
+/// The empty-string facet links `?tag__isempty=1`, which lists only those rows (#2081).
+async fn empty_facet_lists_the_empty_rows(pool: &Pool) {
+    for (name, tag) in [("plain-row", ""), ("red-row", "red")] {
+        let mut t = Tagged {
+            id: Auto::default(),
+            name: name.into(),
+            tag: tag.into(),
+        };
+        t.insert_pool(pool).await.expect("insert tag");
+    }
+    let body = get(pool, "/adminls_tag").await;
+    assert!(body.contains("/adminls_tag?tag__isempty=1"), "{body}");
+    let body = get(pool, "/adminls_tag?tag__isempty=1").await;
+    assert!(
+        body.contains("plain-row") && !body.contains("red-row"),
+        "{body}"
+    );
+    // The active empty value toggles back off.
+    assert!(body.contains(r#"href="/adm/adminls_tag""#), "{body}");
+}
+
 /// A bulk action past the bind-safe key cap is a 400 and writes nothing (#2049).
 async fn bulk_action_selection_is_capped(pool: &Pool) {
     let id = seed(pool, "kept-row", false).await;
@@ -492,6 +526,7 @@ tri_dialect_test! {
         string_pk_redirect_is_encoded,
         url_filters_skip_secret_and_unshown_fields,
         null_facet_lists_the_null_rows,
+        empty_facet_lists_the_empty_rows,
         bulk_action_selection_is_capped,
     ],
 }

@@ -284,6 +284,18 @@ pub enum ExecError {
     #[error("the server ended the atomic transaction early; some writes may be committed")]
     AtomicEndedEarly,
 
+    /// `atomic_with` inside an open block on the same pool: the level is
+    /// fixed when the outermost transaction begins.
+    #[error("an isolation level can only be set on the outermost atomic block")]
+    NestedIsolation,
+
+    /// The backend cannot run a transaction at this isolation level.
+    #[error("{dialect} cannot run a transaction at {level:?}")]
+    IsolationUnsupported {
+        dialect: &'static str,
+        level: super::Isolation,
+    },
+
     /// `ForeignKey::get` resolved a PK that didn't match any row in
     /// the target table. Means the parent was deleted under a
     /// non-CASCADE constraint, or the FK was constructed by hand with
@@ -332,7 +344,7 @@ pub enum ExecError {
 
 impl ExecError {
     /// A UNIQUE or primary-key violation, on any backend.
-    #[cfg(feature = "template_views")]
+    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn is_unique_violation(&self) -> bool {
         matches!(self, Self::Driver(sqlx::Error::Database(db)) if db.is_unique_violation())
     }

@@ -35,6 +35,25 @@ pub struct Tag {
     pub label: String,
 }
 
+/// `Auto` PK with a composite unique: `upsert` targets `(shop, code)`.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "audit1795_sku",
+    app = "audit1747",
+    unique_together = "shop, code",
+    audit(track = "qty")
+)]
+#[allow(dead_code)]
+pub struct Sku {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 16)]
+    pub shop: String,
+    #[rustango(max_length = 16)]
+    pub code: String,
+    pub qty: i64,
+}
+
 impl rustango::prunable::Prunable for Item {
     fn prune_queryset() -> rustango::query::QuerySet<Self> {
         Item::objects().filter("name", "b")
@@ -44,12 +63,14 @@ rustango::register_prunable!(Item);
 
 const ITEM: &str = "audit1747_item";
 const TAG: &str = "audit1747_tag";
+const SKU: &str = "audit1795_sku";
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
     rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Sku>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
-    for table in [ITEM, TAG] {
+    for table in [ITEM, TAG, SKU] {
         AuditLog::delete_where("entity_table", table, pool)
             .await
             .expect("clear audit rows");
@@ -226,7 +247,8 @@ async fn queryset_update_audits_each_row(pool: &Pool) {
     );
 }
 
-/// Writes that cannot audit are refused, and write nothing.
+/// Writes that cannot audit are refused, and write nothing. MySQL has no
+/// RETURNING, so conflict-handling bulk inserts are refused there.
 async fn unauditable_bulk_writes_are_refused(pool: &Pool) {
     let tags = [Tag {
         slug: "r".into(),
@@ -238,12 +260,112 @@ async fn unauditable_bulk_writes_are_refused(pool: &Pool) {
             "{r:?}"
         );
     };
-    refused(Tag::bulk_insert_or_ignore_pool(&tags, pool).await);
-    refused(Tag::bulk_upsert_pool(&tags, &["label"], &["label"], pool).await);
+    if pool.dialect().name() == "mysql" {
+        refused(Tag::bulk_insert_or_ignore_pool(&tags, pool).await);
+        refused(Tag::bulk_upsert_pool(&tags, &["slug"], &["label"], pool).await);
+    }
     let pk_change = Tag::update_all("slug", "z", pool).await.map(|_| ());
     refused(pk_change);
     assert_eq!(Tag::objects().count(pool).await.unwrap(), 0);
     assert_eq!(ops(pool, TAG, "create").await, 0);
+}
+
+fn tag(slug: &str, label: &str) -> Tag {
+    Tag {
+        slug: slug.into(),
+        label: label.into(),
+    }
+}
+
+/// `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` audit each row they
+/// wrote, as `create` or `update` (#1795).
+async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
+    if pool.dialect().name() == "mysql" {
+        return;
+    }
+    tag("a", "one").insert_pool(pool).await.expect("seed");
+    let rows = [tag("a", "uno"), tag("b", "two")];
+    Tag::bulk_upsert_pool(&rows, &["slug"], &["label"], pool)
+        .await
+        .expect("upsert");
+    assert_eq!(ops(pool, TAG, "create").await, 2);
+    assert_eq!(ops(pool, TAG, "update").await, 1);
+    let a = latest(pool, TAG, "a").await;
+    assert_eq!(
+        (a.operation.as_str(), &a.changes["label"]),
+        ("update", &"uno".into())
+    );
+    assert_eq!(latest(pool, TAG, "b").await.operation, "create");
+
+    // `a` is skipped, `c` lands: only `c` is audited.
+    let rows = [tag("a", "skipped"), tag("c", "three")];
+    Tag::bulk_insert_or_ignore_pool(&rows, pool)
+        .await
+        .expect("insert or ignore");
+    assert_eq!(ops(pool, TAG, "create").await, 3);
+    assert_eq!(ops(pool, TAG, "update").await, 1);
+    assert_eq!(latest(pool, TAG, "c").await.operation, "create");
+    assert_eq!(latest(pool, TAG, "a").await.changes["label"], "uno");
+}
+
+/// A target that never matches (an unset `Auto` PK) inserts each row once.
+async fn bulk_upsert_on_unmatched_target_inserts_once(pool: &Pool) {
+    if pool.dialect().name() == "mysql" {
+        return;
+    }
+    let item = |name: &str| Item {
+        id: Auto::default(),
+        name: name.into(),
+        score: 1,
+    };
+    Item::bulk_upsert_pool(&[item("x"), item("y")], &["id"], &["score"], pool)
+        .await
+        .expect("upsert");
+    assert_eq!(Item::objects().count(pool).await.unwrap(), 2);
+    assert_eq!(ops(pool, ITEM, "create").await, 2);
+    assert_eq!(ops(pool, ITEM, "update").await, 0);
+}
+
+/// A PG `upsert` on a non-PK target records `create`, then `update` (#1795).
+async fn upsert_on_unique_target_records_its_op(pool: &Pool) {
+    let _ = pool;
+    #[cfg(feature = "postgres")]
+    #[allow(irrefutable_let_patterns)]
+    if let Pool::Postgres(pg) = pool {
+        let sku = |qty| Sku {
+            id: Auto::default(),
+            shop: "s".into(),
+            code: "k".into(),
+            qty,
+        };
+        let mut first = sku(1);
+        first.upsert(pg).await.expect("upsert insert");
+        let pk = first.id.get().expect("pk assigned").to_string();
+        assert_eq!(latest(pool, SKU, &pk).await.operation, "create");
+        let mut second = sku(5);
+        second.upsert(pg).await.expect("upsert update");
+        assert_eq!(second.id.get().map(ToString::to_string), Some(pk.clone()));
+        let entry = latest(pool, SKU, &pk).await;
+        assert_eq!(entry.operation, "update");
+        assert_eq!(entry.changes["qty"], 5);
+        assert_eq!(ops(pool, SKU, "create").await, 1);
+    }
+}
+
+/// An audited `bulk_update` past the bind cap is split, not rejected (#1795).
+async fn large_bulk_update_is_chunked(pool: &Pool) {
+    // Three binds per row: the PK, `name` and `score`.
+    let rows = (pool.dialect().max_bind_params() / 3 + 1) as i64;
+    seed_many(pool, rows).await;
+    let mut items = Item::objects().fetch(pool).await.unwrap();
+    for item in &mut items {
+        item.score += 1;
+    }
+    let n = Item::bulk_update(&items, &["name", "score"], pool)
+        .await
+        .unwrap();
+    assert_eq!(n, rows as u64);
+    assert_eq!(ops(pool, ITEM, "update").await, rows);
 }
 
 /// `bulk_insert` and `upsert` are PostgreSQL-only methods.
@@ -397,6 +519,10 @@ tri_dialect_test! {
         bulk_update_audits_each_row,
         queryset_update_audits_each_row,
         unauditable_bulk_writes_are_refused,
+        conflict_bulk_inserts_audit_each_written_row,
+        upsert_on_unique_target_records_its_op,
+        bulk_upsert_on_unmatched_target_inserts_once,
+        large_bulk_update_is_chunked,
         bulk_insert_and_upsert_audit_on_postgres,
         large_audit_batch_is_chunked,
         bulk_writes_page_past_one_chunk,

@@ -35,6 +35,16 @@ impl Dialect for MySql {
         "mysql"
     }
 
+    /// `SET TRANSACTION` without `SESSION` covers only the next transaction.
+    /// If `START TRANSACTION` fails after the `SET`, the connection's next
+    /// transaction runs at that level: sqlx cannot close it from here.
+    fn begin_isolated_sql(&self, level: super::Isolation) -> Option<String> {
+        Some(format!(
+            "SET TRANSACTION ISOLATION LEVEL {}; START TRANSACTION",
+            level.sql()
+        ))
+    }
+
     /// MySQL has no `NULLS FIRST` or `NULLS LAST`, so the writer
     /// sorts on `<col> IS NULL` first instead.
     fn supports_nulls_order(&self) -> bool {
@@ -629,12 +639,19 @@ impl Dialect for MySql {
 
     // ---- advisory locks ----
 
+    // GET_LOCK names are server-wide: suffix the database so tenants don't share one (#1991).
     fn acquire_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT GET_LOCK({}, 0)", self.placeholder(1)))
+        Some(format!(
+            "SELECT GET_LOCK({}, 0)",
+            my_db_lock_name(self.placeholder(1))
+        ))
     }
 
     fn release_session_lock_sql(&self) -> Option<String> {
-        Some(format!("SELECT RELEASE_LOCK({})", self.placeholder(1)))
+        Some(format!(
+            "SELECT RELEASE_LOCK({})",
+            my_db_lock_name(self.placeholder(1))
+        ))
     }
 
     // MySQL has no transaction-scoped advisory lock.
@@ -690,6 +707,11 @@ impl Dialect for MySql {
         write_mysql_bulk_update(&mut b, query)?;
         Ok(b.finish())
     }
+}
+
+/// Bound prefix + SHA1 of the current database: 57 chars, under MySQL's 64-char lock-name cap.
+fn my_db_lock_name(prefix: impl std::fmt::Display) -> String {
+    format!("CONCAT({prefix}, SHA1(COALESCE(DATABASE(), '')))")
 }
 
 /// Write a backtick-quoted identifier in place, for the conflict
@@ -930,8 +952,10 @@ mod tests {
         let acq = MySql.acquire_session_lock_sql().unwrap();
         assert!(acq.contains("GET_LOCK"));
         assert!(acq.contains("?"));
+        assert!(acq.contains("DATABASE()"), "{acq}");
         let rel = MySql.release_session_lock_sql().unwrap();
         assert!(rel.contains("RELEASE_LOCK"));
+        assert!(rel.contains("DATABASE()"), "{rel}");
     }
 
     #[test]

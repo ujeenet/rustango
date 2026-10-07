@@ -172,6 +172,21 @@ async fn update_cannot_change_the_pk(pool: &Pool) {
     assert_eq!(rows[0].name, "Renamed");
 }
 
+/// #2075 — a duplicate key is a `409 Conflict`, single or bulk.
+async fn a_duplicate_key_is_409(pool: &Pool) {
+    let row = r#"{"slug":"rust","name":"Rust"}"#;
+    let (status, _) = send(pool, Method::POST, "/tags", row).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = send(pool, Method::POST, "/tags", row).await;
+    assert_eq!(status, StatusCode::CONFLICT, "duplicate: {body}");
+    assert_eq!(json(&body)["error"], "conflict", "{body}");
+
+    let bulk = r#"[{"slug":"go","name":"Go"},{"slug":"go","name":"Go"}]"#;
+    let (status, body) = send(pool, Method::POST, "/tags", bulk).await;
+    assert_eq!(status, StatusCode::CONFLICT, "bulk duplicate: {body}");
+    assert_eq!(Tag::objects().count(pool).await.expect("count"), 1);
+}
+
 /// A SQLite text PK column without `NOT NULL` accepts NULL, so the missing
 /// PK has to be rejected before the INSERT.
 #[cfg(feature = "sqlite")]
@@ -218,6 +233,7 @@ tri_dialect_test! {
         bulk_create_keeps_the_client_pks,
         create_without_the_pk_is_400_and_writes_nothing,
         update_cannot_change_the_pk,
+        a_duplicate_key_is_409,
         create_with_a_uuid_pk_round_trips,
         create_fills_a_v7_pk_and_skips_generated_columns,
     ],

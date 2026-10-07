@@ -59,8 +59,9 @@
 //!   design, and any the closure registered are cleared.
 //! - Nested calls and nested `atomic()` blocks on the same pool act as
 //!   savepoints. The outer rollback throws away their work too.
-//! - Drop the `tx.lock()` guard before a nested `atomic()` or a
-//!   `bulk_insert_pool`: while it is held they fail with `NestedAtomic`.
+//! - Drop the `tx.lock()` guard before a nested `atomic()`, a
+//!   `bulk_insert_pool`, or a multi-statement write (audited `_pool`
+//!   writes, M2M `set`, fixtures): while it is held they fail with `NestedAtomic`.
 
 use std::future::Future;
 use std::pin::Pin;

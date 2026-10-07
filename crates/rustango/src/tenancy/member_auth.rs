@@ -843,28 +843,33 @@ async fn provision_member(
         };
 
         // The user and its link commit together, or neither does.
-        let mut tx = crate::sql::transaction_pool(pool)
+        let mut scope = crate::sql::TxScope::begin(pool, crate::sql::Begin::Deferred)
             .await
             .map_err(|e| format!("begin: {e}"))?;
-        match user.insert_tx(&mut tx).await {
+        match user.insert_tx(scope.tx()).await {
             Ok(()) => {
-                let id = user
-                    .id
-                    .get()
-                    .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned())?;
-                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
-                    .await
-                    .map_err(|e| format!("link: {e}"))?;
-                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+                let linked = match user.id.get().copied() {
+                    Some(id) => create_link_tx(scope.tx(), provider, &profile.provider_user_id, id)
+                        .await
+                        .map(|()| id)
+                        .map_err(|e| format!("link: {e}")),
+                    None => Err("insert returned no id".to_owned()),
+                };
+                let ended = scope.finish(linked.is_ok()).await;
+                let id = linked?;
+                ended.map_err(|e| format!("commit: {e}"))?;
                 return Ok(id);
             }
             Err(e) if attempt == 0 => {
                 // Likely a username/email unique clash — retry once with
                 // a suffixed username.
                 tracing::debug!(error = %e, "member insert retry after conflict");
+                let _ = scope.finish(false).await;
             }
-            Err(e) => return Err(format!("insert: {e}")),
+            Err(e) => {
+                let _ = scope.finish(false).await;
+                return Err(format!("insert: {e}"));
+            }
         }
     }
     Err("could not allocate a unique username".to_owned())

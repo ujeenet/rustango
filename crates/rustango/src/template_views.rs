@@ -2552,18 +2552,18 @@ fn filter_value(field: &crate::core::FieldSchema, raw: &str) -> Option<SqlValue>
     }
 }
 
-/// The request's CSRF cookie under the name its CSRF layer checks: an
-/// app's `CsrfConfig::cookie_name`, not always the default (#1722).
+/// The request's CSRF cookie as its CSRF layer configures it: an app's
+/// `CsrfConfig` name (#1722) and `Secure` flag (#2117).
 struct CsrfCookie {
     headers: axum::http::HeaderMap,
-    name: String,
+    spec: crate::forms::csrf::CsrfCookieSpec,
 }
 
 impl CsrfCookie {
     fn of(parts: &axum::http::request::Parts) -> Self {
         Self {
             headers: parts.headers.clone(),
-            name: crate::forms::csrf::active_cookie_name(&parts.extensions).to_owned(),
+            spec: crate::forms::csrf::CsrfCookieSpec::active(&parts.extensions),
         }
     }
 }
@@ -2581,7 +2581,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CsrfCookie {
 
 /// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
 fn stamp_csrf(csrf: &CsrfCookie, ctx: &mut Context) -> Option<String> {
-    crate::forms::csrf::stamp_named_into_context(&csrf.headers, &csrf.name, ctx)
+    crate::forms::csrf::stamp_cookie_into_context(&csrf.headers, &csrf.spec, ctx)
 }
 
 /// Every CBV router with a POST route goes through here, so each
@@ -4497,7 +4497,7 @@ mod tests {
         );
         let csrf = CsrfCookie {
             headers,
-            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+            spec: crate::forms::csrf::CsrfCookieSpec::active(&axum::http::Extensions::new()),
         };
         let mut ctx = Context::new();
         let set_cookie = stamp_csrf(&csrf, &mut ctx);
@@ -4517,7 +4517,7 @@ mod tests {
     fn stamp_csrf_mints_fresh_when_absent() {
         let csrf = CsrfCookie {
             headers: axum::http::HeaderMap::new(),
-            name: crate::forms::csrf::CSRF_COOKIE.to_owned(),
+            spec: crate::forms::csrf::CsrfCookieSpec::active(&axum::http::Extensions::new()),
         };
         let mut ctx = Context::new();
         let set_cookie = stamp_csrf(&csrf, &mut ctx);
@@ -6019,6 +6019,73 @@ mod tests {
             .unwrap();
         let res = app.oneshot(forged).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The CBV's cookie takes `Secure` from the layer's `CsrfConfig::secure`,
+    /// whatever the session policy says (#2117).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_cookie_follows_the_layers_secure_flag() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let tera = Arc::new(tera);
+        for (cfg, secure) in [
+            (crate::forms::csrf::CsrfConfig::default(), true),
+            (
+                crate::forms::csrf::CsrfConfig::default().allow_insecure_for_dev(),
+                false,
+            ),
+        ] {
+            let app = CreateView::for_model(schema_two_fields())
+                .template("f.html")
+                .router("/c", tera.clone(), pool.clone())
+                .layer(crate::forms::csrf::with_config(cfg));
+            let req = Request::builder()
+                .uri("/c/new")
+                .body(Body::empty())
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let cookies: Vec<&str> = res
+                .headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(cookies.len(), 1, "{cookies:?}");
+            assert_eq!(cookies[0].contains("; Secure"), secure, "{cookies:?}");
+        }
+    }
+
+    /// With only the CBV's own default layer, `Secure` follows the session
+    /// policy, so plain-HTTP dev keeps its cookie (#2117 review).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cbv_cookie_without_an_app_layer_follows_the_session_policy() {
+        // nextest gives each test its own process, so the `OnceLock` is ours.
+        let ours = crate::session::set_secure_cookies(false);
+        if !ours && crate::session::secure_cookies() {
+            return;
+        }
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let app = CreateView::for_model(schema_two_fields())
+            .template("f.html")
+            .router("/c", Arc::new(tera), pool);
+        let req = Request::builder()
+            .uri("/c/new")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let cookies: Vec<&str> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(!cookies[0].contains("; Secure"), "{cookies:?}");
     }
 
     /// An outer layer's `exempt_prefix` does not switch off a CBV's own

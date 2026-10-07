@@ -33,7 +33,7 @@ pub enum ConfigError {
     Parse {
         path: String,
         #[source]
-        source: toml::de::Error,
+        source: TomlSyntaxError,
     },
 
     /// The merged tree did not fit [`Settings`], usually a type
@@ -60,26 +60,62 @@ impl ConfigError {
     pub fn location(&self) -> String {
         match self {
             Self::Io { path, source } => format!("{path} ({})", source.kind()),
-            Self::Parse { path, source } => {
-                match source.span().and_then(|s| line_col(path, s.start)) {
-                    Some((line, col)) => format!("{path}, line {line}, column {col}"),
-                    None => path.clone(),
-                }
-            }
+            Self::Parse { path, source } => match source.line_col {
+                Some((line, col)) => format!("{path}, line {line}, column {col}"),
+                None => path.clone(),
+            },
             Self::Shape(_) => "the merged settings (a value has the wrong type)".into(),
             Self::EnvOverride { var, .. } => format!("env var `{var}`"),
         }
     }
 }
 
-/// 1-based line and column of byte `offset` in the file at `path`.
-fn line_col(path: &str, offset: usize) -> Option<(usize, usize)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let before = text.get(..offset)?;
-    let line = before.matches('\n').count() + 1;
-    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    Some((line, col))
+/// A TOML syntax error without the source text: `toml`'s own error
+/// quotes the offending line, which can hold a secret (#2108).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TomlSyntaxError {
+    message: String,
+    line_col: Option<(usize, usize)>,
 }
+
+impl TomlSyntaxError {
+    fn new(err: &toml::de::Error, text: &str) -> Self {
+        let line_col = err.span().and_then(|s| {
+            let before = text.get(..s.start)?;
+            let line = before.matches('\n').count() + 1;
+            let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            Some((line, col))
+        });
+        Self {
+            message: err.message().to_owned(),
+            line_col,
+        }
+    }
+
+    /// What is wrong, e.g. `invalid basic string`.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// 1-based line and column of the error, when known.
+    #[must_use]
+    pub fn line_col(&self) -> Option<(usize, usize)> {
+        self.line_col
+    }
+}
+
+impl std::fmt::Display for TomlSyntaxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = self.message.replace('\n', "; ");
+        match self.line_col {
+            Some((line, col)) => write!(f, "{message} at line {line}, column {col}"),
+            None => f.write_str(&message),
+        }
+    }
+}
+
+impl std::error::Error for TomlSyntaxError {}
 
 pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigError> {
     load_with_root_and_env(root, env, std::env::vars())
@@ -139,12 +175,10 @@ where
 fn read_toml(path: &Path, required: bool) -> Result<Option<toml::Value>, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
-            let value = s
-                .parse::<toml::Value>()
-                .map_err(|source| ConfigError::Parse {
-                    path: path.display().to_string(),
-                    source,
-                })?;
+            let value = s.parse::<toml::Value>().map_err(|e| ConfigError::Parse {
+                path: path.display().to_string(),
+                source: TomlSyntaxError::new(&e, &s),
+            })?;
             Ok(Some(value))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),
@@ -503,6 +537,30 @@ retention_days = 90
             ConfigError::Parse { path, .. } => assert!(path.contains("default.toml")),
             other => panic!("expected ConfigError::Parse, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2108 — neither `{e}` nor `{e:?}` quotes the line, which can hold a secret.
+    #[test]
+    fn parse_error_text_never_quotes_the_source() {
+        let root = fresh_root("parse_error_secret");
+        write(
+            &root,
+            "default.toml",
+            "[database]\nurl = \"postgres://app:s3cret@db/app\n",
+        );
+        let err = load_with_root(&root, "any").unwrap_err();
+        let mut texts = vec![format!("{err:?}"), format!("{err:#?}")];
+        let mut cur: Option<&dyn std::error::Error> = Some(&err);
+        while let Some(e) = cur {
+            texts.push(e.to_string());
+            cur = e.source();
+        }
+        for text in texts {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+        assert!(err.to_string().contains("line 2"), "{err}");
+        assert!(err.location().contains("line 2"), "{}", err.location());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

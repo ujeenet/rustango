@@ -940,7 +940,8 @@ pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
 pub(crate) use atomic::rolled_back;
-pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
+pub use atomic::{atomic, atomic_with, on_commit, on_commit_pending, AtomicTx, Isolation, TxGuard};
+pub use atomic::{Begin, TxScope};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],
 // compile SQL through `pool.dialect()` and run it on the matching
@@ -973,7 +974,7 @@ pub(crate) fn bind_query_sqlite<'a>(
 pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_insert(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await?;
+    execute_pool(pool, "insert_pool", &stmt.sql, stmt.params).await?;
     Ok(())
 }
 
@@ -995,7 +996,7 @@ pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, 
         // so read the insert id the conflict clause sets instead.
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            crate::test_assertions::query_counter::bump();
+            on_pool(pool, "insert_or_ignore");
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(&stmt.sql);
             for v in stmt.params {
@@ -1006,7 +1007,7 @@ pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, 
                 && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID)
         }
         #[allow(unreachable_patterns)]
-        _ => Ok(execute_pool(pool, &stmt.sql, stmt.params).await? > 0),
+        _ => Ok(execute_pool(pool, "insert_or_ignore", &stmt.sql, stmt.params).await? > 0),
     }
 }
 
@@ -1031,7 +1032,7 @@ pub async fn insert_returning_pool(
     pool: &Pool,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "insert_returning_pool");
     query.validate()?;
     if query.returning.is_empty() {
         return Err(ExecError::EmptyReturning);
@@ -1205,7 +1206,7 @@ fn generated_pk(
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    execute_pool(pool, "update_pool", &stmt.sql, stmt.params).await
 }
 
 /// `DELETE` against either backend; returns rows affected.
@@ -1214,7 +1215,7 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
     let stmt = pool.dialect().compile_delete(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    execute_pool(pool, "delete_pool", &stmt.sql, stmt.params).await
 }
 
 /// `SELECT COUNT(*)` against either backend.
@@ -1223,7 +1224,7 @@ pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecEr
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, ExecError> {
     let stmt = pool.dialect().compile_count(query)?;
-    fetch_scalar_pool(pool, &stmt.sql, stmt.params).await
+    fetch_scalar_pool(pool, "count_rows_pool", &stmt.sql, stmt.params).await
 }
 
 /// Multi-row `INSERT` on any backend. It does not read back `Auto<T>`
@@ -1257,7 +1258,7 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     // join that transaction like a multi-batch insert does.
     if query.rows.len() <= max_rows && !atomic::in_block(pool) {
         let stmt = pool.dialect().compile_bulk_insert(query)?;
-        execute_pool(pool, &stmt.sql, stmt.params).await?;
+        execute_pool(pool, "bulk_insert_pool", &stmt.sql, stmt.params).await?;
         return Ok(());
     }
 
@@ -1297,7 +1298,7 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
         return Ok(0);
     }
     let stmt = pool.dialect().compile_bulk_update(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    execute_pool(pool, "bulk_update_pool", &stmt.sql, stmt.params).await
 }
 
 /// Run arbitrary SQL with bound `SqlValue` params; returns rows
@@ -1315,7 +1316,7 @@ pub async fn raw_execute_pool(
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
-    execute_pool(pool, sql, binds).await
+    execute_pool(pool, "raw_execute_pool", sql, binds).await
 }
 
 /// [`raw_execute_pool`] inside an open [`PoolTx`], so several writes
@@ -1381,7 +1382,7 @@ pub async fn raw_execute_tx(
 /// Non-driver `ExecError` variants map to `sqlx::Error::Protocol`.
 pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
     for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        match execute_pool(pool, stmt, Vec::new()).await {
+        match execute_pool(pool, "run_ddl_idempotent", stmt, Vec::new()).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
                 // Two ways a re-run can fail with the job already done:
@@ -1407,11 +1408,22 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
 
 // ---- internal dispatch helpers ----
 
+/// Every statement on a bare `&Pool` passes here: it counts toward
+/// `assert_num_queries` and warns when it bypasses an open `atomic` block.
+pub(crate) fn on_pool(pool: &Pool, op: &'static str) {
+    crate::test_assertions::query_counter::bump();
+    atomic::warn_if_in_block(pool, op);
+}
+
 /// Run a parameterized statement that returns no rows. Shared by the
 /// non-`FromRow` `_pool` functions.
-async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
-    // Counts toward `assert_num_queries`; a no-op outside tests.
-    crate::test_assertions::query_counter::bump();
+async fn execute_pool(
+    pool: &Pool,
+    op: &'static str,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    on_pool(pool, op);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -1549,6 +1561,70 @@ pub async fn insert_returning_tx(
     )
 }
 
+/// Run `query` in `tx` with `RETURNING <pk>`, in bind-sized batches, and
+/// give back the PK of every row it wrote. PG and SQLite only.
+///
+/// # Errors
+/// As [`bulk_insert_pool`]; [`ExecError::AuditUnsupported`] on MySQL.
+pub(crate) async fn bulk_insert_pks_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let pk = query
+        .model
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    let mut pks = Vec::with_capacity(query.rows.len());
+    for chunk in query.rows.chunks(max_rows) {
+        let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), chunk.to_vec())
+            .returning(vec![pk.column]);
+        batch.on_conflict.clone_from(&query.on_conflict);
+        batch.validate()?;
+        crate::test_assertions::query_counter::bump();
+        let rows: Result<Vec<InsertReturningPool>, ExecError> = match tx {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(t) => {
+                let stmt = Postgres.compile_bulk_insert(&batch)?;
+                Ok(stmt
+                    .params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::PgRow)
+                    .collect())
+            }
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(_) => Err(ExecError::AuditUnsupported {
+                table: query.model.table,
+                reason: "MySQL has no RETURNING to read the written rows",
+            }),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(t) => {
+                let stmt = super::sqlite::DIALECT.compile_bulk_insert(&batch)?;
+                Ok(stmt
+                    .params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::SqliteRow)
+                    .collect())
+            }
+        };
+        let rows = rows?;
+        for row in &rows {
+            pks.push(generated_pk(row, pk, query.model.table)?);
+        }
+    }
+    Ok(pks)
+}
+
 /// `UPDATE` inside an open transaction; returns rows affected.
 ///
 /// # Errors
@@ -1566,6 +1642,27 @@ pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, 
 pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
     let stmt = tx.dialect().compile_delete(query)?;
     execute_tx(tx, &stmt.sql, stmt.params).await
+}
+
+/// Validated multi-row `INSERT` inside an open transaction, split to fit
+/// the backend's bind-parameter limit like [`bulk_insert_pool`].
+pub(crate) async fn bulk_insert_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<(), ExecError> {
+    query.validate()?;
+    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    for chunk in query.rows.chunks(max_rows) {
+        let stmt = tx.dialect().compile_bulk_insert(&BulkInsertQuery {
+            model: query.model,
+            columns: query.columns.clone(),
+            rows: chunk.to_vec(),
+            returning: query.returning.clone(),
+            on_conflict: query.on_conflict.clone(),
+        })?;
+        execute_tx(tx, &stmt.sql, stmt.params).await?;
+    }
+    Ok(())
 }
 
 /// `SELECT` inside an open transaction, with optional `select_related`
@@ -1694,9 +1791,13 @@ where
 
 /// Run a SELECT that returns one `i64` scalar, per backend so each
 /// can use its own `Row::try_get`.
-async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<i64, ExecError> {
-    // Counted here, not in the callers, so every caller is covered.
-    crate::test_assertions::query_counter::bump();
+async fn fetch_scalar_pool(
+    pool: &Pool,
+    op: &'static str,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<i64, ExecError> {
+    on_pool(pool, op);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -1753,7 +1854,7 @@ pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "select_rows_pool");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -1803,7 +1904,7 @@ pub async fn select_one_row_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "select_one_row_pool");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -1872,7 +1973,7 @@ pub async fn fetch_aggregate_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "fetch_aggregate_pool");
     let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -1911,7 +2012,6 @@ where
 
 // `.values_dict()` / `.values_list()` projection.
 mod values;
-pub(crate) use values::fetch_flat_raw;
 #[allow(unused_imports)]
 pub use values::{
     fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, try_get_flat_my,
@@ -1937,7 +2037,7 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "raw_query_pool");
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -2207,7 +2307,7 @@ pub async fn fetch_paginated_pool<T>(
 where
     T: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "fetch_paginated_pool");
     let select = qs.compile()?;
     let stmt = paginated_statement(pool.dialect(), &select)?;
     let sql = stmt.sql;
@@ -2303,7 +2403,7 @@ where
         + Send
         + Unpin,
 {
-    crate::test_assertions::query_counter::bump();
+    on_pool(pool, "select_rows_pool_with_related");
     let stmt = pool.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
     // Stitch from leaf aliases so each FK chain is decoded once.

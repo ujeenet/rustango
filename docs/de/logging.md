@@ -120,6 +120,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::admin` | Admin-Routing und -Registrierung |
 | `rustango::admin::audit` | Audit-Log-Schreibvorgänge |
 | `rustango::admin::sso` | Admin-SSO |
+| `rustango::atomic` | `&Pool`-Aufrufe, die einen offenen `atomic`-Block umgehen |
 | `rustango::cache` | Cache-Backends |
 | `rustango::cache_page` | Page-Cache-Middleware |
 | `rustango::cors` | CORS-Entscheidungen |

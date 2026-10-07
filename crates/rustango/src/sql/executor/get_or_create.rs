@@ -19,11 +19,10 @@ use crate::sql::Pool;
 /// programming error and returns
 /// [`ExecError::MultipleRowsReturned`].
 ///
-/// This is **not atomic** without an enclosing
-/// transaction — between the SELECT and the INSERT another writer
-/// could insert a colliding row. For race-free behaviour pair it
-/// with `Pool::begin()` or with a UNIQUE constraint that surfaces
-/// the conflict via the existing `upsert()` machinery.
+/// This is **not atomic**: another writer can insert a colliding row
+/// between the SELECT and the INSERT, and an [`atomic`](crate::sql::atomic)
+/// block does not help, since the SELECT runs on `pool`, not the block.
+/// For race-free behaviour rely on a UNIQUE constraint and `upsert()`.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -88,9 +87,8 @@ where
 /// none, invoke `create_fn` and return `(created, true)`. Matching
 /// multiple rows returns [`ExecError::MultipleRowsReturned`].
 ///
-/// Same atomicity caveat as [`get_or_create`] — wrap in a
-/// transaction or rely on a UNIQUE constraint for race-free
-/// semantics.
+/// Same atomicity caveat as [`get_or_create`]: rely on a UNIQUE
+/// constraint for race-free semantics.
 ///
 /// Both closures receive an **owned** `Pool` for the same
 /// async-lifetime reason as [`get_or_create`].

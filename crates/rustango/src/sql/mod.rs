@@ -14,7 +14,7 @@ mod compiled;
 pub mod connect_diagnosis;
 mod dialect;
 mod error;
-mod executor;
+pub(crate) mod executor;
 mod foreign_key;
 mod geometry;
 mod hstore;
@@ -51,7 +51,8 @@ pub use hstore::HStore;
 pub use range::Range;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
-pub(crate) use executor::inserted_pk;
+#[cfg(feature = "postgres")]
+pub(crate) use executor::insert_returning_on;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;
@@ -60,8 +61,8 @@ pub use executor::row_to_json_sqlite;
 #[cfg(feature = "admin")]
 pub(crate) use executor::select_one_row_as_json_tx;
 pub use executor::{
-    atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
-    explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
+    atomic, atomic_with, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool,
+    delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
     fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, get_or_create, insert_or_ignore, insert_pool, insert_returning_pool,
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
@@ -69,11 +70,12 @@ pub use executor::{
     select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
     select_rows_tx_with_related, transaction_pool, try_get_flat_my, update_or_create, update_pool,
     update_tx, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
-    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
+    FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, Isolation, LoadRelated,
     MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
     UpdaterPool,
 };
+pub(crate) use executor::{bulk_insert_pks_tx, inserted_pk};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted
@@ -94,11 +96,8 @@ pub use executor::row_to_json;
 /// Nine in-tree tests, the `cookbook_blog` example — both its request
 /// handlers and its chapter-3 test — and **rustango's own library**
 /// imported them anyway, because there was no other way to run an
-/// aggregate or a prefetch against a specific connection. A
-/// prohibition the framework itself violates is not a prohibition:
-/// `tenancy::permissions` still calls `__macro_internals::delete_on`
-/// today, and the guard in `macro_internals_stays_internal` walks only
-/// `tests/` and `examples/`, so it cannot see it (#1519, #1516).
+/// aggregate or a prefetch against a specific connection. The guard in
+/// `macro_internals_stays_internal` now walks `src/` as well (#1516).
 ///
 /// The macro never emits `fetch_aggregate_on` or
 /// `annotate_count_children{,_on}`. Audited `save_on` calls
@@ -156,6 +155,7 @@ pub(crate) use executor::write_transaction_pool;
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use executor::LoadRelatedSqlite;
+pub(crate) use executor::{Begin, TxScope};
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;

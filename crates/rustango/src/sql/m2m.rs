@@ -38,9 +38,15 @@
 //! etc.) have been removed; the v0.34-era source-compat window
 //! lapsed when v0.35 shipped the tri-dialect Pool.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
+
 use super::error::ExecError;
 use super::{FlatScalar, Pool};
-use crate::core::{FieldType, QueryError, SqlValue};
+use crate::core::{
+    BulkInsertQuery, ConflictClause, CountQuery, DeleteQuery, FieldSchema, FieldType, Filter,
+    InsertQuery, ModelSchema, Op, QueryError, SelectQuery, SqlValue, WhereExpr,
+};
 
 /// Manages the rows in a junction table for one source instance.
 ///
@@ -72,41 +78,31 @@ impl M2MManager {
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
     pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        let sql = format!(
-            "SELECT {dst} FROM {through} WHERE {src} = {p1}",
-            through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-        );
-        let binds = vec![src.clone()];
-        fetch_col_pool::<K>(pool, &sql, binds).await
+        fetch_dst(
+            self.junction(),
+            self.dst_col,
+            vec![eq(self.src_col, src)],
+            pool,
+        )
+        .await
     }
 
     /// Add `dst_id` to the junction table. No-op if already present.
-    /// Tri-dialect: uses `INSERT … ON CONFLICT DO NOTHING` on
-    /// Postgres + SQLite (both support it ≥ SQLite 3.24), and a no-op
-    /// `ON DUPLICATE KEY UPDATE` on MySQL.
+    /// Tri-dialect: an `InsertQuery` with [`ConflictClause::DoNothing`].
     ///
     /// # Errors
-    /// Driver failures.
+    /// Driver failures, or a key outside the through model's field bounds.
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        let src_q = dialect.quote_ident(self.src_col);
-        let sql = format!(
-            "INSERT INTO {through} ({src_q}, {dst}) VALUES ({p1}, {p2}) {skip}",
-            through = dialect.quote_ident(self.through),
-            dst = dialect.quote_ident(self.dst_col),
-            skip = skip_duplicate(dialect, &src_q),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
+        let mut query = InsertQuery::new(
+            self.junction(),
+            vec![self.src_col, self.dst_col],
+            vec![src.clone(), dst.clone()],
         );
-        let binds = vec![src.clone(), dst.clone()];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        query.on_conflict = Some(ConflictClause::DoNothing);
+        super::executor::insert_pool(pool, &query).await?;
         // #410 — fire m2m_changed after successful junction-row write.
         // `signals` is an optional feature, so every emission below is gated
         // (#1208) — these statements were unconditional while the module is not.
@@ -130,18 +126,9 @@ impl M2MManager {
     /// Driver failures.
     pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        let sql = format!(
-            "DELETE FROM {through} WHERE {src} = {p1} AND {dst} = {p2}",
-            through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-        );
-        let binds = vec![src.clone(), dst.clone()];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        let filters = vec![eq(self.src_col, src.clone()), eq(self.dst_col, dst.clone())];
+        delete(self.junction(), filters, pool).await?;
         // #410 — fire m2m_changed after successful junction-row remove.
         #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
@@ -168,53 +155,20 @@ impl M2MManager {
         ids: &[K],
         pool: &Pool,
     ) -> Result<(), ExecError> {
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        let del_sql = format!(
-            "DELETE FROM {through} WHERE {src} = {p1}",
-            through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
-            p1 = dialect.placeholder(1),
-        );
-        // Build multi-row INSERT only when ids is non-empty (otherwise
-        // we'd emit `VALUES ()` which every backend rejects).
         let dsts = ids
             .iter()
             .map(|k| dst_key(k.clone(), self.through, self.dst_col))
             .collect::<Result<Vec<_>, _>>()?;
-        let ins_sql_with_binds = if dsts.is_empty() {
-            None
-        } else {
-            let mut sql = format!(
-                "INSERT INTO {through} ({src}, {dst}) VALUES ",
-                through = dialect.quote_ident(self.through),
-                src = dialect.quote_ident(self.src_col),
-                dst = dialect.quote_ident(self.dst_col),
-            );
-            let mut binds = Vec::with_capacity(ids.len() * 2);
-            for (i, dst) in dsts.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(", ");
-                }
-                let p_src = dialect.placeholder(i * 2 + 1);
-                let p_dst = dialect.placeholder(i * 2 + 2);
-                sql.push_str(&format!("({p_src}, {p_dst})"));
-                binds.push(src.clone());
-                binds.push(dst.clone());
-            }
-            Some((sql, binds))
-        };
-        // #561 — was a 3-arm match each running DELETE + (optional)
-        // INSERT inside a per-backend tx with local `bind_pg/my/sqlite`
-        // helpers. The new `raw_execute_tx` combinator (#798) routes
-        // the bind through the canonical executor `bind_query*` path,
-        // so the body collapses to one flat sequence.
-        let mut tx = crate::sql::transaction_pool(pool).await?;
-        crate::sql::raw_execute_tx(&mut tx, &del_sql, vec![src.clone()]).await?;
-        if let Some((ins_sql, binds)) = ins_sql_with_binds {
-            crate::sql::raw_execute_tx(&mut tx, &ins_sql, binds).await?;
-        }
-        tx.commit().await.map_err(ExecError::Driver)?;
+        let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
+        replace(
+            self.junction(),
+            vec![eq(self.src_col, src.clone())],
+            vec![self.src_col, self.dst_col],
+            rows,
+            pool,
+        )
+        .await?;
         // #410 — fire m2m_changed after the atomic DELETE+INSERT
         // commits. `dst_pks` is the new full set (may be empty when
         // `set([])` was called).
@@ -237,16 +191,8 @@ impl M2MManager {
     /// # Errors
     /// Driver failures.
     pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        let sql = format!(
-            "DELETE FROM {through} WHERE {src} = {p1}",
-            through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
-            p1 = dialect.placeholder(1),
-        );
-        let binds = vec![src.clone()];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        delete(self.junction(), vec![eq(self.src_col, src.clone())], pool).await?;
         // #410 — fire m2m_changed after clear.
         #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
@@ -272,35 +218,106 @@ impl M2MManager {
         pool: &Pool,
     ) -> Result<bool, ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
         let src = self.src_key()?;
-        // COUNT(*) is a bigint on every backend, whatever the `dst` type (#1950).
-        let sql = format!(
-            "SELECT COUNT(*) FROM {through} WHERE {src} = {p1} AND {dst} = {p2}",
-            through = dialect.quote_ident(self.through),
-            src = dialect.quote_ident(self.src_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-        );
-        let binds = vec![src.clone(), dst.clone()];
-        let rows = fetch_col_pool::<i64>(pool, &sql, binds).await?;
-        Ok(rows.first().is_some_and(|n| *n > 0))
+        let filters = vec![eq(self.src_col, src), eq(self.dst_col, dst)];
+        exists(self.junction(), filters, pool).await
     }
 
     fn src_key(&self) -> Result<SqlValue, ExecError> {
         src_key(&self.src_pk, self.through)
     }
+
+    fn junction(&self) -> &'static ModelSchema {
+        junction(self.through, &[self.src_col, self.dst_col])
+    }
 }
 
-/// Skip an existing link. Untargeted off MySQL: a `through` model need not have a
-/// unique pair. MySQL's `INSERT IGNORE` also hid truncation and FK errors (#1966).
-fn skip_duplicate(dialect: &dyn super::Dialect, pivot: &str) -> String {
-    if dialect.name() == "mysql" {
-        dialect.insert_on_conflict_skip(&[pivot])
-    } else {
-        "ON CONFLICT DO NOTHING".to_owned()
+/// The junction as a schema the emitters compile against (#2136): the
+/// registered through model, else one naming just the manager's columns.
+fn junction(through: &'static str, cols: &[&'static str]) -> &'static ModelSchema {
+    type Key = (&'static str, Vec<&'static str>);
+    // Keys are `&'static` names from `m2m(...)` declarations, so this stays small.
+    static CACHE: OnceLock<Mutex<HashMap<Key, &'static ModelSchema>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    cache.entry((through, cols.to_vec())).or_insert_with(|| {
+        if let Some(entry) = crate::core::ModelEntry::for_table(through) {
+            return entry.schema;
+        }
+        // Types only pick NULL casts, and a junction never binds NULL.
+        let fields: Vec<FieldSchema> = cols
+            .iter()
+            .map(|c| FieldSchema::new(c, c, FieldType::I64))
+            .collect();
+        let mut schema = ModelSchema::new(through, through);
+        schema.fields = Box::leak(fields.into_boxed_slice());
+        Box::leak(Box::new(schema))
+    })
+}
+
+fn eq(column: &'static str, value: SqlValue) -> Filter {
+    Filter {
+        column,
+        op: Op::Eq,
+        value,
     }
+}
+
+/// The `dst` column of the matching junction rows, decoded as `K`.
+async fn fetch_dst<K: FlatScalar>(
+    junction: &'static ModelSchema,
+    dst_col: &'static str,
+    filters: Vec<Filter>,
+    pool: &Pool,
+) -> Result<Vec<K>, ExecError> {
+    let mut query = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(filters));
+    query.projection = Some(vec![dst_col]);
+    super::executor::on_pool(pool, "m2m");
+    super::executor::fetch_values_flat(pool, &query).await
+}
+
+async fn exists(
+    junction: &'static ModelSchema,
+    filters: Vec<Filter>,
+    pool: &Pool,
+) -> Result<bool, ExecError> {
+    let select = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(filters));
+    let n = super::executor::count_rows_pool(pool, &CountQuery::from_select(select)).await?;
+    Ok(n > 0)
+}
+
+async fn delete(
+    junction: &'static ModelSchema,
+    filters: Vec<Filter>,
+    pool: &Pool,
+) -> Result<u64, ExecError> {
+    let query = DeleteQuery::new(junction, WhereExpr::and_predicates(filters));
+    super::executor::delete_pool(pool, &query).await
+}
+
+/// Delete the rows `owner` matches and insert `rows` in one transaction, so
+/// readers never see the empty state in between.
+async fn replace(
+    junction: &'static ModelSchema,
+    owner: Vec<Filter>,
+    columns: Vec<&'static str>,
+    rows: Vec<Vec<SqlValue>>,
+    pool: &Pool,
+) -> Result<(), ExecError> {
+    // A bad key fails before the DELETE runs, not after.
+    let ins = BulkInsertQuery::new(junction, columns, rows);
+    ins.validate()?;
+    let del = DeleteQuery::new(junction, WhereExpr::and_predicates(owner));
+    let mut scope = crate::sql::TxScope::begin(pool, crate::sql::Begin::Deferred).await?;
+    let r: Result<(), ExecError> = async {
+        let tx = scope.tx();
+        super::executor::delete_tx(tx, &del).await?;
+        super::executor::bulk_insert_tx(tx, &ins).await
+    }
+    .await;
+    scope.end(r).await
 }
 
 /// The source PK bound as-is (#1926); an unsaved source has none.
@@ -375,6 +392,9 @@ fn dst_column_type(through: &str, dst_col: &str) -> Option<FieldType> {
 /// `content_type_id`, resolved from [`Self::src_schema`] via
 /// [`crate::contenttypes::ContentType::get_for_schema`] (cached).
 ///
+/// The `content_type_id` column is bound as an `i64`; a non-integer one is
+/// not supported yet (#2050).
+///
 /// Constructed by the macro-generated `<name>_m2m()` method on any model
 /// declaring `#[rustango(generic_m2m(...))]` — do not build directly.
 pub struct GenericM2MManager {
@@ -397,6 +417,20 @@ pub struct GenericM2MManager {
 impl GenericM2MManager {
     fn src_key(&self) -> Result<SqlValue, ExecError> {
         src_key(&self.src_pk, self.through)
+    }
+
+    fn junction(&self) -> &'static ModelSchema {
+        junction(self.through, &[self.pk_col, self.ct_col, self.dst_col])
+    }
+
+    /// The `pk_col` / `ct_col` filters that pick this instance's rows.
+    async fn owner(&self, pool: &Pool) -> Result<Vec<Filter>, ExecError> {
+        let src = self.src_key()?;
+        let ct = self.ct_id(pool).await?;
+        Ok(vec![
+            eq(self.pk_col, src),
+            eq(self.ct_col, SqlValue::I64(ct)),
+        ])
     }
 
     /// Resolve the owning model's `content_type_id`, erroring clearly
@@ -430,6 +464,7 @@ impl GenericM2MManager {
     }
 
     /// Related PKs linked to this instance (scoped to its content type).
+    /// Decoded as `i64`; use [`Self::all_as`] for a non-integer target PK (#2050).
     ///
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
@@ -442,20 +477,8 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
     pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        let sql = format!(
-            "SELECT {dst} FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
-            through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
-            ctc = dialect.quote_ident(self.ct_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-        );
-        let binds = vec![src.clone(), SqlValue::I64(ct)];
-        fetch_col_pool::<K>(pool, &sql, binds).await
+        let owner = self.owner(pool).await?;
+        fetch_dst(self.junction(), self.dst_col, owner, pool).await
     }
 
     /// Link `dst_id` to this instance. No-op if already present.
@@ -464,22 +487,20 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        let pk = dialect.quote_ident(self.pk_col);
-        let sql = format!(
-            "INSERT INTO {through} ({pk}, {ctc}, {dst}) VALUES ({p1}, {p2}, {p3}) {skip}",
-            through = dialect.quote_ident(self.through),
-            skip = skip_duplicate(dialect, &pk),
-            ctc = dialect.quote_ident(self.ct_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-            p3 = dialect.placeholder(3),
+        let mut values: Vec<SqlValue> = self
+            .owner(pool)
+            .await?
+            .into_iter()
+            .map(|f| f.value)
+            .collect();
+        values.push(dst.clone());
+        let mut query = InsertQuery::new(
+            self.junction(),
+            vec![self.pk_col, self.ct_col, self.dst_col],
+            values,
         );
-        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        query.on_conflict = Some(ConflictClause::DoNothing);
+        super::executor::insert_pool(pool, &query).await?;
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Add, vec![dst])
             .await;
@@ -492,21 +513,9 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        let sql = format!(
-            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3}",
-            through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
-            ctc = dialect.quote_ident(self.ct_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-            p3 = dialect.placeholder(3),
-        );
-        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        let mut filters = self.owner(pool).await?;
+        filters.push(eq(self.dst_col, dst.clone()));
+        delete(self.junction(), filters, pool).await?;
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst])
             .await;
@@ -523,52 +532,23 @@ impl GenericM2MManager {
         ids: &[K],
         pool: &Pool,
     ) -> Result<(), ExecError> {
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        let del_sql = format!(
-            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
-            through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
-            ctc = dialect.quote_ident(self.ct_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-        );
         let dsts = ids
             .iter()
             .map(|k| dst_key(k.clone(), self.through, self.dst_col))
             .collect::<Result<Vec<_>, _>>()?;
-        let ins = if dsts.is_empty() {
-            None
-        } else {
-            let mut sql = format!(
-                "INSERT INTO {through} ({pk}, {ctc}, {dst}) VALUES ",
-                through = dialect.quote_ident(self.through),
-                pk = dialect.quote_ident(self.pk_col),
-                ctc = dialect.quote_ident(self.ct_col),
-                dst = dialect.quote_ident(self.dst_col),
-            );
-            let mut binds = Vec::with_capacity(ids.len() * 3);
-            for (i, dst) in dsts.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(", ");
-                }
-                let p1 = dialect.placeholder(i * 3 + 1);
-                let p2 = dialect.placeholder(i * 3 + 2);
-                let p3 = dialect.placeholder(i * 3 + 3);
-                sql.push_str(&format!("({p1}, {p2}, {p3})"));
-                binds.push(src.clone());
-                binds.push(SqlValue::I64(ct));
-                binds.push(dst.clone());
-            }
-            Some((sql, binds))
-        };
-        let mut tx = crate::sql::transaction_pool(pool).await?;
-        crate::sql::raw_execute_tx(&mut tx, &del_sql, vec![src.clone(), SqlValue::I64(ct)]).await?;
-        if let Some((ins_sql, binds)) = ins {
-            crate::sql::raw_execute_tx(&mut tx, &ins_sql, binds).await?;
-        }
-        tx.commit().await.map_err(ExecError::Driver)?;
+        let owner = self.owner(pool).await?;
+        let rows = dsts
+            .iter()
+            .map(|d| {
+                owner
+                    .iter()
+                    .map(|f| f.value.clone())
+                    .chain([d.clone()])
+                    .collect()
+            })
+            .collect();
+        let columns = vec![self.pk_col, self.ct_col, self.dst_col];
+        replace(self.junction(), owner, columns, rows, pool).await?;
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Set, dsts).await;
         Ok(())
@@ -579,19 +559,8 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        let sql = format!(
-            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
-            through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
-            ctc = dialect.quote_ident(self.ct_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-        );
-        let binds = vec![src.clone(), SqlValue::I64(ct)];
-        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        let owner = self.owner(pool).await?;
+        delete(self.junction(), owner, pool).await?;
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Clear, Vec::new())
             .await;
@@ -608,23 +577,9 @@ impl GenericM2MManager {
         pool: &Pool,
     ) -> Result<bool, ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let dialect = pool.dialect();
-        let src = self.src_key()?;
-        let ct = self.ct_id(pool).await?;
-        // COUNT(*) is a bigint on every backend, whatever the `dst` type (#1950).
-        let sql = format!(
-            "SELECT COUNT(*) FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3}",
-            through = dialect.quote_ident(self.through),
-            pk = dialect.quote_ident(self.pk_col),
-            ctc = dialect.quote_ident(self.ct_col),
-            dst = dialect.quote_ident(self.dst_col),
-            p1 = dialect.placeholder(1),
-            p2 = dialect.placeholder(2),
-            p3 = dialect.placeholder(3),
-        );
-        let binds = vec![src.clone(), SqlValue::I64(ct), dst.clone()];
-        let rows = fetch_col_pool::<i64>(pool, &sql, binds).await?;
-        Ok(rows.first().is_some_and(|n| *n > 0))
+        let mut filters = self.owner(pool).await?;
+        filters.push(eq(self.dst_col, dst));
+        exists(self.junction(), filters, pool).await
     }
 }
 
@@ -665,21 +620,3 @@ impl M2MManager {
         self.contains(dst_id, pool).await
     }
 }
-
-// ============================================================ small per-backend helpers
-
-/// Run a single-column SELECT and decode each row's value as `K`. `FlatScalar`
-/// reads a UUID from MySQL's `CHAR(36)` and SQLite text or bytes (#1950).
-async fn fetch_col_pool<K: FlatScalar>(
-    pool: &Pool,
-    sql: &str,
-    binds: Vec<SqlValue>,
-) -> Result<Vec<K>, ExecError> {
-    crate::test_assertions::query_counter::bump();
-    super::executor::fetch_flat_raw(pool, sql, binds).await
-}
-
-// #561 — the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers
-// were removed once `set_pool` started routing through
-// `raw_execute_tx` (which uses the canonical executor `bind_query*`
-// path). The audit-tx + m2m-set body is now a single flat sequence.

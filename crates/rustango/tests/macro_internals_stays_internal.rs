@@ -13,8 +13,7 @@
 //! chapter-3 test, and two in the flagship example" — which sums to
 //! thirteen, counts `cookbook_blog` twice under two names, and omits
 //! the library's own call site, the one that most undermines the
-//! prohibition. This guard still cannot see that site: it walks
-//! `tests/` and `examples/` only — #1519, #1516.)
+//! prohibition. That site is gone and the guard walks `src/` too, #1516.)
 //!
 //! They were not misusing it. There was no public way to run an
 //! aggregate or a prefetch against a specific executor rather than a
@@ -54,18 +53,23 @@ fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
 fn nothing_outside_the_macro_imports_macro_internals() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
+    rust_files(&crate_root.join("src"), &mut files);
     rust_files(&crate_root.join("tests"), &mut files);
     rust_files(&crate_root.join("examples"), &mut files);
 
     let mut offenders = Vec::new();
     for path in files {
-        // This file names the module to forbid it; so does the test that
-        // documents why the `postgres` gate leaked into the derive.
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(
-            name,
-            "macro_internals_stays_internal.rs" | "soft_delete_without_postgres.rs"
-        ) {
+        // `sql/mod.rs` defines the module. This file names it to forbid it;
+        // so does the test on why the `postgres` gate leaked into the derive.
+        let rel = path.strip_prefix(crate_root).unwrap_or(&path);
+        if [
+            "src/sql/mod.rs",
+            "tests/macro_internals_stays_internal.rs",
+            "tests/soft_delete_without_postgres.rs",
+        ]
+        .iter()
+        .any(|allowed| rel == Path::new(allowed))
+        {
             continue;
         }
         let Ok(src) = fs::read_to_string(&path) else {

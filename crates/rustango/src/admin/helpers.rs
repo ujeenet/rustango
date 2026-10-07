@@ -170,6 +170,7 @@ pub(crate) fn chrome_context_with_session(
                 "authenticated": true,
                 "username": s.username,
                 "is_superuser": s.is_superuser,
+                "impersonated_by": s.impersonated_by,
             }),
             (None, true) => serde_json::json!({ "authenticated": true }),
             (None, false) => serde_json::Value::Null,

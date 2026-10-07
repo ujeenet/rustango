@@ -792,6 +792,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// The statement that begins a transaction at `level`, or `None` when
+    /// this backend cannot run at it.
+    fn begin_isolated_sql(&self, _level: super::Isolation) -> Option<String> {
+        None
+    }
+
     /// The column comment to splice into a `CREATE TABLE` column
     /// definition. Only MySQL writes one here; Postgres uses
     /// [`Self::column_comment_statement`] instead, and SQLite has no

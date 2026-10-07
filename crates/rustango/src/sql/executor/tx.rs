@@ -194,6 +194,7 @@ impl<'a> PoolTx<'a> {
 /// # Errors
 /// Driver errors from `BEGIN`.
 pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
+    super::atomic::warn_if_in_block(pool, "transaction_pool");
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),
@@ -204,13 +205,39 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
     }
 }
 
+/// [`transaction_pool`] at isolation `level`.
+pub(crate) async fn isolated_transaction_pool(
+    pool: &Pool,
+    level: super::atomic::Isolation,
+) -> Result<PoolTx<'static>, ExecError> {
+    let unsupported = || ExecError::IsolationUnsupported {
+        dialect: pool.dialect().name(),
+        level,
+    };
+    let sql = pool
+        .dialect()
+        .begin_isolated_sql(level)
+        .ok_or_else(unsupported)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin_with(sql).await?)),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => Ok(PoolTx::Mysql(my.begin_with(sql).await?)),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with(sql).await?)),
+    }
+}
+
 /// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`.
 pub(crate) async fn write_transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
     match pool {
         // Take the write lock up front: a deferred tx that reads first
         // fails at once on a busy WAL database instead of waiting.
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?)),
+        Pool::Sqlite(sq) => {
+            super::atomic::warn_if_in_block(pool, "transaction_pool");
+            Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?))
+        }
         #[allow(unreachable_patterns)]
         _ => transaction_pool(pool).await,
     }

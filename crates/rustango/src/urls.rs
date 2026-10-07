@@ -296,15 +296,34 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
         .rsplit_once('@')
         .map_or(host_with_port, |(_, h)| h);
     // Strip port.
-    let host = host_after_userinfo
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let Some((host, _)) = split_host_port(host_after_userinfo) else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
     if host.is_empty() {
         return false;
     }
     allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
+}
+
+/// Splits an authority into host and port; `[v6]:port` keeps the brackets
+/// on the host (#2043). `None` when the port is not digits, so
+/// `good.com:1@evil.com` is refused rather than read as `good.com`.
+pub(crate) fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    let (host, rest) = match authority.find(']') {
+        Some(end) if authority.starts_with('[') => authority.split_at(end + 1),
+        _ if authority.starts_with('[') => return None,
+        _ => authority
+            .find(':')
+            .map_or((authority, ""), |i| authority.split_at(i)),
+    };
+    if rest.is_empty() {
+        return Some((host, None));
+    }
+    let port = rest
+        .strip_prefix(':')
+        .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))?;
+    Some((host, Some(port.parse().ok()?)))
 }
 
 /// `true` when `url` is absolute: it has a scheme prefix such as
@@ -1497,5 +1516,42 @@ mod querystring_tests {
             escape_leading_slashes("/path//slashes//inside"),
             "/path//slashes//inside"
         );
+    }
+
+    /// `[v6]:port` splits after the bracket, not at its first colon (#2043).
+    #[test]
+    fn split_host_port_handles_ipv6() {
+        assert_eq!(split_host_port("[::1]:8080"), Some(("[::1]", Some(8080))));
+        assert_eq!(split_host_port("[::1]"), Some(("[::1]", None)));
+        assert_eq!(split_host_port("app.test:80"), Some(("app.test", Some(80))));
+        assert_eq!(split_host_port("app.test"), Some(("app.test", None)));
+        // A port is digits only; anything else is refused.
+        for bad in [
+            "[::1]x",
+            "[::1",
+            "good.com:1@evil.com:2",
+            "good.com:@evil.com",
+            "[::1]:@evil.com",
+            "good.com:",
+            "good.com:+80",
+            "good.com:99999",
+        ] {
+            assert_eq!(split_host_port(bad), None, "{bad}");
+        }
+        assert!(!url_has_allowed_host_and_scheme(
+            "http://good.com:1@evil.com:2/",
+            &["good.com", "evil.com:2"],
+            false
+        ));
+        assert!(url_has_allowed_host_and_scheme(
+            "http://[::1]:8080/x",
+            &["[::1]"],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "http://[::2]:8080/x",
+            &["["],
+            false
+        ));
     }
 }

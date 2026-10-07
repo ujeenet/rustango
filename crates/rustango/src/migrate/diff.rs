@@ -801,6 +801,9 @@ pub fn render_changes_split(
 /// `BIGSERIAL`, which SQLite typed as NUMERIC and then rejected
 /// NULL inserts into).
 ///
+/// It has no before-snapshot, so a MySQL column drop lacks its FK drop;
+/// [`super::render_changes_between`] has one (#2026).
+///
 /// # Errors
 /// As [`render_changes_split`].
 pub fn render_changes_split_with_dialect(
