@@ -829,7 +829,7 @@ Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
 darauf an. Der `<slug>` ist sein kurzer Bezeichner. **Nicht** sicher erneut ausführbar:
 ein erneuter Aufruf auf einem
 bestehenden Slug wird vorab mit ``tenant slug `<slug>` already exists``
-abgelehnt (tenancy/provision.rs:599), bevor sonst etwas passiert.
+abgelehnt (`tenancy::provision::provision_tenant`), bevor sonst etwas passiert.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"

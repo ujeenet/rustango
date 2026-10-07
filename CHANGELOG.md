@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — stale admin comment and source reference in docs
+
+The fullstack `urls.rs` comment names `nest_with`, as `main.rs` does; manage.md names `provision_tenant` instead of a line number.
+
 ### Fixed — de/fr/es scaffolding, migrations, manage and getting-started match English (#2015)
 
 They now cover the committed `system/migrations/`, the scaffolded login-gated `admin_router` and `with_session_auth`. de/es `create-tenant` no longer says it is safe to re-run.

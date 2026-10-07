@@ -815,7 +815,7 @@ como fallidas en el siguiente arranque, y un reintento del webhook con el mismo
 Configura un nuevo tenant (cliente/org) y le aplica las migraciones de tenant. El
 `<slug>` es su identificador corto. **No** es seguro volver a ejecutarlo: llamarlo de
 nuevo sobre un slug existente se rechaza de entrada con ``tenant slug
-`<slug>` already exists`` (tenancy/provision.rs:599), antes de hacer nada más.
+`<slug>` already exists`` (`tenancy::provision::provision_tenant`), antes de hacer nada más.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"

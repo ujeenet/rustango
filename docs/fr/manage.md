@@ -853,7 +853,7 @@ Met en place un nouveau tenant (client/organisation) et applique les
 migrations tenant à celui-ci. Le `<slug>` est son identifiant court.
 **Pas** sûr à réexécuter : l'appeler à nouveau sur un slug existant est refusé
 d'emblée avec ``tenant slug `<slug>` already exists``
-(tenancy/provision.rs:599), avant toute autre opération. Ce qui ne
+(`tenancy::provision::provision_tenant`), avant toute autre opération. Ce qui ne
 duplique rien.
 
 ```bash
