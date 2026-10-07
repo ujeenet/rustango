@@ -272,12 +272,14 @@ impl<S: Clone + Send + Sync + 'static> AccessLogRouterExt for Router<S> {
 async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let started = Instant::now();
     let method = req.method().clone();
-    let raw_query = req.uri().query();
+    // `next.run` takes the request; path and query borrow this copy.
+    let uri = req.uri().clone();
     // Path and query stay separate fields: OpenTelemetry defines
     // `url.path` as the path alone. Joining them would make a
     // collector treat every query string as its own path.
-    let path = req.uri().path().to_owned();
-    let query = raw_query
+    let path = uri.path();
+    let query = uri
+        .query()
         .map(|q| redact_query(q, &cfg.redact_query_params))
         .unwrap_or_default();
     let ip = if cfg.include_ip {
@@ -428,13 +430,25 @@ const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
 /// `url.query` the same way. The span renders next to the event
 /// fields, so a raw span value would put the secrets back on the line
 /// this function just cleaned.
-pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+///
+/// Borrows when nothing needs hiding: it runs twice on every request.
+pub(crate) fn redact_query<'a>(raw: &'a str, redact_keys: &[String]) -> std::borrow::Cow<'a, str> {
     // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
     let hidden = |k: &str| {
-        let key = crate::url_codec::url_decode(k);
+        let key: std::borrow::Cow<'_, str> = if k.contains(['%', '+']) {
+            crate::url_codec::url_decode(k).into()
+        } else {
+            k.into()
+        };
         ALWAYS_REDACTED.iter().any(|r| r.eq_ignore_ascii_case(&key))
             || redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
     };
+    let any_hidden = raw
+        .split('&')
+        .any(|pair| pair.split_once('=').is_some_and(|(k, _)| hidden(k)));
+    if !any_hidden {
+        return std::borrow::Cow::Borrowed(raw);
+    }
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
             Some((k, _)) if hidden(k) => {
@@ -444,6 +458,7 @@ pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("&")
+        .into()
 }
 
 #[cfg(test)]
@@ -579,6 +594,13 @@ mod tests {
     fn redact_query_passes_through_when_no_match() {
         let r = redact_query("a=1&b=2", &["password".to_owned()]);
         assert_eq!(r, "a=1&b=2");
+    }
+
+    /// Runs twice per request, so a clean query is not copied (#1493).
+    #[test]
+    fn redact_query_borrows_a_clean_query() {
+        let r = redact_query("page=2&sort=name&q=a%20b", &default_redact_params());
+        assert!(matches!(r, std::borrow::Cow::Borrowed(_)), "{r:?}");
     }
 
     /// #1818 — a custom list without `token` still hides the handoff token.
