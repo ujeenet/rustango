@@ -180,6 +180,21 @@ The admin and tenant login forms now set and check that layer's cookie name, not
 ### Provisioning runs store operator-safe failure text
 
 New failed steps and runs store validation text or "Step failed (internal server error)"; the cause goes to the log (#2198). Rows already in `rustango_provisioning_events` and `rustango_provisioning_runs` keep their old text; clear them if they hold driver errors.
+### Translations editor: an emptied cell deletes its override
+
+The grid posts each shown value as a hidden `orig:<locale>:<key>` field; a cell shown non-empty and posted blank is deleted. A custom editor form must post those fields too, and can call `i18n::admin::apply_form` (#2091).
+
+### SQLite: defaulted integer PKs are `BIGINT`
+
+New tables and migrations create a non-`Auto` integer PK with a `default` as `BIGINT`, so the default applies. Existing tables keep the rowid column until rebuilt (#2137).
+
+### ViewSet serializer PATCH runs in one transaction
+
+The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010). A hand-written `ModelEntry` with an audited update runner but no `with_audited_update_record` keeps the old unlocked update, so its audit entry is still written.
+
+### Host claims are transactional
+
+Tenant edit and create now insert and delete a claim row in `rustango_org_hosts` inside their transaction (#2099).
 
 ## 0.60.1
 

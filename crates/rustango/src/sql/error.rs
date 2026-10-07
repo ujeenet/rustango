@@ -336,6 +336,23 @@ impl ExecError {
     pub(crate) fn is_unique_violation(&self) -> bool {
         matches!(self, Self::Driver(sqlx::Error::Database(db)) if db.is_unique_violation())
     }
+
+    /// A deadlock the database broke by aborting this transaction:
+    /// MySQL 1213, PG 40P01.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn is_deadlock(&self) -> bool {
+        let Self::Driver(sqlx::Error::Database(db)) = self else {
+            return false;
+        };
+        #[cfg(feature = "mysql")]
+        if db
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1213)
+        {
+            return true;
+        }
+        db.code().as_deref() == Some("40P01")
+    }
 }
 
 // =====================================================================

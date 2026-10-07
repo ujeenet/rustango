@@ -993,6 +993,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 <#struct_name as #root::core::Model>::__rustango_audited_delete,
             )
             .with_audited_create(<#struct_name as #root::core::Model>::__rustango_audited_create)
+            .with_audited_update_record(
+                <#struct_name as #root::core::Model>::__rustango_audited_update_record,
+            )
         }
     })
 }
@@ -2735,6 +2738,10 @@ fn model_impl_tokens(
             fn __rustango_audited_create() -> ::core::option::Option<#root::audit::AuditedCreate> {
                 ::core::option::Option::Some(Self::__rustango_create_audited)
             }
+            fn __rustango_audited_update_record(
+            ) -> ::core::option::Option<#root::audit::AuditedUpdateRecord> {
+                ::core::option::Option::Some(Self::__rustango_update_record_audited)
+            }
         }
     } else {
         quote!()
@@ -3386,6 +3393,24 @@ fn inherent_impl_tokens(
                     <Self as #root::core::Model>::SCHEMA,
                     pk,
                     |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Create),
+                ))
+            }
+
+            /// Audited one-row `update` entry, behind `Model::__rustango_audited_update_record`.
+            #[doc(hidden)]
+            pub fn __rustango_update_record_audited<'a, 't>(
+                tx: &'a mut #root::sql::PoolTx<'t>,
+                pk: #root::core::SqlValue,
+            ) -> ::std::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                > + ::core::marker::Send + 'a,
+            >> {
+                ::std::boxed::Box::pin(#root::audit::record_update::<Self>(
+                    tx,
+                    <Self as #root::core::Model>::SCHEMA,
+                    pk,
+                    |_r: &Self| _r.__rustango_audit_entry(#root::audit::AuditOp::Update),
                 ))
             }
 

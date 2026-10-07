@@ -1480,6 +1480,12 @@ pub trait Model: Sized + Send + Sync + 'static {
     fn __rustango_audited_create() -> Option<crate::audit::AuditedCreate> {
         None
     }
+
+    /// Audited `update` recorder for a one-row update in a transaction (#2010).
+    #[doc(hidden)]
+    fn __rustango_audited_update_record() -> Option<crate::audit::AuditedUpdateRecord> {
+        None
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.
@@ -1496,6 +1502,7 @@ pub struct ModelEntry {
     audited_update: fn() -> Option<crate::audit::AuditedUpdate>,
     audited_delete: fn() -> Option<crate::audit::AuditedDelete>,
     audited_create: fn() -> Option<crate::audit::AuditedCreate>,
+    audited_update_record: fn() -> Option<crate::audit::AuditedUpdateRecord>,
 }
 
 impl ModelEntry {
@@ -1508,6 +1515,7 @@ impl ModelEntry {
             audited_update: || None,
             audited_delete: || None,
             audited_create: || None,
+            audited_update_record: || None,
         }
     }
 
@@ -1530,6 +1538,16 @@ impl ModelEntry {
         create: fn() -> Option<crate::audit::AuditedCreate>,
     ) -> Self {
         self.audited_create = create;
+        self
+    }
+
+    /// The model's audited one-row `update` recorder (#2010).
+    #[must_use]
+    pub const fn with_audited_update_record(
+        mut self,
+        record: fn() -> Option<crate::audit::AuditedUpdateRecord>,
+    ) -> Self {
+        self.audited_update_record = record;
         self
     }
 
@@ -1566,6 +1584,12 @@ impl ModelEntry {
     #[must_use]
     pub fn audited_delete(&self) -> Option<crate::audit::AuditedDelete> {
         (self.audited_delete)()
+    }
+
+    /// Audited one-row `update` recorder, `None` for a model without audit.
+    #[must_use]
+    pub fn audited_update_record(&self) -> Option<crate::audit::AuditedUpdateRecord> {
+        (self.audited_update_record)()
     }
 
     /// Audited `create` recorder, `None` for a model without audit.

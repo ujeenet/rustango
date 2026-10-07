@@ -66,6 +66,21 @@ A failed step's event and the run's `error` keep validation text, else "Step fai
 ### Fixed — admin CSRF follows the outer layer's cookie (#2160)
 
 Under `csrf::with_config`, admin pages and both login forms set and check that layer's cookie name and `Secure` flag; POSTs no longer 403.
+### Fixed — the translations editor clears one locale's override (#2091)
+
+Emptying a cell the page showed non-empty deletes that `(locale, key)` row, so the locale falls back to its file. A gap someone filled after the page loaded is kept.
+
+### Fixed — SQLite honours a DB default on an integer primary key (#2137)
+
+A non-`Auto` integer PK with a `default` is created as `BIGINT`, not the rowid alias that skipped the default.
+
+### Fixed — ViewSet PATCH validates the row it overwrites (#2010)
+
+The cross-field check reads the row locked, and the UPDATE and its audit entry run in the same transaction.
+
+### Fixed — two tenants can no longer claim one host at once (#2099)
+
+`add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused. A MySQL deadlock between two claims is retried once.
 
 ## [0.60.1] — 2026-10-07
 
