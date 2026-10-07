@@ -967,24 +967,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &collected.column_entries,
     );
 
-    // Issue #271 / T1.9 — `#[rustango(manager(ext = "FooManagerExt"))]`
-    // emits an empty extension trait so users can add methods via
-    // `impl FooManagerExt for QuerySet<Foo>` without hand-writing the
-    // trait declaration. See `crates/rustango/src/manager.rs` for the
-    // pattern this replaces.
-    let manager_trait = container.manager_ext.as_ref().map(|name| {
-        let model_name_str = struct_name.to_string();
-        let doc = format!(
-            "Empty marker trait for [`{model_name_str}`], from \
-             `#[rustango(manager(ext = ...))]`. Put query shortcuts on your \
-             own extension trait over `QuerySet<{model_name_str}>`."
-        );
-        quote! {
-            #[doc = #doc]
-            pub trait #name: ::core::marker::Sized {}
-        }
-    });
-
     Ok(quote! {
         #model_impl
         #inherent_impl
@@ -996,7 +978,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #through_accessors
         #reverse_has_accessors
         #generic_fk_accessors
-        #manager_trait
 
         #root::core::inventory::submit! {
             // `module_path!()` evaluates at the registration site,
@@ -3276,18 +3257,8 @@ fn inherent_impl_tokens(
         }
     };
 
-    // pool_save_method moved to after audit_pair_tokens /
-    // audit_pk_to_string (they live ~70 lines below) — needed for
-    // the audited branch which builds an UpdateQuery + PendingEntry
-    // and dispatches via audit::save_one_with_audit.
-
-    // pool_delete_method moved to after audit_pair_tokens / audit_pk_to_string
-    // are computed (they live ~80 lines below).
-
-    // Build the (column, JSON value) pair list used by every
-    // snapshot-style audit emission. Reused across delete_on,
-    // soft_delete_on, restore_on, and (later) bulk paths. Empty
-    // when the model isn't audited.
+    // The tracked (column, JSON value) pairs, spliced only into
+    // `__rustango_audit_pairs`. Empty when the model isn't audited.
     let audit_pair_tokens: Vec<TokenStream2> = audited_fields
         .map(|tracked| {
             tracked
@@ -3357,6 +3328,20 @@ fn inherent_impl_tokens(
         let pairs = audit_pair_tokens.iter();
         let pk_str = audit_pk_to_string.clone();
         quote! {
+            /// This row's tracked `(column, value)` pairs.
+            #[doc(hidden)]
+            pub fn __rustango_audit_pairs(
+                &self,
+            ) -> ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> {
+                ::std::vec![ #( #pairs ),* ]
+            }
+
+            /// This row's audit PK.
+            #[doc(hidden)]
+            pub fn __rustango_audit_pk(&self) -> ::std::string::String {
+                #pk_str
+            }
+
             /// Snapshot audit entry for `operation` on this row.
             #[doc(hidden)]
             pub fn __rustango_audit_entry(
@@ -3365,12 +3350,10 @@ fn inherent_impl_tokens(
             ) -> #root::audit::PendingEntry {
                 #root::audit::PendingEntry {
                     entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                    entity_pk: #pk_str,
+                    entity_pk: self.__rustango_audit_pk(),
                     operation,
                     source: #root::audit::current_source(),
-                    changes: #root::audit::snapshot_changes(&[
-                        #( #pairs ),*
-                    ]),
+                    changes: #root::audit::snapshot_changes(&self.__rustango_audit_pairs()),
                 }
             }
 
@@ -3483,199 +3466,154 @@ fn inherent_impl_tokens(
         make_pool_update(quote!(#root::audit::AuditOp::SoftDelete), soft_deleted_json);
     let pool_restore_run = make_pool_update(quote!(#root::audit::AuditOp::Restore), restored_json);
 
-    // `save_pool(&Pool)` — emitted for every model with a PK.
-    // Audited Auto-PK models are deferred (the Auto::Unset →
-    // insert_pool path needs the audited-insert flow from a future
-    // batch). Three body shapes:
-    // - non-audited, plain PK: build UpdateQuery + dispatch through
-    //   sql::update_pool
-    // - non-audited, Auto-PK: same, but Auto::Unset routes to
-    //   self.insert_pool which already handles RETURNING / LAST_INSERT_ID
-    // - audited, plain PK: build UpdateQuery + PendingEntry, dispatch
-    //   through audit::save_one_with_audit (per-backend tx wraps
-    //   UPDATE + audit emit atomically). Snapshot-style audit (post-
-    //   write field values) — diff-style audit (with pre-UPDATE
-    //   SELECT for `before` values) needs per-tracked-column codegen
-    //   that doesn't fit the runtime-helper pattern; legacy &PgPool
-    //   `save` keeps the diff for now.
+    // `save_pool(&Pool)` — emitted for every model with a PK. The
+    // audited `save_pool` is built below on the diff path; both share
+    // `save_partial_methods`, which differ only in how they run `_query`.
+    let save_partial_methods = |pk_ident: &syn::Ident,
+                                pk_column_lit: &str,
+                                run: TokenStream2|
+     -> TokenStream2 {
+        let assignments = &fields.update_assignments;
+        quote! {
+            /// Save (UPDATE) only the listed Rust-side fields,
+            /// leaving every other column untouched. Issue #66.
+            ///
+            /// `fields` are Rust-side struct field names; the macro
+            /// resolves each to its SQL column. Unknown field
+            /// names return [`#root::core::QueryError::UnknownField`]
+            /// wrapped in `ExecError::Query`. An empty list is a
+            /// no-op (returns `Ok(())` and logs a `tracing::warn!`).
+            /// On an audited model the audit diff covers only these fields.
+            ///
+            /// Use this when:
+            /// * you only mutated a couple of fields on a wide row
+            ///   (avoid re-writing every column on every save), or
+            /// * two writers diverged after their initial read and
+            ///   you want to preserve the other writer's changes to
+            ///   columns you didn't touch.
+            ///
+            /// Auto-PK models with an unset PK return
+            /// [`#root::core::QueryError::UnknownField`] with
+            /// field name `<pk>` — `save_partial` is an
+            /// UPDATE-only path. Call [`Self::insert_pool`]
+            /// (or [`Self::save_pool`] which dispatches based on
+            /// PK state) for the INSERT case.
+            ///
+            /// # Errors
+            /// As [`Self::save_pool`], plus `UnknownField` for
+            /// unknown / empty / Auto-Unset cases.
+            pub async fn save_partial(
+                &mut self,
+                fields: &[&str],
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                if fields.is_empty() {
+                    #root::__tracing::warn!(
+                        target: "rustango::save_partial",
+                        model = <Self as #root::core::Model>::SCHEMA.name,
+                        "save_partial called with empty field list — no-op"
+                    );
+                    return ::core::result::Result::Ok(0);
+                }
+                let _schema = <Self as #root::core::Model>::SCHEMA;
+                // Validate field names against the schema.
+                let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
+                    ::std::collections::HashSet::with_capacity(fields.len());
+                for f in fields {
+                    match _schema.field(f) {
+                        ::core::option::Option::Some(fs) => {
+                            _wanted_cols.insert(fs.column);
+                        }
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(
+                                #root::sql::ExecError::Query(
+                                    #root::core::QueryError::UnknownField {
+                                        model: _schema.name,
+                                        field: (*f).to_owned(),
+                                    }
+                                )
+                            );
+                        }
+                    }
+                }
+                // Build the full assignment vec, then keep only the
+                // assignments whose column is in `_wanted_cols`.
+                let _full: ::std::vec::Vec<#root::core::Assignment> =
+                    ::std::vec![ #( #assignments ),* ];
+                let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
+                    .into_iter()
+                    .filter(|a| _wanted_cols.contains(a.column))
+                    .collect();
+                if _filtered.is_empty() {
+                    // All field names valid, but they all map to
+                    // non-assignable slots (PK column, computed/
+                    // virtual fields, relations without an
+                    // assignment). Same no-op as an empty list.
+                    #root::__tracing::warn!(
+                        target: "rustango::save_partial",
+                        model = _schema.name,
+                        "save_partial: every named field maps to a non-assignable column — no-op"
+                    );
+                    return ::core::result::Result::Ok(0);
+                }
+                let _query = #root::core::UpdateQuery::new(
+                    _schema,
+                    _filtered,
+                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
+                        #pk_column_lit,
+                        #root::core::Op::Eq,
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#pk_ident)
+                        ),
+                    )),
+                );
+                #run
+            }
+
+            /// Typed-column counterpart of [`Self::save_partial`] —
+            /// issue #67. `fields` is a tuple of [`Column`]
+            /// constants whose `Model` matches `Self`; typos and
+            /// model mismatches surface at *compile time*
+            /// (`Author::name` inside a `Post::save_partial_typed`
+            /// call is a type error, no runtime check).
+            ///
+            /// ```ignore
+            /// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+            /// ```
+            ///
+            /// Lowers to [`Self::save_partial`] under the hood — the
+            /// tuple is reduced to a `&[&str]` slice of Rust-side
+            /// field names and forwarded.
+            ///
+            /// [`Column`]: #root::core::Column
+            ///
+            /// # Errors
+            /// As [`Self::save_partial`].
+            pub async fn save_partial_typed<
+                L: #root::core::TypedFieldList<Self>,
+            >(
+                &mut self,
+                fields: L,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _names = fields.rust_field_names();
+                let _refs: ::std::vec::Vec<&str> =
+                    _names.iter().copied().collect();
+                self.save_partial(&_refs, pool).await
+            }
+        }
+    };
     let pool_save_method = if let Some((pk_ident, pk_col)) = primary_key {
         let pk_column_lit = pk_col.as_str();
         let assignments = &fields.update_assignments;
         if audited_fields.is_some() {
-            if fields.pk_is_auto {
-                // Auto-PK + audited: defer. The Auto::Unset insert
-                // path needs a transactional INSERT + LAST_INSERT_ID
-                // + audit emit flow — that's a follow-up batch.
-                quote!()
-            } else {
-                let pairs = audit_pair_tokens.iter();
-                let pairs2 = audit_pair_tokens.iter();
-                let pk_str = audit_pk_to_string.clone();
-                let pk_str2 = audit_pk_to_string.clone();
-                quote! {
-                    /// Save (UPDATE) this row against either backend
-                    /// with audit emission inside the same transaction.
-                    /// Bi-dialect counterpart of [`Self::save`] for
-                    /// audited models with non-`Auto<T>` PKs.
-                    ///
-                    /// Captures **post-write** field state (snapshot
-                    /// audit). The legacy &PgPool [`Self::save`]
-                    /// captures BEFORE+AFTER for true diff audit;
-                    /// porting that to the &Pool path needs runtime
-                    /// per-tracked-column decoding and is deferred.
-                    ///
-                    /// # Errors
-                    /// As [`Self::save`].
-                    pub async fn save_pool(
-                        &mut self,
-                        pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::UpdateQuery::new(
-                            <Self as #root::core::Model>::SCHEMA,
-                            ::std::vec![ #( #assignments ),* ],
-                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                                #pk_column_lit,
-                                #root::core::Op::Eq,
-                                ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            )),
-                        );
-                        let _audit_entry = #root::audit::PendingEntry {
-                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
-                            entity_pk: #pk_str,
-                            operation: #root::audit::AuditOp::Update,
-                            source: #root::audit::current_source(),
-                            changes: #root::audit::snapshot_changes(&[
-                                #( #pairs ),*
-                            ]),
-                        };
-                        let _affected = #root::audit::save_one_with_audit(
-                            pool, &_query, &_audit_entry,
-                        ).await?;
-                        ::core::result::Result::Ok(_affected)
-                    }
-
-                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66.
-                    /// Audit emission shrinks to the same column set so
-                    /// the audit log reflects exactly what was written.
-                    ///
-                    /// # Errors
-                    /// As [`Self::save_pool`], plus
-                    /// [`#root::core::QueryError::UnknownField`] wrapped
-                    /// in `ExecError::Query` for unknown field names.
-                    pub async fn save_partial(
-                        &mut self,
-                        fields: &[&str],
-                        pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        if fields.is_empty() {
-                            #root::__tracing::warn!(
-                                target: "rustango::save_partial",
-                                model = <Self as #root::core::Model>::SCHEMA.name,
-                                "save_partial called with empty field list — no-op"
-                            );
-                            return ::core::result::Result::Ok(0);
-                        }
-                        let _schema = <Self as #root::core::Model>::SCHEMA;
-                        let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
-                            ::std::collections::HashSet::with_capacity(fields.len());
-                        for f in fields {
-                            match _schema.field(f) {
-                                ::core::option::Option::Some(fs) => {
-                                    _wanted_cols.insert(fs.column);
-                                }
-                                ::core::option::Option::None => {
-                                    return ::core::result::Result::Err(
-                                        #root::sql::ExecError::Query(
-                                            #root::core::QueryError::UnknownField {
-                                                model: _schema.name,
-                                                field: (*f).to_owned(),
-                                            }
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                        let _full: ::std::vec::Vec<#root::core::Assignment> =
-                            ::std::vec![ #( #assignments ),* ];
-                        let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
-                            .into_iter()
-                            .filter(|a| _wanted_cols.contains(a.column))
-                            .collect();
-                        if _filtered.is_empty() {
-                            #root::__tracing::warn!(
-                                target: "rustango::save_partial",
-                                model = _schema.name,
-                                "save_partial: every named field maps to a non-assignable column — no-op"
-                            );
-                            return ::core::result::Result::Ok(0);
-                        }
-                        let _query = #root::core::UpdateQuery::new(
-                            _schema,
-                            _filtered,
-                            #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                                #pk_column_lit,
-                                #root::core::Op::Eq,
-                                ::core::convert::Into::<#root::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            )),
-                        );
-                        // Narrow the audit snapshot to the same column set.
-                        let _all_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
-                            ::std::vec![ #( #pairs2 ),* ];
-                        let _narrowed: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
-                            _all_pairs
-                                .into_iter()
-                                .filter(|(col, _)| _wanted_cols.contains(col))
-                                .collect();
-                        let _audit_entry = #root::audit::PendingEntry {
-                            entity_table: _schema.table,
-                            entity_pk: #pk_str2,
-                            operation: #root::audit::AuditOp::Update,
-                            source: #root::audit::current_source(),
-                            changes: #root::audit::snapshot_changes(&_narrowed),
-                        };
-                        let _affected = #root::audit::save_one_with_audit(
-                            pool, &_query, &_audit_entry,
-                        ).await?;
-                        ::core::result::Result::Ok(_affected)
-                    }
-
-                    /// Typed-column counterpart of [`Self::save_partial`] —
-                    /// issue #67. `fields` is a tuple of [`Column`]
-                    /// constants whose `Model` matches `Self`; typos and
-                    /// model mismatches surface at *compile time*
-                    /// (`Author::name` inside a `Post::save_partial_typed`
-                    /// call is a type error, no runtime check).
-                    ///
-                    /// ```ignore
-                    /// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
-                    /// ```
-                    ///
-                    /// Lowers to [`Self::save_partial`] under the hood;
-                    /// audit narrowing + every other semantic is identical.
-                    ///
-                    /// [`Column`]: #root::core::Column
-                    ///
-                    /// # Errors
-                    /// As [`Self::save_partial`].
-                    pub async fn save_partial_typed<
-                        L: #root::core::TypedFieldList<Self>,
-                    >(
-                        &mut self,
-                        fields: L,
-                        pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _names = fields.rust_field_names();
-                        let _refs: ::std::vec::Vec<&str> =
-                            _names.iter().copied().collect();
-                        self.save_partial(&_refs, pool).await
-                    }
-                }
-            }
+            quote!()
         } else {
+            let partial = save_partial_methods(
+                pk_ident,
+                pk_column_lit,
+                quote!(#root::sql::update_pool(pool, &_query).await),
+            );
             let dispatch_unset = if fields.pk_is_auto {
                 quote! {
                     if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
@@ -3688,7 +3626,7 @@ fn inherent_impl_tokens(
             quote! {
                 /// Save this row to its table against either backend.
                 /// `INSERT` when the `Auto<T>` PK is `Unset`, else
-                /// `UPDATE` keyed on the PK.
+                /// `UPDATE` keyed on the PK; global scopes do not apply.
                 ///
                 /// # Errors
                 /// As [`Self::save`].
@@ -3712,132 +3650,7 @@ fn inherent_impl_tokens(
                     ::core::result::Result::Ok(_affected)
                 }
 
-                /// Save (UPDATE) only the listed Rust-side fields,
-                /// leaving every other column untouched. Issue #66.
-                ///
-                /// `fields` are Rust-side struct field names; the macro
-                /// resolves each to its SQL column. Unknown field
-                /// names return [`#root::core::QueryError::UnknownField`]
-                /// wrapped in `ExecError::Query`. An empty list is a
-                /// no-op (returns `Ok(())` and logs a `tracing::warn!`).
-                ///
-                /// Use this when:
-                /// * you only mutated a couple of fields on a wide row
-                ///   (avoid re-writing every column on every save), or
-                /// * two writers diverged after their initial read and
-                ///   you want to preserve the other writer's changes to
-                ///   columns you didn't touch.
-                ///
-                /// Auto-PK models with an unset PK return
-                /// [`#root::core::QueryError::UnknownField`] with
-                /// field name `<pk>` — `save_partial` is an
-                /// UPDATE-only path. Call [`Self::insert_pool`]
-                /// (or [`Self::save_pool`] which dispatches based on
-                /// PK state) for the INSERT case.
-                ///
-                /// # Errors
-                /// As [`Self::save_pool`], plus `UnknownField` for
-                /// unknown / empty / Auto-Unset cases.
-                pub async fn save_partial(
-                    &mut self,
-                    fields: &[&str],
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    if fields.is_empty() {
-                        #root::__tracing::warn!(
-                            target: "rustango::save_partial",
-                            model = <Self as #root::core::Model>::SCHEMA.name,
-                            "save_partial called with empty field list — no-op"
-                        );
-                        return ::core::result::Result::Ok(0);
-                    }
-                    let _schema = <Self as #root::core::Model>::SCHEMA;
-                    // Validate field names against the schema.
-                    let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
-                        ::std::collections::HashSet::with_capacity(fields.len());
-                    for f in fields {
-                        match _schema.field(f) {
-                            ::core::option::Option::Some(fs) => {
-                                _wanted_cols.insert(fs.column);
-                            }
-                            ::core::option::Option::None => {
-                                return ::core::result::Result::Err(
-                                    #root::sql::ExecError::Query(
-                                        #root::core::QueryError::UnknownField {
-                                            model: _schema.name,
-                                            field: (*f).to_owned(),
-                                        }
-                                    )
-                                );
-                            }
-                        }
-                    }
-                    // Build the full assignment vec, then keep only the
-                    // assignments whose column is in `_wanted_cols`.
-                    let _full: ::std::vec::Vec<#root::core::Assignment> =
-                        ::std::vec![ #( #assignments ),* ];
-                    let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
-                        .into_iter()
-                        .filter(|a| _wanted_cols.contains(a.column))
-                        .collect();
-                    if _filtered.is_empty() {
-                        // All field names valid, but they all map to
-                        // non-assignable slots (PK column, computed/
-                        // virtual fields, relations without an
-                        // assignment). Same no-op as an empty list.
-                        #root::__tracing::warn!(
-                            target: "rustango::save_partial",
-                            model = _schema.name,
-                            "save_partial: every named field maps to a non-assignable column — no-op"
-                        );
-                        return ::core::result::Result::Ok(0);
-                    }
-                    let _query = #root::core::UpdateQuery::new(
-                        _schema,
-                        _filtered,
-                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                            #pk_column_lit,
-                            #root::core::Op::Eq,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        )),
-                    );
-                    let _affected = #root::sql::update_pool(pool, &_query).await?;
-                    ::core::result::Result::Ok(_affected)
-                }
-
-                /// Typed-column counterpart of [`Self::save_partial`] —
-                /// issue #67. `fields` is a tuple of [`Column`]
-                /// constants whose `Model` matches `Self`; typos and
-                /// model mismatches surface at *compile time*
-                /// (`Author::name` inside a `Post::save_partial_typed`
-                /// call is a type error, no runtime check).
-                ///
-                /// ```ignore
-                /// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
-                /// ```
-                ///
-                /// Lowers to [`Self::save_partial`] under the hood — the
-                /// tuple is reduced to a `&[&str]` slice of Rust-side
-                /// field names and forwarded.
-                ///
-                /// [`Column`]: #root::core::Column
-                ///
-                /// # Errors
-                /// As [`Self::save_partial`].
-                pub async fn save_partial_typed<
-                    L: #root::core::TypedFieldList<Self>,
-                >(
-                    &mut self,
-                    fields: L,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _names = fields.rust_field_names();
-                    let _refs: ::std::vec::Vec<&str> =
-                        _names.iter().copied().collect();
-                    self.save_partial(&_refs, pool).await
-                }
+                #partial
             }
         }
     } else {
@@ -3850,77 +3663,79 @@ fn inherent_impl_tokens(
     // audit::insert_one_with_audit (per-backend tx wraps INSERT
     // + auto-PK readback + audit emit). Snapshot-style audit (the
     // PendingEntry's `changes` carries post-write field values).
-    let pool_insert_method = if audited_fields.is_some() {
-        if let Some(_) = primary_key {
-            let pushes = if fields.has_auto {
-                fields.insert_pushes.clone()
-            } else {
-                // For non-Auto-PK models, the macro normally builds
-                // {columns, values} from fields.insert_columns +
-                // fields.insert_values rather than insert_pushes.
-                // Map those into the pushes shape.
-                fields
-                    .insert_columns
-                    .iter()
-                    .zip(&fields.insert_values)
-                    .map(|(col, val)| {
-                        quote! {
-                            _columns.push(#col);
-                            _values.push(#val);
-                        }
-                    })
-                    .collect()
-            };
-            // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
-            let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
-            {
-                fields.returning_cols.clone()
-            } else {
-                // Non-Auto-PK: still need RETURNING something for the
-                // audit helper's contract (it errors on empty
-                // returning). Return the PK column so the audit row
-                // can carry the assigned PK back. Some non-Auto PKs
-                // are server-side-default (e.g. UUIDv4 default), so
-                // RETURNING is genuinely useful.
-                primary_key
-                    .map(|(_, col)| {
-                        let lit = col.as_str();
-                        vec![quote!(#lit)]
-                    })
-                    .unwrap_or_default()
-            };
-            quote! {
-                /// Insert this row against either backend with audit
-                /// emission inside the same transaction. Bi-dialect
-                /// counterpart of [`Self::insert`] for audited models.
-                ///
-                /// Snapshot-style audit (post-write field values).
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
-                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
-                    })
-                    .await
-                }
-            }
+    let audited_insert_query = if audited_fields.is_some() && primary_key.is_some() {
+        let pushes = if fields.has_auto {
+            fields.insert_pushes.clone()
         } else {
-            quote!()
+            // For non-Auto-PK models, the macro normally builds
+            // {columns, values} from fields.insert_columns +
+            // fields.insert_values rather than insert_pushes.
+            // Map those into the pushes shape.
+            fields
+                .insert_columns
+                .iter()
+                .zip(&fields.insert_values)
+                .map(|(col, val)| {
+                    quote! {
+                        _columns.push(#col);
+                        _values.push(#val);
+                    }
+                })
+                .collect()
+        };
+        // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
+        let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty() {
+            fields.returning_cols.clone()
+        } else {
+            // Non-Auto-PK: still need RETURNING something for the
+            // audit helper's contract (it errors on empty
+            // returning). Return the PK column so the audit row
+            // can carry the assigned PK back. Some non-Auto PKs
+            // are server-side-default (e.g. UUIDv4 default), so
+            // RETURNING is genuinely useful.
+            primary_key
+                .map(|(_, col)| {
+                    let lit = col.as_str();
+                    vec![quote!(#lit)]
+                })
+                .unwrap_or_default()
+        };
+        Some(quote! {
+            let mut _columns: ::std::vec::Vec<&'static str> =
+                ::std::vec::Vec::new();
+            let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                ::std::vec::Vec::new();
+            #( #pushes )*
+            let _query = #root::core::InsertQuery::new(
+                <Self as #root::core::Model>::SCHEMA,
+                _columns,
+                _values,
+            )
+            .returning(::std::vec![ #( #returning_cols ),* ]);
+        })
+    } else {
+        None
+    };
+    let pool_insert_method = if let Some(insert_query) = &audited_insert_query {
+        quote! {
+            /// Insert this row against either backend with audit
+            /// emission inside the same transaction. Bi-dialect
+            /// counterpart of [`Self::insert`] for audited models.
+            ///
+            /// Snapshot-style audit (post-write field values).
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_pool(
+                &mut self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_query
+                #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
+                    _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                })
+                .await
+            }
         }
     } else {
         // Keep the non-audited pool_insert_method we built earlier.
@@ -3950,11 +3765,18 @@ fn inherent_impl_tokens(
     let pool_save_method = if let Some(tracked) = audited_fields {
         if let Some((pk_ident, pk_col)) = primary_key {
             let pk_column_lit = pk_col.as_str();
-            // Two iterators — quote!'s `#(#var)*` consumes the
-            // iterator, and we need to splice the same after-pairs
-            // sequence into both per-backend arms.
-            let after_pairs_pg = audit_pair_tokens.iter().collect::<Vec<_>>();
-            let pk_str = audit_pk_to_string.clone();
+            let partial = save_partial_methods(
+                pk_ident,
+                pk_column_lit,
+                quote! {
+                    self.__rustango_save_with_diff(
+                        pool,
+                        &_query,
+                        ::core::option::Option::Some(&_wanted_cols),
+                    )
+                    .await
+                },
+            );
             // Per-tracked-column BEFORE-pair token list. Each entry
             // is `(col_lit, try_get_returning<value_ty>(row, col_lit) → Json)`.
             // The Row alias resolves to PgRow / MySqlRow per call site,
@@ -4021,6 +3843,7 @@ fn inherent_impl_tokens(
                 /// `{ "field": { "before": …, "after": … } }` entry
                 /// per tracked column whose value actually changed
                 /// — same shape as the existing &PgPool save() emits.
+                /// Keyed on the PK; global scopes do not apply.
                 ///
                 /// # Errors
                 /// As [`Self::save`].
@@ -4040,8 +3863,39 @@ fn inherent_impl_tokens(
                             ),
                         )),
                     );
-                    let _after_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
-                        ::std::vec![ #( #after_pairs_pg ),* ];
+                    self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
+                        .await
+                }
+
+                /// Run `query` and write its diff entry, limited to `only` columns.
+                #[doc(hidden)]
+                async fn __rustango_save_with_diff(
+                    &self,
+                    pool: &#root::sql::Pool,
+                    query: &#root::core::UpdateQuery,
+                    only: ::core::option::Option<&::std::collections::HashSet<&'static str>>,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let mut _scope = #root::__private_runtime::TxScope::begin(
+                        pool,
+                        #root::__private_runtime::Begin::Deferred,
+                    )
+                    .await?;
+                    let _r = self.__rustango_save_with_diff_tx(_scope.tx(), query, only).await;
+                    _scope.end(_r).await
+                }
+
+                /// [`Self::__rustango_save_with_diff`] inside an open transaction.
+                #[doc(hidden)]
+                async fn __rustango_save_with_diff_tx(
+                    &self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                    query: &#root::core::UpdateQuery,
+                    only: ::core::option::Option<&::std::collections::HashSet<&'static str>>,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let mut _after_pairs = self.__rustango_audit_pairs();
+                    if let ::core::option::Option::Some(only) = only {
+                        _after_pairs.retain(|(col, _)| only.contains(col));
+                    }
                     let _before_query = #root::audit::before_image_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #pk_column_lit,
@@ -4050,18 +3904,20 @@ fn inherent_impl_tokens(
                         ),
                         &[ #( #tracked_cols ),* ],
                     );
-                    #root::audit::save_one_with_diff(
-                        pool,
-                        &_query,
+                    #root::audit::save_one_with_diff_tx(
+                        tx,
+                        query,
                         &_before_query,
                         <Self as #root::core::Model>::SCHEMA.table,
-                        #pk_str,
+                        self.__rustango_audit_pk(),
                         _after_pairs,
                         |_audit_before_row| ::std::vec![ #( #before_pairs_pg ),* ],
                         |_audit_before_row| ::std::vec![ #( #before_pairs_my ),* ],
                         |_audit_before_row| ::std::vec![ #( #before_pairs_sqlite ),* ],
                     ).await
                 }
+
+                #partial
             }
         } else {
             quote!()
@@ -4085,6 +3941,7 @@ fn inherent_impl_tokens(
                     /// Delete this row against either backend with audit
                     /// emission inside the same transaction. Bi-dialect
                     /// counterpart of [`Self::delete`] for audited models.
+                    /// Keyed on the PK; global scopes do not apply.
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
@@ -4111,6 +3968,7 @@ fn inherent_impl_tokens(
                     /// Delete the row identified by this instance's primary key
                     /// against either backend. Equivalent to [`Self::delete`] but
                     /// takes [`#root::sql::Pool`] and dispatches per backend.
+                    /// Global scopes do not apply.
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
@@ -4949,7 +4807,8 @@ fn inherent_impl_tokens(
             /// writes through this would silently bypass the
             /// `pre_delete` / `post_delete` signals (no per-row hooks
             /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
-            /// gets one bulk audit entry, not one per row.
+            /// gets one bulk audit entry, not one per row. Global scopes
+            /// do not apply: every row goes.
             ///
             /// # Errors
             /// As [`raw_execute_pool`].
@@ -6443,60 +6302,87 @@ fn inherent_impl_tokens(
     };
 
     // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
-    // the non-audited `_pool` methods but execute against an open
-    // `PoolTx` so the writes participate in the caller's transaction.
-    // Auditing inside TX is deferred; these always use the plain
-    // executor primitives regardless of whether the model is audited.
-    let tx_insert_method = if fields.has_auto {
-        let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
-        quote! {
-            /// Insert this row inside an open transaction, populating
-            /// any `Auto<T>` PK from the auto-assigned value. Works
-            /// against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #( #pushes )*
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
-                #root::sql::apply_auto_pk(_result, self)
+    // the `_pool` methods but execute against an open `PoolTx` so the
+    // writes participate in the caller's transaction. Audited models
+    // write their audit rows in it too, through the same audit helpers.
+    let tx_insert_method =
+        if let (true, Some(insert_query)) = (fields.has_auto, &audited_insert_query) {
+            quote! {
+                /// Insert this row inside an open transaction, populating
+                /// any `Auto<T>` PK, and write its audit row there too.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &mut self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #insert_query
+                    #root::audit::insert_one_with_audit_tx(tx, &_query, self, |_m: &Self| {
+                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    })
+                    .await
+                }
             }
-        }
-    } else {
-        let insert_columns = &fields.insert_columns;
-        let insert_values = &fields.insert_values;
-        quote! {
-            /// Insert this row inside an open transaction.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_tx(tx, &_query).await
+        } else if fields.has_auto {
+            let pushes = &fields.insert_pushes;
+            let returning_cols = &fields.returning_cols;
+            quote! {
+                /// Insert this row inside an open transaction, populating
+                /// any `Auto<T>` PK from the auto-assigned value. Works
+                /// against any backend that `tx` wraps.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &mut self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #returning_cols ),* ]);
+                    let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
+                    #root::sql::apply_auto_pk(_result, self)
+                }
             }
-        }
-    };
+        } else {
+            let insert_columns = &fields.insert_columns;
+            let insert_values = &fields.insert_values;
+            let insert_run = if audited_insert_query.is_some() {
+                quote! {
+                    let _audit_entry =
+                        self.__rustango_audit_entry(#root::audit::AuditOp::Create);
+                    #root::audit::insert_with_entry_tx(tx, &_query, &_audit_entry).await
+                }
+            } else {
+                quote!(#root::sql::insert_tx(tx, &_query).await)
+            };
+            quote! {
+                /// Insert this row inside an open transaction.
+                ///
+                /// # Errors
+                /// As [`Self::insert_pool`].
+                pub async fn insert_tx(
+                    &self,
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    let _query = #root::core::InsertQuery::new(
+                        <Self as #root::core::Model>::SCHEMA,
+                        ::std::vec![ #( #insert_columns ),* ],
+                        ::std::vec![ #( #insert_values ),* ],
+                    );
+                    #insert_run
+                }
+            }
+        };
 
     let tx_save_method = if let Some((pk_ident, pk_col)) = primary_key {
         let pk_column_lit = pk_col.as_str();
@@ -6509,6 +6395,14 @@ fn inherent_impl_tokens(
             }
         } else {
             quote!()
+        };
+        let save_run = if audited_fields.is_some() {
+            quote! {
+                self.__rustango_save_with_diff_tx(tx, &_query, ::core::option::Option::None)
+                    .await
+            }
+        } else {
+            quote!(#root::sql::update_tx(tx, &_query).await)
         };
         quote! {
             /// Save this row inside an open transaction. `INSERT` when
@@ -6533,8 +6427,7 @@ fn inherent_impl_tokens(
                         ),
                     )),
                 );
-                let _affected = #root::sql::update_tx(tx, &_query).await?;
-                ::core::result::Result::Ok(_affected)
+                #save_run
             }
         }
     } else {
@@ -6545,6 +6438,15 @@ fn inherent_impl_tokens(
         let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
         let pk_ident_for_tx = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_tx {
+            let delete_run = if audited_fields.is_some() {
+                quote! {
+                    let _audit_entry =
+                        self.__rustango_audit_entry(#root::audit::AuditOp::Delete);
+                    #root::audit::delete_one_with_audit_tx(tx, &_query, &_audit_entry).await
+                }
+            } else {
+                quote!(#root::sql::delete_tx(tx, &_query).await)
+            };
             quote! {
                 /// Delete the row identified by this instance's PK
                 /// inside an open transaction. Works against any backend
@@ -6563,7 +6465,7 @@ fn inherent_impl_tokens(
                             ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
                     );
-                    #root::sql::delete_tx(tx, &_query).await
+                    #delete_run
                 }
             }
         } else {
@@ -6616,18 +6518,6 @@ fn inherent_impl_tokens(
                     )
                 }
             });
-            let after_pairs = tracked.iter().map(|c| {
-                let column_lit = c.column.as_str();
-                let ident = &c.ident;
-                quote! {
-                    (
-                        #column_lit,
-                        #root::__serde_json::to_value(&self.#ident)
-                            .unwrap_or(#root::__serde_json::Value::Null),
-                    )
-                }
-            });
-            let pk_str = audit_pk_to_string.clone();
             let pre = quote! {
                 let _audit_before_query = #root::audit::before_image_query(
                     <Self as #root::core::Model>::SCHEMA,
@@ -6646,13 +6536,11 @@ fn inherent_impl_tokens(
             };
             let post = quote! {
                 if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                    let _audit_after:
-                        ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
-                        ::std::vec![ #( #after_pairs ),* ];
+                    let _audit_after = self.__rustango_audit_pairs();
                     if let ::core::option::Option::Some(_audit_entry) =
                         #root::audit::PendingEntry::update_diff(
                             <Self as #root::core::Model>::SCHEMA.table,
-                            #pk_str,
+                            self.__rustango_audit_pk(),
                             &_audit_before,
                             &_audit_after,
                         )
@@ -6711,20 +6599,12 @@ fn inherent_impl_tokens(
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
         };
-        // An upsert that may hit a conflict is recorded as `Update`; only
-        // an unset PK with a PK-only target is surely a `Create`.
-        let (audit_upsert_pre, audit_upsert_emit) = if audited_fields.is_some() {
+        // Audited: the upsert reports whether it inserted or updated (#1795).
+        let (upsert_run, audit_upsert_emit) = if audited_fields.is_some() {
             (
-                if upsert_target_columns == [pk_column.clone()] {
-                    quote! {
-                        let _audit_op = if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                            #root::audit::AuditOp::Create
-                        } else {
-                            #root::audit::AuditOp::Update
-                        };
-                    }
-                } else {
-                    quote!(let _audit_op = #root::audit::AuditOp::Update;)
+                quote! {
+                    let (_returning_row_v, _audit_op) =
+                        #root::audit::upsert_returning_on(&mut *_executor, &query).await?;
                 },
                 quote! {
                     let _audit_entry = self.__rustango_audit_entry(_audit_op);
@@ -6732,7 +6612,14 @@ fn inherent_impl_tokens(
                 },
             )
         } else {
-            (quote!(), quote!())
+            (
+                quote! {
+                    let _returning_row_v =
+                        #root::sql::__macro_internals::insert_returning_on(_executor, &query)
+                            .await?;
+                },
+                quote!(),
+            )
         };
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
@@ -6874,11 +6761,7 @@ fn inherent_impl_tokens(
                 )
                 .returning(::std::vec![ #( #upsert_returning ),* ])
                 .on_conflict(#conflict_clause);
-                #audit_upsert_pre
-                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
+                #upsert_run
                 let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
                 #audit_upsert_emit
@@ -6977,7 +6860,8 @@ fn inherent_impl_tokens(
                 /// (`QuerySet::active()` / `only_trashed()`,
                 /// `soft_delete::active_filter` /
                 /// `compose_with_active`) filter trashed rows out by
-                /// reading `IS NULL` on the same column.
+                /// reading `IS NULL` on the same column. Keyed on the PK;
+                /// global scopes do not apply.
                 ///
                 /// # Errors
                 /// As [`#root::sql::update_pool`].
@@ -7001,7 +6885,8 @@ fn inherent_impl_tokens(
                 /// Tri-dialect counterpart of [`Self::restore_on`].
                 /// Clears the `#[rustango(soft_delete)]` column back
                 /// to `NULL`, marking the row live again. Eloquent
-                /// `Model::restore()` parity.
+                /// `Model::restore()` parity. Keyed on the PK; global
+                /// scopes do not apply.
                 ///
                 /// # Errors
                 /// As [`#root::sql::update_pool`].
@@ -7543,15 +7428,21 @@ fn inherent_impl_tokens(
     // Auto<T> PKs are required to be `Auto::Unset` for every row so the
     // sequence picks the PK for fresh inserts; the UPDATE branch never
     // touches the Auto column.
-    // No RETURNING on MySQL, so which rows landed is unknown: refuse on
-    // audited models rather than write unaudited (#1747).
-    let refuse_unaudited_bulk_insert = quote! {
-        if <Self as #root::core::Model>::SCHEMA.audit_track.is_some() {
-            return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+    // Audited models audit each written row; MySQL, with no RETURNING,
+    // is refused there (#1747, #1795).
+    let run_conflict_bulk_insert = match (audited_fields.is_some(), primary_key.is_some()) {
+        (false, _) => quote!(#root::sql::bulk_insert_pool(pool, &_query).await),
+        (true, true) => quote! {
+            #root::audit::bulk_insert_with_audit::<Self>(pool, &_query, |_r: &Self, _op| {
+                _r.__rustango_audit_entry(_op)
+            })
+            .await
+        },
+        (true, false) => quote! {
+            ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
                 table: <Self as #root::core::Model>::SCHEMA.table,
-                reason: "conflict-handling bulk inserts cannot tell which rows landed",
-            });
-        }
+            })
+        },
     };
     let bulk_upsert_pool_method = {
         // Pick the "no Auto" columns when the model has Auto fields,
@@ -7588,7 +7479,8 @@ fn inherent_impl_tokens(
             /// Auto-PK rows must all have `Auto::Unset` (the sequence
             /// picks the PK on insert; the update path never touches
             /// the Auto column). Auto-set rows trigger a hard error.
-            /// Empty slice is a no-op.
+            /// Empty slice is a no-op. On an audited model each written
+            /// row gets a `create` or `update` audit row; MySQL refuses it.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
@@ -7599,7 +7491,6 @@ fn inherent_impl_tokens(
                 update_cols: &[&'static str],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7618,7 +7509,7 @@ fn inherent_impl_tokens(
                     _all_rows,
                 )
                 .on_conflict_do_update(target, update_cols);
-                #root::sql::bulk_insert_pool(pool, &_query).await
+                #run_conflict_bulk_insert
             }
 
             /// Tri-dialect `bulk_create(ignore_conflicts=True)` — silently
@@ -7634,7 +7525,6 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #refuse_unaudited_bulk_insert
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7653,7 +7543,7 @@ fn inherent_impl_tokens(
                     _all_rows,
                 )
                 .on_conflict_do_nothing();
-                #root::sql::bulk_insert_pool(pool, &_query).await
+                #run_conflict_bulk_insert
             }
         }
     };
@@ -8268,13 +8158,6 @@ struct ContainerAttrs {
     /// to partition diff output between registry-scoped and
     /// tenant-scoped migration files.
     scope: Option<String>,
-    /// Custom-Manager extension-trait name from
-    /// `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-    /// When set, the macro emits an empty `pub trait <name>: Sized {}`
-    /// adjacent to the model so users can write
-    /// `impl FooManagerExt for QuerySet<Foo> { fn published(self) -> Self ... }`
-    /// and discover the convention from the model definition.
-    manager_ext: Option<syn::Ident>,
     /// Extra QuerySet accessor names from
     /// `#[rustango(manager_fn = "active")]`. Issue #289 / T2.6.
     /// Each value adds a `pub fn <name>() -> QuerySet<Self>` next to
@@ -8753,7 +8636,6 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
         scope: None,
-        manager_ext: None,
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
@@ -8944,26 +8826,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("manager") {
-                // `#[rustango(manager(ext = "FooManagerExt"))]`. Issue #271 / T1.9.
-                // Stretch `from_queryset = "..."` is left as a
-                // follow-up — the issue's primary acceptance is the
-                // `ext = ...` trait emission.
-                meta.parse_nested_meta(|inner| {
-                    if inner.path.is_ident("ext") {
-                        let s: LitStr = inner.value()?.parse()?;
-                        let name = s.value();
-                        if name.is_empty() {
-                            return Err(inner.error("manager(ext = \"...\") cannot be empty"));
-                        }
-                        out.manager_ext =
-                            Some(syn::Ident::new(&name, s.span()));
-                        return Ok(());
-                    }
-                    Err(inner.error(
-                        "unknown manager attribute (supported: `ext = \"TraitName\"`)",
-                    ))
-                })?;
-                return Ok(());
+                // Its empty trait could not take methods (#2132).
+                return Err(meta.error(
+                    "`manager(ext = ...)` was removed (#2132): declare your own \
+                     `trait FooManagerExt: Sized { … }` and implement it for `QuerySet<Foo>`",
+                ));
             }
             if meta.path.is_ident("manager_fn") {
                 // `#[rustango(manager_fn = "active")]` — issue #289 / T2.6.
@@ -13811,6 +13678,17 @@ mod field_attr_tests {
         assert!(errs[1].as_deref().unwrap().contains("vector"), "{errs:?}");
         assert!(errs[2].as_deref().unwrap().contains("geometry"), "{errs:?}");
         assert_eq!(errs[3], None);
+    }
+
+    /// `manager(ext)` emitted a trait nobody could add methods to; it is refused (#2132).
+    #[test]
+    fn manager_ext_is_refused() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "p", manager(ext = "PostManagerExt"))]
+            struct Post { id: i64 }
+        };
+        let err = parse_container_attrs(&input).err().expect("refused");
+        assert!(err.to_string().contains("#2132"), "{err}");
     }
 
     /// A raw ident derives names without `r#`; this used to panic (#1937).

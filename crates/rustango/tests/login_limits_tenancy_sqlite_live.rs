@@ -101,6 +101,11 @@ async fn whoami(CurrentUser(user): CurrentUser) -> axum::response::Response {
 }
 
 async fn boot() -> Env {
+    boot_with(|_| {}).await
+}
+
+/// [`boot`] with the JWT router's config adjusted.
+async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Config)) -> Env {
     limits();
     let dir = tempfile::tempdir().expect("tempdir");
     let reg_url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
@@ -172,11 +177,12 @@ async fn boot() -> Env {
         session_secret: secret.clone(),
         operator_secret: secret.clone(),
     });
-    let jwt =
-        rustango::tenancy::auth_routes::JwtAuth::new(rustango::tenancy::auth_routes::Config {
-            session_secret: Some(b"login_limits_jwt_secret_32_bytes!!".to_vec()),
-            ..rustango::tenancy::auth_routes::Config::default()
-        });
+    let mut cfg = rustango::tenancy::auth_routes::Config {
+        session_secret: Some(b"login_limits_jwt_secret_32_bytes!!".to_vec()),
+        ..rustango::tenancy::auth_routes::Config::default()
+    };
+    jwt_cfg(&mut cfg);
+    let jwt = rustango::tenancy::auth_routes::JwtAuth::new(cfg);
     let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend), Arc::new(ApiKeyBackend)];
     let api = Router::new()
         .route("/whoami", get(whoami))
@@ -713,6 +719,95 @@ async fn a_token_from_another_tenant_is_refused_with_the_same_hash() {
         acme.bearer_status("/bearer", &token).await,
         StatusCode::UNAUTHORIZED
     );
+}
+
+impl Env {
+    /// `POST /api/auth/refresh` with `token`; the response.
+    async fn refresh(&self, token: &str) -> axum::response::Response {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "refresh": token }).to_string(),
+            ))
+            .unwrap();
+        send(&self.api, &next_ip(), req).await
+    }
+
+    /// Both endpoints that take a bearer give `want` for `token`.
+    async fn assert_bearer(&self, token: &str, want: StatusCode, what: &str) {
+        for uri in ["/bearer", "/api/auth/me"] {
+            assert_eq!(self.bearer_status(uri, token).await, want, "{what}: {uri}");
+        }
+    }
+}
+
+/// A replayed refresh token revokes its family, and with it every access
+/// token of that chain, at once (#2119).
+#[tokio::test]
+async fn a_revoked_refresh_family_ends_its_access_tokens() {
+    let _g = SUITE.lock().await;
+    // No grace: the first replay counts as theft.
+    let env = boot_with(|c| c.refresh_reuse_grace_secs = 0).await;
+    let name = unique("fam");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let first = login["access"].as_str().unwrap().to_owned();
+    let refresh = login["refresh"].as_str().unwrap().to_owned();
+    let r = env.refresh(&refresh).await;
+    assert_eq!(r.status(), StatusCode::OK, "rotate");
+    let rotated = json_body(r).await["access"].as_str().unwrap().to_owned();
+    env.assert_bearer(&first, StatusCode::OK, "control").await;
+    env.assert_bearer(&rotated, StatusCode::OK, "control").await;
+
+    let r = env.refresh(&refresh).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "replay");
+
+    env.assert_bearer(&first, StatusCode::UNAUTHORIZED, "login access")
+        .await;
+    env.assert_bearer(&rotated, StatusCode::UNAUTHORIZED, "rotated access")
+        .await;
+}
+
+/// Past the absolute session cap the access token is refused too (#2119).
+#[tokio::test]
+async fn the_session_cap_ends_the_access_token() {
+    let _g = SUITE.lock().await;
+    let env = boot_with(|c| c.refresh_absolute_ttl_secs = 2).await;
+    let name = unique("cap");
+    env.user(&name).await;
+    let access = env.access(&name).await;
+    env.assert_bearer(&access, StatusCode::OK, "control").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    env.assert_bearer(&access, StatusCode::UNAUTHORIZED, "capped")
+        .await;
+}
+
+/// Logout ends every access token of that login, not only the bearer sent.
+#[tokio::test]
+async fn logout_ends_every_access_token_of_the_login() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("lo");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let first = login["access"].as_str().unwrap().to_owned();
+    let r = env.refresh(login["refresh"].as_str().unwrap()).await;
+    assert_eq!(r.status(), StatusCode::OK, "rotate");
+    let rotated = json_body(r).await["access"].as_str().unwrap().to_owned();
+    env.assert_bearer(&first, StatusCode::OK, "control").await;
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, format!("Bearer {rotated}"))
+        .body(Body::empty())
+        .unwrap();
+    let r = send(&env.api, &next_ip(), logout).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    env.assert_bearer(&first, StatusCode::UNAUTHORIZED, "earlier access")
+        .await;
 }
 
 async fn json_body(r: axum::response::Response) -> serde_json::Value {

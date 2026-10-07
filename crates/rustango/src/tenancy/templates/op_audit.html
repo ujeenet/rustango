@@ -5,7 +5,7 @@
 <p class="lead">Every change made through this console, newest first.
 Registry-scoped — a tenant's own history lives in that tenant's admin.</p>
 
-<form method="get" action="/audit" class="filter-bar">
+<form method="get" action="{{ console_prefix }}/audit" class="filter-bar">
   <label for="entity_table">entity</label>
   <input type="text" id="entity_table" name="entity_table"
          value="{{ filter_entity_table }}" placeholder="rustango_orgs">
@@ -16,7 +16,7 @@ Registry-scoped — a tenant's own history lives in that tenant's admin.</p>
   <input type="text" id="operation" name="operation"
          value="{{ filter_operation }}" placeholder="action">
   <button type="submit" class="btn btn-secondary">Filter</button>
-  <a href="/audit" class="btn-link">Clear</a>
+  <a href="{{ console_prefix }}/audit" class="btn-link">Clear</a>
 </form>
 
 {% if entries | length == 0 %}
@@ -49,7 +49,7 @@ Registry-scoped — a tenant's own history lives in that tenant's admin.</p>
       <td>
         <code>{{ e.entity_table }}</code>
         <a class="btn-link"
-           href="/audit?entity_table={{ e.entity_table }}&entity_pk={{ e.entity_pk }}"
+           href="{{ console_prefix }}/audit?entity_table={{ e.entity_table }}&entity_pk={{ e.entity_pk }}"
            title="Show only this record's history">{{ e.entity_pk }}</a>
       </td>
       <td>

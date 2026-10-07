@@ -931,6 +931,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_decommission_sqlite_live
       # #1341 — pre-warming pools from the console, which was CLI-only.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_errors_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_mount_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_store_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,testkit --test org_hosts_sqlite_live
@@ -1012,6 +1014,7 @@ jobs:
             --test audit_pool_writes_tri \
             --test audit_bulk_writes_tri \
             --test atomic_savepoints_tri \
+            --test atomic_helpers_tri \
             --test orm_bounded_dml_tri \
             --test orm_core_counts_tri \
             --test manage_data_verbs_tri \
@@ -1304,6 +1307,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
+      - run: cargo test -p rustango --features mysql,testkit,cache --test atomic_helpers_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri

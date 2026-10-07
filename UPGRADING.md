@@ -150,6 +150,96 @@ untouched.
 
 ## Unreleased
 
+### Multi-statement writes inside `atomic` join the block
+
+Inside an `atomic` block on the same pool these now run in a savepoint and commit or roll back with the block (#1460): audited `insert_pool` / `save_pool` / `save_partial` / `delete_pool` / `soft_delete` / `restore` / `truncate`, audited `update_all` / `delete_where` / `destroy` / `bulk_update` / bulk upserts, `audit::emit_many_pool`, M2M `set`, `fixtures::load_all_pool` / `load_into_pool`, `DatabaseCache::incr` on MySQL, SSO member provisioning, viewset bulk create, and the admin's audited edits and creates.
+
+Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`: drop the guard before the call.
+
+On SQLite they no longer take the write lock up front (`BEGIN IMMEDIATE`): the outer block began `DEFERRED`, so a block that reads before it writes can get `SQLITE_BUSY` under a concurrent writer. Write first in the block, or retry; a way to open `atomic` with `BEGIN IMMEDIATE` is planned for 0.61.0.
+
+### Audited `_tx` writes now write audit rows
+
+`insert_tx`, `save_tx` and `delete_tx` on audited models add their audit row in the same transaction, like the `_pool` methods (#1460). Drop any manual audit emit you added after them.
+
+They now run extra statements: the audit insert, and a before-read for `save_tx`. `assert_num_queries` does not count those two, so a test pinning statement counts by other means will see more.
+
+### Render DDL outside the runner with `render_changes_between`
+
+`render_changes_split_with_dialect` has no before-snapshot, so on MySQL it emits `DROP COLUMN` without the FK drop and fails (1828). Use `migrate::render_changes_between(changes, before, after, dialect)` (#2026).
+
+### MySQL migrate lock name changed
+
+The lock is now `rustango_migrate_<sha1 of DATABASE()>` (#1991). During a rolling upgrade an old and a new process on the same database do not exclude each other: upgrade them one at a time.
+
+### `manager(ext = ...)` is gone
+
+**Breaking:** drop the attribute and declare the trait yourself: `trait FooManagerExt: Sized { … }` plus `impl FooManagerExt for QuerySet<Foo>` (#2132).
+
+### M2M writes validate against the through model
+
+On a registered through model, `add` and `set` run its full `validate()`: `max_length`, `min`/`max`, `choices` and named validators, on every backend. A through model missing a manager column now gives `UnknownField` (#2136).
+
+On MySQL, an `add` skipped as a duplicate sets the connection's `LAST_INSERT_ID()`, as other skipped inserts already did.
+
+### Audited conflict bulk inserts run on PG and SQLite
+
+On audited models `bulk_upsert_pool` and `bulk_insert_or_ignore_pool` no longer return `AuditUnsupported` on PG and SQLite; MySQL still does, except for an empty slice, which is now `Ok`. An audited model with no PK gets `MissingPrimaryKey` instead of `AuditUnsupported`. An audited `upsert` may now run two statements (#1795).
+
+### Audited models have `save_partial`
+
+`#[rustango(audit(...))]` models now get `save_partial` and `save_partial_typed`; an inherent method of the same name on such a model now clashes (#1744).
+
+### One `through` table, one shape
+
+Two `m2m` relations on one `through` table with different tables or columns (not just mirrored) are now a `MigrateError::Validation` in `makemigrations`, and a panic in the `SchemaSnapshot` builders (#2000). Give each its own `through`.
+
+`M2MTableSnapshot` equality and order now ignore which end is the source, and new snapshots put the end that sorts first as the source. A mirrored pair no longer rebuilds the junction.
+
+### `ConfigError::Parse` holds a `TomlSyntaxError`
+
+**Breaking:** its `source` is now `config::TomlSyntaxError` (message and line only), not `toml::de::Error`. Read `message()` / `line_col()` (#2108).
+
+### CSRF cookie `Secure` follows the layer
+
+Under `csrf::with_config`, CBV and admin cookies take `Secure` from `CsrfConfig::secure`; plain-HTTP dev needs `allow_insecure_for_dev()`. Under a default `csrf::layer()` (and with no layer) they, and that layer's own cookie, follow the session `Secure` policy (#2117).
+
+### ViewSet duplicate keys are 409
+
+A ViewSet write that hits a unique or primary-key constraint now answers `409` (`"error": "conflict"`), not `400`. Clients that matched on 400 must accept 409 (#2075).
+
+### `AppBuilder::serve` catches panics outside `api`
+
+A handler panic is now a 500, but layers on the `api` router (headers, request id) do not see it (#2069).
+
+### ViewSet throttles run after tenant resolution
+
+Each tenant now has its own throttle budget; unknown tenants share one per client. `tenant_router` resolves the tenant through the mounted context auth uses, and takes no connection before the throttle (#2076).
+
+### Hosts with a non-digit port are refused
+
+`ALLOWED_HOSTS` (even `*`), tenant lookup, CSRF wildcards and `validate_url` now reject `host:port` where the port is not digits (#2043).
+
+### `slugify` output for some non-ASCII input
+
+`slugify` now folds via NFKD, so İ, Vietnamese letters and compat forms (`²`, `ﬁ`) keep a letter instead of being dropped. Stored slugs are not touched (#2092).
+
+### Operator console
+
+The console can be nested under a path prefix; its templates take `console_prefix` (#2007). Schema-mode and connect-check error texts changed (#1335).
+
+### `tenancy::authenticate_*` return `PasswordVerified`
+
+**Breaking:** `authenticate_user`, `authenticate_user_pool`, `authenticate_operator` and `authenticate_operator_pool` return `Option<PasswordVerified<_>>`. It derefs to the row; call `.complete(&pool)` (or `.complete_on(conn)`) after your second factor to store an upgraded hash (#2093).
+
+### `AdminSession::impersonated_by`
+
+**Breaking:** `AdminSession` has a new `impersonated_by` field; build it with `AdminSession::new`. In an impersonation `username` is empty: read `impersonated_by`. `actor()` returns an `AuditSource`; the i18n editor stores its token as `updated_by`, now `user:<id>` or `operator:<id>:impersonating` instead of a username or `operator:<name>`. Update any filter on it (#2110).
+
+### `TenantSessionPayload::impersonation` takes a session id
+
+**Breaking:** it takes a `sid` (the handoff `jti`), and the payload has a new `sid` field. Impersonation cookies from before this release are refused; open the tenant again from the console (#2038).
+
 ## 0.60.0
 
 ### `verify_for_tenant` takes the `Tenant`
@@ -1404,15 +1494,8 @@ WHERE c.contype = 'f' AND n.nspname <> 'public' AND tn.nspname = 'public'
 ```
 
 Drop each one (`ALTER TABLE "<schema>"."<table>" DROP CONSTRAINT "<name>"`).
-For the three permission tables, `manage seed-permissions --slug <slug>`
-then re-creates them inside the tenant. For `rustango_api_keys`, re-add it
-by hand:
-
-```sql
-ALTER TABLE "<schema>"."rustango_api_keys"
-  ADD CONSTRAINT "rustango_api_keys_user_id_fkey" FOREIGN KEY ("user_id")
-  REFERENCES "<schema>"."rustango_users" ("id") ON DELETE CASCADE;
-```
+Then `manage seed-permissions --slug <slug>` re-creates them inside the
+tenant, the `rustango_api_keys` one included since 0.60.1 (#1731).
 
 ### Tenant admin and operator console POSTs need the CSRF token
 

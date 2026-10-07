@@ -322,7 +322,8 @@ where
                     w,
                     "seed-permissions [--slug <s>]\n  \
                      Re-run auto_create_permissions for one (with --slug) or every\n  \
-                     active tenant. Idempotent — UNIQUE on (table_name, codename)\n  \
+                     active tenant, and ensure the permission and API-key tables.\n  \
+                     Idempotent — UNIQUE on (table_name, codename)\n  \
                      means re-running on a populated catalog is a no-op."
                 )?;
                 return Ok(());
@@ -360,6 +361,10 @@ where
     for org in &targets {
         let pool = pools.scoped_pool_dyn(org).await?;
         permissions::ensure_tables_pool(&pool)
+            .await
+            .map_err(TenancyError::Driver)?;
+        // The one path that recreates `rustango_api_keys` or its FK without minting a key (#1731).
+        auth_backends::ensure_api_keys_table_pool(&pool)
             .await
             .map_err(TenancyError::Driver)?;
         permissions::auto_create_permissions_pool(&pool).await?;

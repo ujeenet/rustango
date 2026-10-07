@@ -920,7 +920,8 @@ async fn the_login_form_round_trip_signs_in() {
     let page = b.get("/operators").await;
     let html = body_of(page).await;
     assert!(
-        html.contains(r#"<meta name="csrf-token" content=""#) && !html.contains(r#"content="">"#),
+        html.contains(r#"<meta name="csrf-token" content=""#)
+            && !html.contains(r#"<meta name="csrf-token" content="">"#),
         "the layout's csrf-token meta is filled"
     );
 

@@ -506,24 +506,26 @@ impl Cache for DatabaseCache {
         let value: String = if dialect.name() == "mysql" {
             // No RETURNING: read back in the same transaction, which still
             // holds the row lock the upsert took.
-            let mut tx = crate::sql::transaction_pool(&self.pool)
+            let mut scope = crate::sql::TxScope::begin(&self.pool, crate::sql::Begin::Deferred)
                 .await
                 .map_err(err)?;
-            crate::sql::raw_execute_tx(
-                &mut tx,
-                &format!("{insert} ON DUPLICATE KEY UPDATE {set}"),
-                binds,
-            )
-            .await
-            .map_err(err)?;
-            let rows: Vec<(String,)> = crate::sql::raw_query_tx(
-                &mut tx,
-                &format!("SELECT value FROM {table} WHERE cache_key = {p1}"),
-                vec![StoredKey::new(key).into_value()],
-            )
-            .await
-            .map_err(err)?;
-            tx.commit().await.map_err(|e| err(e.into()))?;
+            let r: Result<Vec<(String,)>, crate::sql::ExecError> = async {
+                let tx = scope.tx();
+                crate::sql::raw_execute_tx(
+                    tx,
+                    &format!("{insert} ON DUPLICATE KEY UPDATE {set}"),
+                    binds,
+                )
+                .await?;
+                crate::sql::raw_query_tx(
+                    tx,
+                    &format!("SELECT value FROM {table} WHERE cache_key = {p1}"),
+                    vec![StoredKey::new(key).into_value()],
+                )
+                .await
+            }
+            .await;
+            let rows = scope.end(r).await.map_err(err)?;
             rows.into_iter().next().map(|(v,)| v).unwrap_or_default()
         } else {
             // SQLite turns an overflowing sum into a REAL; skip that update

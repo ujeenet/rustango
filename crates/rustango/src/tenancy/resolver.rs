@@ -727,7 +727,7 @@ fn host_of(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
     if let Some(value) = headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
             // `Host` header may include `:port` — strip it.
-            return Some(s.split(':').next().unwrap_or(s).to_ascii_lowercase());
+            return crate::urls::split_host_port(s).map(|(h, _)| h.to_ascii_lowercase());
         }
     }
     uri.host().map(str::to_ascii_lowercase)
@@ -876,6 +876,16 @@ mod tests {
         // HTTP/2 carries the host in `:authority`, not `Host`.
         let h2: http::Uri = "https://app.test/x".parse().unwrap();
         assert!(host_is_apex(&none, &h2, "app.test"));
+    }
+
+    /// An IPv6 `Host` keeps its address, not just `[` (#2043).
+    #[test]
+    fn ipv6_host_keeps_the_address() {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::HOST, "[::1]:8080".parse().unwrap());
+        let path: http::Uri = "/".parse().unwrap();
+        assert_eq!(host_of(&h, &path).as_deref(), Some("[::1]"));
+        assert!(host_is_apex(&h, &path, "[::1]"));
     }
 
     #[test]

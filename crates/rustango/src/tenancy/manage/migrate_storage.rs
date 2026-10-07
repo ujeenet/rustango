@@ -218,7 +218,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         crate::tenancy::resolver::CACHE_TTL.as_secs()
     )?;
 
-    if let Err(e) = smoke_check(&parsed.target, &target_url, target_schema.as_deref()).await {
+    if let Err(e) = smoke_check(&target_url, target_schema.as_deref()).await {
         writeln!(
             writer,
             "  smoke-check FAILED: {e} — reverting Org row to {prior_storage_mode}"
@@ -390,57 +390,26 @@ fn pg_dump_to_psql(
     Ok(())
 }
 
-/// Open a one-shot pool against the new location, run `SELECT 1
-/// FROM rustango_users LIMIT 1`. The query passes whether or not
-/// any rows exist — what we're checking is that the table is
-/// reachable, not that it has data.
-async fn smoke_check(
-    target: &StorageMode,
-    target_url: &str,
-    target_schema: Option<&str>,
-) -> Result<(), TenancyError> {
+/// Check `rustango_users` is reachable at the new location; rows or not.
+/// Schema-qualified: through the search_path, `public.rustango_users`
+/// passed for an empty target schema (#1864).
+async fn smoke_check(target_url: &str, target_schema: Option<&str>) -> Result<(), TenancyError> {
     use crate::sql::sqlx::postgres::PgPoolOptions;
-    let opts = PgPoolOptions::new().max_connections(1);
-    let pool = if let (StorageMode::Schema, Some(schema)) = (target, target_schema) {
-        let schema_owned: std::sync::Arc<str> = std::sync::Arc::from(schema);
-        opts.after_connect(move |conn, _meta| {
-            let schema = std::sync::Arc::clone(&schema_owned);
-            Box::pin(async move {
-                let stmt = format!("SET search_path TO {}, public", quote_ident(&schema));
-                crate::sql::sqlx::query(&stmt).execute(conn).await?;
-                Ok(())
-            })
-        })
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
         .connect(target_url)
-        .await?
-    } else {
-        opts.connect(target_url).await?
-    };
-    let _row: Option<(i32,)> = crate::sql::sqlx::query_as("SELECT 1 FROM rustango_users LIMIT 1")
-        .fetch_optional(&pool)
         .await?;
+    let stmt = format!(
+        "SELECT 1 FROM {}.rustango_users LIMIT 1",
+        quote_ident(target_schema.unwrap_or("public"))
+    );
+    let res = crate::sql::sqlx::query(&stmt).fetch_optional(&pool).await;
     pool.close().await;
+    res?;
     Ok(())
 }
 
-/// Replace the password segment of a Postgres conninfo string with
-/// `***` so log lines / writer output don't leak credentials. Best-
-/// effort: if the URL doesn't follow the `postgres://user:pass@host`
-/// shape we just return it verbatim.
-fn redact_url(url: &str) -> String {
-    if let Some(scheme_end) = url.find("://") {
-        let after = &url[scheme_end + 3..];
-        if let Some(at) = after.find('@') {
-            let creds = &after[..at];
-            if let Some(colon) = creds.find(':') {
-                let user = &creds[..colon];
-                let rest = &after[at..];
-                return format!("{}://{user}:***{rest}", &url[..scheme_end]);
-            }
-        }
-    }
-    url.to_owned()
-}
+use crate::sql::connect_diagnosis::redact as redact_url;
 
 #[cfg(test)]
 mod tests {
@@ -517,5 +486,45 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// #1864 — an empty target schema fails even with `public.rustango_users`
+    /// present. Own database, so `public` is ours; skips without `DATABASE_URL`.
+    #[tokio::test]
+    async fn smoke_check_looks_only_in_the_target_schema() {
+        use crate::sql::sqlx;
+        let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&admin_url).await.unwrap();
+        let drop_db = "DROP DATABASE IF EXISTS rustango_t1864 WITH (FORCE)";
+        sqlx::query(drop_db).execute(&admin).await.unwrap();
+        sqlx::query("CREATE DATABASE rustango_t1864")
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (base, _) = admin_url.rsplit_once('/').unwrap();
+        let url = format!("{base}/rustango_t1864");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        for stmt in [
+            "CREATE TABLE public.rustango_users (id BIGINT)",
+            "CREATE SCHEMA acme",
+            "CREATE SCHEMA moved",
+            "CREATE TABLE moved.rustango_users (id BIGINT)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+
+        assert!(smoke_check(&url, Some("acme")).await.is_err());
+        smoke_check(&url, Some("moved")).await.unwrap();
+        smoke_check(&url, None).await.unwrap();
+        sqlx::query("DROP TABLE public.rustango_users")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(smoke_check(&url, None).await.is_err());
+
+        pool.close().await;
+        sqlx::query(drop_db).execute(&admin).await.unwrap();
     }
 }

@@ -1413,6 +1413,53 @@ async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
     assert_eq!(got, [(7,)]);
 }
 
+/// #2140 — a rebuild before a RenameTable of the same table keeps its CHECK,
+/// which the final snapshot keys by the new name.
+async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
+    if pool.dialect().name() == "mysql" {
+        eprintln!("skipping — MySQL renders the alter against the final snapshot (#2149)");
+        return;
+    }
+    let (t, u) = ("mad_rk_old", "mad_rk_new");
+    let chain = Chain::new(pool, "rk", &[u, t]).await;
+    let with = |name: &str, default: Value| {
+        json!({"tables": [table(name, vec![id(), col("price", "i64", default)])],
+               "checks": [{"name": "mad_rk_price", "table": name, "expr": "price >= 0"}]})
+    };
+    chain.step(pool, with(t, json!({}))).await.expect("initial");
+    chain
+        .hand(
+            pool,
+            with(u, json!({"default": "1"})),
+            vec![
+                SchemaChange::AlterColumnDefault {
+                    table: t.into(),
+                    column: "price".into(),
+                    from: None,
+                    to: Some("1".into()),
+                },
+                SchemaChange::RenameTable {
+                    old_name: t.into(),
+                    new_name: u.into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("default then rename");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (1, -5)",
+            &[u, "id", "price"]
+        )
+        .await
+        .is_err(),
+        "the CHECK survives on {}",
+        pool.dialect().name()
+    );
+}
+
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
 /// already there elsewhere does not block it; a RunSQL beside it is refused.
 async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
@@ -1928,6 +1975,7 @@ tri_dialect_test!(
         on_delete_and_drop_in_one_migration,
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,
+        rebuild_before_rename_keeps_checks,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,

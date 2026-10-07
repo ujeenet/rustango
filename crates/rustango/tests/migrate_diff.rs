@@ -986,28 +986,81 @@ fn unchanged_schema_with_every_constraint_kind_emits_nothing() {
     assert_eq!(detect_changes(&s, &s.clone()), vec![]);
 }
 
-/// Two models sharing one junction give the same snapshot in either
+/// Both sides declaring one junction give the same snapshot in either
 /// `inventory` order, so the diff between them is empty.
 #[test]
 fn shared_through_pair_emits_nothing_in_either_order() {
     use rustango::core::{M2MRelation, ModelSchema};
-    const M2M: &[M2MRelation] = &[M2MRelation::new(
+    const TAGS: &[M2MRelation] = &[M2MRelation::new(
         "tags",
         "rv_tag",
         "rv_shared_tags",
         "item_id",
         "tag_id",
     )];
-    const fn model(name: &'static str, table: &'static str) -> ModelSchema {
+    const ITEMS: &[M2MRelation] = &[M2MRelation::new(
+        "items",
+        "rv_post",
+        "rv_shared_tags",
+        "tag_id",
+        "item_id",
+    )];
+    const fn model(
+        name: &'static str,
+        table: &'static str,
+        m2m: &'static [M2MRelation],
+    ) -> ModelSchema {
         let mut s = ModelSchema::new(name, table);
-        s.m2m = M2M;
+        s.m2m = m2m;
         s
     }
-    static POST: ModelSchema = model("Post", "rv_post");
-    static NOTE: ModelSchema = model("Note", "rv_note");
-    let a = SchemaSnapshot::from_models(&[&POST, &NOTE]);
-    let b = SchemaSnapshot::from_models(&[&NOTE, &POST]);
+    static POST: ModelSchema = model("Post", "rv_post", TAGS);
+    static TAG: ModelSchema = model("Tag", "rv_tag", ITEMS);
+    let a = SchemaSnapshot::from_models(&[&POST, &TAG]);
+    let b = SchemaSnapshot::from_models(&[&TAG, &POST]);
     assert_eq!(detect_changes(&a, &b), vec![]);
+}
+
+/// Declaring the other side of a junction, from a table that sorts first,
+/// keeps the junction and its rows (#2000).
+#[test]
+fn adding_the_mirror_side_keeps_the_junction() {
+    use rustango::core::{M2MRelation, ModelSchema};
+    const TAGS: &[M2MRelation] = &[M2MRelation::new(
+        "tags",
+        "rv_a_tag",
+        "rv_post_tags",
+        "post_id",
+        "tag_id",
+    )];
+    const POSTS: &[M2MRelation] = &[M2MRelation::new(
+        "posts",
+        "rv_post",
+        "rv_post_tags",
+        "tag_id",
+        "post_id",
+    )];
+    static POST: ModelSchema = {
+        let mut s = ModelSchema::new("Post", "rv_post");
+        s.m2m = TAGS;
+        s
+    };
+    static TAG: ModelSchema = {
+        let mut s = ModelSchema::new("Tag", "rv_a_tag");
+        s.m2m = POSTS;
+        s
+    };
+    let current = SchemaSnapshot::from_models(&[&POST, &TAG]);
+    // As 0.60.0 wrote it with only `Post.tags` declared.
+    let mut prev = current.clone();
+    prev.m2m_tables = serde_json::from_value(serde_json::json!([
+        {"through": "rv_post_tags", "src_table": "rv_post", "src_col": "post_id",
+         "dst_table": "rv_a_tag", "dst_col": "tag_id"}
+    ]))
+    .unwrap();
+    assert_eq!(detect_changes(&prev, &current), vec![]);
+    let one_side = SchemaSnapshot::from_models(&[&POST]);
+    assert_eq!(one_side.m2m_tables, current.m2m_tables);
 }
 
 /// Each edited object is dropped and added again with its new shape, and

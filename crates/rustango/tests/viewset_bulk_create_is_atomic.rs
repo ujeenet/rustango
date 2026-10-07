@@ -73,18 +73,27 @@ async fn prepare(pool: &Pool, ddl: &str) {
 }
 
 async fn post_json(pool: &Pool, body: &str) -> StatusCode {
+    post_json_full(pool, body).await.0
+}
+
+/// The status and the JSON body.
+async fn post_json_full(pool: &Pool, body: &str) -> (StatusCode, serde_json::Value) {
+    use http_body_util::BodyExt as _;
     let app = ViewSet::for_model(Widget::SCHEMA).router_pool("/widgets", pool.clone());
-    app.oneshot(
-        Request::builder()
-            .method(Method::POST)
-            .uri("/widgets")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_owned()))
-            .unwrap(),
-    )
-    .await
-    .unwrap()
-    .status()
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/widgets")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
 async fn row_count(pool: &Pool) -> i64 {
@@ -111,9 +120,10 @@ async fn assert_atomic(pool: &Pool, ddl: &str, backend: &str) {
             {"label":"alpha","priority":3}]"#,
     )
     .await;
+    // A duplicate key is a 409 since #2075.
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::CONFLICT,
         "[{backend}] a duplicate label must reject the batch"
     );
     assert_eq!(
@@ -135,6 +145,28 @@ async fn assert_atomic(pool: &Pool, ddl: &str, backend: &str) {
         "[{backend}] a valid batch must still be created"
     );
     assert_eq!(row_count(pool).await, 2, "[{backend}] both rows land");
+
+    // Inside an `atomic` block on the pool the batch joins it (#1460), so
+    // the block's rollback takes it back. The response is read back in
+    // the block too, so it lists the rows.
+    let p = pool.clone();
+    let res: Result<(), rustango::sql::ExecError> = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rustango::atomic!(pool, |_tx| {
+            let (status, body) = post_json_full(&p, r#"[{"label":"eps","priority":1}]"#).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert_eq!(body[0]["label"], "eps", "{body}");
+            Err(rustango::sql::ExecError::AtomicAborted)
+        }),
+    )
+    .await
+    .expect("deadlock");
+    assert!(res.is_err());
+    assert_eq!(
+        row_count(pool).await,
+        2,
+        "[{backend}] the batch outlived the block it ran in"
+    );
 }
 
 #[tokio::test]

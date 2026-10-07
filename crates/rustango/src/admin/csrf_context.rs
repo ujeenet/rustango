@@ -33,8 +33,11 @@ pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response
     if super::session::current_csrf_token().is_some() {
         return next.run(request).await;
     }
-    let (token, set_cookie) =
-        crate::forms::csrf::ensure_token(request.headers(), crate::forms::csrf::CSRF_COOKIE);
+    let (token, set_cookie) = crate::forms::csrf::ensure_token_under_layer(
+        request.headers(),
+        request.extensions(),
+        crate::forms::csrf::CSRF_COOKIE,
+    );
 
     let mut response = CURRENT_CSRF_TOKEN.scope(token, next.run(request)).await;
 

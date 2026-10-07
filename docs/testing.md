@@ -151,7 +151,8 @@ The `Box::pin` is required, not stylistic: the bound is
 `for<'tx> FnOnce(&'tx AtomicTx) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
 which is how the closure gets to borrow `tx` across its own await points. An
 `atomic()` on the same pool inside the closure is a savepoint and rolls back too;
-drop the guard before it or a `bulk_insert_pool`, or they fail with `NestedAtomic`. The
+drop the guard before it, a `bulk_insert_pool` or a multi-statement write (audited
+`_pool` writes, M2M `set`, fixtures), or they fail with `NestedAtomic`. The
 closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
 rollback happens either way, so the `unwrap` is about your assertions, not
 about cleanup.
@@ -175,9 +176,9 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 223 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 131 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 63 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 225 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 132 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 64 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum

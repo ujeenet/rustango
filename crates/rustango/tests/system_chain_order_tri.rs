@@ -703,6 +703,39 @@ async fn drop_index_on_owned(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+/// #2139 — an index a later step drops and re-creates is there on an owned table.
+async fn recreated_index_on_owned(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _)) = fresh(backend, tmp.path(), "reidx").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let sys = root.join("system/migrations");
+    let first = read(&tenant_file(&sys));
+    let idx = first["snapshot"]["indexes"][0].clone();
+    let (table, index) = (
+        idx["table"].as_str().unwrap(),
+        idx["name"].as_str().unwrap(),
+    );
+    write_step(
+        &sys,
+        "9001_reindex",
+        first["name"].as_str(),
+        first["snapshot"].clone(),
+        vec![
+            json!({ "DropIndex": { "name": index, "table": table } }),
+            json!({ "CreateIndex": idx }),
+        ],
+    );
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, None));
+    manage_migrate(&pool, &dir).await.expect("first run");
+    assert!(has_index(&pool, index).await, "{table}.{index} missing");
+    manage_migrate(&pool, &dir).await.expect("second run");
+}
+
 /// A table a waiting step made early still gets a later step's new index.
 async fn early_table_gets_a_later_index(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
@@ -1447,6 +1480,7 @@ async fn post_migrate_receiver_can_migrate() {
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn waiters_leave_the_pool_free(backend: Backend) {
     use rustango::sql::sqlx;
+    #[cfg(feature = "postgres")]
     const KEY: i64 = 0x5255_5354_4d49_4754;
     const N: u32 = 3;
     let tmp = tempfile::tempdir().unwrap();
@@ -1479,8 +1513,7 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
             let opts = sqlx::mysql::MySqlPoolOptions::new().max_connections(N);
             let pool = opts.acquire_timeout(wait).connect(&url).await.unwrap();
             let mut outside = sqlx::MySqlConnection::connect(&url).await.unwrap();
-            sqlx::query("SELECT GET_LOCK(?, -1)")
-                .bind(format!("rustango_migrate_{KEY:x}"))
+            sqlx::query(MY_HOLD_LOCK)
                 .execute(&mut outside)
                 .await
                 .unwrap();
@@ -1511,10 +1544,102 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
     }
 }
 
+/// The runner's per-database MySQL lock, taken from outside.
+#[cfg(feature = "mysql")]
+const MY_HOLD_LOCK: &str = "SELECT GET_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())), -1)";
+
+/// Whether the database at `url` has its migrate lock taken.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn migrate_lock_held(backend: Backend, url: &str) -> bool {
+    use rustango::sql::sqlx::{self, Connection as _};
+    match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => {
+            let mut c = sqlx::PgConnection::connect(url).await.unwrap();
+            sqlx::query(
+                "SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database \
+                 WHERE l.locktype = 'advisory' AND l.granted AND d.datname = current_database()",
+            )
+            .fetch_optional(&mut c)
+            .await
+            .unwrap()
+            .is_some()
+        }
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => {
+            let mut c = sqlx::MySqlConnection::connect(url).await.unwrap();
+            let held: (Option<u64>,) = sqlx::query_as(
+                "SELECT IS_USED_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())))",
+            )
+            .fetch_one(&mut c)
+            .await
+            .unwrap();
+            held.0.is_some()
+        }
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    }
+}
+
+/// A slow migrate in one database doesn't block a migrate in another (#1991).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn lock_is_per_database(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (Some((a, a_url)), Some((b, _))) = (
+        fresh(backend, tmp.path(), "lockdba").await,
+        fresh(backend, tmp.path(), "lockdbb").await,
+    ) else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let sleep = match backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres => "SELECT pg_sleep(4)",
+        #[cfg(feature = "mysql")]
+        Backend::Mysql => "SELECT SLEEP(4)",
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite => unreachable!(),
+    };
+    let slow_dir = tmp.path().join("slow");
+    write_raw(
+        &slow_dir,
+        "0001_slow",
+        vec![json!({ "data": { "sql": sleep, "reversible": false } })],
+    );
+    let slow = tokio::spawn(async move { rustango::migrate::migrate_pool(&a, &slow_dir).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !migrate_lock_held(backend, &a_url).await {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the slow migrate holds its database's lock");
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let limit = std::time::Duration::from_secs(1);
+    rustango::migrate::with_lock_timeout(limit, rustango::migrate::migrate_pool(&b, &empty))
+        .await
+        .expect("another database's migrate must not hold this one's lock");
+    slow.await.unwrap().expect("slow migrate");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn lock_is_per_database_postgres() {
+    lock_is_per_database(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn lock_is_per_database_mysql() {
+    lock_is_per_database(Backend::Mysql).await;
+}
+
 /// A migrate under `with_lock_timeout` gives up on a held lock with a clear error.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn lock_timeout_gives_up(backend: Backend) {
     use rustango::sql::sqlx::{self, Connection as _};
+    #[cfg(feature = "postgres")]
     const KEY: i64 = 0x5255_5354_4d49_4754;
     let tmp = tempfile::tempdir().unwrap();
     let Some((pool, url)) = fresh(backend, tmp.path(), "locktimeout").await else {
@@ -1535,11 +1660,7 @@ async fn lock_timeout_gives_up(backend: Backend) {
         #[cfg(feature = "mysql")]
         Backend::Mysql => {
             let mut c = sqlx::MySqlConnection::connect(&url).await.unwrap();
-            sqlx::query("SELECT GET_LOCK(?, -1)")
-                .bind(format!("rustango_migrate_{KEY:x}"))
-                .execute(&mut c)
-                .await
-                .unwrap();
+            sqlx::query(MY_HOLD_LOCK).execute(&mut c).await.unwrap();
             Box::new(c)
         }
         #[cfg(feature = "sqlite")]
@@ -1629,6 +1750,7 @@ per_backend!(
     fk_to_a_later_system_step,
     fk_to_a_waiting_system_step,
     drop_index_on_owned,
+    recreated_index_on_owned,
     dropped_table_gets_its_fks_back,
     later_step_waits_on_a_held_table,
     early_table_gets_a_later_index,
