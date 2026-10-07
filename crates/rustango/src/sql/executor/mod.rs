@@ -1272,11 +1272,14 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
 /// One multi-row INSERT binds `rows × columns` parameters: 65535 on
 /// Postgres, 32766 on SQLite, `max_allowed_packet` on MySQL. Past the
 /// cap the driver fails with an opaque error.
-fn compile_bulk_insert_batches(
+pub(crate) fn compile_bulk_insert_batches(
     dialect: &dyn Dialect,
     query: &BulkInsertQuery,
 ) -> Result<Vec<super::CompiledStatement>, ExecError> {
     query.validate()?;
+    if query.rows.is_empty() {
+        return Ok(Vec::new());
+    }
     let max_rows = (dialect.max_bind_params() / query.columns.len().max(1)).max(1);
     if query.rows.len() <= max_rows {
         return Ok(vec![dialect.compile_bulk_insert(query)?]);
@@ -1575,49 +1578,51 @@ pub(crate) async fn bulk_insert_pks_tx(
         .ok_or(ExecError::MissingPrimaryKey {
             table: query.model.table,
         })?;
-    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
+    #[cfg(feature = "mysql")]
+    let no_returning = || ExecError::AuditUnsupported {
+        table: query.model.table,
+        reason: "MySQL has no RETURNING to read the written rows",
+    };
+    // Before compiling: the MySQL writer refuses RETURNING itself.
+    #[cfg(feature = "mysql")]
+    if matches!(tx, PoolTx::Mysql(_)) && !query.rows.is_empty() {
+        return Err(no_returning());
+    }
+    let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), query.rows.clone())
+        .returning(vec![pk.column]);
+    batch.on_conflict.clone_from(&query.on_conflict);
+    let stmts = compile_bulk_insert_batches(tx.dialect(), &batch)?;
     let mut pks = Vec::with_capacity(query.rows.len());
-    for chunk in query.rows.chunks(max_rows) {
-        let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), chunk.to_vec())
-            .returning(vec![pk.column]);
-        batch.on_conflict.clone_from(&query.on_conflict);
-        batch.validate()?;
+    for stmt in stmts {
         crate::test_assertions::query_counter::bump();
         let rows: Result<Vec<InsertReturningPool>, ExecError> = match tx {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => {
-                let stmt = Postgres.compile_bulk_insert(&batch)?;
-                Ok(stmt
-                    .params
-                    .into_iter()
-                    .fold(sqlx::query(&stmt.sql), bind_query)
-                    .fetch_all(&mut **t)
-                    .await?
-                    .into_iter()
-                    .map(InsertReturningPool::PgRow)
-                    .collect())
-            }
+            PoolTx::Postgres(t) => Ok(stmt
+                .params
+                .into_iter()
+                .fold(sqlx::query(&stmt.sql), bind_query)
+                .fetch_all(&mut **t)
+                .await?
+                .into_iter()
+                .map(InsertReturningPool::PgRow)
+                .collect()),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => Err(ExecError::AuditUnsupported {
-                table: query.model.table,
-                reason: "MySQL has no RETURNING to read the written rows",
-            }),
-            #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => {
-                let stmt = super::sqlite::DIALECT.compile_bulk_insert(&batch)?;
-                Ok(stmt
-                    .params
-                    .into_iter()
-                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
-                    .fetch_all(&mut **t)
-                    .await?
-                    .into_iter()
-                    .map(InsertReturningPool::SqliteRow)
-                    .collect())
+            PoolTx::Mysql(_) => {
+                drop(stmt);
+                Err(no_returning())
             }
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(t) => Ok(stmt
+                .params
+                .into_iter()
+                .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                .fetch_all(&mut **t)
+                .await?
+                .into_iter()
+                .map(InsertReturningPool::SqliteRow)
+                .collect()),
         };
-        let rows = rows?;
-        for row in &rows {
+        for row in &rows? {
             pks.push(generated_pk(row, pk, query.model.table)?);
         }
     }
@@ -1649,16 +1654,8 @@ pub(crate) async fn bulk_insert_tx(
     tx: &mut PoolTx<'_>,
     query: &BulkInsertQuery,
 ) -> Result<(), ExecError> {
-    query.validate()?;
-    let max_rows = (tx.dialect().max_bind_params() / query.columns.len().max(1)).max(1);
-    for chunk in query.rows.chunks(max_rows) {
-        let stmt = tx.dialect().compile_bulk_insert(&BulkInsertQuery {
-            model: query.model,
-            columns: query.columns.clone(),
-            rows: chunk.to_vec(),
-            returning: query.returning.clone(),
-            on_conflict: query.on_conflict.clone(),
-        })?;
+    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
+    for stmt in stmts {
         execute_tx(tx, &stmt.sql, stmt.params).await?;
     }
     Ok(())

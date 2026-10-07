@@ -164,8 +164,9 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
         .unwrap();
     let pools = TenantPools::new(registry.clone());
 
-    // `t2156-broken` has no users table, so its FKs cannot be added.
-    for slug in ["t2156-broken", "t2156-ok"] {
+    // `t2156-a-broken` has no users table, so its FKs cannot be added.
+    // Created last, it still runs first: tenants go in slug order.
+    for slug in ["t2156-b-ok", "t2156-a-broken"] {
         run(
             &pools,
             &url,
@@ -175,7 +176,7 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
         .unwrap();
     }
     let ok = Org::objects()
-        .where_(Org::slug.eq("t2156-ok".to_owned()))
+        .where_(Org::slug.eq("t2156-b-ok".to_owned()))
         .fetch(&rustango::sql::Pool::from(registry.clone()))
         .await
         .unwrap()
@@ -198,7 +199,9 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
         "the tenant after the broken one was not seeded"
     );
     assert!(err.contains("1 of 2 tenant(s) failed"), "{err}");
-    assert!(err.contains("failed `t2156-broken`"), "{err}");
+    let broken = err.find("failed `t2156-a-broken`").expect(&err);
+    let seeded = err.find("seeded `t2156-b-ok`").expect(&err);
+    assert!(broken < seeded, "tenants must run in slug order: {err}");
 
     drop(scoped);
     drop(pools);

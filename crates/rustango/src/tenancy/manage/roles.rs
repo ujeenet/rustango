@@ -349,6 +349,7 @@ where
     } else {
         Org::objects()
             .where_(Org::active.eq(true))
+            .order_by(&[("slug", false)])
             .fetch(&registry)
             .await?
     };

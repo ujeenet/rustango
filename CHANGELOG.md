@@ -10,11 +10,11 @@ A tenant that fails is reported and the rest are still seeded; the command exits
 
 ### Fixed — MySQL migrate reports data committed before a failing DDL (#2151)
 
-MySQL commits the open transaction at the first DDL, so a failure there now returns `PartiallyApplied` with what committed, not a plain driver error.
+MySQL commits the open transaction at the first DDL, so a failure there now returns `PartiallyApplied` with what committed, not a plain driver error. Unapply reports it the same way.
 
 ### Fixed — `bulk_insert_pool` checks field limits (#2153)
 
-A value over `max_length` or outside `min`/`max` is refused with the same `QueryError` as `insert_pool`, before any SQL runs.
+Rows are checked like `insert_pool` before any SQL runs: `max_length`, `min`/`max`, `choices`, named validators, and `UnknownField` for a column the model lacks.
 
 ### Added — `render_changes_between` takes the before-snapshot (#2026)
 
