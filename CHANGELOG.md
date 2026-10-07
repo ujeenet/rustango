@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `migrate-tenant-storage --to database` from schema mode (#2189)
+
+The restored schema is renamed to `public` in the same transaction as the restore, replacing the new database's empty `public`.
+
 ### Fixed — MySQL AlterColumn* before a RenameTable in one migration (#2149)
 
 The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name. An `AlterFkOnDelete` before a rename works on MySQL and PG too.
