@@ -332,7 +332,7 @@ pub enum ExecError {
 
 impl ExecError {
     /// A UNIQUE or primary-key violation, on any backend.
-    #[cfg(feature = "template_views")]
+    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn is_unique_violation(&self) -> bool {
         matches!(self, Self::Driver(sqlx::Error::Database(db)) if db.is_unique_violation())
     }

@@ -111,9 +111,10 @@ async fn assert_atomic(pool: &Pool, ddl: &str, backend: &str) {
             {"label":"alpha","priority":3}]"#,
     )
     .await;
+    // A duplicate key is a 409 since #2075.
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::CONFLICT,
         "[{backend}] a duplicate label must reject the batch"
     );
     assert_eq!(

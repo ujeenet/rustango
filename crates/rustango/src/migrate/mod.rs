@@ -56,7 +56,6 @@ pub use make::{
 pub use manage::{append_data_op, make_data_migration};
 pub use progress::{MigrationEvent, MigrationObserver, Outcome};
 pub use rebuild::TableRebuild;
-pub use runner::ensure_ledger_pool_with_ledger;
 #[cfg(all(feature = "postgres", any(feature = "manage", feature = "tenancy")))]
 pub(crate) use runner::migrate_locked;
 #[cfg(any(feature = "manage", feature = "tenancy"))]
@@ -66,6 +65,7 @@ pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
 pub use runner::migrate_pool_with_progress;
 pub use runner::unapply_pool_with_ledger;
+pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};
 pub(crate) use runner::{LockHeld, Signals};
 // Always on: entry points that work on PG, MySQL and SQLite through the
 // `Pool` enum, plus the inventory and builder surface.

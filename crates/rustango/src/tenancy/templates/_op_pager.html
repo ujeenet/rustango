@@ -10,7 +10,7 @@
 {% if total_pages > 1 %}
 <nav class="pager" aria-label="Pagination">
   {% if has_prev %}
-  <a class="pager-step" href="{{ pager_base }}?page={{ page - 1 }}{{ query_suffix }}" rel="prev">← Previous</a>
+  <a class="pager-step" href="{{ console_prefix }}{{ pager_base }}?page={{ page - 1 }}{{ query_suffix }}" rel="prev">← Previous</a>
   {% else %}
   <span class="pager-step pager-disabled">← Previous</span>
   {% endif %}
@@ -21,12 +21,12 @@
     {% elif mark.number == page %}
     <span class="pager-page pager-current" aria-current="page">{{ mark.number }}</span>
     {% else %}
-    <a class="pager-page" href="{{ pager_base }}?page={{ mark.number }}{{ query_suffix }}">{{ mark.number }}</a>
+    <a class="pager-page" href="{{ console_prefix }}{{ pager_base }}?page={{ mark.number }}{{ query_suffix }}">{{ mark.number }}</a>
     {% endif %}
   {% endfor %}
 
   {% if has_next %}
-  <a class="pager-step" href="{{ pager_base }}?page={{ page + 1 }}{{ query_suffix }}" rel="next">Next →</a>
+  <a class="pager-step" href="{{ console_prefix }}{{ pager_base }}?page={{ page + 1 }}{{ query_suffix }}" rel="next">Next →</a>
   {% else %}
   <span class="pager-step pager-disabled">Next →</span>
   {% endif %}

@@ -19,6 +19,29 @@ use serde_json::{json, Value};
 
 async fn no_setup(_pool: &Pool) {}
 
+#[derive(rustango::Model)]
+#[rustango(table = "mad_sdm_parent")]
+#[allow(dead_code)]
+pub struct SdParent {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(rustango::Model)]
+#[rustango(table = "mad_sdm_child")]
+#[allow(dead_code)]
+pub struct SdChild {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(
+        fk = "mad_sdm_parent",
+        on = "id",
+        on_delete = "set_default",
+        default = "0"
+    )]
+    pub parent_id: i64,
+}
+
 fn id() -> Value {
     json!({"name": "id", "column": "id", "ty": "i64", "nullable": false,
            "primary_key": true, "auto": true})
@@ -996,6 +1019,97 @@ async fn on_delete_reaches_an_existing_table(pool: &Pool) {
     on_delete_reaches(pool, "mad_od", true).await;
 }
 
+/// No `on_delete` and an explicit `NO ACTION` are one schema: neither way
+/// writes a migration, so SQLite never rebuilds for nothing (#1573).
+async fn no_action_is_not_a_change(pool: &Pool) {
+    let (a, b) = ("mad_noact_author", "mad_noact_book");
+    for (first, second) in [(None, Some("NO ACTION")), (Some("NO ACTION"), None)] {
+        let chain = Chain::new(pool, "mad_noact", &[b, a]).await;
+        let with = |on_delete: Option<&str>| {
+            let mut rel = json!({"kind": "fk", "to": a, "on": "id"});
+            if let Some(action) = on_delete {
+                rel["on_delete"] = json!(action);
+            }
+            json!({"tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64", json!({"fk": rel}))]),
+            ]})
+        };
+        chain.step(pool, with(first)).await.expect("initial");
+        for _ in 0..2 {
+            let mig = make_migrations_from(chain.dir.path(), &snap(with(second)), None)
+                .expect("makemigrations");
+            assert!(mig.is_none(), "{first:?} -> {second:?} wrote {mig:?}");
+        }
+    }
+}
+
+/// `SET DEFAULT` resets the child where the server enforces it, and is
+/// refused where InnoDB would accept it and then block the delete (#1573).
+async fn set_default_is_enforced_or_refused(pool: &Pool) {
+    let (a, b) = ("mad_setdef_author", "mad_setdef_book");
+    let chain = Chain::new(pool, "mad_setdef", &[b, a]).await;
+    let rel = json!({"kind": "fk", "to": a, "on": "id", "on_delete": "SET DEFAULT"});
+    let step = chain
+        .step(
+            pool,
+            json!({"tables": [
+                table(a, vec![id()]),
+                table(b, vec![id(), col("author_id", "i64",
+                    json!({"fk": rel, "default": "0"}))]),
+            ]}),
+        )
+        .await;
+    let refused = by_dialect! { pool,
+        postgres => false, because "PG enforces SET DEFAULT",
+        mysql => true, because "InnoDB records SET DEFAULT but refuses the parent delete",
+        sqlite => false, because "SQLite enforces SET DEFAULT",
+    };
+    if refused.value {
+        let err = step.expect_err(refused.why);
+        assert!(err.contains("set_default"), "{err}");
+        return;
+    }
+    step.expect(refused.why);
+    exec(pool, "INSERT INTO {} ({}) VALUES (0), (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[b, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"])
+        .await
+        .expect(refused.why);
+    let sql = q(pool, "SELECT {} FROM {}", &["author_id", b]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(0,)], "{}", refused.why);
+}
+
+/// The model-based DDL path refuses it on MySQL too (#2180).
+async fn set_default_is_refused_by_create_tables(pool: &Pool) {
+    drop_table(pool, "mad_sdm_child").await;
+    drop_table(pool, "mad_sdm_parent").await;
+    rustango::testkit::create_tables_for::<SdParent>(pool)
+        .await
+        .expect("parent");
+    let r = rustango::testkit::create_tables_for::<SdChild>(pool).await;
+    let refused = by_dialect! { pool,
+        postgres => false, because "PG enforces SET DEFAULT",
+        mysql => true, because "InnoDB records SET DEFAULT but refuses the parent delete",
+        sqlite => false, because "SQLite enforces SET DEFAULT",
+    };
+    match r {
+        Err(e) if refused.value => assert!(e.to_string().contains("set_default"), "{e}"),
+        r => assert_eq!(r.is_err(), refused.value, "{}: {r:?}", refused.why),
+    }
+}
+
 /// As above through the non-atomic runners.
 async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
     on_delete_reaches(pool, "mad_odn", false).await;
@@ -1411,6 +1525,53 @@ async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
         .await
         .unwrap();
     assert_eq!(got, [(7,)]);
+}
+
+/// #2140 — a rebuild before a RenameTable of the same table keeps its CHECK,
+/// which the final snapshot keys by the new name.
+async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
+    if pool.dialect().name() == "mysql" {
+        eprintln!("skipping — MySQL renders the alter against the final snapshot (#2149)");
+        return;
+    }
+    let (t, u) = ("mad_rk_old", "mad_rk_new");
+    let chain = Chain::new(pool, "rk", &[u, t]).await;
+    let with = |name: &str, default: Value| {
+        json!({"tables": [table(name, vec![id(), col("price", "i64", default)])],
+               "checks": [{"name": "mad_rk_price", "table": name, "expr": "price >= 0"}]})
+    };
+    chain.step(pool, with(t, json!({}))).await.expect("initial");
+    chain
+        .hand(
+            pool,
+            with(u, json!({"default": "1"})),
+            vec![
+                SchemaChange::AlterColumnDefault {
+                    table: t.into(),
+                    column: "price".into(),
+                    from: None,
+                    to: Some("1".into()),
+                },
+                SchemaChange::RenameTable {
+                    old_name: t.into(),
+                    new_name: u.into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("default then rename");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (1, -5)",
+            &[u, "id", "price"]
+        )
+        .await
+        .is_err(),
+        "the CHECK survives on {}",
+        pool.dialect().name()
+    );
 }
 
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
@@ -1925,9 +2086,13 @@ tri_dialect_test!(
     scenarios: [
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
+        no_action_is_not_a_change,
+        set_default_is_enforced_or_refused,
+        set_default_is_refused_by_create_tables,
         on_delete_and_drop_in_one_migration,
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,
+        rebuild_before_rename_keeps_checks,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,

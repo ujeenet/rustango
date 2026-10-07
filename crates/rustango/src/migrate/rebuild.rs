@@ -275,14 +275,39 @@ impl TableRebuild {
     }
 }
 
-/// `table`'s shape after the op that `later` follows, from the migration's
-/// final `after`: later renames, added columns and FK actions undone. A
-/// later op this cannot undo is refused rather than rebuilt past.
-pub(crate) fn shape_at(
+/// `after` with `table` as it is after the op that `later` follows: its
+/// shape from [`shape_at`], and its CHECKs under that name (#2140) without
+/// the ones a later op adds.
+pub(crate) fn snapshot_at(
     table: &str,
     later: &[super::Operation],
     after: &SchemaSnapshot,
-) -> Result<TableSnapshot, String> {
+) -> Result<SchemaSnapshot, String> {
+    use super::SchemaChange as SC;
+    let (shape, last) = shape_at(table, later, after)?;
+    let mut at = after.clone();
+    at.tables.retain(|t| t.name != table);
+    at.tables.push(shape);
+    at.checks.retain(|c| {
+        !later.iter().any(|op| {
+            matches!(op, super::Operation::Schema(SC::AddCheckConstraint { name, .. }) if *name == c.name)
+        })
+    });
+    for c in at.checks.iter_mut().filter(|c| c.table == last) {
+        c.table = table.to_owned();
+    }
+    Ok(at)
+}
+
+/// `table`'s shape after the op that `later` follows, from the migration's
+/// final `after`: later renames, added columns and FK actions undone. A
+/// later op this cannot undo is refused rather than rebuilt past. Also
+/// returns the table's name at the end.
+fn shape_at(
+    table: &str,
+    later: &[super::Operation],
+    after: &SchemaSnapshot,
+) -> Result<(TableSnapshot, String), String> {
     use super::SchemaChange as SC;
     // The table's name when each later op runs.
     let mut name = table.to_owned();
@@ -366,7 +391,7 @@ pub(crate) fn shape_at(
             }
         }
     }
-    Ok(t)
+    Ok((t, name))
 }
 
 fn field<'t>(

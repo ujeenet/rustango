@@ -369,11 +369,12 @@ async fn touch_extends_a_live_entry() {
     let dir = unique_tmp_dir("touch");
     let cache = FileCache::new(&dir);
     cache
-        .set("k", "v", Some(Duration::from_millis(30)))
+        // Wide margin: a 30 ms TTL expired before `touch` on slow CI runners.
+        .set("k", "v", Some(Duration::from_millis(500)))
         .await
         .unwrap();
     assert!(cache.touch("k", None).await.unwrap());
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     assert!(!cache.touch("missing", None).await.unwrap());
     let _ = std::fs::remove_dir_all(&dir);

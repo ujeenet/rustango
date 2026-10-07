@@ -785,7 +785,7 @@ pub async fn fetch_values_flat<U: FlatScalar>(
 ///
 /// # Errors
 /// Driver failure, or a decode error as for [`fetch_values_flat`].
-pub(crate) async fn fetch_flat_raw<U: FlatScalar>(
+async fn fetch_flat_raw<U: FlatScalar>(
     pool: &Pool,
     sql: &str,
     params: Vec<SqlValue>,

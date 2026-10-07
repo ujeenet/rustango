@@ -6,7 +6,7 @@
 
 use rustango::core::Column as _;
 use rustango::sql::sqlx;
-use rustango::sql::FetcherPool as _;
+use rustango::sql::{CounterPool as _, FetcherPool as _};
 use rustango::tenancy::{manage, Org, TenantPools};
 
 fn sibling_database_url(url: &str, database: &str) -> String {
@@ -103,6 +103,7 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
 
     // UPGRADING's repair: drop the constraint, re-run `seed-permissions --slug`.
     let fks = [
+        ("rustango_api_keys", "user_id"),
         ("rustango_role_permissions", "role_id"),
         ("rustango_user_roles", "user_id"),
         ("rustango_user_roles", "role_id"),
@@ -135,6 +136,72 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
         .unwrap_or_else(|e| panic!("{table}.{column} FK not re-created: {e}"));
         assert_eq!(target, schema, "{table}.{column}");
     }
+
+    drop(scoped);
+    drop(pools);
+    registry.close().await;
+    sqlx::query(&drop_db).execute(&admin).await.unwrap();
+}
+
+/// A tenant whose seeding fails must not stop the next one (#2156).
+#[tokio::test]
+async fn seed_permissions_continues_past_a_failing_tenant() {
+    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&admin_url).await.unwrap();
+    let db = format!("rustango_t2156_{}", std::process::id());
+    let drop_db = format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)");
+    sqlx::query(&drop_db).execute(&admin).await.unwrap();
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let url = sibling_database_url(&admin_url, &db);
+    let registry = sqlx::PgPool::connect(&url).await.unwrap();
+    rustango::testkit::migrate_framework(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap();
+    let pools = TenantPools::new(registry.clone());
+
+    // `t2156-a-broken` has no users table, so its FKs cannot be added.
+    // Created last, it still runs first: tenants go in slug order.
+    for slug in ["t2156-b-ok", "t2156-a-broken"] {
+        run(
+            &pools,
+            &url,
+            &["create-tenant", slug, "--mode", "schema", "--no-migrate"],
+        )
+        .await
+        .unwrap();
+    }
+    let ok = Org::objects()
+        .where_(Org::slug.eq("t2156-b-ok".to_owned()))
+        .fetch(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+    let scoped = pools.scoped_pool_dyn(&ok).await.unwrap();
+    rustango::testkit::migrate_framework(&scoped).await.unwrap();
+
+    let perms = || async {
+        rustango::tenancy::permissions::Permission::objects()
+            .count(&scoped)
+            .await
+            .unwrap_or(0)
+    };
+    assert_eq!(perms().await, 0);
+    let err = run(&pools, &url, &["seed-permissions"])
+        .await
+        .expect_err("the broken tenant must fail the run");
+    assert!(
+        perms().await > 0,
+        "the tenant after the broken one was not seeded"
+    );
+    assert!(err.contains("1 of 2 tenant(s) failed"), "{err}");
+    let broken = err.find("failed `t2156-a-broken`").expect(&err);
+    let seeded = err.find("seeded `t2156-b-ok`").expect(&err);
+    assert!(broken < seeded, "tenants must run in slug order: {err}");
 
     drop(scoped);
     drop(pools);

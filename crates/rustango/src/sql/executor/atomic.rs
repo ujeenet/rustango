@@ -13,32 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::OwnedMutexGuard;
 
 use super::{transaction_pool, ExecError, PoolTx};
-use crate::sql::Pool;
+use crate::sql::{Pool, PoolId};
 
 type Callback = Box<dyn FnOnce() + Send>;
-
-/// Identity of a pool: the address of the pool state its clones share.
-/// The clone held here keeps that address from being reused, and unlike
-/// `connect_options()` it survives `set_connect_options`.
-#[derive(Clone)]
-struct PoolId(Pool);
-
-impl PoolId {
-    fn key(&self) -> *const () {
-        match &self.0 {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => std::ptr::from_ref(p.options()).cast(),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => std::ptr::from_ref(p.options()).cast(),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => std::ptr::from_ref(p.options()).cast(),
-        }
-    }
-
-    fn same(&self, other: &Self) -> bool {
-        self.key() == other.key()
-    }
-}
 
 /// The transaction of one outermost block.
 struct Slot {
@@ -343,7 +320,7 @@ impl Drop for OpenSavepoint {
 
 /// Whether the running task is inside an [`atomic`] block on `pool`.
 pub(crate) fn in_block(pool: &Pool) -> bool {
-    let id = PoolId(pool.clone());
+    let id = PoolId::of(pool);
     BLOCK
         .try_with(|b| {
             std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
@@ -476,7 +453,7 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    let id = PoolId(pool.clone());
+    let id = PoolId::of(pool);
     let current = BLOCK.try_with(Arc::clone).ok();
     let same_pool =
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));

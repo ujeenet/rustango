@@ -267,13 +267,12 @@ impl BackendKind {
             (Self::Postgres, _) => Ok(()),
             (_, StorageMode::Database) => Ok(()),
             (Self::MySql, StorageMode::Schema) => {
-                Err("MySQL backend doesn't support schema-mode tenancy \
-                 (use storage_mode=database)")
+                Err("MySQL does not support schema mode — choose the database storage mode")
             }
-            (Self::Sqlite, StorageMode::Schema) => {
-                Err("SQLite backend doesn't support schema-mode tenancy \
-                 (use storage_mode=database; each tenant gets its own file)")
-            }
+            (Self::Sqlite, StorageMode::Schema) => Err(
+                "SQLite does not support schema mode — choose the database storage mode, \
+                 which gives each tenant its own file",
+            ),
         }
     }
 }
@@ -422,6 +421,14 @@ mod tests {
             .validate_storage_mode(StorageMode::Schema)
             .unwrap_err();
         assert!(err.contains("MySQL"));
+        assert_operator_facing(err);
+    }
+
+    /// Shown in the console, so no wire value or CLI flag (#1335).
+    fn assert_operator_facing(msg: &str) {
+        assert!(!msg.contains("storage_mode="), "wire value: {msg}");
+        assert!(!msg.contains("--"), "CLI flag: {msg}");
+        assert!(msg.contains("database storage mode"), "{msg}");
     }
 
     #[test]
@@ -430,6 +437,7 @@ mod tests {
             .validate_storage_mode(StorageMode::Schema)
             .unwrap_err();
         assert!(err.contains("SQLite"));
+        assert_operator_facing(err);
     }
 
     #[test]

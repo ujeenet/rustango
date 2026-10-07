@@ -36,6 +36,7 @@ pub fn make_migrations(
     dir: &Path,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry();
     make_migrations_from(dir, &current, name_override)
 }
@@ -61,6 +62,7 @@ pub fn make_migrations_for_scope(
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
+    super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry_for_scope(scope);
     let migration_scope = match scope {
         crate::core::ModelScope::Registry => super::MigrationScope::Registry,
@@ -89,6 +91,7 @@ pub fn make_migrations_for_app(
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
     }
+    super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry_for_app(app);
     make_migrations_from(&app_dir, &current, name_override)
 }
@@ -232,6 +235,7 @@ pub fn make_migrations_system(
         crate::core::ModelScope::Registry => super::MigrationScope::Registry,
         crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
     };
+    super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry_system_for_scope(scope);
     let prior = if dir.exists() {
         file::list_dir(&dir)?
@@ -653,6 +657,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
 /// merged, or [`MigrateError::Io`] / [`MigrateError::Json`] on file
 /// problems.
 pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
+    super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry();
     make_merge_migration_from(dir, &current)
 }

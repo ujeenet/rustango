@@ -115,7 +115,16 @@ impl JsonRpcError {
     pub fn invalid_params(detail: impl Into<String>) -> Self {
         Self::new(codes::INVALID_PARAMS, detail)
     }
+
+    /// An internal error: the detail is logged, the agent sees none (#1963).
+    pub(crate) fn internal_logged(detail: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %detail, "mcp internal error");
+        Self::new(codes::INTERNAL_ERROR, INTERNAL_MESSAGE)
+    }
 }
+
+/// What an agent sees for any internal failure.
+pub(crate) const INTERNAL_MESSAGE: &str = "internal error";
 
 /// The error codes JSON-RPC 2.0 reserves, plus the two this server
 /// defines in the range left for servers.

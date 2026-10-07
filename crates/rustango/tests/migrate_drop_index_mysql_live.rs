@@ -24,8 +24,11 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use rustango::migrate::{diff::render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
+use rustango::migrate::{
+    diff::render_changes_split_with_dialect, render_changes_between, SchemaChange, SchemaSnapshot,
+};
 use rustango::sql::sqlx::{self, Row};
+use rustango::sql::MySql;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -235,4 +238,59 @@ async fn dropping_a_model_with_dependents_applies_in_one_go() {
     .unwrap()
     .get::<i64, _>("c");
     assert_eq!(left, 0, "the table should be gone after the full sequence");
+}
+
+/// #2026 — `render_changes_between` drops the FK before its column, so MySQL takes it (1828).
+#[tokio::test]
+async fn rendered_fk_column_drop_executes_on_mysql() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let my = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+    let (parent, child) = (unique("fkd_parent"), unique("fkd_child"));
+    let id = serde_json::json!({ "name": "id", "column": "id", "ty": "i64",
+                                 "nullable": false, "primary_key": true });
+    let fk = serde_json::json!({ "name": "p", "column": "p_id", "ty": "i64",
+        "nullable": true, "primary_key": false,
+        "fk": { "kind": "fk", "to": parent, "on": "id" } });
+    let snap = |child_fields: serde_json::Value| -> SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({ "tables": [
+            { "name": parent, "model": "Parent", "fields": [id] },
+            { "name": child, "model": "Child", "fields": child_fields },
+        ] }))
+        .unwrap()
+    };
+    let (with_fk, without) = (
+        snap(serde_json::json!([id, fk])),
+        snap(serde_json::json!([id])),
+    );
+    let run = |sql: Vec<String>| {
+        let my = my.clone();
+        async move {
+            for stmt in sql.iter().filter(|s| !s.starts_with("--")) {
+                sqlx::query(stmt)
+                    .execute(&my)
+                    .await
+                    .unwrap_or_else(|e| panic!("MySQL rejected `{stmt}`: {e}"));
+            }
+        }
+    };
+    let create = [
+        SchemaChange::CreateTable(parent.clone()),
+        SchemaChange::CreateTable(child.clone()),
+    ];
+    run(render_changes_between(&create, &SchemaSnapshot::default(), &with_fk, &MySql).unwrap())
+        .await;
+    let drop = [SchemaChange::DropColumn {
+        table: child.clone(),
+        column: "p_id".into(),
+    }];
+    run(render_changes_between(&drop, &with_fk, &without, &MySql).unwrap()).await;
+    for t in [&child, &parent] {
+        sqlx::query(&format!("DROP TABLE `{t}`"))
+            .execute(&my)
+            .await
+            .unwrap();
+    }
 }

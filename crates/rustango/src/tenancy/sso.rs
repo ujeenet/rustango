@@ -20,7 +20,8 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, seal_flow, ProviderButton, SsoError, SSO_FLOW_COOKIE,
+    build_provider, open_flow, seal_flow, FlowPurpose, FlowScope, ProviderButton, SsoError,
+    SSO_FLOW_COOKIE,
 };
 use crate::admin::sso_provider::SsoProvider;
 use crate::query::QuerySet;
@@ -184,7 +185,7 @@ async fn resolve_by_slug(
 /// per-slug: `{scheme}://{host}{login_url}/sso/{slug}/callback`. Scheme
 /// honors `X-Forwarded-Proto` from a trusted proxy, else `https`.
 fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<String> {
-    let host = parts.headers.get(header::HOST)?.to_str().ok()?;
+    let host = crate::urls::HostAuthority::parse(parts.headers.get(header::HOST)?.to_str().ok()?)?;
     let scheme =
         crate::real_ip::trusted_forwarded(&parts.headers, &parts.extensions, "x-forwarded-proto")
             .unwrap_or("https");
@@ -218,6 +219,7 @@ fn set_cookie(resp: &mut Response, value: &str) {
 /// `GET {login_url}/sso/{slug}` — start the tenant handshake for one
 /// provider (tenant-owned or shared).
 pub(super) async fn tenant_sso_begin(
+    org: &Org,
     slug: &str,
     secret: &SessionSecret,
     tenant_pool: &Pool,
@@ -245,7 +247,11 @@ pub(super) async fn tenant_sso_begin(
         }
     };
     let (url, flow) = provider.begin();
-    let sealed = seal_flow(&flow, secret.key());
+    let sealed = seal_flow(
+        &flow,
+        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        secret.key(),
+    );
     let flow_cookie = format!(
         "{SSO_FLOW_COOKIE}={sealed}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=600{}",
         secure_suffix()
@@ -278,7 +284,11 @@ pub(super) async fn tenant_sso_callback(
     let Some(sealed) = crate::cookies::cookie_from_headers(&parts.headers, SSO_FLOW_COOKIE) else {
         return login_error(routes, "expired");
     };
-    let flow = match open_flow(sealed, secret.key()) {
+    let flow = match open_flow(
+        sealed,
+        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        secret.key(),
+    ) {
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
@@ -408,5 +418,23 @@ mod tests {
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].login_url, "/admin/login/sso/okta");
+    }
+
+    /// The `redirect_uri` never takes userinfo from the Host (#2173).
+    #[test]
+    fn derive_redirect_refuses_a_host_with_userinfo() {
+        let routes = super::RouteConfig::default();
+        let parts = |host: &str| {
+            axum::http::Request::builder()
+                .header("host", host)
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        assert!(super::derive_redirect(&parts("good.com:1@evil.com:2"), &routes, "g").is_none());
+        assert!(super::derive_redirect(&parts("good.com@evil.com"), &routes, "g").is_none());
+        let ok = super::derive_redirect(&parts("good.com:8443"), &routes, "g").unwrap();
+        assert!(ok.starts_with("https://good.com:8443/"), "{ok}");
     }
 }

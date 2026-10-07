@@ -52,6 +52,36 @@ async fn plain_http_redirects_to_https() {
     assert_eq!(loc, "https://example.com/api/users?page=2");
 }
 
+/// A Host with userinfo must not steer the redirect elsewhere (#2173).
+#[tokio::test]
+async fn host_with_userinfo_is_refused_not_redirected() {
+    for host in ["good.com:1@evil.com:2", "good.com@evil.com"] {
+        let resp = app(SslRedirectLayer::new())
+            .oneshot(req("/", host, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{host}");
+        assert!(resp.headers().get("location").is_none(), "{host}");
+    }
+}
+
+/// HTTP/2 has no `Host`; the URI authority is used, and checked too (#2181).
+#[tokio::test]
+async fn authority_without_host_still_redirects() {
+    let no_host = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = app(SslRedirectLayer::new())
+        .oneshot(no_host("http://example.com:8080/a?b=1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(resp.headers()["location"], "https://example.com:8080/a?b=1");
+    let resp = app(SslRedirectLayer::new())
+        .oneshot(no_host("http://good.com@evil.com/"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn forwarded_proto_https_passes_through() {
     let app = app(SslRedirectLayer::new().proxy_ssl_header("X-Forwarded-Proto", "https"));

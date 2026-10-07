@@ -323,6 +323,27 @@ pub(crate) fn unique_clause(dialect: &dyn Dialect, table: &str, column: &str) ->
     )
 }
 
+/// Refuse an FK action `dialect` would accept and not enforce (#1573):
+/// the `String`/`Vec<String>` renderers above cannot return the error.
+pub(crate) fn check_on_delete(dialect: &dyn Dialect, model: &ModelSchema) -> Result<(), String> {
+    if dialect.supports_on_delete_set_default() {
+        return Ok(());
+    }
+    match model
+        .scalar_fields()
+        .find(|f| f.fk_on_delete == Some(crate::core::OnDeleteAction::SetDefault))
+    {
+        Some(f) => Err(format!(
+            "`{}.{}`: on_delete = \"set_default\" is not enforced on {} \
+             (the parent delete is refused); use another action (#1573)",
+            model.table,
+            f.column,
+            dialect.name()
+        )),
+        None => Ok(()),
+    }
+}
+
 // ============================================================ internals
 
 /// FK clauses to join with `, ` into a `CREATE TABLE (...)` body, for

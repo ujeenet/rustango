@@ -145,7 +145,7 @@ pub use agents::{
 pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{
     authenticate_operator_pool, authenticate_user_pool, validate_tenant_user_schema, Operator,
-    TenantUserModel, User, REQUIRED_USER_COLUMNS,
+    PasswordVerified, TenantUserModel, User, REQUIRED_USER_COLUMNS,
 };
 #[cfg(feature = "postgres")]
 pub use auth_backends::ensure_api_keys_table;
@@ -217,4 +217,6 @@ pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
 };
-pub use sweep::{active_tenants, for_each_tenant, SweepError, TenantOutcome, TenantSweep};
+pub use sweep::{
+    active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,
+};

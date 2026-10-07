@@ -38,12 +38,12 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
       <td>{{ p.sort_order }}</td>
       <td class="actions-col">
         {% if edit_enabled %}
-        <form method="post" action="/sso-shared/{{ p.id }}/email-link">
+        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/email-link">
           {{ csrf_input | default(value='') | safe }}
           <input type="hidden" name="allow_email_link" value="{% if p.allow_email_link %}off{% else %}on{% endif %}">
           <button type="submit" class="btn-row-action">{% if p.allow_email_link %}Stop email linking{% else %}Allow email linking{% endif %}</button>
         </form>
-        <form method="post" action="/sso-shared/{{ p.id }}/delete"
+        <form method="post" action="{{ console_prefix }}/sso-shared/{{ p.id }}/delete"
               data-confirm="Delete shared provider {{ p.slug }}?">
           {{ csrf_input | default(value='') | safe }}
           <button type="submit" class="btn-row-action">Delete</button>
@@ -58,7 +58,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
 
 {% if edit_enabled %}
 <h2>Add a shared provider</h2>
-<form method="post" action="/sso-shared" class="op-form">
+<form method="post" action="{{ console_prefix }}/sso-shared" class="op-form">
   {{ csrf_input | default(value='') | safe }}
   <label>Slug <input name="slug" required pattern="[a-z0-9-]+" placeholder="acme-google"></label>
   <label>Button label <input name="label" required placeholder="Sign in with Google"></label>

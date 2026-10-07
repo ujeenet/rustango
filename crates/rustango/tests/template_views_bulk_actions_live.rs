@@ -1,4 +1,5 @@
-#![cfg(all(feature = "template_views", feature = "tenancy"))]
+// PG-only: raw `PgPool` and `ANY($1)` binds (#2125).
+#![cfg(all(feature = "postgres", feature = "template_views", feature = "tenancy"))]
 //! Live end-to-end test for `ListView::bulk_actions` (#80, v0.30.4).
 //!
 //! Mounts a `ListView` with bulk_actions enabled + a custom action,

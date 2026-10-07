@@ -67,6 +67,40 @@ rustango::register_mcp_tool!(
     },
 );
 
+// A tool that never finishes, so its request can be dropped mid-call.
+rustango::register_mcp_tool!(
+    "hang",
+    "Never returns",
+    AddInput,
+    |_ctx: McpContext, _input: AddInput| async move {
+        std::future::pending::<()>().await;
+        Ok::<_, McpError>(json!({}))
+    },
+);
+
+/// An aborted call still leaves its audit row (#1963).
+#[tokio::test]
+async fn aborted_call_is_still_audited() {
+    let pool = Pool::Sqlite(
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite"),
+    );
+    rustango::audit::ensure_table_pool(&pool).await.unwrap();
+    let mut ctx = ctx_with_tools(&["hang"]).await;
+    ctx.pool = pool.clone();
+    let call = call_tool(
+        ctx,
+        json!({ "name": "hang", "arguments": { "a": 1, "b": 2 } }),
+    );
+    let aborted = tokio::time::timeout(std::time::Duration::from_millis(300), call).await;
+    assert!(aborted.is_err(), "the tool should still be running");
+    let filter = rustango::audit::AuditFilter::default();
+    assert_eq!(rustango::audit::count(&pool, &filter).await.unwrap(), 1);
+}
+
 async fn ctx_with_tools(tools: &[&str]) -> McpContext {
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
@@ -82,6 +116,7 @@ async fn ctx_with_tools(tools: &[&str]) -> McpContext {
             tools: tools.iter().map(|s| s.to_string()).collect(),
             user_id: None,
             jti: "test-jti".into(),
+            secret_prefix: String::new(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),
         cancel: rustango::mcp::CancelToken::never(),

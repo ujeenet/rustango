@@ -82,6 +82,42 @@ pub enum Pool {
     Sqlite(sqlx::SqlitePool),
 }
 
+/// Identity of a pool: the address of the pool state its clones share.
+/// The clone held here keeps that address from being reused, and unlike
+/// `connect_options()` it survives `set_connect_options`.
+#[derive(Clone)]
+pub(crate) struct PoolId(Pool);
+
+impl PoolId {
+    pub(crate) fn of(pool: &Pool) -> Self {
+        Self(pool.clone())
+    }
+
+    fn key(&self) -> *const () {
+        key_of(&self.0)
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+
+    /// `true` when `pool` is a clone of this one.
+    pub(crate) fn is(&self, pool: &Pool) -> bool {
+        self.key() == key_of(pool)
+    }
+}
+
+fn key_of(pool: &Pool) -> *const () {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => std::ptr::from_ref(p.options()).cast(),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => std::ptr::from_ref(p.options()).cast(),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => std::ptr::from_ref(p.options()).cast(),
+    }
+}
+
 /// Apply [`tuning`] to any backend's `PoolOptions`.
 ///
 /// A macro, not a function: sqlx's three `PoolOptions` types share
@@ -166,10 +202,20 @@ impl Pool {
             .await
             .map_err(|f| match f {
                 ConnectFail::Driver(d) => d,
-                // A scheme this build cannot speak is not a
-                // connection fault, but the caller still needs a
-                // diagnosis, and the message already says what to add
-                // to Cargo.toml.
+                // Operators read this, so no Cargo advice and no raw
+                // URL, which can carry a password (#1335).
+                ConnectFail::Pool(PoolError::FeatureNotEnabled { scheme, .. }) => {
+                    ConnectDiagnosis::new(
+                        ConnectFault::Other,
+                        url,
+                        format!("this server cannot connect to {scheme} databases"),
+                    )
+                }
+                ConnectFail::Pool(PoolError::UnsupportedScheme(_)) => ConnectDiagnosis::new(
+                    ConnectFault::Other,
+                    url,
+                    "not a postgres://, mysql:// or sqlite: URL",
+                ),
                 ConnectFail::Pool(e) => {
                     ConnectDiagnosis::new(ConnectFault::Other, url, e.to_string())
                 }
@@ -997,6 +1043,36 @@ mod tests {
     async fn empty_url_errors_clearly() {
         let err = Pool::connect("").await.unwrap_err();
         assert!(matches!(err, PoolError::UnsupportedScheme(_)));
+    }
+
+    /// Operators read this diagnosis in the console; Cargo is not theirs (#1335).
+    #[cfg(any(not(feature = "postgres"), not(feature = "mysql")))]
+    #[tokio::test]
+    async fn a_diagnosis_for_a_missing_backend_names_no_cargo_feature() {
+        let url = if cfg!(feature = "postgres") {
+            "mysql://user:secret@host:3306/db"
+        } else {
+            "postgres://user:secret@host/db"
+        };
+        let msg = Pool::connect_diagnosed(url, std::time::Duration::from_secs(1))
+            .await
+            .err()
+            .expect("no driver for this scheme")
+            .to_string();
+        assert!(!msg.contains("Cargo") && !msg.contains("features"), "{msg}");
+        assert!(msg.contains("this server cannot connect"), "{msg}");
+    }
+
+    /// The detail must not echo the URL, which can carry a password.
+    #[tokio::test]
+    async fn a_diagnosis_for_an_unknown_scheme_does_not_echo_the_url() {
+        let msg =
+            Pool::connect_diagnosed("oracle://u:secret@h/db", std::time::Duration::from_secs(1))
+                .await
+                .err()
+                .expect("unknown scheme")
+                .to_string();
+        assert!(!msg.contains("secret"), "{msg}");
     }
 
     #[cfg(all(feature = "postgres", not(feature = "mysql")))]

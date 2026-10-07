@@ -169,16 +169,21 @@ fn created(m: &Migration) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// Names of the indexes a step creates together with their table.
+/// Names of the indexes a step creates together with their table and no
+/// later step drops: a re-created one is the system chain's again (#2139).
 fn indexes_made_with_table(steps: &[Migration]) -> BTreeSet<&str> {
     let mut names = BTreeSet::new();
     for m in steps {
         let made: BTreeSet<String> = created(m).collect();
         for c in schema_ops(m) {
-            if let SchemaChange::CreateIndex { name, table, .. } = c {
-                if made.contains(table) {
+            match c {
+                SchemaChange::CreateIndex { name, table, .. } if made.contains(table) => {
                     names.insert(name.as_str());
                 }
+                SchemaChange::DropIndex { name, .. } => {
+                    names.remove(name.as_str());
+                }
+                _ => {}
             }
         }
     }

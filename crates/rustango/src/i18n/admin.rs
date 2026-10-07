@@ -13,8 +13,8 @@
 //! (`…/export.json`), and gate **writes** on superuser — when session
 //! auth is configured (the default), the POST handler reads the live
 //! [`crate::admin::AdminSession`] from request extensions, rejects
-//! non-superusers with 403, and records the operator's username as
-//! `updated_by`. An admin mounted without session auth (open / proxied)
+//! non-superusers with 403, and records [`crate::admin::AdminSession::actor`]
+//! as `updated_by`. An admin mounted without session auth (open / proxied)
 //! has no superuser to check, so writes stay open there, consistent with
 //! the rest of that admin's surface. Reads (the grid + export) stay at
 //! the admin login gate.
@@ -345,7 +345,7 @@ async fn editor_post(
     // session in extensions; the task-local is the fallback. No session
     // at all means an admin mounted without auth, so writes stay open.
     let updated_by = match crate::admin::session::from_extensions(req.extensions()) {
-        Some(session) if session.is_superuser => session.username,
+        Some(session) if session.is_superuser => session.actor().as_token(),
         Some(_) => {
             return (
                 StatusCode::FORBIDDEN,
@@ -433,6 +433,35 @@ crate::register_admin_view!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A user named like an operator is recorded by id, never as the operator.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_user_named_like_an_operator_is_recorded_as_a_user() {
+        use crate::admin::session::AdminSession;
+        use crate::sql::FetcherPool as _;
+        let pool: Pool = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap()
+            .into();
+        crate::i18n::db::ensure_table_pool(&pool).await.unwrap();
+        let operator = AdminSession::impersonation(7).actor().as_token();
+        let mut req = axum::http::Request::post("/editor")
+            .body(axum::body::Body::from("tr:en:greeting=Hi"))
+            .unwrap();
+        req.extensions_mut()
+            .insert(AdminSession::new(5, operator.clone(), true));
+        editor_post(pool.clone(), req).await;
+
+        let rows = crate::i18n::db::Translation::objects()
+            .fetch(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].updated_by, "user:5");
+        assert_ne!(rows[0].updated_by, operator);
+    }
 
     fn rows() -> Vec<(String, String, String)> {
         vec![
