@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Tenancy verbs reject stray arguments
+
+`assign-role acme bob editor extra`, `set-operator-active alice bob --off` and similar used to ignore the extra word; they now fail. `set-superuser --on --off` fails instead of using the last flag (#1952).
+
+### `[tenancy] apex_domain` now takes effect
+
+If your config sets it, `Cli::with_settings` uses it when `RUSTANGO_APEX_DOMAIN` is unset (#1379).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

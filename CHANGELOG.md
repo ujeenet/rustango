@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — role, operator and user verbs refuse extra arguments (#1952)
+
+`assign-role`, `revoke-role`, `list-roles`, `create-role`, `set-operator-active`, `set-superuser`, `reset-password`, `list-operators` and `prewarm-pools` reject stray arguments and take flags anywhere. `set-superuser --on --off` is refused.
+
+### Fixed — `set-superuser` and `reset-password` write through the ORM (#1952)
+
+### Fixed — `startapp` refuses Rust keywords as app names (#1952)
+
+### Fixed — `make:serializer` docs show `Auto<i64>`, as the template writes (#1952)
+
+### Fixed — `[tenancy] apex_domain` is read (#1379)
+
+`Cli::with_settings` applies it; `RUSTANGO_APEX_DOMAIN` still wins.
+
+### Changed — settings that do nothing are documented and warned about (#1379)
+
+`[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
