@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — media collection listing is paged (#1570)
+
+`list_collections` and `GET /collections` return 100 rows by default; `list_collections_paged` and `?limit=&offset=` (max 1000) choose the page.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

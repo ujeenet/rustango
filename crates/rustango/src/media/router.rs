@@ -59,7 +59,7 @@
 //! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. |
 //! | DELETE | `/media/{id}/tags/{slug}`         | Remove a single tag. |
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
-//! | GET    | `/collections`                    | List every non-deleted collection. |
+//! | GET    | `/collections`                    | Non-deleted collections, paged. `?limit=N&offset=N` (default 100, max 1000). |
 //! | GET    | `/collections/{id}`               | Single collection. |
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` includes sub-folders. Authorized as `Read(CollectionContents { recursive })` — a media read, not a collection read. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside is orphaned, not deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
@@ -1222,6 +1222,14 @@ fn default_limit() -> i64 {
 }
 
 #[derive(Debug, Deserialize)]
+struct PageQuery {
+    /// Clamped server-side to `1..=1000`; absent means the default page.
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ContentsQuery {
     #[serde(default)]
     recursive: bool,
@@ -1351,8 +1359,10 @@ async fn create_collection_handler(
 
 async fn list_collections_handler(
     State(manager): State<Arc<MediaManager>>,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<CollectionResponse>>, MediaError> {
-    let cs = manager.list_collections().await?;
+    let limit = q.limit.unwrap_or(super::DEFAULT_LIST_CAP);
+    let cs = manager.list_collections_paged(limit, q.offset).await?;
     Ok(Json(cs.into_iter().map(Into::into).collect()))
 }
 

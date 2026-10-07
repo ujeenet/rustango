@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Media collections are listed one page at a time
+
+`MediaManager::list_collections` and `GET /collections` return at most 100 rows. Use `list_collections_paged(limit, offset)` or `?limit=&offset=` (max 1000) to read the rest (#1570).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

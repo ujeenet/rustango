@@ -1014,20 +1014,34 @@ impl MediaManager {
         Ok(rows.into_iter().next())
     }
 
-    /// List every non-deleted collection, ordered by `(parent_id, name)`
+    /// List non-deleted collections, roots first, then by `(parent_id, name)`
     /// so siblings group together — handy for tree-renderers.
+    ///
+    /// **Returns at most [`DEFAULT_LIST_CAP`] rows** (100). Use
+    /// [`Self::list_collections_paged`] to choose the page.
     pub async fn list_collections(&self) -> Result<Vec<MediaCollection>, MediaError> {
-        // `ORDER BY parent_id IS NULL DESC, …` is the portable way to
-        // get NULLs first: MySQL has no `NULLS FIRST`, but `IS NULL`
-        // works on all three backends.
-        let sql = "SELECT id, name, slug, parent_id, description, created_at, deleted_at \
-                   FROM rustango_media_collections \
-                   WHERE deleted_at IS NULL \
-                   ORDER BY parent_id IS NULL DESC, parent_id, name";
-        let rows: Vec<MediaCollection> = crate::sql::raw_query_pool(sql, vec![], &self.pool)
+        self.list_collections_paged(DEFAULT_LIST_CAP, 0).await
+    }
+
+    /// [`Self::list_collections`] with an explicit page; `limit` is
+    /// clamped to `1..=MAX_LIST_LIMIT`.
+    pub async fn list_collections_paged(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MediaCollection>, MediaError> {
+        use crate::core::NullsOrder;
+        use crate::sql::FetcherPool as _;
+        MediaCollection::objects()
+            .where_(MediaCollection::deleted_at.is_null())
+            .order_by_with_nulls(&[("parent_id", false, NullsOrder::First)])
+            // `id` makes the order total, so pages neither repeat nor skip.
+            .order_by(&[("name", false), ("id", false)])
+            .limit(limit.clamp(1, MAX_LIST_LIMIT))
+            .offset(offset.max(0))
+            .fetch(&self.pool)
             .await
-            .map_err(media_err_from_exec)?;
-        Ok(rows)
+            .map_err(media_err_from_exec)
     }
 
     /// Build the slug-joined path for a collection: `"products/2026/launch"`.
