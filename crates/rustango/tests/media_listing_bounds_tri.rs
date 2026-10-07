@@ -155,10 +155,80 @@ async fn tags_are_paged(pool: &Pool) {
     assert_eq!(slugs, ["t00001", "t00002"]);
 }
 
+/// `set_tags` / `tag` cost a fixed number of queries, not one per slug.
+async fn tagging_is_batched(pool: &Pool) {
+    let mgr = manager(pool);
+    let media = seed_media(&mgr, None).await;
+    let first: Vec<String> = (0..50).map(|i| format!("s{i:02}")).collect();
+    let first: Vec<&str> = first.iter().map(String::as_str).collect();
+
+    // Find, insert the missing, find again; then delete + insert links.
+    let queries = QueryCounter::scope(async {
+        mgr.set_tags(media, &first).await.expect("set_tags");
+        QueryCounter::current()
+    })
+    .await;
+    assert_eq!(queries, 5, "set_tags with 50 new slugs");
+    assert_eq!(mgr.tags_for(media).await.unwrap().len(), 50);
+
+    // 25 known + 25 new; a repeat slug is one tag.
+    let more: Vec<String> = (25..75).map(|i| format!("s{i:02}")).collect();
+    let mut more: Vec<&str> = more.iter().map(String::as_str).collect();
+    more.push("s30");
+    let queries = QueryCounter::scope(async {
+        mgr.tag(media, &more).await.expect("tag");
+        QueryCounter::current()
+    })
+    .await;
+    assert_eq!(queries, 4, "tag with 25 new slugs");
+    assert_eq!(mgr.tags_for(media).await.unwrap().len(), 75);
+
+    // Every tag known: one find, one link insert.
+    let queries = QueryCounter::scope(async {
+        mgr.tag(media, &more).await.expect("re-tag");
+        QueryCounter::current()
+    })
+    .await;
+    assert_eq!(queries, 2, "tag with no new slugs");
+    assert_eq!(mgr.tags_for(media).await.unwrap().len(), 75);
+
+    let too_many: Vec<String> = (0..1001).map(|i| format!("x{i}")).collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    let r = mgr.set_tags(media, &too_many).await;
+    assert!(matches!(r, Err(MediaError::Other(_))), "{r:?}");
+    assert_eq!(
+        mgr.tags_for(media).await.unwrap().len(),
+        75,
+        "a refused set changes nothing"
+    );
+}
+
+/// Two new slugs that MySQL's collation treats as one.
+async fn case_variants_resolve(pool: &Pool) {
+    let mgr = manager(pool);
+    let media = seed_media(&mgr, None).await;
+    mgr.set_tags(media, &["Mixed", "mixed"])
+        .await
+        .expect("set_tags");
+    let expected = by_dialect! { pool,
+        postgres => 2, because "slugs compare case-sensitively",
+        mysql    => 1, because "the default collation is case-insensitive",
+        sqlite   => 2, because "slugs compare case-sensitively",
+    };
+    assert_eq!(
+        mgr.tags_for(media).await.unwrap().len(),
+        expected.value,
+        "{}",
+        expected.why
+    );
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
         collections_are_paged,
         tags_are_paged,
+        tagging_is_batched,
+        case_variants_resolve,
     ]
 );

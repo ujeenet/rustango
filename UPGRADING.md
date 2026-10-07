@@ -158,6 +158,10 @@ untouched.
 
 It used to return up to 1000 tags by usage; it now returns 100 by slug, with `?limit=&offset=`. `GET /tags/popular` still orders by usage (#1570).
 
+### `tag` / `set_tags` take at most 1000 distinct slugs
+
+More returns `MediaError::Other` (HTTP 400) and changes nothing (#1570).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 It pages by slug through the new `MediaManager::list_tags` instead of counting every tag link for `popular_tags(1000)`.
 
+### Fixed — tagging costs a fixed number of queries (#1570)
+
+`tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

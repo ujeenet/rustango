@@ -99,6 +99,11 @@ const DEFAULT_DISK_NAME: &str = "default";
 /// already applied, so the whole surface has one bound.
 const MAX_LIST_LIMIT: i64 = 1000;
 
+/// Most distinct slugs one [`MediaManager::tag`] / [`MediaManager::set_tags`]
+/// call takes. Its `IN` list and two-bind insert rows fit every dialect's bind cap.
+const MAX_TAGS_PER_CALL: usize = MAX_LIST_LIMIT as usize;
+const _: () = assert!(MAX_TAGS_PER_CALL * 2 <= 32766);
+
 /// Rows [`MediaManager::purge_pending`] deletes per call.
 ///
 /// Bounds how much one run does: the sweep reads this many rows, then
@@ -1321,44 +1326,77 @@ impl MediaManager {
 
     /// Apply tags to a media row. Auto-creates missing tags.
     /// Idempotent — duplicates ignored.
+    ///
+    /// # Errors
+    /// `Other` for more than 1000 distinct slugs; `Db` otherwise.
     pub async fn tag(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
-        let d = self.pool.dialect();
-        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-        // `Dialect::insert_on_conflict_skip`, and **not** MySQL's
-        // `INSERT IGNORE`. `INSERT IGNORE` downgrades every row-level
-        // error to a warning, not just the duplicate key: it swallows
-        // NOT NULL (1364), CHECK (3819) and foreign-key violations
-        // that PostgreSQL and SQLite raise, which would break the
-        // atomicity `set_tags` promises. The dialect emits the narrow
-        // `ON DUPLICATE KEY UPDATE tag_id = tag_id` instead.
-        //
-        // Both columns, because the unique constraint is the
-        // composite `(media_id, tag_id)` from `MediaTagLink`'s
-        // `unique_together`, and PG and SQLite reject an
-        // `ON CONFLICT` list that matches no constraint.
-        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
-        let sql = format!(
-            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
-             VALUES ({p1}, {p2}) {skip}"
-        );
-        for slug in slugs {
-            let t = self.ensure_tag(slug).await?;
-            let tag_id = match t.id {
-                Auto::Set(v) => v,
-                _ => continue,
-            };
-            crate::sql::raw_execute_pool(
-                &self.pool,
-                &sql,
-                vec![
-                    crate::core::SqlValue::I64(media_id),
-                    crate::core::SqlValue::I64(tag_id),
-                ],
-            )
+        let tag_ids = self.ensure_tag_ids(slugs).await?;
+        crate::sql::bulk_insert_pool(&self.pool, &tag_links(media_id, &tag_ids))
             .await
-            .map_err(media_err_from_exec)?;
+            .map_err(media_err_from_exec)
+    }
+
+    /// Ids of the tags named by `slugs`, creating missing ones, in
+    /// three statements however many slugs there are.
+    async fn ensure_tag_ids(&self, slugs: &[&str]) -> Result<Vec<i64>, MediaError> {
+        let mut slugs = slugs.to_vec();
+        slugs.sort_unstable();
+        slugs.dedup();
+        if slugs.len() > MAX_TAGS_PER_CALL {
+            return Err(MediaError::Other(format!(
+                "at most {MAX_TAGS_PER_CALL} tags per call, got {}",
+                slugs.len()
+            )));
         }
-        Ok(())
+        if slugs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = self.tags_by_slug(&slugs).await?;
+        let have: std::collections::HashSet<&str> = found.iter().map(|t| t.slug.as_str()).collect();
+        let missing: Vec<&str> = slugs
+            .iter()
+            .copied()
+            .filter(|s| !have.contains(s))
+            .collect();
+        if missing.is_empty() {
+            return Ok(tag_ids_of(&found));
+        }
+        let rows = missing
+            .iter()
+            .map(|s| {
+                vec![
+                    crate::core::SqlValue::String((*s).to_owned()),
+                    crate::core::SqlValue::String((*s).to_owned()),
+                ]
+            })
+            .collect();
+        // Skips a tag a concurrent call created meanwhile.
+        let insert = crate::core::BulkInsertQuery::new(
+            <MediaTag as crate::core::Model>::SCHEMA,
+            vec!["name", "slug"],
+            rows,
+        )
+        .on_conflict_do_nothing();
+        if let Err(e) = crate::sql::bulk_insert_pool(&self.pool, &insert).await {
+            if !is_mysql_same_batch_conflict(&e) {
+                return Err(media_err_from_exec(e));
+            }
+            // Two new slugs equal under MySQL's collation: one at a time.
+            for s in &missing {
+                self.ensure_tag(s).await?;
+            }
+        }
+        Ok(tag_ids_of(&self.tags_by_slug(&slugs).await?))
+    }
+
+    /// Tags whose slug is in `slugs` (at most [`MAX_TAGS_PER_CALL`]).
+    async fn tags_by_slug(&self, slugs: &[&str]) -> Result<Vec<MediaTag>, MediaError> {
+        use crate::sql::FetcherPool as _;
+        MediaTag::objects()
+            .where_(MediaTag::slug.is_in(slugs.iter().map(|s| (*s).to_owned())))
+            .fetch(&self.pool)
+            .await
+            .map_err(media_err_from_exec)
     }
 
     /// Remove a single tag from a media row.
@@ -1395,30 +1433,14 @@ impl MediaManager {
     /// `Db` for the delete, either insert, or the commit.
     pub async fn set_tags(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
         // Resolve every tag id **before** opening the transaction.
-        // `ensure_tag` is get-or-create, so it writes and is the most
-        // likely step to fail. Doing it first means a failure leaves
-        // the row's old tags intact, and keeps N round trips out of an
-        // open write transaction. A tag row left over from a failed
-        // set is harmless: `popular_tags` counts links, so it reports
-        // zero uses.
-        let mut tag_ids: Vec<i64> = Vec::with_capacity(slugs.len());
-        for slug in slugs {
-            let t = self.ensure_tag(slug).await?;
-            if let Auto::Set(v) = t.id {
-                tag_ids.push(v);
-            }
-        }
+        // Get-or-create writes and is the most likely step to fail, so
+        // a failure leaves the row's old tags intact. A tag row left
+        // over from a failed set is harmless: `popular_tags` counts
+        // links, so it reports zero uses.
+        let tag_ids = self.ensure_tag_ids(slugs).await?;
 
-        let d = self.pool.dialect();
-        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
+        let p1 = self.pool.dialect().placeholder(1);
         let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
-        // `insert_on_conflict_skip` again, never `INSERT IGNORE` —
-        // see the note in `tag()` for why the two are not the same.
-        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
-        let insert_sql = format!(
-            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
-             VALUES ({p1}, {p2}) {skip}"
-        );
 
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
@@ -1430,18 +1452,9 @@ impl MediaManager {
         )
         .await
         .map_err(media_err_from_exec)?;
-        for tag_id in tag_ids {
-            crate::sql::raw_execute_tx(
-                &mut tx,
-                &insert_sql,
-                vec![
-                    crate::core::SqlValue::I64(media_id),
-                    crate::core::SqlValue::I64(tag_id),
-                ],
-            )
+        crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, &tag_ids))
             .await
             .map_err(media_err_from_exec)?;
-        }
         tx.commit().await?;
         Ok(())
     }
@@ -1704,6 +1717,51 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
 
 fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
     media_err_from_exec(e.into())
+}
+
+/// One `(media_id, tag_id)` link row per tag, skipping ones already there.
+fn tag_links(media_id: i64, tag_ids: &[i64]) -> crate::core::BulkInsertQuery {
+    let rows = tag_ids
+        .iter()
+        .map(|t| {
+            vec![
+                crate::core::SqlValue::I64(media_id),
+                crate::core::SqlValue::I64(*t),
+            ]
+        })
+        .collect();
+    crate::core::BulkInsertQuery::new(
+        <MediaTagLink as crate::core::Model>::SCHEMA,
+        vec!["media_id", "tag_id"],
+        rows,
+    )
+    .on_conflict_do_nothing()
+}
+
+/// Ids of `tags`, deduplicated: MySQL's collation can map two slugs to one tag.
+fn tag_ids_of(tags: &[MediaTag]) -> Vec<i64> {
+    let mut ids: Vec<i64> = tags
+        .iter()
+        .filter_map(|t| match t.id {
+            Auto::Set(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// MySQL 1869: a skip-on-conflict insert met a row it inserted itself.
+fn is_mysql_same_batch_conflict(e: &crate::sql::ExecError) -> bool {
+    #[cfg(feature = "mysql")]
+    if let crate::sql::ExecError::Driver(sqlx::Error::Database(d)) = e {
+        return d
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1869);
+    }
+    let _ = e;
+    false
 }
 
 /// `root` and its live descendants, each level locked `FOR UPDATE`, so a
