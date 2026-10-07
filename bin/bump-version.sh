@@ -90,7 +90,8 @@ REWRITE='
   my $example = $ARGV =~ m{^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs)$}
     && /^\s*(#|\/\/)/;
   unless ($example) {
-    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    # Our own manifest line, or a pin naming rustango: never a third-party dep.
+    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g if /^\s*version\s*=/ || /rustango/;
     s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
     s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
     s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
@@ -154,7 +155,8 @@ fi
 # So the match has to be anchored to something that makes it a claim about
 # the CURRENT version:
 #
-#   version = "X"        manifests, and the README pin in renamed-smoke
+#   version = "X"        a manifest's own `version =` line, or a line naming
+#                        rustango (the workspace pins, the renamed-smoke pin)
 #   "version": "X"       the MCP serverInfo block
 #   version:     X       the `manage about` transcript
 #   --version X          the `cargo install cargo-rustango` line
@@ -250,8 +252,13 @@ echo "verifying nothing still claims $OLD"
 # shapes the perl pass rewrites; the series shapes are checked just after.
 #
 EXAMPLES='^(bin/bump-version\.sh|crates/rustango/tests/docs_versions\.rs):[0-9]+:[[:space:]]*(#|//)'
-CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
-stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
+# `version = "X"` is scoped the way the rewrite scopes it.
+V='version[[:space:]]*=[[:space:]]*"'
+O="${OLD//./\\.}([^0-9.]|\$)"
+CLAIM="(^[[:space:]]*${V}|rustango.*${V})${O}|${V}${O}.*rustango|"
+CLAIM+='("version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
+CLAIM+="${O}"
+stale=$(git grep -nE "$CLAIM" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' | grep -vE "$EXAMPLES" || true)
 
 # The series sites, checked the way `docs_versions` checks them: the
