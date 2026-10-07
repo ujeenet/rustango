@@ -964,6 +964,7 @@ impl Cache for InMemoryCache {
 /// Keep the directory private (0700): anyone who can open a lock file
 /// can stall writers for up to 5 seconds per call.
 /// There is no entry cap with a cull strategy. The directory is per host.
+/// File I/O runs on tokio's blocking pool, so every call needs a tokio runtime.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }
@@ -1087,37 +1088,40 @@ impl FileCache {
     /// Longest wait for a stripe lock before the call fails.
     const LOCK_WAIT: Duration = Duration::from_secs(5);
 
+    /// Run `op` on tokio's blocking pool. Every method's file I/O goes
+    /// through here, so none of it parks an async worker (#1530).
+    async fn blocking<T, F>(&self, op: F) -> Result<T, CacheError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> Result<T, CacheError> + Send + 'static,
+    {
+        let me = Self::new(self.dir.clone());
+        tokio::task::spawn_blocking(move || op(&me))
+            .await
+            .map_err(|e| CacheError::Connection(format!("blocking task: {e}")))?
+    }
+
     /// Lock the stripe that owns `path`. POSIX has no conditional
     /// unlink, so every replace or removal of an existing entry happens
-    /// under this lock. A held lock is waited for off the async worker,
-    /// via `spawn_blocking`, so that path needs a tokio runtime.
-    async fn lock_entry(&self, path: &std::path::Path) -> Result<EntryLock, CacheError> {
+    /// under this lock. Called only inside [`Self::blocking`].
+    fn lock_entry(&self, path: &std::path::Path) -> Result<EntryLock, CacheError> {
         use fs4::TryLockError;
         let file = self.open_lock(path)?;
-        match fs4::FileExt::try_lock(&file) {
-            Ok(()) => return Ok(EntryLock(Some(file))),
-            Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
-            Err(TryLockError::WouldBlock) => {}
-        }
-        tokio::task::spawn_blocking(move || {
-            let deadline = std::time::Instant::now() + Self::LOCK_WAIT;
-            let mut pause = Duration::from_millis(1);
-            loop {
-                match fs4::FileExt::try_lock(&file) {
-                    Ok(()) => return Ok(EntryLock(Some(file))),
-                    Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
-                    Err(TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => {
-                        return Err(CacheError::Connection("lock: timed out".into()));
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        std::thread::sleep(pause);
-                        pause = (pause * 2).min(Duration::from_millis(5));
-                    }
+        let deadline = std::time::Instant::now() + Self::LOCK_WAIT;
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match fs4::FileExt::try_lock(&file) {
+                Ok(()) => return Ok(EntryLock(Some(file))),
+                Err(TryLockError::Error(e)) => return Self::lock_failed(&e),
+                Err(TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => {
+                    return Err(CacheError::Connection("lock: timed out".into()));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(5));
                 }
             }
-        })
-        .await
-        .map_err(|e| CacheError::Connection(format!("lock: {e}")))?
+        }
     }
 
     /// Open the stripe's lock file: owner-only, never through a symlink.
@@ -1186,8 +1190,8 @@ impl FileCache {
 
     /// Remove `path` if it is still expired or undecodable once locked,
     /// and return its value if a racer replaced it with a live one.
-    async fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
-        let _lock = self.lock_entry(path).await?;
+    fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
+        let _lock = self.lock_entry(path)?;
         match Self::read_entry(path)? {
             Entry::Live(v, _) => Ok(Some(v)),
             Entry::Dead => {
@@ -1200,12 +1204,12 @@ impl FileCache {
 
     /// Lock `path`'s stripe for a write already staged in `tmp`,
     /// removing `tmp` if the lock can't be had.
-    async fn lock_for(
+    fn lock_for(
         &self,
         tmp: &std::path::Path,
         path: &std::path::Path,
     ) -> Result<EntryLock, CacheError> {
-        self.lock_entry(path).await.inspect_err(|_| {
+        self.lock_entry(path).inspect_err(|_| {
             let _ = std::fs::remove_file(tmp);
         })
     }
@@ -1216,6 +1220,120 @@ impl FileCache {
             let _ = std::fs::remove_file(tmp);
             CacheError::Connection(format!("rename: {e}"))
         })
+    }
+
+    fn get_entry(&self, key: &str) -> Result<Option<String>, CacheError> {
+        let path = self.key_path(key);
+        match Self::read_entry(&path)? {
+            Entry::Missing => Ok(None),
+            Entry::Live(v, _) => Ok(Some(v)),
+            Entry::Dead => self.clear_dead(&path),
+        }
+    }
+
+    fn set_entry(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        let path = self.key_path(key);
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        let _lock = self.lock_for(&tmp, &path)?;
+        Self::put(&tmp, &path)
+    }
+
+    fn incr_entry(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        let path = self.key_path(key);
+        let _lock = self.lock_entry(&path)?;
+        let (cur, kept) = match Self::read_entry(&path)? {
+            Entry::Live(v, at) => (v.parse::<i64>().unwrap_or(0), Some(at)),
+            Entry::Dead | Entry::Missing => (0, None),
+        };
+        let new = cur.saturating_add(by);
+        let bytes = match (ttl, kept) {
+            (None, Some(at)) => Self::encode_at(key, &new.to_string(), at),
+            _ => Self::encode(key, &new.to_string(), ttl),
+        };
+        let tmp = self.write_tmp(&bytes)?;
+        Self::put(&tmp, &path)?;
+        Ok(new)
+    }
+
+    fn touch_entry(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let path = self.key_path(key);
+        let _lock = self.lock_entry(&path)?;
+        let Entry::Live(value, _) = Self::read_entry(&path)? else {
+            return Ok(false);
+        };
+        let tmp = self.write_tmp(&Self::encode(key, &value, ttl))?;
+        Self::put(&tmp, &path).map(|()| true)
+    }
+
+    fn delete_entry(&self, key: &str) -> Result<(), CacheError> {
+        match std::fs::remove_file(self.key_path(key)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CacheError::Connection(format!("remove_file: {e}"))),
+        }
+    }
+
+    fn add_entry(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let path = self.key_path(key);
+        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
+        let _lock = self.lock_for(&tmp, &path)?;
+        let live = match Self::read_entry(&path) {
+            Ok(entry) => matches!(entry, Entry::Live(..)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if live {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(false);
+        }
+        Self::put(&tmp, &path).map(|()| true)
+    }
+
+    fn clear_entries(&self) -> Result<(), CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("cache") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_prefix_entries(&self, prefix: &str) -> Result<(), CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("cache") {
+                continue;
+            }
+            let Ok(buf) = std::fs::read(&path) else {
+                continue;
+            };
+            match Self::decode(&buf) {
+                // Matching entry: same path means same key, so no re-check.
+                Some((key, ..)) if key.starts_with(prefix) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                // Another namespace's live entry — leave it alone.
+                Some((_, _, false, _)) => {}
+                // Expired, unreadable, or an older format: drop it if still dead.
+                _ => {
+                    let _ = self.clear_dead(&path);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1246,59 +1364,32 @@ impl Cache for FileCache {
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
-        let path = self.key_path(key);
-        match Self::read_entry(&path)? {
-            Entry::Missing => Ok(None),
-            Entry::Live(v, _) => Ok(Some(v)),
-            Entry::Dead => self.clear_dead(&path).await,
-        }
+        let key = key.to_owned();
+        self.blocking(move |c| c.get_entry(&key)).await
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        let path = self.key_path(key);
-        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
-        let _lock = self.lock_for(&tmp, &path).await?;
-        Self::put(&tmp, &path)
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.blocking(move |c| c.set_entry(&key, &value, ttl)).await
     }
 
     /// Read, add and write under the stripe lock, so no count is lost.
     /// A non-integer counts as 0. As in `InMemoryCache`, a live key keeps
     /// its expiry when `ttl` is `None`; a `ttl`, or a new key, resets it.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
-        let path = self.key_path(key);
-        let _lock = self.lock_entry(&path).await?;
-        let (cur, kept) = match Self::read_entry(&path)? {
-            Entry::Live(v, at) => (v.parse::<i64>().unwrap_or(0), Some(at)),
-            Entry::Dead | Entry::Missing => (0, None),
-        };
-        let new = cur.saturating_add(by);
-        let bytes = match (ttl, kept) {
-            (None, Some(at)) => Self::encode_at(key, &new.to_string(), at),
-            _ => Self::encode(key, &new.to_string(), ttl),
-        };
-        let tmp = self.write_tmp(&bytes)?;
-        Self::put(&tmp, &path)?;
-        Ok(new)
+        let key = key.to_owned();
+        self.blocking(move |c| c.incr_entry(&key, by, ttl)).await
     }
 
     /// Rewrite a live entry with the new expiry, under the stripe lock.
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
-        let path = self.key_path(key);
-        let _lock = self.lock_entry(&path).await?;
-        let Entry::Live(value, _) = Self::read_entry(&path)? else {
-            return Ok(false);
-        };
-        let tmp = self.write_tmp(&Self::encode(key, &value, ttl))?;
-        Self::put(&tmp, &path).map(|()| true)
+        let key = key.to_owned();
+        self.blocking(move |c| c.touch_entry(&key, ttl)).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
-        let path = self.key_path(key);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(CacheError::Connection(format!("remove_file: {e}"))),
-        }
+        let key = key.to_owned();
+        self.blocking(move |c| c.delete_entry(&key)).await
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CacheError> {
@@ -1308,36 +1399,12 @@ impl Cache for FileCache {
     /// Atomic across processes on the host: the check and the rename
     /// happen under the entry's stripe lock.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
-        let path = self.key_path(key);
-        let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
-        let _lock = self.lock_for(&tmp, &path).await?;
-        let live = match Self::read_entry(&path) {
-            Ok(entry) => matches!(entry, Entry::Live(..)),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-        };
-        if live {
-            let _ = std::fs::remove_file(&tmp);
-            return Ok(false);
-        }
-        Self::put(&tmp, &path).map(|()| true)
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.blocking(move |c| c.add_entry(&key, &value, ttl)).await
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("cache") {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        Ok(())
+        self.blocking(Self::clear_entries).await
     }
 
     /// Delete only the entries whose key starts with `prefix`.
@@ -1350,33 +1417,9 @@ impl Cache for FileCache {
     /// Expired and undecodable entries are removed along the way, as
     /// the scan has already paid for the read.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("cache") {
-                continue;
-            }
-            let Ok(buf) = std::fs::read(&path) else {
-                continue;
-            };
-            match Self::decode(&buf) {
-                // Matching entry: same path means same key, so no re-check.
-                Some((key, ..)) if key.starts_with(prefix) => {
-                    let _ = std::fs::remove_file(&path);
-                }
-                // Another namespace's live entry — leave it alone.
-                Some((_, _, false, _)) => {}
-                // Expired, unreadable, or an older format: drop it if still dead.
-                _ => {
-                    let _ = self.clear_dead(&path).await;
-                }
-            }
-        }
-        Ok(())
+        let prefix = prefix.to_owned();
+        self.blocking(move |c| c.delete_prefix_entries(&prefix))
+            .await
     }
 }
 
@@ -1521,6 +1564,105 @@ mod file_cache_tests {
             waited < Duration::from_millis(200),
             "worker blocked {waited:?}"
         );
+    }
+
+    /// Plant a FIFO at `key`'s entry path: opening it blocks until a writer comes.
+    #[cfg(unix)]
+    fn plant_fifo(cache: &FileCache, key: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(cache.dir()).unwrap();
+        let path = cache.key_path(key);
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.unwrap().success(), "mkfifo failed");
+        path
+    }
+
+    /// Feed a valid entry into the FIFO after `after`, unblocking its reader.
+    #[cfg(unix)]
+    fn feed_fifo(
+        path: std::path::PathBuf,
+        key: &str,
+        after: Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let bytes = FileCache::encode(key, "v", None);
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            std::fs::write(&path, bytes).unwrap();
+        })
+    }
+
+    /// Run `op` on a current-thread runtime and return how long a 20 ms
+    /// sleep beside it took: long if `op` blocked the only worker (#1530).
+    #[cfg(unix)]
+    async fn worker_stall<F>(op: F) -> Duration
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let task = tokio::spawn(op);
+        let start = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let waited = start.elapsed();
+        task.await.unwrap();
+        waited
+    }
+
+    /// A slow read leaves the worker free.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_read_leaves_the_worker_free() {
+        let dir = tmp_dir("fifo-get");
+        let cache = std::sync::Arc::new(FileCache::new(&dir));
+        let feeder = feed_fifo(plant_fifo(&cache, "k"), "k", Duration::from_millis(300));
+        let c = cache.clone();
+        let waited = worker_stall(async move { c.get("k").await.unwrap() }).await;
+        feeder.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            waited < Duration::from_millis(200),
+            "worker blocked {waited:?}"
+        );
+    }
+
+    /// The `delete_prefix` scan reads off the worker too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_scan_leaves_the_worker_free() {
+        let dir = tmp_dir("fifo-scan");
+        let cache = std::sync::Arc::new(FileCache::new(&dir));
+        let feeder = feed_fifo(plant_fifo(&cache, "k"), "k", Duration::from_millis(300));
+        let c = cache.clone();
+        let waited = worker_stall(async move { c.delete_prefix("x").await.unwrap() }).await;
+        feeder.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            waited < Duration::from_millis(200),
+            "worker blocked {waited:?}"
+        );
+    }
+
+    /// Racing writers and readers on one key never see it missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_set_and_get_never_miss() {
+        let dir = tmp_dir("race");
+        let cache = std::sync::Arc::new(FileCache::new(&dir));
+        cache.set("k", "0", None).await.unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let c = cache.clone();
+            tasks.push(tokio::spawn(async move {
+                for n in 0..50 {
+                    if i % 2 == 0 {
+                        c.set("k", &format!("{i}-{n}"), None).await.unwrap();
+                    } else {
+                        assert!(c.get("k").await.unwrap().is_some(), "torn read");
+                    }
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stripe held past the deadline fails the call and leaves no temp file.

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `FileCache` needs a tokio runtime for every call
+
+Its file I/O moved to `spawn_blocking` (#1530).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
