@@ -63,6 +63,9 @@ pub type AdminActionFn = Arc<
 >;
 
 /// The permission a custom bulk action is checked against (#1818).
+///
+/// Any custom action also needs the table writable, so `Delete` needs
+/// `{table}.change` too. It audits as an update and sends edit signals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActionPerm {
@@ -646,6 +649,8 @@ impl Builder {
 
     /// [`Self::register_action`] checked against `perm` instead of
     /// `change`, plus the object hook named after the action (#1818).
+    /// A `Delete` action still needs `{table}.change`, and it audits and
+    /// signals as an edit; the handler does its own deleting.
     pub fn register_action_with_perm<F>(
         mut self,
         model_table: &'static str,

@@ -231,15 +231,25 @@ impl CacheRateLimitLayer {
     }
 
     /// Refund a slot [`Self::try_take`] counted in `window_start`. A past
-    /// window has expired, so there is nothing to refund.
+    /// window has expired, and a counter is never taken below 0: an
+    /// evicted key would otherwise hand out an extra slot.
     pub(crate) async fn give_back_at(&self, key: &str, window_start: u64) {
         if self.window_now().1 != window_start {
             return;
         }
         let ttl = Some(Duration::from_secs(self.window_secs()));
         let cache_key = self.cache_key(key, window_start);
-        if let Err(e) = self.cache.decr(&cache_key, 1, ttl).await {
-            tracing::warn!(cache_key, error = %e, "rate-limit cache refund failed");
+        let current = self.cache.get(&cache_key).await;
+        if !matches!(&current, Ok(Some(v)) if v.parse::<i64>().is_ok_and(|n| n > 0)) {
+            return;
+        }
+        match self.cache.decr(&cache_key, 1, ttl).await {
+            // Evicted between the read and the decr: undo it.
+            Ok(n) if n < 0 => {
+                let _ = self.cache.incr(&cache_key, 1, ttl).await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(cache_key, error = %e, "rate-limit cache refund failed"),
         }
     }
 
@@ -393,6 +403,37 @@ mod tests {
         // reset_at must be in the future and within one window-length.
         assert!(reset_at > now);
         assert!(reset_at <= now + 60);
+    }
+
+    /// A refund to an evicted counter does not make it negative.
+    #[tokio::test]
+    async fn refund_never_goes_below_zero() {
+        let l = layer(1, 3600);
+        let (_, window) = l.try_take("k").await.unwrap().unwrap();
+        let key = l.cache_key("k", window);
+        l.cache.delete(&key).await.unwrap();
+        l.give_back_at("k", window).await;
+        let v = l.cache.get(&key).await.unwrap();
+        assert!(
+            v.as_deref().is_none_or(|v| v == "0"),
+            "counter went to {v:?}"
+        );
+        assert!(l.try_take("k").await.unwrap().is_ok());
+        assert!(l.try_take("k").await.unwrap().is_err(), "an extra slot");
+    }
+
+    /// A refund for a past window touches neither that window nor this one.
+    #[tokio::test]
+    async fn refund_after_the_window_changed_is_dropped() {
+        let l = layer(1, 3600);
+        let (_, window) = l.try_take("k").await.unwrap().unwrap();
+        let past = window - 3600;
+        l.give_back_at("k", past).await;
+        assert_eq!(l.cache.get(&l.cache_key("k", past)).await.unwrap(), None);
+        assert!(
+            l.try_peek("k").await.unwrap().is_err(),
+            "this window refunded"
+        );
     }
 
     #[tokio::test]

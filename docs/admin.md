@@ -298,7 +298,8 @@ registered handler simply won't appear.
 A custom action is checked like an edit: `{table}.change` plus an object hook
 named after the action. An action that deletes should say so with
 `register_action_with_perm(table, name, ActionPerm::Delete, handler)`, so it
-needs `{table}.delete` and runs the `delete` hook instead.
+needs `{table}.delete` and runs the `delete` hook instead. It still needs
+`{table}.change`, and it is audited and signalled as an edit.
 
 ---
 

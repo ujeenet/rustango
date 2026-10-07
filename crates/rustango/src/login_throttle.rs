@@ -200,12 +200,11 @@ struct Buckets {
 enum Limit {
     /// A token bucket in this process.
     Memory(RateLimitLayer),
-    /// A fixed-window counter in a cache. On a cache error the per-IP
-    /// limit counts in `fallback` (fail closed); the global one, with
-    /// none, lets the attempt through (fail open).
+    /// A fixed-window counter in a cache; on a cache error the attempt
+    /// counts in the in-process `fallback`, so the limit never opens.
     Cache {
         shared: CacheRateLimitLayer,
-        fallback: Option<RateLimitLayer>,
+        fallback: RateLimitLayer,
     },
 }
 
@@ -226,10 +225,7 @@ impl Limit {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache read failed");
-                    match fallback {
-                        Some(l) => l.peek(key).await,
-                        None => Ok(()),
-                    }
+                    fallback.peek(key).await
                 }
             },
         }
@@ -242,10 +238,7 @@ impl Limit {
                 Ok(r) => r.map(|(_, window)| Spent::Window(window)),
                 Err(e) => {
                     tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache incr failed");
-                    match fallback {
-                        Some(l) => l.take(key).await.map(|_| Spent::Memory),
-                        None => Ok(Spent::Nothing),
-                    }
+                    fallback.take(key).await.map(|_| Spent::Memory)
                 }
             },
         }
@@ -253,13 +246,9 @@ impl Limit {
 
     async fn give_back(&self, key: &str, spent: Spent) {
         match (self, spent) {
-            (
-                Self::Memory(l)
-                | Self::Cache {
-                    fallback: Some(l), ..
-                },
-                Spent::Memory,
-            ) => l.give_back(key).await,
+            (Self::Memory(l) | Self::Cache { fallback: l, .. }, Spent::Memory) => {
+                l.give_back(key).await;
+            }
             (Self::Cache { shared, .. }, Spent::Window(w)) => shared.give_back_at(key, w).await,
             _ => {}
         }
@@ -288,7 +277,12 @@ impl LoginThrottle {
     }
 
     /// Per-IP and global limits counted in `cache`, so every replica on
-    /// one Redis or database cache shares them (#1809). Fixed windows.
+    /// one Redis or database cache shares them (#1809). On a cache error
+    /// they count in process.
+    ///
+    /// Fixed windows: a burst across a window edge can reach 2× a limit.
+    /// Keys are `login-ip:*` / `login-global:*`, so apps on one cache share
+    /// them; give each app its own [`crate::cache::ScopedCache`].
     #[must_use]
     pub fn with_cache(limits: LoginLimits, cache: BoxedCache) -> Self {
         let ip = CacheRateLimitLayer::new(cache.clone(), limits.ip_limit.max(1), limits.ip_window);
@@ -298,11 +292,11 @@ impl LoginThrottle {
             limits,
             ip: Limit::Cache {
                 shared: ip.key_prefix("login-ip"),
-                fallback: Some(memory_ip(limits)),
+                fallback: memory_ip(limits),
             },
             global: Limit::Cache {
                 shared: global.key_prefix("login-global"),
-                fallback: None,
+                fallback: memory_global(limits),
             },
         }))
     }
@@ -810,18 +804,22 @@ mod tests {
         }
     }
 
-    /// A cache outage keeps the per-IP limit (in process) and opens the global one.
-    #[tokio::test]
-    async fn a_cache_outage_keeps_the_per_ip_limit() {
+    fn down(ip_limit: u32, global_limit: u32) -> LoginThrottle {
         let cache: BoxedCache = Arc::new(Down);
-        let t = on_cache(
+        on_cache(
             &cache,
             LoginLimits {
-                ip_limit: 1,
-                global_limit: 1,
+                ip_limit,
+                global_limit,
                 ..LoginLimits::default()
             },
-        );
+        )
+    }
+
+    /// A cache outage keeps the per-IP limit, counted in process.
+    #[tokio::test]
+    async fn a_cache_outage_keeps_the_per_ip_limit() {
+        let t = down(1, 10);
         let s = tenant("t-down");
         t.begin(&s, &ip("10.9.6.1"), "a")
             .await
@@ -830,6 +828,30 @@ mod tests {
             .await;
         assert!(t.begin(&s, &ip("10.9.6.1"), "a").await.is_err());
         assert!(t.begin(&s, &ip("10.9.6.2"), "b").await.is_ok());
+    }
+
+    /// A cache outage keeps the global limit too: many IPs are still capped.
+    #[tokio::test]
+    async fn a_cache_outage_keeps_the_global_limit() {
+        let t = down(10, 1);
+        let s = tenant("t-down-g");
+        t.begin(&s, &ip("10.9.7.1"), "a")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        assert!(t.begin(&s, &ip("10.9.7.2"), "b").await.is_err());
+    }
+
+    /// Successes during an outage refund the in-process fallback buckets.
+    #[tokio::test]
+    async fn a_cache_outage_refunds_the_fallback() {
+        let t = down(1, 1);
+        let s = tenant("t-down-ok");
+        for n in 0..5 {
+            let a = t.begin(&s, &ip("10.9.8.1"), &format!("ok{n}")).await;
+            a.unwrap().succeeded().await;
+        }
     }
 
     #[test]
