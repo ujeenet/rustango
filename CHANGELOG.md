@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — README links work on crates.io (#1405)
+
+crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
