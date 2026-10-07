@@ -114,6 +114,7 @@ The access log writes its field list once; query redaction no longer allocates f
 ### Fixed — flaky SQLite file-pool test on Windows (#2205)
 
 The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.
+
 ### Fixed — MySQL `DoNothing`/`DoUpdate` on an auto-increment PK no longer fails with 1869 (#2200)
 
 The no-op write now targets a non-auto-increment column, so two rows of one batch that hit the same unique key are skipped or merged.
