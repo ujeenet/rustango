@@ -2782,8 +2782,8 @@ fn render_step(
             table: super::rebuild::name_at_end(table, later),
             name: name.clone(),
             to: super::rebuild::name_at_end(to, later),
-            from: from.clone(),
-            on: on.clone(),
+            from: super::rebuild::columns_at_end(table, from, later),
+            on: super::rebuild::columns_at_end(to, on, later),
         }),
         _ => None,
     };

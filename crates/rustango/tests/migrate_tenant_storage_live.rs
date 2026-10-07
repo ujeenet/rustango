@@ -403,24 +403,50 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     org.insert(&pool).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
-    run_with_writer(
-        &pools,
-        &registry_url,
-        std::path::Path::new("."),
-        args(&[
-            "migrate-tenant-storage",
-            "t2189",
-            "--to",
-            "database",
-            "--database-url",
-            &dst_url,
-        ]),
-        &mut Vec::<u8>::new(),
+    let migrate = || async {
+        run_with_writer(
+            &pools,
+            &registry_url,
+            std::path::Path::new("."),
+            args(&[
+                "migrate-tenant-storage",
+                "t2189",
+                "--to",
+                "database",
+                "--database-url",
+                &dst_url,
+            ]),
+            &mut Vec::<u8>::new(),
+        )
+        .await
+    };
+    // A non-empty `public` is refused before anything moves.
+    let dst = PgPool::connect(&dst_url).await.unwrap();
+    sqlx_exec(&dst, "CREATE TABLE public.junk (id INT)").await;
+    let err = migrate().await.unwrap_err().to_string();
+    assert!(
+        err.contains("must be empty") && err.contains("junk"),
+        "{err}"
+    );
+    let left: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
     )
+    .fetch_one(&dst)
     .await
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap();
+    assert_eq!(left, 0, "a refused move restored something");
+    sqlx_exec(&dst, "DROP TABLE public.junk").await;
+    dst.close().await;
+    migrate().await.unwrap_or_else(|e| panic!("{e}"));
 
     let dst = PgPool::connect(&dst_url).await.unwrap();
+    let granted: bool = rustango::sql::sqlx::query_scalar(
+        "SELECT has_schema_privilege('public', 'public', 'USAGE')",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert!(granted, "other roles lost USAGE on public");
     let names: Vec<(String,)> =
         rustango::sql::sqlx::query_as("SELECT username FROM public.rustango_users ORDER BY id")
             .fetch_all(&dst)

@@ -1841,6 +1841,86 @@ async fn composite_fk_add_before_rename(pool: &Pool) {
     );
 }
 
+/// #2195 review — as above, with its columns and its target renamed later.
+async fn composite_fk_add_before_target_and_column_renames(pool: &Pool) {
+    let (p, p2, t, u) = (
+        "mad_cc_parent",
+        "mad_cc_parent2",
+        "mad_cc_old",
+        "mad_cc_new",
+    );
+    let chain = Chain::new(pool, "cc", &[u, t, p2, p]).await;
+    let cols = |a: &str, b: &str| vec![id(), col(a, "i64", json!({})), col(b, "i64", json!({}))];
+    let snap = |p: &str, pb: &str, kid: Value| {
+        json!({"tables": [table(p, cols("a", pb)), kid],
+               "indexes": [{"name": "mad_cc_ab_uq", "table": p, "columns": ["a", pb],
+                            "unique": true}]})
+    };
+    chain
+        .step(pool, snap(p, "b", table(t, cols("a", "b"))))
+        .await
+        .expect("initial");
+    let mut kid = table(u, cols("a2", "b"));
+    kid["composite_fks"] =
+        json!([{"name": "mad_cc_fk", "to": p2, "from": ["a2", "b"], "on": ["a", "b2"]}]);
+    let ops = vec![
+        SchemaChange::AddCompositeFk {
+            table: t.into(),
+            name: "mad_cc_fk".into(),
+            to: p.into(),
+            from: vec!["a".into(), "b".into()],
+            on: vec!["a".into(), "b".into()],
+        },
+        SchemaChange::RenameColumn {
+            table: t.into(),
+            old_column: "a".into(),
+            new_column: "a2".into(),
+        },
+        SchemaChange::RenameColumn {
+            table: p.into(),
+            old_column: "b".into(),
+            new_column: "b2".into(),
+        },
+        SchemaChange::RenameTable {
+            old_name: p.into(),
+            new_name: p2.into(),
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, snap(p2, "b2", kid), ops, None)
+        .await
+        .expect("add composite FK, then column and table renames");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[u, "id", "a2", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+        &[p2, "id", "a", "b2"],
+    )
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 9, 9)",
+        &[u, "id", "a2", "b"],
+    )
+    .await
+    .expect("a row that matches the parent");
+}
+
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
 /// already there elsewhere does not block it; a RunSQL beside it is refused.
 async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
@@ -2364,6 +2444,7 @@ tri_dialect_test!(
         fk_comes_back_under_names_at_its_op,
         on_delete_change_before_rename,
         composite_fk_add_before_rename,
+        composite_fk_add_before_target_and_column_renames,
         declared_index_survives_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
