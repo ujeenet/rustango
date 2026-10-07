@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — strict CSP on the SSO error page; no server HTML in `innerHTML` (#2144)
+
+The member SSO error page uses a nonce'd `<style>`. The console connection probe returns JSON the page renders as text, and the admin autocomplete builds its options as nodes, so row text is never parsed as HTML.
+
 ### Added — admin actions can require `delete` with `ActionPerm` (#1818)
 
 `register_action_with_perm(.., ActionPerm::Delete, ..)` checks `{table}.delete` and the `delete` hook instead of `change`; the tenant admin and server builders have it too.

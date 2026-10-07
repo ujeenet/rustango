@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### The console connection probe returns JSON (#2144)
+
+`POST <console>/orgs/test-connection` and `/orgs/{slug}/test-connection` now answer `{"status": "ok"|"bad", "message", "endpoint"?}` instead of an HTML fragment.
+
 ### Custom admin actions can require `delete` (#1818)
 
 Register an action that deletes with `register_action_with_perm(.., ActionPerm::Delete, ..)`; `register_action` still checks `change`.

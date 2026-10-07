@@ -338,7 +338,7 @@ async fn test_connection_reports_why_and_creates_nothing() {
     assert_eq!(resp.status(), StatusCode::OK);
     let html = body_of(resp).await;
     assert!(
-        html.contains("probe-bad"),
+        html.contains(r#""status":"bad""#),
         "an unusable URL should report as bad: {html}"
     );
     // The endpoint is echoed so the operator can see *what* was tried,
@@ -395,7 +395,7 @@ async fn the_probe_refuses_the_registry_instead_of_blessing_it() {
     assert_eq!(resp.status(), StatusCode::OK);
     let html = body_of(resp).await;
     assert!(
-        html.contains("probe-bad"),
+        html.contains(r#""status":"bad""#),
         "the registry's own database must not probe as usable: {html}"
     );
     assert!(
