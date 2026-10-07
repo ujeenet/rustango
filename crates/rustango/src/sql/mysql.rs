@@ -272,6 +272,11 @@ impl Dialect for MySql {
         false
     }
 
+    /// InnoDB parses `SET DEFAULT` and refuses the parent delete (1451).
+    fn supports_on_delete_set_default(&self) -> bool {
+        false
+    }
+
     /// MySQL spells this `DROP CHECK` and takes no `IF EXISTS`,
     /// which is a parse error on any drop-constraint form.
     ///

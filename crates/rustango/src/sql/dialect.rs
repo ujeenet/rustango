@@ -130,6 +130,12 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// `true` if the server enforces `ON DELETE SET DEFAULT`. InnoDB
+    /// accepts the clause and then refuses the parent delete (#1573).
+    fn supports_on_delete_set_default(&self) -> bool {
+        true
+    }
+
     /// `true` when changing a column restates its whole definition
     /// (MySQL's `MODIFY COLUMN`), not one property at a time (#1676).
     fn modifies_whole_column(&self) -> bool {

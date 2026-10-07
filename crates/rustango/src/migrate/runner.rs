@@ -338,6 +338,9 @@ pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
 /// # Errors
 /// As [`apply_all`].
 pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+    for model in bootstrap_models() {
+        ddl::check_on_delete(pool.dialect(), model).map_err(MigrateError::Validation)?;
+    }
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,

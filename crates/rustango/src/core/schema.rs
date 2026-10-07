@@ -304,7 +304,8 @@ impl OnDeleteAction {
     /// - `SetDefault` works on PG and SQLite, but InnoDB parses and
     ///   ignores it. MySQL still records `DELETE_RULE = 'SET DEFAULT'`
     ///   in `information_schema`, so introspection looks right while
-    ///   the parent delete is refused with error 1451.
+    ///   the parent delete is refused with error 1451. So the migration
+    ///   writer refuses it on MySQL.
     ///
     /// [`UPGRADING.md`]: https://github.com/ujeenet/rustango/blob/main/UPGRADING.md
     #[must_use]
