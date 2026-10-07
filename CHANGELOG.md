@@ -109,6 +109,9 @@ A subtree with more collections than the backend's bind limit is listed in sever
 ### Fixed — logging follow-ups from the #1479 reviews (#1493)
 
 The access log writes its field list once; query redaction no longer allocates for a clean query; `#[rustango::main]` installs through `logging::Setup`; `bin/bump-version.sh` no longer rewrites an inline third-party pin at our version (a `[dependencies.foo]` table still matches). `docs/logging.md` now says `fmt` never shows the span's status, size and duration.
+### Fixed — flaky SQLite file-pool test on Windows (#2205)
+
+The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.
 
 ## [0.60.1] — 2026-10-07
 
