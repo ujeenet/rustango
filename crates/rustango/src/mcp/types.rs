@@ -118,7 +118,7 @@ impl JsonRpcError {
 
     /// An internal error: the detail is logged, the agent sees none (#1963).
     pub(crate) fn internal_logged(detail: impl std::fmt::Display) -> Self {
-        tracing::error!(target: "rustango::mcp", error = %detail, "mcp internal error");
+        tracing::error!(error = %detail, "mcp internal error");
         Self::new(codes::INTERNAL_ERROR, INTERNAL_MESSAGE)
     }
 }
