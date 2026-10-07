@@ -53,7 +53,7 @@ pub enum PoolError {
     /// URL didn't start with a recognized scheme (`postgres://`,
     /// `postgresql://`, `mysql://`, or `sqlite:`). Holds the scheme
     /// only: the rest of the URL can carry a password (#2172).
-    #[error("unsupported URL scheme `{0}` — expected postgres://, mysql://, or sqlite:")]
+    #[error("{} — expected postgres://, mysql://, or sqlite:", scheme_problem(.0))]
     UnsupportedScheme(String),
 
     /// The URL names a backend whose Cargo feature is off.
@@ -68,6 +68,15 @@ pub enum PoolError {
 
     #[error(transparent)]
     Env(#[from] EnvError),
+}
+
+/// An empty scheme has nothing to quote.
+fn scheme_problem(scheme: &str) -> String {
+    if scheme.is_empty() {
+        "missing or invalid URL scheme".to_owned()
+    } else {
+        format!("unsupported URL scheme `{scheme}`")
+    }
 }
 
 impl PoolError {
@@ -1069,6 +1078,12 @@ mod tests {
             let shown = format!("{err} {err:?}");
             assert!(!shown.contains("hunter2"), "{shown}");
         }
+        let err = Pool::connect_lazy("postgresql//u:hunter2@h/db").unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("missing or invalid URL scheme — expected postgres://"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

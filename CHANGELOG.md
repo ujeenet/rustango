@@ -20,6 +20,14 @@ It names the key and the expected type; the TOML value can be a secret.
 
 Operator, decommission, pre-warm, org-edit and password-hash failures log the cause and show an opaque message.
 
+### Security — tenant-create form and run stream withhold driver text (#2193)
+
+A failed `provision()` and a failed run read show an opaque message; the cause is logged.
+
+### Security — `Settings` Debug redacts secrets
+
+`database.url` and `cache.redis_url` show without their password; `sso.client_secret` and `mail.smtp_password` show as `<redacted>`.
+
 ### Fixed — admin CSRF follows the outer layer's cookie (#2160)
 
 Under `csrf::with_config`, admin pages and both login forms set and check that layer's cookie name and `Secure` flag; POSTs no longer 403.

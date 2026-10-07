@@ -212,6 +212,11 @@ async fn failed_org_actions_withhold_the_driver_text() {
         ("/orgs/acme/deactivate", "", "Could not deactivate"),
         ("/orgs/acme/purge", "confirm=acme", "Could not purge"),
         ("/orgs/prewarm", "", "Pre-warm failed"),
+        (
+            "/orgs/acme/edit",
+            "display_name=x&active=on",
+            "Could not save",
+        ),
     ] {
         let b = boot().await;
         break_org_table(&b.raw).await;
@@ -248,6 +253,51 @@ async fn a_failed_operator_create_withholds_the_driver_text() {
         "driver text leaked: {body}"
     );
     assert!(body.contains("Could not create the operator"), "{body}");
+}
+
+/// #2171 — a failed operator save (reset password, deactivate) withholds
+/// the driver text.
+#[tokio::test]
+async fn failed_operator_saves_withhold_the_driver_text() {
+    let b = boot().await;
+    let mut other = rustango::tenancy::Operator {
+        id: Auto::default(),
+        username: format!("other-{}", UNIQ.fetch_add(1, Ordering::SeqCst)),
+        password_hash: rustango::tenancy::password::hash("x").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    other
+        .insert_pool(&rustango::sql::Pool::from(b.raw.clone()))
+        .await
+        .expect("seed operator");
+    let id = *other.id.get().unwrap();
+    sqlx::query(
+        "CREATE TRIGGER no_op_updates BEFORE UPDATE ON rustango_operators \
+         BEGIN SELECT RAISE(ABORT, 'TRIGGERSECRET'); END",
+    )
+    .execute(&b.raw)
+    .await
+    .expect("trigger");
+    let pw = "Kq7-violet-harbor-91";
+    let mut wrong = Vec::new();
+    for (uri, form) in [
+        (
+            format!("/operators/{id}/reset-password"),
+            format!("password={pw}&confirm_password={pw}"),
+        ),
+        (format!("/operators/{id}/active"), String::new()),
+    ] {
+        let resp = post_form(&b, &uri, &form).await;
+        let body =
+            String::from_utf8(to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        if body.contains("TRIGGERSECRET") || !body.contains("Could not save") {
+            wrong.push(format!("{uri}: {body}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 #[tokio::test]
