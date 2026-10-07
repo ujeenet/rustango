@@ -23,46 +23,125 @@ use crate::core::Column as _;
 use crate::sql::FetcherPool as _;
 
 /// One event, flattened for the run's event table.
-struct Row {
-    step: String,
-    status: String,
-    message: String,
+pub(super) struct Row {
+    pub(super) step: String,
+    pub(super) status: String,
+    pub(super) message: String,
 }
 
-fn flatten(event: &TenantMigrationEvent) -> Row {
+/// A migration event as a run-log line. Error text sits in `cause`,
+/// which [`Self::stored`] logs and never stores: operators read the log (#2209).
+pub(super) struct LogLine {
+    slug: Option<String>,
+    step: &'static str,
+    status: &'static str,
+    text: String,
+    cause: Option<String>,
+}
+
+impl LogLine {
+    /// The row to store; a `cause` is logged with the org and run id.
+    pub(super) fn stored(self, run_id: i64) -> Row {
+        let message = match &self.cause {
+            Some(cause) => super::operator_console::withheld_in(
+                &tracing::error_span!(
+                    "migrate_run",
+                    org = self.slug.as_deref().unwrap_or(""),
+                    run_id
+                ),
+                "tenancy::migrate_run",
+                &self.text,
+                cause,
+            ),
+            None => self.text,
+        };
+        Row {
+            step: self.step.into(),
+            status: self.status.into(),
+            message,
+        }
+    }
+}
+
+/// The one renderer of migration events for a stored run log.
+pub(super) fn log_line(event: &TenantMigrationEvent) -> LogLine {
+    use crate::migrate::MigrationEvent as E;
+    let line = |slug: Option<&str>, step, status, text: String, cause: Option<&String>| LogLine {
+        slug: slug.map(ToOwned::to_owned),
+        step,
+        status,
+        text,
+        cause: cause.cloned(),
+    };
     match event {
-        TenantMigrationEvent::Planned { tenants } => Row {
-            step: "plan".into(),
-            status: "info".into(),
-            message: format!("{tenants} tenant(s) to migrate"),
-        },
-        TenantMigrationEvent::TenantStarted { slug, index, total } => Row {
-            step: "tenant".into(),
-            status: "started".into(),
-            message: format!("{slug} ({index}/{total})"),
-        },
-        TenantMigrationEvent::Migration { slug, chain, event } => Row {
-            step: "migration".into(),
-            status: "info".into(),
-            message: format!("{slug} {}: {}", chain_name(*chain), describe(event)),
-        },
+        TenantMigrationEvent::Planned { tenants } => line(
+            None,
+            "plan",
+            "info",
+            format!("{tenants} tenant(s) to migrate"),
+            None,
+        ),
+        TenantMigrationEvent::TenantStarted { slug, index, total } => line(
+            Some(slug),
+            "tenant",
+            "started",
+            format!("{slug} ({index}/{total})"),
+            None,
+        ),
+        TenantMigrationEvent::Migration { slug, chain, event } => {
+            let chain = chain_name(*chain);
+            match event {
+                E::Planned { total } => line(
+                    Some(slug),
+                    "migration",
+                    "info",
+                    format!("{slug} {chain}: {total} pending"),
+                    None,
+                ),
+                E::Started { name, .. } => line(
+                    Some(slug),
+                    "migration",
+                    "info",
+                    format!("{slug} {chain}: {name} started"),
+                    None,
+                ),
+                E::Finished { name, outcome, .. } => line(
+                    Some(slug),
+                    "migration",
+                    "info",
+                    format!("{slug} {chain}: applied {name} ({outcome:?})"),
+                    None,
+                ),
+                E::Failed { name, error, .. } => line(
+                    Some(slug),
+                    "migration",
+                    "failed",
+                    format!("{slug} {chain}: {name} failed"),
+                    Some(error),
+                ),
+            }
+        }
         TenantMigrationEvent::TenantFinished {
             slug,
             applied,
             error,
             ..
-        } => error.as_ref().map_or_else(
-            || Row {
-                step: "tenant".into(),
-                status: "ok".into(),
-                message: format!("{slug}: {applied} applied"),
-            },
-            |e| Row {
-                step: "tenant".into(),
-                status: "failed".into(),
-                message: format!("{slug}: {e}"),
-            },
-        ),
+        } => match error {
+            None => line(
+                Some(slug),
+                "tenant",
+                "ok",
+                format!("{slug}: {applied} applied"),
+                None,
+            ),
+            Some(e) => line(
+                Some(slug),
+                "tenant",
+                "failed",
+                format!("{slug} failed"),
+                Some(e),
+            ),
+        },
     }
 }
 
@@ -70,16 +149,6 @@ const fn chain_name(chain: tenant_migrate::Chain) -> &'static str {
     match chain {
         tenant_migrate::Chain::System => "system",
         tenant_migrate::Chain::Project => "app",
-    }
-}
-
-fn describe(event: &crate::migrate::MigrationEvent) -> String {
-    use crate::migrate::MigrationEvent as E;
-    match event {
-        E::Planned { total } => format!("{total} pending"),
-        E::Started { name, .. } => format!("{name} started"),
-        E::Finished { name, outcome, .. } => format!("applied {name} ({outcome:?})"),
-        E::Failed { name, error, .. } => format!("{name} failed: {error}"),
     }
 }
 
@@ -134,7 +203,7 @@ where
     let observer = move |event: TenantMigrationEvent| {
         // A closed receiver means the writer died; the migration is
         // still worth finishing.
-        let _ = tx.send(flatten(&event));
+        let _ = tx.send(log_line(&event).stored(run_id));
     };
 
     let result = match slug {
@@ -158,7 +227,17 @@ where
     } else {
         RunState::Failed
     };
-    let error = result.as_ref().err().map(ToString::to_string);
+    // Operator-safe, like the event rows (#2209).
+    let error = result.as_ref().err().map(|e| {
+        e.user_facing().unwrap_or_else(|| {
+            super::operator_console::withheld_in(
+                &tracing::error_span!("migrate_run", org = slug.unwrap_or(""), run_id),
+                "tenancy::migrate_run",
+                "Migration failed",
+                e,
+            )
+        })
+    });
     if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
         tracing::warn!(
             target: "rustango::tenancy::migrate_run",

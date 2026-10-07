@@ -386,7 +386,10 @@ impl Reporter<'_> {
     /// A migration event from the tenant's own run. Buffered rather
     /// than written — see the type docs.
     fn migration(&self, event: tenant_migrate::TenantMigrationEvent) {
-        self.buffer("migration", "info", &render_migration(&event));
+        if let Some(store) = &self.store {
+            let row = super::migrate_run::log_line(&event).stored(store.run_id);
+            self.buffer(&row.step, &row.status, &row.message);
+        }
         self.notify(ProvisionEvent::Migration(event));
     }
 }
@@ -427,54 +430,6 @@ impl StepStatus {
             Self::Started | Self::Ok => "",
             Self::Skipped(why) | Self::Failed(why) => why,
         }
-    }
-}
-
-/// One line describing a migration event, for the stored log.
-fn render_migration(event: &tenant_migrate::TenantMigrationEvent) -> String {
-    use crate::migrate::{MigrationEvent as M, Outcome};
-    use tenant_migrate::{Chain, TenantMigrationEvent as E};
-
-    let chain_tag = |c: Chain| match c {
-        Chain::System => "system",
-        Chain::Project => "app",
-    };
-    match event {
-        E::Planned { tenants } => format!("migrating {tenants} tenant(s)"),
-        E::TenantStarted { slug, .. } => format!("tenant {slug}"),
-        E::TenantFinished {
-            slug,
-            applied,
-            error,
-            ..
-        } => match error {
-            Some(e) => format!("tenant {slug} failed: {e}"),
-            None => format!("tenant {slug}: {applied} migration(s)"),
-        },
-        E::Migration { chain, event, .. } => match event {
-            M::Planned { total } => format!("{}: {total} pending", chain_tag(*chain)),
-            M::Started { name, .. } => format!("{}/{name} started", chain_tag(*chain)),
-            M::Finished {
-                name,
-                outcome,
-                elapsed,
-                ..
-            } => {
-                let verb = match outcome {
-                    Outcome::Ran => "applied",
-                    Outcome::RanPartial { .. } => "applied (partial)",
-                    Outcome::Faked => "faked",
-                };
-                format!(
-                    "{verb} {}/{name} ({:.1}s)",
-                    chain_tag(*chain),
-                    elapsed.as_secs_f64()
-                )
-            }
-            M::Failed { name, error, .. } => {
-                format!("{}/{name} failed: {error}", chain_tag(*chain))
-            }
-        },
     }
 }
 

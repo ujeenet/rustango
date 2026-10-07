@@ -60,6 +60,10 @@ A failed `provision()` and a failed run read show an opaque message; the cause i
 
 A failed step's event and the run's `error` keep validation text, else "Step failed (…)"; the cause is logged with the org slug and run id.
 
+### Security — migration failures in the run log withhold driver text (#2209)
+
+Provision and console "Run migrations" runs store "`<name>` failed (…)" and log the cause. Both now render migration events through one renderer, so provision runs log them as `plan` / `tenant` / `migration` steps.
+
 ### Security — `Settings` Debug redacts secrets
 
 `database.url` and `cache.redis_url` show without their password; `sso.client_secret` and `mail.smtp_password` show as `<redacted>`.
