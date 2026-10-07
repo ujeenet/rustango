@@ -37,7 +37,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use tera::Context;
 
-use super::{inject_op_brand, withheld, ConsoleState};
+use super::{inject_op_brand, withheld, withheld_in, ConsoleState};
 use crate::sql::connect_diagnosis::redact;
 use crate::tenancy::auth;
 use crate::tenancy::org::{BackendKind, StorageMode};
@@ -247,7 +247,17 @@ pub(super) async fn org_new_submit(
         // database — comes back here rather than as a run to watch,
         // because there is nothing to watch. Re-render with the
         // operator's input intact so they can fix one field.
-        Err(e) => render_form(&state, &op, &form, Some(&e.to_string())),
+        Err(e) => {
+            let msg = e.user_facing().unwrap_or_else(|| {
+                withheld(
+                    "operator_console::provision",
+                    &request.slug,
+                    "Could not create the tenant",
+                    &e,
+                )
+            });
+            render_form(&state, &op, &form, Some(&msg))
+        }
     }
 }
 
@@ -628,9 +638,14 @@ pub(super) async fn provision_run_stream(
                     }
                 }
                 Err(e) => {
-                    yield Item::Ok(Event::default()
-                        .event("error")
-                        .data(e.to_string()));
+                    // Driver text is logged, not streamed (#2193).
+                    let msg = withheld_in(
+                        &tracing::error_span!("operator_console", run_id),
+                        "operator_console::provision_stream",
+                        "Could not read the run",
+                        &e,
+                    );
+                    yield Item::Ok(Event::default().event("error").data(msg));
                     return;
                 }
             }

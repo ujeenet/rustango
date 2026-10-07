@@ -1048,3 +1048,97 @@ mod through_the_builder {
         let _ = (body_of(resp).await, tmp);
     }
 }
+
+/// Drop a registry table under the console, so its queries fail in the driver.
+async fn drop_registry_table(b: &Booted, table: &str) {
+    let raw = sqlx::SqlitePool::connect(&b.registry_url).await.unwrap();
+    sqlx::query(&format!("DROP TABLE {table}"))
+        .execute(&raw)
+        .await
+        .unwrap();
+}
+
+/// #2193 — a provision that fails in the driver re-renders the form
+/// without the driver text.
+#[tokio::test]
+async fn a_failed_create_withholds_the_driver_text() {
+    let b = boot().await;
+    drop_registry_table(&b, "rustango_orgs").await;
+    let tenant_db = b._tmp.path().join("broken.db");
+    let form = format!(
+        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        unique("broken"),
+        form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
+    );
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_of(resp).await;
+    assert!(
+        !html.contains("no such table"),
+        "driver text leaked: {html}"
+    );
+    assert!(html.contains("Could not create the tenant"), "{html}");
+
+    // #2198 — the run's stored log says the step failed, not why.
+    for uri in ["/orgs/provision/1", "/orgs/provision/1/stream"] {
+        let resp = b
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), body_of(resp))
+            .await
+            .expect("the run is finished");
+        assert!(!body.contains("no such table"), "{uri} leaked: {body}");
+        assert!(body.contains("Step failed"), "{uri}: {body}");
+    }
+}
+
+/// #2193 — a stream whose store read fails sends an opaque `error` event.
+#[tokio::test]
+async fn a_failed_stream_read_withholds_the_driver_text() {
+    let b = boot().await;
+    drop_registry_table(&b, "rustango_provisioning_events").await;
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/orgs/provision/1/stream")
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(std::time::Duration::from_secs(20), body_of(resp))
+        .await
+        .expect("the stream ends on an error");
+    assert!(body.contains("event: error"), "{body}");
+    assert!(
+        !body.contains("no such table"),
+        "driver text leaked: {body}"
+    );
+    assert!(body.contains("Could not read the run"), "{body}");
+}
