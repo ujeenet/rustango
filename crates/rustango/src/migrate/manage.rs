@@ -1946,7 +1946,7 @@ fn parse_name_and_model_as(
 
 /// Keywords (2015–2024, strict and reserved) plus the crate names a module
 /// may not shadow. `cargo-rustango` keeps its own copy; it links no rustango.
-fn is_reserved_module_name(name: &str) -> bool {
+pub(super) fn is_reserved_module_name(name: &str) -> bool {
     const RESERVED: &[&str] = &[
         "abstract",
         "alloc",
