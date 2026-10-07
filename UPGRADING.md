@@ -169,6 +169,7 @@ Register an action that deletes with `register_action_with_perm(.., ActionPerm::
 ### Login limits warn when they count per process (#1809)
 
 The first login logs a warning while the per-IP and global limits live in process memory; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` to share them.
+
 ### Error text no longer echoes secrets
 
 `PoolError::UnsupportedScheme` holds just the scheme (empty if none), not the URL (#2172). `ConfigError::Shape` reads `` `section.key`: expected <type> `` and no longer quotes the value (#2159). Update any test that matched the old text.
@@ -180,6 +181,7 @@ The admin and tenant login forms now set and check that layer's cookie name, not
 ### Provisioning runs store operator-safe failure text
 
 New failed steps and runs store validation text or "Step failed (internal server error)"; the cause goes to the log (#2198). Rows already in `rustango_provisioning_events` and `rustango_provisioning_runs` keep their old text; clear them if they hold driver errors.
+
 ### Translations editor: an emptied cell deletes its override
 
 The grid posts each shown value as a hidden `orig:<locale>:<key>` field; a cell shown non-empty and posted blank is deleted. A custom editor form must post those fields too, and can call `i18n::admin::apply_form` (#2091).
@@ -195,6 +197,7 @@ The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent P
 ### Host claims are transactional
 
 Tenant edit and create now insert and delete a claim row in `rustango_org_hosts` inside their transaction (#2099).
+
 ### `GET /collections` returns at most 1000 rows
 
 It used to return every collection. Page with `?limit=&offset=`; with no `?limit` it returns 1000 now and 100 from 0.61.0. `MediaManager::list_collections` is deprecated in favour of `list_collections_paged` (#1570).

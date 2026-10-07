@@ -35,6 +35,7 @@ The member SSO error page uses a nonce'd `<style>`. The console connection probe
 ### Added — `LoginThrottle::with_cache` shares login limits across replicas (#1809)
 
 The per-IP and global login limits can count in a Redis or database cache; the first login warns while they count per process.
+
 ### Security — `PoolError::UnsupportedScheme` holds the scheme only (#2172)
 
 It used to hold the whole URL, password included.
@@ -66,6 +67,7 @@ A failed step's event and the run's `error` keep validation text, else "Step fai
 ### Fixed — admin CSRF follows the outer layer's cookie (#2160)
 
 Under `csrf::with_config`, admin pages and both login forms set and check that layer's cookie name and `Secure` flag; POSTs no longer 403.
+
 ### Fixed — the translations editor clears one locale's override (#2091)
 
 Emptying a cell the page showed non-empty deletes that `(locale, key)` row, so the locale falls back to its file. A gap someone filled after the page loaded is kept.
@@ -81,6 +83,7 @@ The cross-field check reads the row locked, and the UPDATE and its audit entry r
 ### Fixed — two tenants can no longer claim one host at once (#2099)
 
 `add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused. A MySQL deadlock between two claims is retried once.
+
 ### Fixed — media collection listing is paged (#1570)
 
 `GET /collections` takes `?limit=&offset=` (max 1000) through the new `list_collections_paged`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0. `list_collections` is deprecated and still unbounded.
@@ -96,6 +99,7 @@ It pages by slug through the new `MediaManager::list_tags` instead of counting e
 ### Fixed — recursive collection listing past the bind limit (#1570)
 
 A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing; there, an `offset` above 10 000 is refused with 400.
+
 ### Fixed — test hygiene (#2165, #2166, #1945, #1941)
 
 - The FileCache add race test backdates its entry instead of waiting on a 1 ms wall-clock TTL (#2165).
