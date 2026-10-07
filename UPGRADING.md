@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `migrate-tenant-storage --to schema` needs PG 15+ with `CREATEDB`, or a superuser
+
+It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. Extensions are not copied: create `vector`, `citext`, `pgcrypto` and the like in the registry first, or the restore fails and changes nothing (#1864).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

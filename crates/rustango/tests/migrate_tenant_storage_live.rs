@@ -1,19 +1,13 @@
 #![cfg(feature = "postgres")]
 //! Integration test for the `migrate-tenant-storage` verb (item #58
-//! in the future-feature backlog). The `--dry-run` flag short-circuits
-//! before any actual pg_dump → psql work, so this test exercises the
-//! verb's dispatch + Org-lookup + storage-mode validation path
-//! without requiring `pg_dump` / `psql` on PATH or doing any real
-//! data movement.
-//!
-//! A full live test (with real pg_dump) is left as follow-on work —
-//! it would need both binaries on PATH plus a second writable
-//! database to be the target.
+//! in the future-feature backlog). Most tests use `--dry-run`; the
+//! restore test needs `pg_dump` / `psql` on PATH.
 
 #![cfg(all(feature = "tenancy", feature = "postgres"))]
 
 use std::sync::Arc;
 
+use rustango::core::Column as _;
 use rustango::sql::sqlx::PgPool;
 use rustango::sql::Auto;
 use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};
@@ -252,6 +246,117 @@ async fn migrate_tenant_storage_rejects_unknown_slug() {
         "expected `not found` for unknown slug: {err}"
     );
     rustango::migrate::drop_all(&pool).await.unwrap();
+}
+
+/// #1864 — database → schema restores the rows into the target schema.
+/// `psql -c` ignored the piped dump, so the schema stayed empty.
+#[tokio::test]
+async fn migrate_tenant_storage_restores_rows_into_a_schema() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    if std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        assert!(std::env::var("CI").is_err(), "CI needs pg_dump and psql");
+        eprintln!("skipping: pg_dump not on PATH");
+        return;
+    }
+    fresh(&pool).await;
+    let registry_url = std::env::var("DATABASE_URL").unwrap();
+    let drop_src = "DROP DATABASE IF EXISTS rustango_t1864_src WITH (FORCE)";
+    sqlx_exec(&pool, drop_src).await;
+    sqlx_exec(&pool, "CREATE DATABASE rustango_t1864_src").await;
+    sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t1864_moved CASCADE").await;
+    let (base, _) = registry_url.rsplit_once('/').unwrap();
+    let src_url = format!("{base}/rustango_t1864_src");
+    let mut org = Org {
+        id: Auto::default(),
+        slug: "t1864".into(),
+        display_name: "Moved".into(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        database_url: Some(src_url.clone()),
+        schema_name: None,
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        ..rustango::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+
+    let pools = TenantPools::new(pool.clone());
+    let migrate = || async {
+        run_with_writer(
+            &pools,
+            &registry_url,
+            std::path::Path::new("."),
+            args(&[
+                "migrate-tenant-storage",
+                "t1864",
+                "--to",
+                "schema",
+                "--schema-name",
+                "t1864_moved",
+            ]),
+            &mut Vec::<u8>::new(),
+        )
+        .await
+    };
+    // No `rustango_users`: the smoke check fails and drops what it restored.
+    let err = migrate().await.unwrap_err();
+    assert!(err.to_string().contains("dropped"), "{err}");
+    let left: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't1864_moved'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "the failed restore left its schema");
+
+    let src = PgPool::connect(&src_url).await.unwrap();
+    for stmt in [
+        "CREATE TABLE rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
+        "INSERT INTO rustango_users (username) VALUES ('ann'), ('bob')",
+    ] {
+        sqlx_exec(&src, stmt).await;
+    }
+    src.close().await;
+    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+
+    let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
+        "SELECT username FROM t1864_moved.rustango_users ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(names, [("ann".to_owned(),), ("bob".to_owned(),)]);
+    let staging: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_database WHERE datname LIKE 'rustango_stage_%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(staging, 0, "staging database left behind");
+    let moved: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq("t1864".to_owned()))
+        .fetch_on(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moved[0].storage_mode, StorageMode::Schema.as_str());
+    assert_eq!(moved[0].schema_name.as_deref(), Some("t1864_moved"));
+
+    sqlx_exec(&pool, "DROP SCHEMA t1864_moved CASCADE").await;
+    sqlx_exec(&pool, drop_src).await;
+    rustango::migrate::drop_all(&pool).await.unwrap();
+}
+
+async fn sqlx_exec(pool: &PgPool, sql: &str) {
+    rustango::sql::sqlx::query(sql).execute(pool).await.unwrap();
 }
 
 // Suppress unused-import warning when the file's only consumer

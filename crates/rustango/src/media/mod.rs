@@ -916,14 +916,6 @@ impl MediaManager {
         description: impl Into<String>,
     ) -> Result<MediaCollection, MediaError> {
         let slug = slug.into();
-        // A soft-deleted folder has no restore path, yet its `unique`
-        // slug would block this one forever (#1677). Drop the tombstone
-        // in the INSERT's transaction, so a failed INSERT keeps it.
-        let tombstone = MediaCollection::objects()
-            .where_(MediaCollection::slug.eq(slug.clone()))
-            .where_(MediaCollection::deleted_at.is_not_null())
-            .compile_delete()
-            .map_err(|e| media_err_from_exec(e.into()))?;
         let mut row = MediaCollection {
             id: Auto::Unset,
             name: name.into(),
@@ -956,9 +948,29 @@ impl MediaManager {
                 )));
             }
         }
-        crate::sql::delete_tx(&mut tx, &tombstone)
-            .await
-            .map_err(media_err_from_exec)?;
+        // A tombstone's `unique` slug would block this one forever (#1677).
+        // Dropped in this tx, by id: a DELETE by a slug that matches nothing
+        // gap-locks MySQL's slug index, and two creates deadlock (#2182).
+        let tombstones = {
+            use crate::sql::FetcherTx as _;
+            MediaCollection::objects()
+                .where_(MediaCollection::slug.eq(row.slug.clone()))
+                .where_(MediaCollection::deleted_at.is_not_null())
+                .fetch_tx(&mut tx)
+                .await
+                .map_err(media_err_from_exec)?
+        };
+        for t in tombstones {
+            let Auto::Set(id) = t.id else { continue };
+            let tombstone = MediaCollection::objects()
+                .where_(MediaCollection::id.eq(id))
+                .where_(MediaCollection::deleted_at.is_not_null())
+                .compile_delete()
+                .map_err(|e| media_err_from_exec(e.into()))?;
+            crate::sql::delete_tx(&mut tx, &tombstone)
+                .await
+                .map_err(media_err_from_exec)?;
+        }
         row.insert_tx(&mut tx).await.map_err(media_err_from_exec)?;
         let Auto::Set(id) = row.id else {
             return Err(MediaError::Other("collection INSERT returned no id".into()));
