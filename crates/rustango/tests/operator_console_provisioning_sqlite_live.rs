@@ -1142,3 +1142,127 @@ async fn a_failed_stream_read_withholds_the_driver_text() {
     );
     assert!(body.contains("Could not read the run"), "{body}");
 }
+
+/// #2209 — a migration that fails in the driver shows no driver text in
+/// the run log, on the run page or in the stream.
+#[tokio::test]
+async fn a_failed_migration_withholds_the_driver_text() {
+    use rustango::migrate::{file, DataOp, Migration, Operation};
+    let b = boot().await;
+    let boom = Migration {
+        name: "0001_boom".into(),
+        created_at: "2026-10-07T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        snapshot: Default::default(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT * FROM boom_missing_tbl".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    file::write(&b._migrations.path().join("0001_boom.json"), &boom).unwrap();
+
+    let tenant_db = b._tmp.path().join("boom.db");
+    let form = format!(
+        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        unique("boom"),
+        form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
+    );
+    let created = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = created
+        .headers()
+        .get("location")
+        .expect("redirect to the run")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    for uri in [
+        format!("/orgs/{location}"),
+        format!("/orgs/{location}/stream"),
+    ] {
+        let resp = b
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), body_of(resp))
+            .await
+            .expect("the run is finished");
+        assert!(body.contains("0001_boom failed"), "{uri}: {body}");
+        assert!(!body.contains("boom_missing_tbl"), "{uri} leaked: {body}");
+    }
+}
+
+/// #2212 — a failed connection check shows the advice, not the driver's words.
+#[tokio::test]
+async fn a_failed_connection_check_withholds_the_driver_text() {
+    let b = boot().await;
+    let missing = b._tmp.path().join("no-such-dir").join("x.db");
+    let form = format!(
+        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        unique("unreachable"),
+        form_encode(&format!("sqlite://{}?mode=ro", missing.display()))
+    );
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let form_html = body_of(resp).await;
+    let run_html = body_of(
+        b.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs/provision/1")
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    for (page, html) in [("form", &form_html), ("run", &run_html)] {
+        assert!(html.contains("(tried "), "{page} lost the advice: {html}");
+        assert!(!html.contains("driver said"), "{page} leaked: {html}");
+        assert!(!html.contains("unable to open"), "{page} leaked: {html}");
+    }
+}
