@@ -325,6 +325,21 @@ pub(crate) fn snapshot_at(
     Ok((at, renamed))
 }
 
+/// `table`'s name once the renames in `later` have run.
+pub(crate) fn name_at_end(table: &str, later: &[super::Operation]) -> String {
+    let mut name = table.to_owned();
+    for op in later {
+        if let super::Operation::Schema(super::SchemaChange::RenameTable { old_name, new_name }) =
+            op
+        {
+            if *old_name == name {
+                name.clone_from(new_name);
+            }
+        }
+    }
+    name
+}
+
 /// `table`'s shape after the op that `later` follows, from the migration's
 /// final `after`: later renames, added columns and FK actions undone. A
 /// later op this cannot undo is refused rather than rebuilt past. Also

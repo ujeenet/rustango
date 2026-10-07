@@ -1795,6 +1795,52 @@ async fn declared_index_survives_unique_drop_before_rename(pool: &Pool) {
     );
 }
 
+/// #2190 — a composite FK added before its table is renamed.
+async fn composite_fk_add_before_rename(pool: &Pool) {
+    let (parent, t, u) = ("mad_cr_parent", "mad_cr_old", "mad_cr_new");
+    let chain = Chain::new(pool, "cr", &[u, t, parent]).await;
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let with = |name: &str, with_fk: bool| {
+        let mut kid = table(name, ab());
+        if with_fk {
+            kid["composite_fks"] =
+                json!([{"name": "mad_cr_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+        }
+        json!({"tables": [table(parent, ab()), kid],
+               "indexes": [{"name": "mad_cr_ab_uq", "table": parent, "columns": ["a", "b"],
+                            "unique": true}]})
+    };
+    chain.step(pool, with(t, false)).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AddCompositeFk {
+            table: t.into(),
+            name: "mad_cr_fk".into(),
+            to: parent.into(),
+            from: vec!["a".into(), "b".into()],
+            on: vec!["a".into(), "b".into()],
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(u, true), ops, None)
+        .await
+        .expect("add composite FK then rename");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[u, "id", "a", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+}
+
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
 /// already there elsewhere does not block it; a RunSQL beside it is refused.
 async fn rebuild_checks_only_its_own_orphans(pool: &Pool) {
@@ -2317,6 +2363,7 @@ tri_dialect_test!(
         fk_unique_drop_before_rename,
         fk_comes_back_under_names_at_its_op,
         on_delete_change_before_rename,
+        composite_fk_add_before_rename,
         declared_index_survives_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
