@@ -12,8 +12,11 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rustango::core::Column as _;
+use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
 use rustango::media::{Media, MediaCollection, MediaError, MediaManager};
-use rustango::sql::{transaction_pool, update_tx, Auto, FetcherTx as _, Pool};
+use rustango::sql::{
+    bulk_insert_pool, sqlx, transaction_pool, update_tx, Auto, FetcherTx as _, Pool,
+};
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 use rustango::testkit::matrix::{drop_table, fresh_table};
 use rustango::tri_dialect_test;
@@ -43,8 +46,16 @@ async fn create(mgr: &MediaManager, slug: &str, parent: Option<i64>) -> i64 {
     id
 }
 
-fn is_not_found(r: &Result<MediaCollection, MediaError>) -> bool {
-    matches!(r, Err(MediaError::Other(m)) if m.contains("not found"))
+/// The router answers 404 for "not found", so a bad `parent_id` avoids it (400).
+fn is_dead_parent(r: &Result<MediaCollection, MediaError>) -> bool {
+    matches!(r, Err(MediaError::Other(m))
+        if m.contains("missing or deleted") && !m.contains("not found"))
+}
+
+/// MySQL 1213 / PG 40P01: the server rolled one side back.
+fn is_deadlock(e: &MediaError) -> bool {
+    matches!(e, MediaError::Db(sqlx::Error::Database(d))
+        if matches!(d.code().as_deref(), Some("40001" | "40P01")))
 }
 
 /// A missing or deleted parent is refused, and a delete takes the subtree.
@@ -58,11 +69,11 @@ async fn dead_parent_is_refused(pool: &Pool) {
         assert!(mgr.get_collection(id).await.unwrap().is_none(), "{id} live");
     }
     let r = mgr.create_collection("x", "seq-x", Some(mid), "").await;
-    assert!(is_not_found(&r), "{r:?}");
+    assert!(is_dead_parent(&r), "{r:?}");
     let r = mgr
         .create_collection("y", "seq-y", Some(i64::MAX), "")
         .await;
-    assert!(is_not_found(&r), "{r:?}");
+    assert!(is_dead_parent(&r), "{r:?}");
 }
 
 /// A child committed while the delete waits on its parent is deleted too.
@@ -153,12 +164,150 @@ async fn create_waits_and_sees_the_deleted_parent(pool: &Pool) {
     tx.commit().await.expect("commit");
 
     let r = creating.await.unwrap();
-    assert!(is_not_found(&r), "created under a deleted parent: {r:?}");
+    assert!(is_dead_parent(&r), "created under a deleted parent: {r:?}");
+}
+
+/// SQLite: a writer that holds the lock makes both wait, not fail with
+/// `SQLITE_BUSY` after reading first (#2180).
+async fn writers_wait_their_turn(pool: &Pool) {
+    let mgr = manager(pool);
+    let root = create(&mgr, "busy-root", None).await;
+    let mid = create(&mgr, "busy-mid", Some(root)).await;
+    let other = create(&mgr, "busy-other", None).await;
+
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    let mut hold = MediaCollection {
+        id: Auto::Unset,
+        name: "busy-hold".into(),
+        slug: "busy-hold".into(),
+        parent_id: None,
+        description: String::new(),
+        created_at: Auto::Unset,
+        deleted_at: None,
+    };
+    hold.insert_tx(&mut tx).await.expect("take the write lock");
+    let deleting = tokio::spawn({
+        let mgr = mgr.clone();
+        async move { mgr.delete_collection(root).await }
+    });
+    let creating = tokio::spawn({
+        let mgr = mgr.clone();
+        async move {
+            mgr.create_collection("n", "busy-new", Some(other), "")
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tx.commit().await.expect("commit");
+
+    deleting
+        .await
+        .unwrap()
+        .expect("delete waits for the writer");
+    creating
+        .await
+        .unwrap()
+        .expect("create waits for the writer");
+    assert!(mgr.get_collection(mid).await.unwrap().is_none());
+}
+
+/// A level wider than one `IN` list's bind limit is walked in chunks.
+async fn wide_subtree_is_chunked(pool: &Pool) {
+    let mgr = manager(pool);
+    let root = create(&mgr, "wide-root", None).await;
+    let n = pool.dialect().max_bind_params() + 1;
+    let rows = (0..n)
+        .map(|i| {
+            vec![
+                SqlValue::String(format!("w{i}")),
+                SqlValue::String(format!("w{i}")),
+                SqlValue::I64(root),
+                SqlValue::String(String::new()),
+            ]
+        })
+        .collect();
+    let q = BulkInsertQuery::new(
+        MediaCollection::SCHEMA,
+        vec!["name", "slug", "parent_id", "description"],
+        rows,
+    );
+    bulk_insert_pool(pool, &q).await.expect("seed a wide level");
+    mgr.delete_collection(root).await.expect("chunked delete");
+    let live = mgr.list_collections().await.expect("list");
+    assert!(live.is_empty(), "{} live after the delete", live.len());
+}
+
+/// A delete and a create at once, at every depth: no live child is left
+/// under a deleted parent, and a deadlock is a clear error, never a hang.
+/// One create per round: two creates can deadlock each other on MySQL's
+/// slug-index gap lock, which is not what this tests.
+async fn concurrent_writes_stay_consistent(pool: &Pool) {
+    let mgr = manager(pool);
+    let mut deadlocks = 0;
+    for round in 0..20 {
+        let root = create(&mgr, &format!("st{round}-root"), None).await;
+        let a = create(&mgr, &format!("st{round}-a"), Some(root)).await;
+        let b = create(&mgr, &format!("st{round}-b"), Some(root)).await;
+        let c = create(&mgr, &format!("st{round}-c"), Some(a)).await;
+        let d = create(&mgr, &format!("st{round}-d"), Some(b)).await;
+        let parent = [root, a, b, c, d][round % 5];
+        let creating = tokio::spawn({
+            let mgr = mgr.clone();
+            let slug = format!("st{round}-new");
+            async move { mgr.create_collection(&slug, &slug, Some(parent), "").await }
+        });
+        let deleting = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.delete_collection(root).await }
+        });
+        match tokio::time::timeout(Duration::from_secs(30), creating)
+            .await
+            .expect("create hung")
+            .unwrap()
+        {
+            Ok(_) => {}
+            Err(e) if is_deadlock(&e) => deadlocks += 1,
+            r @ Err(_) => assert!(is_dead_parent(&r), "{r:?}"),
+        }
+        match tokio::time::timeout(Duration::from_secs(30), deleting)
+            .await
+            .expect("delete hung")
+            .unwrap()
+        {
+            Ok(()) => {}
+            Err(e) if is_deadlock(&e) => {
+                deadlocks += 1;
+                mgr.delete_collection(root).await.expect("retry delete");
+            }
+            Err(e) => panic!("delete: {e}"),
+        }
+        let live = mgr.list_collections().await.expect("list");
+        let ids: std::collections::HashSet<_> = live
+            .iter()
+            .filter_map(|c| match c.id {
+                Auto::Set(id) => Some(id),
+                Auto::Unset => None,
+            })
+            .collect();
+        for c in &live {
+            if let Some(p) = c.parent_id {
+                assert!(ids.contains(&p), "{} is live under deleted {p}", c.slug);
+            }
+        }
+    }
+    eprintln!(
+        "{}: {deadlocks} deadlock(s) in 20 rounds",
+        pool.dialect().name()
+    );
 }
 
 tri_dialect_test!(
     setup: setup,
+    sqlite: file,
     scenarios: [
+        writers_wait_their_turn,
+        wide_subtree_is_chunked,
+        concurrent_writes_stay_consistent,
         dead_parent_is_refused,
         delete_takes_a_child_created_meanwhile,
         create_waits_and_sees_the_deleted_parent,

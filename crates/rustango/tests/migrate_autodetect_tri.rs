@@ -19,6 +19,29 @@ use serde_json::{json, Value};
 
 async fn no_setup(_pool: &Pool) {}
 
+#[derive(rustango::Model)]
+#[rustango(table = "mad_sdm_parent")]
+#[allow(dead_code)]
+pub struct SdParent {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(rustango::Model)]
+#[rustango(table = "mad_sdm_child")]
+#[allow(dead_code)]
+pub struct SdChild {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(
+        fk = "mad_sdm_parent",
+        on = "id",
+        on_delete = "set_default",
+        default = "0"
+    )]
+    pub parent_id: i64,
+}
+
 fn id() -> Value {
     json!({"name": "id", "column": "id", "ty": "i64", "nullable": false,
            "primary_key": true, "auto": true})
@@ -1068,6 +1091,25 @@ async fn set_default_is_enforced_or_refused(pool: &Pool) {
     assert_eq!(got, [(0,)], "{}", refused.why);
 }
 
+/// The model-based DDL path refuses it on MySQL too (#2180).
+async fn set_default_is_refused_by_create_tables(pool: &Pool) {
+    drop_table(pool, "mad_sdm_child").await;
+    drop_table(pool, "mad_sdm_parent").await;
+    rustango::testkit::create_tables_for::<SdParent>(pool)
+        .await
+        .expect("parent");
+    let r = rustango::testkit::create_tables_for::<SdChild>(pool).await;
+    let refused = by_dialect! { pool,
+        postgres => false, because "PG enforces SET DEFAULT",
+        mysql => true, because "InnoDB records SET DEFAULT but refuses the parent delete",
+        sqlite => false, because "SQLite enforces SET DEFAULT",
+    };
+    match r {
+        Err(e) if refused.value => assert!(e.to_string().contains("set_default"), "{e}"),
+        r => assert_eq!(r.is_err(), refused.value, "{}: {r:?}", refused.why),
+    }
+}
+
 /// As above through the non-atomic runners.
 async fn on_delete_reaches_without_a_transaction(pool: &Pool) {
     on_delete_reaches(pool, "mad_odn", false).await;
@@ -1999,6 +2041,7 @@ tri_dialect_test!(
         on_delete_reaches_without_a_transaction,
         no_action_is_not_a_change,
         set_default_is_enforced_or_refused,
+        set_default_is_refused_by_create_tables,
         on_delete_and_drop_in_one_migration,
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,

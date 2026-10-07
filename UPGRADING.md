@@ -152,11 +152,11 @@ untouched.
 
 ### `create_collection` checks the parent
 
-A missing or soft-deleted `parent` now returns `MediaError::Other("collection N not found")` (404 over REST) instead of creating an orphan (#1573).
+A missing or soft-deleted `parent` now returns `MediaError::Other("parent collection N is missing or deleted")` (400 over REST) instead of creating an orphan (#1573).
 
 ### MySQL refuses `on_delete = "set_default"`
 
-InnoDB never enforced it: the parent delete failed with 1451. A migration that adds such an FK now fails to render on MySQL; pick another action (#1573).
+InnoDB never enforced it: the parent delete failed with 1451. A migration that adds such an FK now fails to render on MySQL, as do `apply_all_pool` and testkit `create_tables_for`; pick another action (#1573).
 
 ## 0.60.0
 

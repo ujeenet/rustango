@@ -143,6 +143,9 @@ async fn emit_indexes(
 async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(), MigrateError> {
     let dialect = pool.dialect();
     for model in models {
+        ddl::check_on_delete(dialect, model).map_err(MigrateError::Validation)?;
+    }
+    for model in models {
         let sql = ddl::create_table_if_not_exists_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }

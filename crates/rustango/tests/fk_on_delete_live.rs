@@ -448,18 +448,25 @@ fn a_changed_on_delete_action_is_an_op() {
 #[test]
 fn no_action_and_no_clause_are_equal() {
     let base = SchemaSnapshot::from_models(&[<PostDefault as rustango::core::Model>::SCHEMA]);
-    let mut explicit = base.clone();
-    explicit.tables[0]
-        .fields
-        .iter_mut()
-        .find(|f| f.column == "author_id")
-        .and_then(|f| f.fk.as_mut())
-        .expect("fk")
-        .on_delete = Some("NO ACTION".into());
-    for (prev, cur) in [(&base, &explicit), (&explicit, &base)] {
-        let changes = detect_changes(prev, cur);
-        assert!(changes.is_empty(), "{changes:?}");
+    let with = |action: &str| {
+        let mut snap = base.clone();
+        snap.tables[0]
+            .fields
+            .iter_mut()
+            .find(|f| f.column == "author_id")
+            .and_then(|f| f.fk.as_mut())
+            .expect("fk")
+            .on_delete = Some(action.into());
+        snap
+    };
+    for explicit in [with("NO ACTION"), with("no action")] {
+        for (prev, cur) in [(&base, &explicit), (&explicit, &base)] {
+            let changes = detect_changes(prev, cur);
+            assert!(changes.is_empty(), "{changes:?}");
+        }
     }
+    // RESTRICT is not NO ACTION: PG defers one and not the other.
+    assert_eq!(detect_changes(&base, &with("RESTRICT")).len(), 1);
 }
 
 fn models() -> SchemaSnapshot {
