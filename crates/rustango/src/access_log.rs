@@ -879,6 +879,38 @@ mod observability_mount_tests {
         assert_eq!(bare, with_query, "the two access-log shapes drifted apart");
     }
 
+    /// Backs `docs/logging.md`: plain `fmt` never prints the span's
+    /// response fields; only a span-close reader sees them (#1493).
+    #[tokio::test]
+    async fn fmt_shows_span_response_fields_only_on_close() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let span_status_rendered = |close: bool| async move {
+            use tracing_subscriber::fmt::format::FmtSpan;
+            let buf = crate::testkit::CaptureWriter::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buf.clone())
+                .with_ansi(false)
+                .with_span_events(if close { FmtSpan::CLOSE } else { FmtSpan::NONE })
+                .finish();
+            let _g = tracing::subscriber::set_default(subscriber);
+            let app = mount_observability(
+                Router::new().route("/", get(|| async { "ok" })),
+                Some(AccessLogLayer::default()),
+                default_redact_params(),
+            );
+            app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .expect("router answers");
+            let out = buf.contents();
+            assert!(out.contains("http.request{"), "no span context:\n{out}");
+            out.split("http.request{")
+                .skip(1)
+                .any(|s| s.split('}').next().unwrap_or("").contains("status_code"))
+        };
+        assert!(!span_status_rendered(false).await);
+        assert!(span_status_rendered(true).await, "the control saw nothing");
+    }
+
     /// The control: with a log configured, the span is there too.
     #[tokio::test]
     async fn the_normal_path_mounts_the_span_as_well() {

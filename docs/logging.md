@@ -422,6 +422,12 @@ The span carries `http.request.method`, `url.path`, `url.query`,
 recorded too, which is what a `tracing-opentelemetry` layer picks up to join
 the trace.
 
+Status, body size and duration are recorded when the response comes back,
+after the request's events are already written. The `fmt` subscriber prints
+span fields only on events, so it never shows those three. Read them from the
+access-log line, or from an OpenTelemetry layer, which reads the span when it
+closes.
+
 This layer earns its keep through the tenant field: because the fields sit on
 the *span*, every event emitted during the request — including the ORM's —
 carries them in span context, with no subsystem knowing what a tenant is.
