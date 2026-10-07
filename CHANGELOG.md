@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added — `atomic_with(pool, Isolation, f)` (#1460)
 
-Runs the block's transaction at a chosen isolation level on PostgreSQL and MySQL; SQLite takes only `Serializable`. A nested block cannot set one.
+Runs the block's transaction at a chosen isolation level on PostgreSQL and MySQL; SQLite is always serializable and accepts every level. A nested block cannot set one.
 
 ### Fixed — multi-statement writes join an open `atomic` block (#1460)
 

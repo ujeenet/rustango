@@ -673,8 +673,9 @@ impl Isolation {
     }
 }
 
-/// [`atomic`] whose transaction runs at `isolation`. SQLite runs only
-/// [`Isolation::Serializable`]; on MySQL the level covers this transaction only.
+/// [`atomic`] whose transaction runs at `isolation`. SQLite is always
+/// serializable, so it accepts every level; on MySQL the level covers this
+/// transaction only.
 ///
 /// # Errors
 /// As [`atomic`]; [`ExecError::NestedIsolation`] inside a block on the

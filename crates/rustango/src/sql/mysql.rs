@@ -35,8 +35,9 @@ impl Dialect for MySql {
         "mysql"
     }
 
-    /// `SET TRANSACTION` without `SESSION` covers only the next transaction,
-    /// so the level cannot leak to the pooled connection's next borrower.
+    /// `SET TRANSACTION` without `SESSION` covers only the next transaction.
+    /// If `START TRANSACTION` fails after the `SET`, the connection's next
+    /// transaction runs at that level: sqlx cannot close it from here.
     fn begin_isolated_sql(&self, level: super::Isolation) -> Option<String> {
         Some(format!(
             "SET TRANSACTION ISOLATION LEVEL {}; START TRANSACTION",

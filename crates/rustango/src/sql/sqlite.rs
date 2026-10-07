@@ -114,9 +114,10 @@ impl Dialect for Sqlite {
         "sqlite"
     }
 
-    /// SQLite transactions are always serializable.
-    fn begin_isolated_sql(&self, level: super::Isolation) -> Option<String> {
-        (level == super::Isolation::Serializable).then(|| "BEGIN".to_owned())
+    /// SQLite transactions are always serializable, at least as strict as
+    /// any level asked for, so every level runs as a plain `BEGIN`.
+    fn begin_isolated_sql(&self, _level: super::Isolation) -> Option<String> {
+        Some("BEGIN".to_owned())
     }
 
     /// SQLite's grammar has no bare `OFFSET`; `LIMIT -1` means no limit.
