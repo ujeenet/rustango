@@ -301,3 +301,42 @@ async fn user_verbs_take_flags_anywhere() {
         .await
         .expect("leading flag");
 }
+
+/// set-superuser and reset-password write through the ORM (#1952).
+#[tokio::test]
+async fn set_superuser_and_reset_password_write_the_row() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    let url = format!("sqlite://{}", b._tmp.path().join("acme.db").display());
+    let tenant = sqlx::SqlitePool::connect(&url).await.expect("tenant db");
+    let is_super = || {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT is_superuser FROM rustango_users WHERE username = 'bob'",
+        )
+        .fetch_one(&tenant)
+    };
+    assert!(is_super().await.unwrap(), "the first user is promoted");
+    b.run(&["set-superuser", "acme", "bob", "--off"])
+        .await
+        .expect("off");
+    assert!(!is_super().await.unwrap());
+    assert!(b.run(&["set-superuser", "acme", "nobody"]).await.is_err());
+
+    b.run(&["reset-password", "acme", "bob", "--password", "pw2"])
+        .await
+        .expect("reset");
+    b.run(&[
+        "change-password",
+        "acme",
+        "bob",
+        "--current",
+        "pw2",
+        "--password",
+        "pw3",
+    ])
+    .await
+    .expect("the reset password works");
+}

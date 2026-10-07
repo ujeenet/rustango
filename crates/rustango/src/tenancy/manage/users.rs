@@ -14,7 +14,7 @@ use std::io::Write;
 use sqlx::Database;
 
 use crate::core::Column as _;
-use crate::sql::{Auto, FetcherPool};
+use crate::sql::{Auto, FetcherPool, UpdaterPool as _};
 
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
@@ -319,25 +319,14 @@ where
     // `--on --off` was last-wins; refused now, like every on/off verb.
     let on = parsed.on_off()?.unwrap_or(true);
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    // v0.38 — UPDATE via tri-dialect raw_execute_pool. Dialect
-    // emitter picks placeholders ($1/$2 on PG, ? on sqlite/mysql).
-    let dialect = pool.dialect();
-    let users_t = dialect.quote_ident("rustango_users");
-    let is_super_col = dialect.quote_ident("is_superuser");
-    let username_col = dialect.quote_ident("username");
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
-    let sql = format!("UPDATE {users_t} SET {is_super_col} = {p1} WHERE {username_col} = {p2}");
-    let affected = rustango::sql::raw_execute_pool(
-        &pool,
-        &sql,
-        vec![
-            rustango::core::SqlValue::from(on),
-            rustango::core::SqlValue::from(username.clone()),
-        ],
-    )
-    .await
-    .map_err(|e| TenancyError::Validation(format!("set-superuser: {e}")))?;
+    use crate::tenancy::User;
+    let affected = User::objects()
+        .where_(User::username.eq(username.clone()))
+        .update()
+        .set_typed(User::is_superuser.set(on))
+        .execute_pool(&pool)
+        .await
+        .map_err(|e| TenancyError::Validation(format!("set-superuser: {e}")))?;
     if affected == 0 {
         return Err(TenancyError::Validation(format!(
             "set-superuser: no user `{username}` in tenant `{slug}`"
@@ -401,31 +390,15 @@ where
     };
     let hash = crate::tenancy::password::hash_async(&plain).await?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    // v0.38 — tri-dialect UPDATE. Bind chrono::Utc::now() instead of
-    // SQL `NOW()` so the same code works on PG/MySQL (NOW()) and
-    // SQLite (CURRENT_TIMESTAMP). raw_execute_pool routes per dialect.
-    let dialect = pool.dialect();
-    let users_t = dialect.quote_ident("rustango_users");
-    let hash_col = dialect.quote_ident("password_hash");
-    let ts_col = dialect.quote_ident("password_changed_at");
-    let username_col = dialect.quote_ident("username");
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
-    let p3 = dialect.placeholder(3);
-    let sql = format!(
-        "UPDATE {users_t} SET {hash_col} = {p1}, {ts_col} = {p2} WHERE {username_col} = {p3}"
-    );
-    let affected = rustango::sql::raw_execute_pool(
-        &pool,
-        &sql,
-        vec![
-            rustango::core::SqlValue::from(hash.clone()),
-            rustango::core::SqlValue::DateTime(chrono::Utc::now()),
-            rustango::core::SqlValue::from(username.clone()),
-        ],
-    )
-    .await
-    .map_err(|e| TenancyError::Validation(format!("reset-password: {e}")))?;
+    use crate::tenancy::User;
+    let affected = User::objects()
+        .where_(User::username.eq(username.clone()))
+        .update()
+        .set_typed(User::password_hash.set(hash))
+        .set_typed(User::password_changed_at.set(Some(chrono::Utc::now())))
+        .execute_pool(&pool)
+        .await
+        .map_err(|e| TenancyError::Validation(format!("reset-password: {e}")))?;
     if affected == 0 {
         return Err(TenancyError::Validation(format!(
             "reset-password: no user `{username}` in tenant `{slug}`"
