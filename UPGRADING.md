@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Isolation levels for `atomic`
+
+`sql::atomic_with(pool, Isolation::Serializable, f)` is new (#1460). A custom `Dialect` refuses every level until it implements `begin_isolated_sql`.
+
 ### Audited writes inside `atomic` join the block
 
 Inside an `atomic` block on the same pool, audited `save_pool` / `insert_pool` / `delete_pool`, M2M `set` and fixture loads now commit or roll back with the block (#1460). Holding the block's `TxGuard` across one of them returns `ExecError::NestedAtomic`.

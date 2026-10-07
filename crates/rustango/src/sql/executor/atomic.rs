@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
 
+use super::tx::isolated_transaction_pool;
 use super::{transaction_pool, write_transaction_pool, ExecError, PoolTx};
 use crate::sql::Pool;
 
@@ -646,7 +647,48 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Commit, f).await
+    run(pool, End::Commit, None, f).await
+}
+
+/// A transaction isolation level, for [`atomic_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Isolation {
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl Isolation {
+    /// The level as `SET TRANSACTION ISOLATION LEVEL` spells it.
+    #[must_use]
+    pub fn sql(self) -> &'static str {
+        match self {
+            Self::ReadUncommitted => "READ UNCOMMITTED",
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+/// [`atomic`] whose transaction runs at `isolation`. SQLite runs only
+/// [`Isolation::Serializable`]; on MySQL the level covers this transaction only.
+///
+/// # Errors
+/// As [`atomic`]; [`ExecError::NestedIsolation`] inside a block on the
+/// same pool, [`ExecError::IsolationUnsupported`] for a level the backend
+/// cannot run.
+pub async fn atomic_with<F, T>(pool: &Pool, isolation: Isolation, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx AtomicTx,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    run(pool, End::Commit, Some(isolation), f).await
 }
 
 /// How a block ends when its closure returns `Ok`.
@@ -667,10 +709,15 @@ where
         Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
     >,
 {
-    run(pool, End::Rollback, f).await
+    run(pool, End::Rollback, None, f).await
 }
 
-async fn run<F, T>(pool: &Pool, end: End, f: F) -> Result<T, ExecError>
+async fn run<F, T>(
+    pool: &Pool,
+    end: End,
+    isolation: Option<Isolation>,
+    f: F,
+) -> Result<T, ExecError>
 where
     F: for<'tx> FnOnce(
         &'tx AtomicTx,
@@ -683,8 +730,9 @@ where
     let same_pool =
         std::iter::successors(current.clone(), |b| b.enclosing.clone()).find(|b| b.pool.same(&id));
     match same_pool {
+        Some(_) if isolation.is_some() => Err(ExecError::NestedIsolation),
         Some(parent) => nested(parent, current, end, f).await,
-        None => outermost(pool, id, current, end, f).await,
+        None => outermost(pool, id, current, end, isolation, f).await,
     }
 }
 
@@ -693,6 +741,7 @@ async fn outermost<F, T>(
     id: PoolId,
     enclosing: Option<Arc<Block>>,
     end: End,
+    isolation: Option<Isolation>,
     f: F,
 ) -> Result<T, ExecError>
 where
@@ -703,7 +752,10 @@ where
     >,
 {
     let fatal = Arc::new(AtomicBool::new(false));
-    let mut tx = transaction_pool(pool).await?;
+    let mut tx = match isolation {
+        Some(level) => isolated_transaction_pool(pool, level).await?,
+        None => transaction_pool(pool).await?,
+    };
     let hook = Arc::clone(&fatal);
     tx.on_sqlite_rollback(move || hook.store(true, Ordering::SeqCst))
         .await?;

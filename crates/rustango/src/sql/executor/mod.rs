@@ -940,7 +940,7 @@ pub use tx::{transaction_pool, PoolTx};
 
 mod atomic;
 pub(crate) use atomic::rolled_back;
-pub use atomic::{atomic, on_commit, on_commit_pending, AtomicTx, TxGuard};
+pub use atomic::{atomic, atomic_with, on_commit, on_commit_pending, AtomicTx, Isolation, TxGuard};
 pub use atomic::{Begin, TxScope};
 
 // `&Pool` dispatch. The `_pool` functions below take a [`Pool`],

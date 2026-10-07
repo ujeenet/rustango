@@ -35,6 +35,15 @@ impl Dialect for MySql {
         "mysql"
     }
 
+    /// `SET TRANSACTION` without `SESSION` covers only the next transaction,
+    /// so the level cannot leak to the pooled connection's next borrower.
+    fn begin_isolated_sql(&self, level: super::Isolation) -> Option<String> {
+        Some(format!(
+            "SET TRANSACTION ISOLATION LEVEL {}; START TRANSACTION",
+            level.sql()
+        ))
+    }
+
     /// MySQL has no `NULLS FIRST` or `NULLS LAST`, so the writer
     /// sorts on `<col> IS NULL` first instead.
     fn supports_nulls_order(&self) -> bool {

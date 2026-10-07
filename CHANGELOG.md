@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `atomic_with(pool, Isolation, f)` (#1460)
+
+Runs the block's transaction at a chosen isolation level on PostgreSQL and MySQL; SQLite takes only `Serializable`. A nested block cannot set one.
+
 ### Fixed — multi-statement writes join an open `atomic` block (#1460)
 
 Audited `_pool` writes, M2M `set`, fixture loads, the DB cache's MySQL `incr`, SSO member provisioning and viewset bulk create run in a savepoint of an `atomic` block on the same pool, instead of a second transaction that could deadlock it.

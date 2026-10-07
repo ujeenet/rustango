@@ -287,6 +287,10 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn begin_isolated_sql(&self, level: super::Isolation) -> Option<String> {
+        Some(format!("BEGIN ISOLATION LEVEL {}", level.sql()))
+    }
+
     // ---- compilation: thin shells over `writers::*` ----
 
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
