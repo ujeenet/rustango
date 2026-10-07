@@ -2764,14 +2764,36 @@ fn render_step(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<Step, MigrateError> {
-    let changes = std::slice::from_ref(change);
+    use super::SchemaChange as SC;
+    // The ops after `change`, which is borrowed from `ops`.
+    let later = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[i + 1..]);
+    // Its FK is deferred past the later renames, so it takes their names (#2190).
+    let ended = match change {
+        SC::AddCompositeFk {
+            table,
+            name,
+            to,
+            from,
+            on,
+        } if !dialect.alters_by_rebuild() => Some(SC::AddCompositeFk {
+            table: super::rebuild::name_at_end(table, later),
+            name: name.clone(),
+            to: super::rebuild::name_at_end(to, later),
+            from: super::rebuild::columns_at_end(table, from, later),
+            on: super::rebuild::columns_at_end(to, on, later),
+        }),
+        _ => None,
+    };
+    let changes = std::slice::from_ref(ended.as_ref().unwrap_or(change));
     let render = |snap: &SchemaSnapshot| {
         super::diff::render_changes_split_in_schema(changes, snap, dialect, schema)
     };
     let retry = super::ensure::filled_table_retry(dialect, after, changes, render)
         .transpose()
         .map_err(MigrateError::Validation)?;
-    use super::SchemaChange as SC;
     // The changes SQLite makes by rebuilding the table.
     let rebuilt = match change {
         SC::DropColumn { table, .. }
@@ -2807,11 +2829,6 @@ fn render_step(
         _ if dialect.alters_by_rebuild() => rebuilt,
         _ => modified.filter(|_| dialect.modifies_whole_column()),
     };
-    // The ops after `change`, which is borrowed from `ops`.
-    let later = ops
-        .iter()
-        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
-        .map_or(&[][..], |i| &ops[i + 1..]);
     // Both take the table's shape at this op, not at the end (#2121, #2149).
     let (at, renamed) = match reshaped {
         Some(table) if later.iter().any(|op| touches_table(op, table)) => {

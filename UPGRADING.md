@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `migrate-tenant-storage --to database` replaces the target's `public`
+
+The target database's `public` must be empty, extensions included (keep them in their own schema), and droppable by the user: the database owner on PG 15+, else a superuser. Both are checked before anything moves. The new `public` is owned by that user, with `USAGE` granted to `PUBLIC` (#2189).
+
 ### `migrate-tenant-storage --to schema` needs PG 15+ with `CREATEDB`, or a superuser
 
 It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. Extensions are not copied: create `vector`, `citext`, `pgcrypto` and the like in the registry first, or the restore fails and changes nothing (#1864).

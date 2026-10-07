@@ -26,7 +26,9 @@
 //!      leave a `rustango_stage_*` database to drop by hand.
 //!    - database → caller passes `--database-url`. Database must
 //!      already exist (we don't `CREATE DATABASE` — that's a
-//!      single-statement decision the operator should own).
+//!      single-statement decision the operator should own). Its empty
+//!      `public` is replaced by the restored schema, renamed to `public`;
+//!      both emptiness and the right to drop it are checked first.
 //! 3. `pg_dump` the source (schema-scoped or full DB), pipe into
 //!    `psql` against the target. Into a schema it goes through a
 //!    staging database that renames `public` first.
@@ -124,11 +126,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         })?,
     };
     let source_schema = match current {
-        StorageMode::Schema => Some(
-            org.schema_name
-                .clone()
-                .unwrap_or_else(|| parsed.slug.clone()),
-        ),
+        StorageMode::Schema => Some(SchemaName::parse(
+            org.schema_name.as_deref().unwrap_or(&parsed.slug),
+        )?),
         StorageMode::Database => None,
     };
     let target_schema = match parsed.target {
@@ -176,9 +176,22 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     // we never buffer the full snapshot in memory.
     writeln!(writer, "  starting pg_dump → psql pipe…")?;
     let (source, target) = (Conn::new(&source_url), Conn::new(&target_url));
-    match &target_schema {
-        Some(schema) => restore_into_schema(pools.registry(), &source, &target, schema).await?,
-        None => pg_dump_to_psql(&source, source_schema.as_deref(), &target)?,
+    match (&target_schema, &source_schema) {
+        (Some(schema), _) => {
+            restore_into_schema(pools.registry(), &source, &target, schema).await?
+        }
+        // A database-mode tenant lives in `public` (#2189).
+        (None, Some(schema)) => {
+            check_public_is_replaceable(&target_url).await?;
+            // `--no-acl` drops the default grant, which other app roles need.
+            let then = [
+                "DROP SCHEMA public".to_owned(),
+                format!("ALTER SCHEMA {} RENAME TO public", quote_ident(&schema.0)),
+                "GRANT USAGE ON SCHEMA public TO PUBLIC".to_owned(),
+            ];
+            pg_dump_to_psql(&source, Some(schema), &target, &then)?;
+        }
+        (None, None) => pg_dump_to_psql(&source, None, &target, &[])?,
     }
     writeln!(writer, "  data move OK")?;
 
@@ -186,12 +199,15 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     let target_name = target_schema.as_ref().map(|s| s.0.as_str());
     if let Err(e) = smoke_check(&target_url, target_name).await {
         // The restore created it, so a rerun would hit "schema exists".
-        if let Some(s) = target_name {
-            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
-            crate::sql::sqlx::query(&drop)
-                .execute(pools.registry())
-                .await?;
-        }
+        let Some(s) = target_name else {
+            return Err(TenancyError::Validation(format!(
+                "smoke-check failed: {e}; recreate the target database before a rerun"
+            )));
+        };
+        let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
+        crate::sql::sqlx::query(&drop)
+            .execute(pools.registry())
+            .await?;
         return Err(TenancyError::Validation(format!(
             "smoke-check failed: {e}; the restored schema was dropped"
         )));
@@ -365,6 +381,12 @@ impl SchemaName {
     }
 }
 
+impl std::fmt::Display for SchemaName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Restore `source`'s `public` into `schema` on `target`. pg_dump names
 /// every object `public.`, so `public` is renamed in a staging database
 /// first (#1864).
@@ -374,7 +396,6 @@ async fn restore_into_schema(
     target: &Conn,
     schema: &SchemaName,
 ) -> Result<(), TenancyError> {
-    let schema = schema.0.as_str();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -384,16 +405,9 @@ async fn restore_into_schema(
         .execute(registry)
         .await?;
     let stage = target.database(&staging);
-    let moved = pg_dump_to_psql(source, None, &stage)
-        .and_then(|()| {
-            let mut rename = stage.psql();
-            rename.arg("-c").arg(format!(
-                "ALTER SCHEMA public RENAME TO {}",
-                quote_ident(schema)
-            ));
-            run(rename, "psql rename")
-        })
-        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target));
+    let rename = format!("ALTER SCHEMA public RENAME TO {}", quote_ident(&schema.0));
+    let moved = pg_dump_to_psql(source, None, &stage, &[rename])
+        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target, &[]));
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;
@@ -406,8 +420,9 @@ async fn restore_into_schema(
 /// the source is schema-scoped, pass `--schema=<name>` to pg_dump.
 fn pg_dump_to_psql(
     source: &Conn,
-    source_schema: Option<&str>,
+    source_schema: Option<&SchemaName>,
     target: &Conn,
+    then: &[String],
 ) -> Result<(), TenancyError> {
     let mut dump_cmd = source.command("pg_dump");
     dump_cmd
@@ -417,7 +432,7 @@ fn pg_dump_to_psql(
         .arg("--no-publications")
         .arg("--no-subscriptions");
     if let Some(s) = source_schema {
-        dump_cmd.arg(format!("--schema={s}"));
+        dump_cmd.arg(format!("--schema={}", s.0));
     }
     dump_cmd.stdout(Stdio::piped());
     dump_cmd.stderr(Stdio::piped());
@@ -425,7 +440,11 @@ fn pg_dump_to_psql(
     let dump_stdout = dump.stdout.take().expect("pg_dump stdout was piped");
 
     let mut restore_cmd = target.psql();
-    restore_cmd.arg("--single-transaction");
+    // `-f -` first: psql reads no stdin once `-c` is given (#1864).
+    restore_cmd.args(["--single-transaction", "-f", "-"]);
+    for stmt in then {
+        restore_cmd.arg("-c").arg(stmt);
+    }
     restore_cmd.stdin(dump_stdout);
     let restored = run(restore_cmd, "psql restore");
     let dump_status = dump.wait().map_err(TenancyError::Io)?;
@@ -478,6 +497,54 @@ fn stderr_of(child: &mut std::process::Child) -> String {
 
 fn first_lines(s: &str) -> String {
     s.lines().take(6).collect::<Vec<_>>().join(" | ")
+}
+
+/// The target's `public` must be empty and ours to drop, or the restore
+/// fails at `DROP SCHEMA public` (#2189).
+async fn check_public_is_replaceable(target_url: &str) -> Result<(), TenancyError> {
+    use crate::sql::sqlx::postgres::PgPoolOptions;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(target_url)
+        .await?;
+    let owned: Option<bool> = crate::sql::sqlx::query_scalar(
+        "SELECT pg_has_role(nspowner, 'USAGE') FROM pg_namespace WHERE nspname = 'public'",
+    )
+    .fetch_optional(&pool)
+    .await?;
+    // What DROP SCHEMA would refuse on, without an extension's members.
+    let objects: Vec<String> = crate::sql::sqlx::query_scalar(
+        "SELECT pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_depend d \
+         WHERE d.refclassid = 'pg_namespace'::regclass \
+           AND d.refobjid = 'public'::regnamespace AND d.deptype = 'n' \
+           AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = d.classid \
+                           AND e.objid = d.objid AND e.deptype = 'e') \
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+    if owned != Some(true) {
+        return Err(TenancyError::Validation(
+            "the target database's `public` schema must be droppable by this user: \
+             connect as the database owner (PG 15+) or a superuser"
+                .into(),
+        ));
+    }
+    if !objects.is_empty() {
+        let shown = objects
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(TenancyError::Validation(format!(
+            "the target database's `public` schema must be empty, it holds {} object(s): \
+             {shown}. Use an empty database; keep extensions in their own schema",
+            objects.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Check `rustango_users` is reachable at the new location; rows or not.

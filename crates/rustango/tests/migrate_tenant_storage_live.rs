@@ -355,6 +355,128 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     rustango::migrate::drop_all(&pool).await.unwrap();
 }
 
+/// #2189 — schema → database lands the rows in the new database's `public`.
+#[tokio::test]
+async fn migrate_tenant_storage_restores_rows_into_a_database() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    if std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        assert!(std::env::var("CI").is_err(), "CI needs pg_dump and psql");
+        eprintln!("skipping: pg_dump not on PATH");
+        return;
+    }
+    fresh(&pool).await;
+    let registry_url = std::env::var("DATABASE_URL").unwrap();
+    let drop_dst = "DROP DATABASE IF EXISTS rustango_t2189_dst WITH (FORCE)";
+    sqlx_exec(&pool, drop_dst).await;
+    sqlx_exec(&pool, "CREATE DATABASE rustango_t2189_dst").await;
+    sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t2189_src CASCADE").await;
+    for stmt in [
+        "CREATE SCHEMA t2189_src",
+        "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL)",
+        "INSERT INTO t2189_src.rustango_users (username) VALUES ('ann'), ('bob')",
+    ] {
+        sqlx_exec(&pool, stmt).await;
+    }
+    let (base, _) = registry_url.rsplit_once('/').unwrap();
+    let dst_url = format!("{base}/rustango_t2189_dst");
+    let mut org = Org {
+        id: Auto::default(),
+        slug: "t2189".into(),
+        display_name: "Moved".into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        backend_kind: "postgres".to_owned(),
+        database_url: None,
+        schema_name: Some("t2189_src".into()),
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        ..rustango::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+
+    let pools = TenantPools::new(pool.clone());
+    let migrate = || async {
+        run_with_writer(
+            &pools,
+            &registry_url,
+            std::path::Path::new("."),
+            args(&[
+                "migrate-tenant-storage",
+                "t2189",
+                "--to",
+                "database",
+                "--database-url",
+                &dst_url,
+            ]),
+            &mut Vec::<u8>::new(),
+        )
+        .await
+    };
+    // A non-empty `public` is refused before anything moves.
+    let dst = PgPool::connect(&dst_url).await.unwrap();
+    sqlx_exec(&dst, "CREATE TABLE public.junk (id INT)").await;
+    let err = migrate().await.unwrap_err().to_string();
+    assert!(
+        err.contains("must be empty") && err.contains("junk"),
+        "{err}"
+    );
+    let left: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "a refused move restored something");
+    sqlx_exec(&dst, "DROP TABLE public.junk").await;
+    dst.close().await;
+    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+
+    let dst = PgPool::connect(&dst_url).await.unwrap();
+    let granted: bool = rustango::sql::sqlx::query_scalar(
+        "SELECT has_schema_privilege('public', 'public', 'USAGE')",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert!(granted, "other roles lost USAGE on public");
+    let names: Vec<(String,)> =
+        rustango::sql::sqlx::query_as("SELECT username FROM public.rustango_users ORDER BY id")
+            .fetch_all(&dst)
+            .await
+            .unwrap();
+    assert_eq!(names, [("ann".to_owned(),), ("bob".to_owned(),)]);
+    let schemas: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert_eq!(
+        schemas, 0,
+        "the old schema name is left in the new database"
+    );
+    dst.close().await;
+    let moved: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq("t2189".to_owned()))
+        .fetch_on(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
+    assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
+
+    sqlx_exec(&pool, "DROP SCHEMA t2189_src CASCADE").await;
+    sqlx_exec(&pool, drop_dst).await;
+    rustango::migrate::drop_all(&pool).await.unwrap();
+}
+
 async fn sqlx_exec(pool: &PgPool, sql: &str) {
     rustango::sql::sqlx::query(sql).execute(pool).await.unwrap();
 }

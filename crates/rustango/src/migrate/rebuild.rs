@@ -289,18 +289,17 @@ pub(crate) fn snapshot_at(
     use super::SchemaChange as SC;
     let (mut shape, last) = shape_at(table, later, after)?;
     let mut renamed = last != table;
-    // Undo the later renames of its FK targets, last first.
+    // Undo the later renames of its FK targets and their columns, last first.
     for op in later.iter().rev() {
-        let Op::Schema(SC::RenameTable { old_name, new_name }) = op else {
+        let Op::Schema(change) = op else {
             continue;
         };
-        let fks = shape.fields.iter_mut().filter_map(|f| f.fk.as_mut());
-        let targets = fks
-            .map(|r| &mut r.to)
-            .chain(shape.composite_fks.iter_mut().map(|c| &mut c.to));
-        for to in targets.filter(|to| *to == new_name) {
-            to.clone_from(old_name);
-            renamed = true;
+        for r in shape.fields.iter_mut().filter_map(|f| f.fk.as_mut()) {
+            renamed |= undo_target_rename(change, &mut r.to, &mut [&mut r.on]);
+        }
+        for c in &mut shape.composite_fks {
+            let mut on: Vec<&mut String> = c.on.iter_mut().collect();
+            renamed |= undo_target_rename(change, &mut c.to, &mut on);
         }
     }
     let mut at = after.clone();
@@ -323,6 +322,81 @@ pub(crate) fn snapshot_at(
         i.table = table.to_owned();
     }
     Ok((at, renamed))
+}
+
+/// Undo `change` on an FK's target `to` and its columns `on`, if it
+/// renamed either. Whether it did.
+fn undo_target_rename(
+    change: &super::SchemaChange,
+    to: &mut String,
+    on: &mut [&mut String],
+) -> bool {
+    use super::SchemaChange as SC;
+    match change {
+        SC::RenameTable { old_name, new_name } if to == new_name => {
+            to.clone_from(old_name);
+            true
+        }
+        SC::RenameColumn {
+            table,
+            old_column,
+            new_column,
+        } if table == to => {
+            let mut hit = false;
+            for c in on.iter_mut().filter(|c| **c == new_column) {
+                c.clone_from(old_column);
+                hit = true;
+            }
+            hit
+        }
+        _ => false,
+    }
+}
+
+/// `columns` of `table` once the renames in `later` have run.
+pub(crate) fn columns_at_end(
+    table: &str,
+    columns: &[String],
+    later: &[super::Operation],
+) -> Vec<String> {
+    use super::SchemaChange as SC;
+    let mut name = table.to_owned();
+    let mut columns = columns.to_vec();
+    for op in later {
+        match op {
+            super::Operation::Schema(SC::RenameTable { old_name, new_name })
+                if *old_name == name =>
+            {
+                name.clone_from(new_name);
+            }
+            super::Operation::Schema(SC::RenameColumn {
+                table,
+                old_column,
+                new_column,
+            }) if *table == name => {
+                for c in columns.iter_mut().filter(|c| *c == old_column) {
+                    c.clone_from(new_column);
+                }
+            }
+            _ => {}
+        }
+    }
+    columns
+}
+
+/// `table`'s name once the renames in `later` have run.
+pub(crate) fn name_at_end(table: &str, later: &[super::Operation]) -> String {
+    let mut name = table.to_owned();
+    for op in later {
+        if let super::Operation::Schema(super::SchemaChange::RenameTable { old_name, new_name }) =
+            op
+        {
+            if *old_name == name {
+                name.clone_from(new_name);
+            }
+        }
+    }
+    name
 }
 
 /// `table`'s shape after the op that `later` follows, from the migration's
@@ -367,6 +441,10 @@ fn shape_at(
             } => {
                 if let Some(f) = t.fields.iter_mut().find(|f| f.column == *new_column) {
                     f.column.clone_from(old_column);
+                }
+                let from = t.composite_fks.iter_mut().flat_map(|c| c.from.iter_mut());
+                for c in from.filter(|c| *c == new_column) {
+                    c.clone_from(old_column);
                 }
             }
             SC::AlterColumnType { column, from, .. } => {
