@@ -5325,6 +5325,26 @@ mod gen_tests {
         }
     }
 
+    /// The docs show what `make:serializer` writes; the code lines must match (#1952).
+    #[test]
+    fn serializer_docs_snippet_matches_the_template() {
+        let docs = include_str!("../../../../docs/serializers.md");
+        let start = docs
+            .find("//! Auto-scaffolded by `manage make:serializer PostSerializer`.")
+            .expect("snippet");
+        let snippet = &docs[start..start + docs[start..].find("```").expect("fence")];
+        let rendered = serializer_template("PostSerializer", "Post", "rustango");
+        for line in snippet
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+        {
+            assert!(
+                rendered.contains(line),
+                "docs line not in template: `{line}`"
+            );
+        }
+    }
+
     /// The complement matters as much: a verb that genuinely reads or writes
     /// the database must NOT be short-circuited here, or it would silently do
     /// nothing instead of connecting.
