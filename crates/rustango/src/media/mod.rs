@@ -1174,51 +1174,55 @@ impl MediaManager {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Media>, MediaError> {
+        use crate::sql::FetcherPool as _;
         let ids: Vec<i64> = if recursive {
             self.collect_descendant_ids(collection_id).await?
         } else {
             vec![collection_id]
         };
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        // `ANY($1)` is PG-only. Expand to `IN (?, ?, …)` with one
-        // placeholder per id, which works on every backend.
-        let d = self.pool.dialect();
-        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
-        let in_list = placeholders.join(", ");
         // Clamped, not trusted. A negative `LIMIT` means "no limit"
         // on SQLite, and PostgreSQL rejects `LIMIT -1` outright — so
         // an unclamped caller value is an unbounded scan on one
         // backend and a 500 on the others.
         let lim = limit.clamp(1, MAX_LIST_LIMIT);
         let off = offset.max(0);
-        // `, id DESC` is the tiebreaker, and it is not cosmetic.
-        // `uploaded_at DESC` alone is not a total order, and ties are
-        // normal: on PostgreSQL `now()` is the transaction timestamp,
-        // so a bulk import gives every row the same value, and SQLite
-        // stores one-second resolution. Under a small `LIMIT` the
-        // planner's top-N sort orders tied keys differently per
-        // (limit, offset), so paging the same data twice can return a
-        // row twice and skip another entirely.
-        let p_lim = d.placeholder(ids.len() + 1);
-        let p_off = d.placeholder(ids.len() + 2);
-        let sql = format!(
-            "SELECT id, disk, storage_key, mime, size_bytes, original_filename, \
-                    status, uploaded_at, uploaded_by_id, derived_from_id, \
-                    collection_id, metadata, deleted_at \
-               FROM rustango_media \
-              WHERE collection_id IN ({in_list}) AND deleted_at IS NULL \
-              ORDER BY uploaded_at DESC, id DESC \
-              LIMIT {p_lim} OFFSET {p_off}"
-        );
-        let mut binds: Vec<crate::core::SqlValue> =
-            ids.into_iter().map(crate::core::SqlValue::I64).collect();
-        binds.push(crate::core::SqlValue::I64(lim));
-        binds.push(crate::core::SqlValue::I64(off));
-        let rows: Vec<Media> = crate::sql::raw_query_pool(&sql, binds, &self.pool)
-            .await
-            .map_err(media_err_from_exec)?;
+        // A subtree wider than the bind cap is several `IN` lists. Each
+        // returns its own first `off + lim` rows; the page is cut after
+        // the merge, so it matches what one list would have returned.
+        let parts: Vec<&[i64]> = ids.chunks(self.pool.dialect().max_bind_params()).collect();
+        let (lim_each, off_each) = match parts.len() {
+            1 => (lim, off),
+            _ => (off.saturating_add(lim), 0),
+        };
+        let mut rows: Vec<Media> = Vec::new();
+        for part in &parts {
+            // `, id DESC` is the tiebreaker, and it is not cosmetic.
+            // `uploaded_at DESC` alone is not a total order, and ties are
+            // normal: on PostgreSQL `now()` is the transaction timestamp,
+            // so a bulk import gives every row the same value, and SQLite
+            // stores one-second resolution. Under a small `LIMIT` the
+            // planner's top-N sort orders tied keys differently per
+            // (limit, offset), so paging the same data twice can return a
+            // row twice and skip another entirely.
+            let page = Media::objects()
+                .where_(Media::collection_id.is_in(part.iter().copied()))
+                .where_(Media::deleted_at.is_null())
+                .order_by(&[("uploaded_at", true), ("id", true)])
+                .limit(lim_each)
+                .offset(off_each)
+                .fetch(&self.pool)
+                .await
+                .map_err(media_err_from_exec)?;
+            rows.extend(page);
+        }
+        if parts.len() > 1 {
+            rows.sort_by_key(|m| std::cmp::Reverse(media_order_key(m)));
+            rows = rows
+                .into_iter()
+                .skip(usize::try_from(off).unwrap_or(usize::MAX))
+                .take(usize::try_from(lim).unwrap_or(0))
+                .collect();
+        }
         Ok(rows)
     }
 
@@ -1717,6 +1721,19 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
 
 fn media_err_from_query(e: crate::core::QueryError) -> MediaError {
     media_err_from_exec(e.into())
+}
+
+/// The `(uploaded_at, id)` the listings sort on, descending.
+fn media_order_key(m: &Media) -> (Option<DateTime<Utc>>, i64) {
+    let at = match m.uploaded_at {
+        Auto::Set(v) => Some(v),
+        _ => None,
+    };
+    let id = match m.id {
+        Auto::Set(v) => v,
+        _ => 0,
+    };
+    (at, id)
 }
 
 /// One `(media_id, tag_id)` link row per tag, skipping ones already there.

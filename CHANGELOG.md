@@ -16,6 +16,10 @@ It pages by slug through the new `MediaManager::list_tags` instead of counting e
 
 `tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs.
 
+### Fixed — recursive collection listing past the bind limit (#1570)
+
+A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

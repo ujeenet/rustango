@@ -17,7 +17,7 @@ use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, M
 use rustango::media::{
     Media, MediaCollection, MediaError, MediaManager, MediaTag, MediaTagLink, SaveOpts,
 };
-use rustango::sql::{bulk_insert_pool, Auto, Pool};
+use rustango::sql::{bulk_insert_pool, raw_execute_pool, Auto, Pool};
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 use rustango::test_assertions::QueryCounter;
 use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -223,6 +223,55 @@ async fn case_variants_resolve(pool: &Pool) {
     );
 }
 
+/// A subtree wider than the bind cap still lists one correct page.
+async fn recursive_listing_spans_bind_cap(pool: &Pool) {
+    let mgr = manager(pool);
+    let root = mgr
+        .create_collection("root", "root", None, "")
+        .await
+        .expect("root");
+    let Auto::Set(root) = root.id else {
+        panic!("no id")
+    };
+    let n = pool.dialect().max_bind_params();
+    seed_collections(pool, "w", n, Some(root)).await;
+    if pool.dialect().name() == "postgres" {
+        // Unanalyzed, PG walks the tree with a nested loop: ~40s, not ~40ms.
+        raw_execute_pool(pool, "ANALYZE rustango_media_collections", vec![])
+            .await
+            .expect("analyze");
+    }
+    let last = mgr
+        .get_collection_by_slug(&format!("w{:05}", n - 1))
+        .await
+        .unwrap()
+        .expect("last child");
+    let Auto::Set(last) = last.id else {
+        panic!("no id")
+    };
+
+    let older = seed_media(&mgr, Some(root)).await;
+    let newer = seed_media(&mgr, Some(last)).await;
+
+    // n + 1 ids: the descendant walk, then two `IN` lists.
+    let (first, queries) = QueryCounter::scope(async {
+        let rows = mgr
+            .list_in_collection_paged(root, true, 1, 0)
+            .await
+            .expect("page 1");
+        (rows, QueryCounter::current())
+    })
+    .await;
+    assert_eq!((ids(&first), queries), (vec![newer], 3), "rows, queries");
+    let second = mgr
+        .list_in_collection_paged(root, true, 1, 1)
+        .await
+        .expect("page 2");
+    assert_eq!(ids(&second), vec![older]);
+    let both = mgr.list_in_collection(root, true).await.expect("all");
+    assert_eq!(ids(&both), vec![newer, older]);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
@@ -230,5 +279,6 @@ tri_dialect_test!(
         tags_are_paged,
         tagging_is_batched,
         case_variants_resolve,
+        recursive_listing_spans_bind_cap,
     ]
 );
