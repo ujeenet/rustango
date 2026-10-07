@@ -106,9 +106,11 @@ A subtree with more collections than the backend's bind limit is listed in sever
 - One-backend builds compile their tests under `-D warnings`: typed `Pool` accessors replace irrefutable patterns (#2166).
 - `cache_db_long_keys_tri` gives each scenario its own table, so parallel runs no longer drop each other's (#1945).
 - Test-only helpers are gated on the features that use them (#1941).
+
 ### Fixed — logging follow-ups from the #1479 reviews (#1493)
 
 The access log writes its field list once; query redaction no longer allocates for a clean query; `#[rustango::main]` installs through `logging::Setup`; `bin/bump-version.sh` no longer rewrites an inline third-party pin at our version (a `[dependencies.foo]` table still matches). `docs/logging.md` now says `fmt` never shows the span's status, size and duration.
+
 ### Fixed — flaky SQLite file-pool test on Windows (#2205)
 
 The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.

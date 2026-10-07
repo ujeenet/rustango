@@ -213,6 +213,7 @@ When a subtree has more collections than the backend's bind limit, `list_in_coll
 ### `tag` / `set_tags` take at most 1000 distinct slugs
 
 More returns `MediaError::Other` (HTTP 400) and changes nothing (#1570).
+
 ### `#[rustango::main]` installs through `logging::Setup`
 
 Same output as before. If a subscriber is already installed, it now warns on stderr instead of staying silent (#1493).
