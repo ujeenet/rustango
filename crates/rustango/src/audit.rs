@@ -22,6 +22,10 @@
 //! Per-row writes record before/after values for every field named in the
 //! model's `audit(track = "...")`. Bulk writes collect their entries and
 //! insert them in multi-row statements sized to the bind limit.
+//!
+//! Rows the database removes or changes through an FK `ON DELETE`
+//! action, or that PG's `truncate` (`CASCADE`) empties, are not audited
+//! (planned for 0.61.0).
 
 use serde_json::{Map, Value};
 
@@ -1252,13 +1256,27 @@ pub async fn delete_one_with_audit(
     query: &crate::core::DeleteQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
-    let stmt = pool.dialect().compile_delete(query)?;
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
-    if affected > 0 {
-        emit_one_tx(&mut tx, entry).await?;
-    }
+    let affected = delete_one_with_audit_tx(&mut tx, query, entry).await?;
     tx.commit().await?;
+    Ok(affected)
+}
+
+/// [`delete_one_with_audit`] inside an open transaction. Used by the
+/// generated `Model::delete_tx`.
+///
+/// # Errors
+/// As [`delete_one_with_audit`].
+pub async fn delete_one_with_audit_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::DeleteQuery,
+    entry: &PendingEntry,
+) -> Result<u64, crate::sql::ExecError> {
+    let stmt = tx.dialect().compile_delete(query)?;
+    let affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
+    if affected > 0 {
+        emit_one_tx(tx, entry).await?;
+    }
     Ok(affected)
 }
 
@@ -1401,12 +1419,45 @@ pub async fn insert_one_with_audit<M>(
 where
     M: crate::sql::AssignAutoPkPool,
 {
-    // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::transaction_pool(pool).await?;
-    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
-    crate::sql::apply_auto_pk(returning, model)?;
-    emit_one_tx(&mut tx, &entry(model)).await?;
+    insert_one_with_audit_tx(&mut tx, query, model, entry).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// [`insert_one_with_audit`] inside an open transaction. Used by the
+/// generated `Model::insert_tx`.
+///
+/// # Errors
+/// As [`insert_one_with_audit`].
+pub async fn insert_one_with_audit_tx<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+    model: &mut M,
+    entry: impl FnOnce(&M) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::AssignAutoPkPool,
+{
+    // `insert_returning_tx` already handles each backend's return shape.
+    let returning = crate::sql::insert_returning_tx(tx, query).await?;
+    crate::sql::apply_auto_pk(returning, model)?;
+    emit_one_tx(tx, &entry(model)).await?;
+    Ok(())
+}
+
+/// INSERT `query` and emit `entry` in an open transaction, for a model
+/// with no PK to read back. Used by the generated `Model::insert_tx`.
+///
+/// # Errors
+/// As [`crate::sql::insert_tx`], plus the audit write.
+pub async fn insert_with_entry_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+    entry: &PendingEntry,
+) -> Result<(), crate::sql::ExecError> {
+    crate::sql::insert_tx(tx, query).await?;
+    emit_one_tx(tx, entry).await?;
     Ok(())
 }
 
@@ -1884,8 +1935,20 @@ where
         return Ok(0);
     }
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let stmt = tx.dialect().compile_bulk_update(query)?;
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    // Each row binds its PK and one value per update column. Small pages
+    // also keep SQLite's per-row CTE lookup cheap.
+    let per_row = query.update_columns.len() + 1;
+    let max_rows = (tx.dialect().max_bind_params() / per_row).clamp(1, BULK_AUDIT_CHUNK);
+    let mut affected = 0;
+    for chunk in query.rows.chunks(max_rows) {
+        let batch = crate::core::BulkUpdateQuery::new(
+            query.model,
+            query.update_columns.clone(),
+            chunk.to_vec(),
+        );
+        let stmt = tx.dialect().compile_bulk_update(&batch)?;
+        affected += crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    }
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query
         .rows
@@ -1905,6 +1968,125 @@ where
     }
     tx.commit().await?;
     Ok(affected)
+}
+
+/// Run a conflict-handling bulk insert (`bulk_upsert_pool`,
+/// `bulk_insert_or_ignore_pool`) with one audit row per row it wrote, in
+/// one transaction (#1795). Each row is first tried with `DoNothing`; only
+/// the rows that skipped go to the `DoUpdate`, audited as `Update`.
+///
+/// The first pass runs one statement per row. On PG a row deleted by
+/// another transaction between the passes is recorded as `Update`. MySQL
+/// has no `RETURNING`, so it is refused.
+///
+/// # Errors
+/// [`crate::sql::ExecError::AuditUnsupported`] on MySQL, else as
+/// [`crate::sql::bulk_insert_pool`], plus the re-read and the emit.
+pub async fn bulk_insert_with_audit<M>(
+    pool: &crate::sql::Pool,
+    query: &crate::core::BulkInsertQuery,
+    entry: impl Fn(&M, AuditOp) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    if !pool.dialect().supports_returning() {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason:
+                "without RETURNING a conflict-handling bulk insert cannot tell which rows it wrote",
+        });
+    }
+    if query.rows.is_empty() {
+        return Ok(());
+    }
+    let pk_field = query
+        .model
+        .primary_key()
+        .ok_or(crate::sql::ExecError::MissingPrimaryKey {
+            table: query.model.table,
+        })?;
+    let mut tx = crate::sql::write_transaction_pool(pool).await?;
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for row in &query.rows {
+        let probe = crate::core::InsertQuery::new(query.model, query.columns.clone(), row.clone())
+            .returning(vec![pk_field.column])
+            .on_conflict(crate::core::ConflictClause::DoNothing);
+        match crate::sql::insert_returning_tx(&mut tx, &probe).await {
+            Ok(returning) => {
+                created.push(crate::sql::inserted_pk(&probe, &returning, pk_field)?);
+            }
+            Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => {
+                skipped.push(row.clone());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let mut updated = Vec::new();
+    if let (Some(clause @ crate::core::ConflictClause::DoUpdate { .. }), false) =
+        (&query.on_conflict, skipped.is_empty())
+    {
+        let upsert = crate::core::BulkInsertQuery::new(query.model, query.columns.clone(), skipped)
+            .on_conflict(clause.clone());
+        updated = crate::sql::bulk_insert_pks_tx(&mut tx, &upsert).await?;
+    }
+    for (pks, op) in [(created, AuditOp::Create), (updated, AuditOp::Update)] {
+        for chunk in pks.chunks(BULK_AUDIT_CHUNK) {
+            let rows: Vec<M> = rows_in_tx(
+                &mut tx,
+                query.model,
+                pk_in(query.model, chunk.to_vec())?,
+                false,
+            )
+            .await?;
+            let entries: Vec<PendingEntry> = rows.iter().map(|r| entry(r, op)).collect();
+            emit_many_tx(&mut tx, &entries).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
+/// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
+/// `DoNothing` pass first and upserts only when that skipped (#1795).
+/// A row another transaction deletes between the passes is recorded as `Update`.
+///
+/// # Errors
+/// As [`crate::sql::insert_returning_pool`].
+#[cfg(feature = "postgres")]
+pub async fn upsert_returning_on(
+    conn: &mut sqlx::PgConnection,
+    query: &crate::core::InsertQuery,
+) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
+    use crate::sql::insert_returning_on;
+    if !matches!(
+        query.on_conflict,
+        Some(crate::core::ConflictClause::DoUpdate { .. })
+    ) {
+        return Ok((
+            insert_returning_on(&mut *conn, query).await?,
+            AuditOp::Create,
+        ));
+    }
+    let mut probe = query.clone();
+    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
+    match insert_returning_on(&mut *conn, &probe).await {
+        Ok(row) => Ok((row, AuditOp::Create)),
+        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
+            insert_returning_on(&mut *conn, query).await?,
+            AuditOp::Update,
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 /// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
@@ -2009,97 +2191,93 @@ where
     F2: FnOnce(&crate::sql::MyReturningRow) -> Vec<(&'static str, serde_json::Value)>,
     F3: FnOnce(&crate::sql::SqliteReturningRow) -> Vec<(&'static str, serde_json::Value)>,
 {
-    let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
-    update_query.validate()?;
-    let stmt = pool.dialect().compile_update(update_query)?;
-    let before = pool.dialect().compile_select(before_query)?;
-    // Only the pre-update SELECT differs per backend: each row type is a
-    // different concrete type, so each arm calls its own
-    // `decode_before_*`. The UPDATE, emit and commit are shared by
-    // wrapping the transaction in a `PoolTx`.
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut tx = pg.begin().await?;
-            let pk_q = before
-                .params
-                .iter()
-                .cloned()
-                .fold(sqlx::query(&before.sql), crate::sql::bind_query);
-            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                // A failed pre-read must not let the UPDATE commit unaudited.
-                pk_q.fetch_optional(&mut *tx)
-                    .await?
-                    .map(|row| decode_before_pg(&row));
-            let mut wrapped = crate::sql::PoolTx::Postgres(tx);
-            let _affected = finish_update_with_audit_diff(
-                &mut wrapped,
-                &stmt,
-                before_pairs,
-                &after_pairs,
-                entity_table,
-                &entity_pk,
-            )
-            .await?;
-            wrapped.commit().await?;
-            Ok(_affected)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut tx = my.begin().await?;
-            let pk_q = before
-                .params
-                .iter()
-                .cloned()
-                .fold(sqlx::query(&before.sql), crate::sql::bind_query_my);
-            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                // A failed pre-read must not let the UPDATE commit unaudited.
-                pk_q.fetch_optional(&mut *tx)
-                    .await?
-                    .map(|row| decode_before_my(&row));
-            let mut wrapped = crate::sql::PoolTx::Mysql(tx);
-            let _affected = finish_update_with_audit_diff(
-                &mut wrapped,
-                &stmt,
-                before_pairs,
-                &after_pairs,
-                entity_table,
-                &entity_pk,
-            )
-            .await?;
-            wrapped.commit().await?;
-            Ok(_affected)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut tx = sq.begin().await?;
-            let pk_q = before
-                .params
-                .iter()
-                .cloned()
-                .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite);
-            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
-                // A failed pre-read must not let the UPDATE commit unaudited.
-                pk_q.fetch_optional(&mut *tx)
-                    .await?
-                    .map(|row| decode_before_sqlite(&row));
-            let mut wrapped = crate::sql::PoolTx::Sqlite(tx);
-            let _affected = finish_update_with_audit_diff(
-                &mut wrapped,
-                &stmt,
-                before_pairs,
-                &after_pairs,
-                entity_table,
-                &entity_pk,
-            )
-            .await?;
-            wrapped.commit().await?;
-            Ok(_affected)
-        }
-    }
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let affected = save_one_with_diff_tx(
+        &mut tx,
+        update_query,
+        before_query,
+        entity_table,
+        entity_pk,
+        after_pairs,
+        decode_before_pg,
+        decode_before_my,
+        decode_before_sqlite,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(affected)
 }
 
-/// Shared tail of every [`save_one_with_diff`] arm: run the compiled
+/// [`save_one_with_diff`] inside an open transaction. Used by the
+/// generated `Model::save_tx`.
+///
+/// # Errors
+/// As [`save_one_with_diff`].
+#[allow(clippy::too_many_arguments)]
+pub async fn save_one_with_diff_tx<F1, F2, F3>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    update_query: &crate::core::UpdateQuery,
+    before_query: &crate::core::SelectQuery,
+    entity_table: &'static str,
+    entity_pk: String,
+    after_pairs: Vec<(&'static str, serde_json::Value)>,
+    decode_before_pg: F1,
+    decode_before_my: F2,
+    decode_before_sqlite: F3,
+) -> Result<u64, crate::sql::ExecError>
+where
+    F1: FnOnce(&crate::sql::PgReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+    F2: FnOnce(&crate::sql::MyReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+    F3: FnOnce(&crate::sql::SqliteReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+{
+    let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
+    update_query.validate()?;
+    let stmt = tx.dialect().compile_update(update_query)?;
+    let before = tx.dialect().compile_select(before_query)?;
+    // Only the pre-update SELECT differs per backend: each row type is a
+    // different concrete type, so each arm calls its own `decode_before_*`.
+    // A failed pre-read must not let the UPDATE commit unaudited.
+    let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match tx {
+        #[cfg(feature = "postgres")]
+        crate::sql::PoolTx::Postgres(t) => before
+            .params
+            .iter()
+            .cloned()
+            .fold(sqlx::query(&before.sql), crate::sql::bind_query)
+            .fetch_optional(&mut **t)
+            .await?
+            .map(|row| decode_before_pg(&row)),
+        #[cfg(feature = "mysql")]
+        crate::sql::PoolTx::Mysql(t) => before
+            .params
+            .iter()
+            .cloned()
+            .fold(sqlx::query(&before.sql), crate::sql::bind_query_my)
+            .fetch_optional(&mut **t)
+            .await?
+            .map(|row| decode_before_my(&row)),
+        #[cfg(feature = "sqlite")]
+        crate::sql::PoolTx::Sqlite(t) => before
+            .params
+            .iter()
+            .cloned()
+            .fold(sqlx::query(&before.sql), crate::sql::bind_query_sqlite)
+            .fetch_optional(&mut **t)
+            .await?
+            .map(|row| decode_before_sqlite(&row)),
+    };
+    finish_update_with_audit_diff(
+        tx,
+        &stmt,
+        before_pairs,
+        &after_pairs,
+        entity_table,
+        &entity_pk,
+    )
+    .await
+}
+
+/// Shared tail of [`save_one_with_diff_tx`]: run the compiled
 /// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,

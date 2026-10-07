@@ -1,13 +1,13 @@
 //! Text utilities — slug generation, HTML escaping, truncation.
 //!
-//! Small zero-dep helpers for the common bits of text-handling boilerplate
+//! Small helpers for the common bits of text-handling boilerplate
 //! every web app needs.
 
 // ------------------------------------------------------------------ slugify
 
 /// Convert a string into a URL-safe slug.
 ///
-/// - Lowercases ASCII letters and folds accented Latin ones (`"Café"` → `"cafe"`)
+/// - Lowercases ASCII letters and folds accented Latin ones via NFKD (`"Café"` → `"cafe"`)
 /// - Replaces non-alphanumeric runs with a single `-`
 /// - Strips leading and trailing `-`
 /// - Drops other non-ASCII characters (`"Café 日本"` → `"cafe"`); when that
@@ -26,16 +26,24 @@ pub fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_was_dash = false;
     for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if let Some(folded) = fold_latin(c) {
+        if let Some(folded) = fold_latin(c) {
             out.push_str(folded);
             last_was_dash = false;
-        } else if !out.is_empty() && !last_was_dash {
-            out.push('-');
-            last_was_dash = true;
+            continue;
         }
+        // NFKD splits "ế" / "İ" into an ASCII base plus combining marks.
+        unicode_normalization::char::decompose_compatible(c, |d| {
+            if d.is_ascii_alphanumeric() {
+                out.push(d.to_ascii_lowercase());
+                last_was_dash = false;
+            } else if !unicode_normalization::char::is_combining_mark(d)
+                && !out.is_empty()
+                && !last_was_dash
+            {
+                out.push('-');
+                last_was_dash = true;
+            }
+        });
     }
     let trimmed = out.trim_end_matches('-');
     if trimmed.is_empty() {
@@ -46,38 +54,26 @@ pub fn slugify(s: &str) -> String {
     trimmed.to_owned()
 }
 
-/// ASCII spelling of an accented Latin letter (Latin-1 and Extended-A).
+/// ASCII spelling of a Latin letter that NFKD does not reduce to ASCII.
 fn fold_latin(c: char) -> Option<&'static str> {
     const FOLDS: &[(&str, &str)] = &[
-        ("àáâãäåāăą", "a"),
         ("æ", "ae"),
-        ("çćĉċč", "c"),
-        ("ďđð", "d"),
-        ("èéêëēĕėęě", "e"),
-        ("ĝğġģ", "g"),
-        ("ĥħ", "h"),
-        ("ìíîïĩīĭįı", "i"),
-        ("ĳ", "ij"),
-        ("ĵ", "j"),
-        ("ķĸ", "k"),
-        ("ĺļľŀł", "l"),
-        ("ñńņňŉŋ", "n"),
-        ("òóôõöøōŏő", "o"),
+        ("đð", "d"),
+        ("ħ", "h"),
+        ("ı", "i"),
+        ("ĸ", "k"),
+        ("łŀ", "l"),
+        ("ŉ", "n"),
+        ("ŋ", "n"),
+        ("ø", "o"),
         ("œ", "oe"),
-        ("ŕŗř", "r"),
-        ("śŝşšșſ", "s"),
         ("ß", "ss"),
-        ("ţťŧț", "t"),
+        ("ŧ", "t"),
         ("þ", "th"),
-        ("ùúûüũūŭůűų", "u"),
-        ("ŵ", "w"),
-        ("ýÿŷ", "y"),
-        ("źżž", "z"),
     ];
     if c.is_ascii() {
         return None;
     }
-    // Upper-case Latin letters in these blocks lower to a single char.
     let lower = c.to_lowercase().next()?;
     FOLDS
         .iter()
@@ -2616,6 +2612,14 @@ mod tests {
         assert_eq!(slugify("Straße ÆØ"), "strasse-aeo");
         // Non-Latin input still falls back to the Unicode slug.
         assert_eq!(slugify("Привет мир"), "привет-мир");
+    }
+
+    /// İ and Vietnamese letters fold too (#2092).
+    #[test]
+    fn slugify_folds_dotted_i_and_vietnamese() {
+        assert_eq!(slugify("İstanbul"), "istanbul");
+        assert_eq!(slugify("Tiếng Việt Đà Nẵng"), "tieng-viet-da-nang");
+        assert_eq!(slugify("Ŀlobet"), "llobet");
     }
 
     #[test]

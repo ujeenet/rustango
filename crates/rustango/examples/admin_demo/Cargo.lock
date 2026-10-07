@@ -1935,6 +1935,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
 ]

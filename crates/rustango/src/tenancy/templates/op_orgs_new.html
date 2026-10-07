@@ -1,7 +1,7 @@
 {% extends "op_layout.html" %}
 {% block title %}New tenant — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span>New tenant</p>
+<p class="breadcrumb"><a href="{{ console_prefix }}/orgs">Organizations</a><span class="sep">/</span>New tenant</p>
 <h1>New tenant</h1>
 <p class="lead">Reaches the database, registers the tenant, runs its
 migrations, and only then makes it live. Nothing is written until the
@@ -11,7 +11,7 @@ connection check passes.</p>
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
-<form method="post" action="/orgs/new" class="edit-form">
+<form method="post" action="{{ console_prefix }}/orgs/new" class="edit-form">
   {{ csrf_input | default(value='') | safe }}
   <fieldset class="section">
     <legend>Identity</legend>
@@ -196,7 +196,7 @@ connection check passes.</p>
 
   <p class="form-actions">
     <button type="submit" class="btn btn-primary">Create tenant</button>
-    <a href="/orgs" class="btn-link">Cancel</a>
+    <a href="{{ console_prefix }}/orgs" class="btn-link">Cancel</a>
   </p>
 </form>
 
@@ -253,7 +253,7 @@ connection check passes.</p>
       // database *name*, the server derives the URL the same way the
       // submit will — so the probe tests the real target, not a
       // different one.
-      const res = await fetch("/orgs/test-connection", {
+      const res = await fetch(consoleUrl("/orgs/test-connection"), {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",

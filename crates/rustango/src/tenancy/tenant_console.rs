@@ -94,6 +94,9 @@ pub struct TenantSessionPayload {
     /// operator's for impersonation. A password change ends the session.
     #[serde(default)]
     pub pwf: PasswordFingerprint,
+    /// An impersonation's id, its handoff `jti`: ending it revokes this id (#2038).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl TenantSessionPayload {
@@ -113,19 +116,22 @@ impl TenantSessionPayload {
             imp: None,
             iat: now,
             pwf,
+            sid: None,
         }
     }
 
     /// Mint an impersonation payload — operator-as-superuser
     /// for the named tenant. Distinct from [`Self::new`] so
     /// the call site reads as intent. (#78) `pwf` is the
-    /// operator's [`PasswordFingerprint`].
+    /// operator's [`PasswordFingerprint`]; `sid` names the session so it
+    /// can be revoked alone (#2038).
     #[must_use]
     pub fn impersonation(
         operator_id: i64,
         slug: impl Into<String>,
         ttl_secs: i64,
         pwf: PasswordFingerprint,
+        sid: impl Into<String>,
     ) -> Self {
         let now = chrono::Utc::now().timestamp();
         Self {
@@ -135,6 +141,7 @@ impl TenantSessionPayload {
             imp: Some(operator_id),
             iat: now,
             pwf,
+            sid: Some(sid.into()),
         }
     }
 
@@ -235,7 +242,7 @@ mod tests {
 
     #[test]
     fn impersonation_payload_has_imp_set() {
-        let p = TenantSessionPayload::impersonation(42, "acme", 3600, fp());
+        let p = TenantSessionPayload::impersonation(42, "acme", 3600, fp(), "s1");
         assert_eq!(p.uid, 0);
         assert_eq!(p.slug, "acme");
         assert_eq!(p.imp, Some(42));
@@ -252,7 +259,7 @@ mod tests {
     #[test]
     fn impersonation_round_trip_through_cookie() {
         let secret = key();
-        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp());
+        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp(), "s1");
         let cookie = encode(&secret, &p);
         let back = decode(&secret, "acme", &cookie).unwrap();
         assert_eq!(back, p);
@@ -265,7 +272,7 @@ mod tests {
         // cookies — operator opening tenant A shouldn't have a
         // cookie that authenticates them at tenant B.
         let secret = key();
-        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp());
+        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp(), "s1");
         let cookie = encode(&secret, &p);
         let err = decode(&secret, "globex", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::WrongTenant));

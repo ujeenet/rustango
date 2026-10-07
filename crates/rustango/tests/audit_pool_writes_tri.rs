@@ -42,16 +42,30 @@ pub struct Stamp {
     pub created_at: Auto<DateTime<Utc>>,
 }
 
+/// Audited, with a PK the caller sets: `insert_tx` takes `&self`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "audit1460_tag", app = "audit1675", audit(track = "title"))]
+#[allow(dead_code)]
+pub struct Tag {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+
 const TABLE: &str = "audit1675_note";
 
 /// Fresh table, and no audit rows left for it by an earlier run.
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Note>(pool).await;
     rustango::testkit::matrix::fresh_table::<Stamp>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Tag>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
-    AuditLog::delete_where("entity_table", TABLE, pool)
-        .await
-        .expect("clear audit rows");
+    for table in [TABLE, "audit1460_tag"] {
+        AuditLog::delete_where("entity_table", table, pool)
+            .await
+            .expect("clear audit rows");
+    }
 }
 
 async fn audit_rows(pool: &Pool) -> i64 {
@@ -141,6 +155,20 @@ async fn noop_save_writes_no_audit_row(pool: &Pool) {
     note.title = "changed".into();
     note.save_pool(pool).await.expect("save");
     assert_eq!(audit_rows(pool).await, 2);
+}
+
+/// An audited `save_partial` diffs only the fields it writes (#1744).
+async fn save_partial_audits_only_its_fields(pool: &Pool) {
+    let mut note = insert_note(pool).await;
+    let pk = note.id.get().expect("pk assigned").to_string();
+    note.title = "partial".into();
+    note.deleted_at = Some(Utc::now());
+    assert_eq!(note.save_partial(&["title"], pool).await.unwrap(), 1);
+    assert_eq!(audit_rows(pool).await, 2);
+    let changes = &entries(pool, &pk).await[0].changes;
+    assert_eq!(changes["title"]["before"], "hello");
+    assert_eq!(changes["title"]["after"], "partial");
+    assert!(changes.get("deleted_at").is_none(), "{changes}");
 }
 
 async fn failed_pre_read_fails_the_save(pool: &Pool) {
@@ -441,14 +469,71 @@ async fn scheduled_task_audits_as_its_registration(pool: &Pool) {
     }
 }
 
+/// The derived `_tx` methods write the same audit rows as the pool ones (#1460).
+async fn tx_methods_write_audit_rows(pool: &Pool) {
+    let pk = rustango::atomic!(pool, |tx| {
+        let mut note = Note {
+            id: Auto::default(),
+            title: "hello".into(),
+            deleted_at: None,
+        };
+        note.insert_tx(&mut *tx.lock().await?).await?;
+        note.title = "changed".into();
+        assert_eq!(note.save_tx(&mut *tx.lock().await?).await?, 1);
+        assert_eq!(note.delete_tx(&mut *tx.lock().await?).await?, 1);
+        let tag = Tag {
+            id: 7,
+            title: "t".into(),
+        };
+        tag.insert_tx(&mut *tx.lock().await?).await?;
+        Ok(note.id.get().expect("pk assigned").to_string())
+    })
+    .await
+    .expect("atomic");
+    let rows = entries(pool, &pk).await;
+    let mut ops: Vec<&str> = rows.iter().map(|r| r.operation.as_str()).collect();
+    ops.sort_unstable();
+    assert_eq!(ops, ["create", "delete", "update"]);
+    let update = rows.iter().find(|r| r.operation == "update").unwrap();
+    assert_eq!(update.changes["title"]["before"], "hello");
+    assert_eq!(update.changes["title"]["after"], "changed");
+    let tags = audit::fetch_for_entity_pool(pool, "audit1460_tag", "7")
+        .await
+        .expect("fetch audit rows");
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].operation, "create");
+}
+
+/// The `_tx` audit rows roll back with the block that wrote them.
+async fn tx_audit_rows_roll_back_with_the_block(pool: &Pool) {
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |tx| {
+        let mut note = Note {
+            id: Auto::default(),
+            title: "hello".into(),
+            deleted_at: None,
+        };
+        note.insert_tx(&mut *tx.lock().await?).await?;
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    assert_eq!(audit_rows(pool).await, 0);
+    assert_eq!(Note::objects().count(pool).await.unwrap(), 0);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        tx_methods_write_audit_rows,
+        tx_audit_rows_roll_back_with_the_block,
         insert_records_the_assigned_pk,
         soft_delete_and_restore_each_write_one_row,
         delete_writes_one_row,
         no_row_changed_writes_no_audit_row,
         noop_save_writes_no_audit_row,
+        save_partial_audits_only_its_fields,
         failed_pre_read_fails_the_save,
         second_soft_delete_keeps_the_first_stamp,
         pg_macro_save_skips_noop_and_fails_on_pre_read,

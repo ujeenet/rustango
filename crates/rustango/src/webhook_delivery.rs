@@ -188,7 +188,7 @@ fn is_default_retryable(status: u16) -> bool {
 /// delivery handler and send events.
 ///
 /// Keep one per subscription. Cheap to clone.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebhookSubscription {
     target_url: String,
     secret: String,
@@ -197,6 +197,21 @@ pub struct WebhookSubscription {
     timeout: Duration,
     retry_status_codes: Vec<u16>,
     allow_private_targets: bool,
+}
+
+/// The secret and header values are redacted: headers often carry auth (#2116).
+impl std::fmt::Debug for WebhookSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookSubscription")
+            .field("target_url", &self.target_url)
+            .field("secret", &"<redacted>")
+            .field("signature_format", &self.signature_format)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("timeout", &self.timeout)
+            .field("retry_status_codes", &self.retry_status_codes)
+            .field("allow_private_targets", &self.allow_private_targets)
+            .finish()
+    }
 }
 
 impl WebhookSubscription {
@@ -591,6 +606,17 @@ mod tests {
         ));
         srv.abort();
         q.shutdown().await;
+    }
+
+    /// #2116 — `{:?}` in a log must not print the signing secret.
+    #[test]
+    fn debug_redacts_the_secret_and_header_values() {
+        let sub = WebhookSubscription::new("https://example.com/hook", "the-signing-secret")
+            .header("Authorization", "Bearer the-header-token");
+        let dbg = format!("{sub:?}");
+        assert!(!dbg.contains("the-signing-secret"), "{dbg}");
+        assert!(!dbg.contains("the-header-token"), "{dbg}");
+        assert!(dbg.contains("https://example.com/hook") && dbg.contains("Authorization"));
     }
 
     /// #1852 — a transport error does not quote the URL; its path can be a secret.

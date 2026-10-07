@@ -66,14 +66,23 @@ pub struct DocTag {
     m2m(
         name = "tags",
         to = "m2m1926_tag",
-        through = "m2m1926_post_tag",
-        src = "post_id",
+        through = "m2m1926_note_tag",
+        src = "note_id",
         dst = "tag_id"
     )
 )]
 pub struct Note {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(app = "m2m1926", table = "m2m1926_note_tag")]
+pub struct NoteTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub note_id: i64,
+    pub tag_id: i64,
 }
 
 /// A source whose M2M target has a String PK.
@@ -131,10 +140,51 @@ pub struct RackBadge {
     pub badge_id: uuid::Uuid,
 }
 
+/// A source whose junction is not a registered model, as the migration writer makes it.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "m2m1926_item",
+    app = "m2m1926",
+    m2m(
+        name = "tags",
+        to = "m2m1926_tag",
+        through = "m2m1926_item_tag",
+        src = "item_id",
+        dst = "tag_id"
+    )
+)]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+/// `m2m1926_item_tag`, kept out of the model registry.
+const ITEM_TAG: &rustango::core::ModelSchema = &{
+    use rustango::core::{FieldSchema, FieldType, IndexSchema, ModelSchema};
+    const FIELDS: &[FieldSchema] = &[
+        FieldSchema::new("item_id", "item_id", FieldType::I64),
+        FieldSchema::new("tag_id", "tag_id", FieldType::I64),
+    ];
+    const INDEXES: &[IndexSchema] = &[{
+        let mut i = IndexSchema::new("m2m1926_item_tag_pair", &["item_id", "tag_id"]);
+        i.unique = true;
+        i
+    }];
+    let mut s = ModelSchema::new("ItemTag", "m2m1926_item_tag");
+    s.fields = FIELDS;
+    s.indexes = INDEXES;
+    s
+};
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, ITEM_TAG.table).await;
+    rustango::testkit::create_tables(pool, &[ITEM_TAG])
+        .await
+        .expect("item_tag");
     rustango::testkit::matrix::fresh_table::<RackBadge>(pool).await;
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
+    rustango::testkit::matrix::fresh_table::<NoteTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<ShelfLabel>(pool).await;
 }
 
@@ -171,16 +221,40 @@ async fn string_pk_rows_stay_per_source(pool: &Pool) {
 }
 
 /// A key too long for the junction column is an error, not a silent
-/// MySQL truncation under `INSERT IGNORE` (#1966). SQLite has no length limit.
+/// MySQL truncation (#1966); the through model's bounds hold on SQLite too (#2136).
 async fn too_long_key_is_an_error(pool: &Pool) {
     let long = post(&"x".repeat(100));
-    let res = long.tags_m2m().add(1, pool).await;
-    if pool.dialect().name() == "sqlite" {
-        res.expect("sqlite stores it");
-    } else {
-        assert!(res.is_err(), "too-long key was accepted");
-        assert_eq!(PostTag::objects().count(pool).await.expect("count"), 0);
-    }
+    assert!(
+        long.tags_m2m().add(1, pool).await.is_err(),
+        "add accepted it"
+    );
+    // Refused before any statement runs, so no DELETE goes out (#2152).
+    let tags = long.tags_m2m();
+    let res = rustango::test_assertions::assert_num_queries(0, tags.set(&[1], pool)).await;
+    assert!(res.is_err(), "set accepted it");
+    assert_eq!(PostTag::objects().count(pool).await.expect("count"), 0);
+}
+
+/// The emitters compile against an unregistered junction too; a duplicate `add` is skipped.
+async fn unregistered_junction_round_trips(pool: &Pool) {
+    let (a, b) = (Item { id: 1 }, Item { id: 2 });
+    a.tags_m2m().add(1, pool).await.expect("add");
+    a.tags_m2m().add(1, pool).await.expect("duplicate add");
+    b.tags_m2m().set(&[2, 3], pool).await.expect("set");
+    assert_eq!(a.tags_m2m().all(pool).await.expect("all"), vec![1]);
+    assert!(b.tags_m2m().contains(3, pool).await.expect("contains"));
+    b.tags_m2m().remove(3, pool).await.expect("remove");
+    assert_eq!(b.tags_m2m().all(pool).await.expect("all"), vec![2]);
+    a.tags_m2m().clear(pool).await.expect("clear");
+    assert!(a.tags_m2m().all(pool).await.expect("all").is_empty());
+}
+
+/// `set` splits a list past the backend's bind limit like `bulk_insert` (#2136).
+async fn set_past_the_bind_limit(pool: &Pool) {
+    let n = i64::try_from(pool.dialect().max_bind_params() / 2 + 1).expect("fits");
+    let ids: Vec<i64> = (0..n).collect();
+    post("big").tags_m2m().set(&ids, pool).await.expect("set");
+    assert_eq!(PostTag::objects().count(pool).await.expect("count"), n);
 }
 
 async fn uuid_pk_rows_stay_per_source(pool: &Pool) {
@@ -208,7 +282,7 @@ async fn uuid_pk_rows_stay_per_source(pool: &Pool) {
 
 /// An unsaved source has no key; it must not act on anyone's rows.
 async fn unsaved_source_is_refused(pool: &Pool) {
-    post("abc-slug")
+    Note { id: Auto::Set(7) }
         .tags_m2m()
         .add(1, pool)
         .await
@@ -217,7 +291,7 @@ async fn unsaved_source_is_refused(pool: &Pool) {
     let err = unsaved.tags_m2m().clear(pool).await.expect_err("unsaved");
     assert!(matches!(err, ExecError::M2mUnsavedSource { .. }), "{err:?}");
     assert!(unsaved.tags_m2m().add(1, pool).await.is_err());
-    assert_eq!(PostTag::objects().count(pool).await.expect("count"), 1);
+    assert_eq!(NoteTag::objects().count(pool).await.expect("count"), 1);
 }
 
 /// String destination keys bind and read back as text (#1950).
@@ -310,6 +384,8 @@ tri_dialect_test! {
     scenarios: [
         string_pk_rows_stay_per_source,
         too_long_key_is_an_error,
+        set_past_the_bind_limit,
+        unregistered_junction_round_trips,
         uuid_pk_rows_stay_per_source,
         unsaved_source_is_refused,
         string_destination_keys_round_trip,

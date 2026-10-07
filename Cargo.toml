@@ -55,6 +55,9 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 # Errors
 thiserror = "1"
 
+# NFKD folding for `text::slugify`; already in the tree via sqlx's stringprep.
+unicode-normalization = "0.1"
+
 # Logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-appender = "0.2"

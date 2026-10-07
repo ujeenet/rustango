@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use rustango::admin::AdminSession;
 use rustango::sql::{sqlx, Auto, FetcherPool as _};
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
@@ -22,6 +23,18 @@ static UNIQ: AtomicU64 = AtomicU64::new(0);
 /// Tracing's callsite interest is process-global: a sibling logging on another
 /// thread can hide the handoff line from the capture test's scoped subscriber.
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// What a user detail page saw: the audit source token and the admin session.
+static SEEN: std::sync::Mutex<Vec<(String, Option<AdminSession>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn record_actor(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
+    let source = rustango::audit::current_source().as_token();
+    let session = parts.extensions.get::<AdminSession>().cloned();
+    SEEN.lock().unwrap().push((source, session));
+    true
+}
+rustango::register_admin_object_permission!("rustango_users", "view", record_actor);
 
 fn unique(prefix: &str) -> String {
     format!(
@@ -466,13 +479,16 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
         StatusCode::OK,
         "the impersonation session works before the change"
     );
-    // The session names the operator, so `updated_by` is never empty (#1939).
+    // The sidebar names the operator by id, not by a name (#2110).
     let html = axum::body::to_bytes(index.into_body(), usize::MAX)
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&html);
+    let op_id = op.id.get().copied().unwrap();
     assert!(
-        html.contains(&format!("operator:{}", op.username)),
+        html.contains(&format!(
+            "Impersonating as operator <strong>#{op_id}</strong>"
+        )),
         "the sidebar should name the operator"
     );
 
@@ -485,6 +501,62 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
         env.get("/__admin/", &imp_cookie).await.status(),
         StatusCode::SEE_OTHER,
         "the impersonation session must end with the operator's password"
+    );
+}
+
+/// Ending an impersonation, by its button or by logout, revokes the
+/// cookie server-side: a copy stops working (#2038).
+#[tokio::test]
+async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
+    let env = boot().await;
+    for end in ["/__admin/__end-impersonation", "/__logout"] {
+        let (op, location) = start_impersonation(&env).await;
+        let handoff = &location[location
+            .find("/__impersonation_handoff")
+            .expect("handoff url")..];
+        let redeemed = env.get(handoff, "").await;
+        let cookie = redeemed.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(env.get("/__admin/", &cookie).await.status(), StatusCode::OK);
+
+        let ended = env.post(end, &cookie, "").await;
+        assert!(ended.status().is_redirection(), "{end}: {}", ended.status());
+        assert_eq!(
+            env.get("/__admin/", &cookie).await.status(),
+            StatusCode::SEE_OTHER,
+            "{end}: a kept copy must be refused"
+        );
+        let op = Operator::objects()
+            .filter("id", op.id.get().copied().unwrap())
+            .fetch(&env.registry)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            op.sessions_revoked_at, None,
+            "{end}: the console session stays"
+        );
+    }
+
+    // A cookie with no session id could never be revoked, so it is refused.
+    let (op, _) = start_impersonation(&env).await;
+    let mut legacy = TenantSessionPayload::impersonation(
+        op.id.get().copied().unwrap(),
+        &env.slug,
+        3600,
+        PasswordFingerprint::of(&env.secret, &op.password_hash),
+        "unused",
+    );
+    legacy.sid = None;
+    let legacy = format!("{COOKIE_NAME}={}", encode(&env.secret, &legacy));
+    assert_eq!(
+        env.get("/__admin/", &legacy).await.status(),
+        StatusCode::SEE_OTHER
     );
 }
 
@@ -678,4 +750,44 @@ async fn api_create_tenant_checks_the_host() {
     )
     .await;
     assert!(ok.is_ok(), "{ok:?}");
+}
+
+/// An impersonating operator acts as `operator:<id>:impersonating`, never
+/// as `user:0` or a username a tenant user could also take (#2110).
+#[tokio::test]
+async fn an_impersonation_is_attributed_to_the_operator_id() {
+    let env = boot().await;
+    let (op, location) = start_impersonation(&env).await;
+    let op_id = op.id.get().copied().unwrap();
+    let mut user = User {
+        username: format!("operator:{}", op.username),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+
+    let handoff = &location[location
+        .find("/__impersonation_handoff")
+        .expect("handoff url")..];
+    let redeemed = env.get(handoff, "").await;
+    let cookie = redeemed.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    SEEN.lock().unwrap().clear();
+    let res = env
+        .get(&format!("/__admin/rustango_users/{uid}"), &cookie)
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (source, session) = SEEN.lock().unwrap().pop().expect("the action ran");
+    let token = format!("operator:{op_id}:impersonating");
+    assert_eq!(source, token, "audited writes");
+    let session = session.expect("an admin session");
+    assert_eq!(session.impersonated_by, Some(op_id));
+    assert_eq!(session.actor().as_token(), token, "updated_by");
+    assert!(session.username.is_empty(), "{}", session.username);
 }

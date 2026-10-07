@@ -35,7 +35,7 @@
 //! [`JtiBlacklist`] is per process. Behind a load balancer, a redeemed
 //! token could be replayed against another process inside the TTL. A
 //! shared store (Redis `SETNX`, or a `rustango_used_jti` table) would
-//! close that.
+//! close that. Ended impersonations are kept there too (#2038).
 
 use std::sync::{Arc, OnceLock};
 
@@ -236,6 +236,21 @@ impl JtiBlacklist {
         } else {
             Err(HandoffError::AlreadyUsed)
         }
+    }
+
+    /// Revoke the impersonation session `sid` until its cookie's `exp` (#2038).
+    pub async fn end_session(&self, sid: &str, exp: i64) {
+        self.store.mark_used(&Self::ended_key(sid), exp).await;
+    }
+
+    /// `true` once [`Self::end_session`] revoked `sid`.
+    pub async fn session_ended(&self, sid: &str) -> bool {
+        self.store.is_used(&Self::ended_key(sid)).await
+    }
+
+    /// The `:` keeps it apart from a handoff jti, which is base64url.
+    fn ended_key(sid: &str) -> String {
+        format!("ended:{sid}")
     }
 }
 

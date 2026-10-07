@@ -71,9 +71,5 @@
 //! ```
 //!
 //! Both shapes still compose with the rest of the QuerySet builder.
-//!
-//! `#[rustango(manager(ext = "Name"))]` only emits an empty
-//! `pub trait Name: Sized {}` beside the model. A trait impl cannot add
-//! methods, so the shortcuts still go on your own trait, as above.
 
 // Doc-only module; worked examples live in `tests/manager_pattern_live.rs`.

@@ -346,7 +346,7 @@ pub async fn select_rows_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Vec<serde_json::Value>, ExecError> {
-    crate::test_assertions::query_counter::bump();
+    super::on_pool(pool, "select_rows_as_json");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -495,7 +495,7 @@ pub async fn select_one_row_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Option<serde_json::Value>, ExecError> {
-    crate::test_assertions::query_counter::bump();
+    super::on_pool(pool, "select_one_row_as_json");
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]

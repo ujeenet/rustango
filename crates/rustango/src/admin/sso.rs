@@ -212,11 +212,7 @@ async fn sso_callback(
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
     let cookie_value = session::encode(
         secret,
-        AdminSession {
-            user_id: uid,
-            username: user.username,
-            is_superuser: user.is_superuser,
-        },
+        AdminSession::new(uid, user.username, user.is_superuser),
         &auth_hash,
         user.sessions_revoked_at,
     );

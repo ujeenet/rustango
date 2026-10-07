@@ -3,8 +3,8 @@
 //!
 //! Atomicity caveat: the helpers run SELECT then INSERT/UPDATE in
 //! two statements; another writer could race between the two. For
-//! race-free behaviour pair with `Pool::begin()` or rely on a
-//! UNIQUE constraint. These tests run single-threaded so the race
+//! race-free behaviour rely on a UNIQUE constraint. These tests run
+//! single-threaded so the race
 //! window doesn't matter.
 
 #![cfg(feature = "sqlite")]

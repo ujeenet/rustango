@@ -410,7 +410,6 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `default_permissions` | `"add, change, delete, view"` | autopermisos a crear |
 | `default_related_name` | `"posts"` | nombre del accesor inverso en el padre |
 | `base_manager_name` | `"all_objects"` | nombre del manager base (sin filtrar) |
-| `manager(ext = "Trait")` | ruta del trait | emitir un trait marcador vacío (sin métodos) |
 | `manager_fn` | `"published"` | añadir un accesor de manager más allá de `objects()` |
 | `get_latest_by` | `"created_at"` | columna por defecto para `latest()`/`earliest()` |
 | `order_with_respect_to` | `"parent"` | ordenación de las filas hijas relativa al padre |

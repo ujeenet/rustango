@@ -31,15 +31,19 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 /// access-log layers so both see the 500, and inside CORS and the
 /// security headers so the 500 carries them.
 /// A panic inside a streaming body, after the headers are sent, is not caught.
-#[cfg(any(feature = "manage", feature = "tenancy"))]
+#[cfg(any(feature = "manage", feature = "tenancy", feature = "runserver"))]
 #[must_use]
 pub(crate) fn catch_panics(router: axum::Router) -> axum::Router {
     router.layer(axum::middleware::from_fn(
         |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            // A `runserver`-only build has no request-id layer.
+            #[cfg(feature = "_http_layers")]
             let request_id = req
                 .extensions()
                 .get::<crate::request_id::RequestId>()
                 .map(|id| id.0.clone());
+            #[cfg(not(feature = "_http_layers"))]
+            let request_id: Option<String> = None;
             let method = req.method().clone();
             let path = req.uri().path().to_owned();
             match catch_unwind(next.run(req)).await {

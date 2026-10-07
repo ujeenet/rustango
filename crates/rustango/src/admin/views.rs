@@ -234,15 +234,48 @@ const RESERVED_PARAMS: &[&str] = &[
 /// Most keys one `IN` list binds: under every dialect's bind cap (#2049).
 const MAX_IN_KEYS: usize = 10_000;
 
-/// `?<field>__isnull=1` lists the rows where `field` is NULL (#2006).
-const ISNULL_SUFFIX: &str = "__isnull";
+/// How a list URL param selects rows on one field. NULL and `""` get a
+/// `=1` suffix form, since `?field=` reads as "no filter" (#2006, #2081).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldLookup {
+    Eq,
+    IsNull,
+    IsEmpty,
+}
 
-/// The URL pair that selects one facet value: NULL needs `__isnull`.
-fn facet_param(field: &str, key: &SqlValue, raw: &str) -> (String, String) {
-    if matches!(key, SqlValue::Null) {
-        (format!("{field}{ISNULL_SUFFIX}"), "1".to_owned())
-    } else {
-        (field.to_owned(), raw.to_owned())
+impl FieldLookup {
+    const ALL: [Self; 3] = [Self::Eq, Self::IsNull, Self::IsEmpty];
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Eq => "",
+            Self::IsNull => "__isnull",
+            Self::IsEmpty => "__isempty",
+        }
+    }
+
+    /// Splits a URL key into the field name and its lookup.
+    fn parse(key: &str) -> (&str, Self) {
+        [Self::IsNull, Self::IsEmpty]
+            .into_iter()
+            .find_map(|l| Some((key.strip_suffix(l.suffix())?, l)))
+            .unwrap_or((key, Self::Eq))
+    }
+
+    /// Every URL key that can filter `field`, to clear them all.
+    fn keys(field: &str) -> [String; 3] {
+        Self::ALL.map(|l| format!("{field}{}", l.suffix()))
+    }
+
+    /// The URL pair that selects one facet value.
+    fn param(field: &str, key: &SqlValue, raw: &str) -> (String, String) {
+        let lookup = match key {
+            SqlValue::Null => Self::IsNull,
+            SqlValue::String(s) if s.is_empty() => Self::IsEmpty,
+            _ => Self::Eq,
+        };
+        let value = if lookup == Self::Eq { raw } else { "1" };
+        (format!("{field}{}", lookup.suffix()), value.to_owned())
     }
 }
 
@@ -297,10 +330,7 @@ pub(crate) async fn table_view(
         if value.is_empty() {
             continue;
         }
-        let (name, is_null) = match key.strip_suffix(ISNULL_SUFFIX) {
-            Some(base) => (base, true),
-            None => (key.as_str(), false),
-        };
+        let (name, lookup) = FieldLookup::parse(key);
         // Only fields the list shows or filters on (#2031).
         let Some(field) = model
             .field(name)
@@ -308,16 +338,21 @@ pub(crate) async fn table_view(
         else {
             continue;
         };
-        let (op, v) = if is_null {
-            if value != "1" {
-                continue;
+        if lookup != FieldLookup::Eq && value != "1" {
+            continue;
+        }
+        let (op, v) = match lookup {
+            FieldLookup::IsNull => (Op::IsNull, SqlValue::Bool(true)),
+            FieldLookup::IsEmpty if field.ty == crate::core::FieldType::String => {
+                (Op::Eq, SqlValue::String(String::new()))
             }
-            (Op::IsNull, SqlValue::Bool(true))
-        } else {
-            let Ok(v) = forms::parse_form_value(field, Some(value)) else {
-                continue;
-            };
-            (Op::Eq, v)
+            FieldLookup::IsEmpty => continue,
+            FieldLookup::Eq => {
+                let Ok(v) = forms::parse_form_value(field, Some(value)) else {
+                    continue;
+                };
+                (Op::Eq, v)
+            }
         };
         field_filters.push((
             field.name,
@@ -886,7 +921,8 @@ async fn compute_facets(
         let Some(field) = model.field(filter_name) else {
             continue;
         };
-        let isnull_key = format!("{}{ISNULL_SUFFIX}", field.name);
+        let lookup_keys = FieldLookup::keys(field.name);
+        let lookup_keys: Vec<&str> = lookup_keys.iter().map(String::as_str).collect();
         let facet_filters: Vec<Filter> = field_filters
             .iter()
             .filter(|(name, _)| *name != field.name)
@@ -945,11 +981,11 @@ async fn compute_facets(
                 render::escape(&raw)
             };
             let count: i64 = *count;
-            let param = facet_param(field.name, key, &raw);
+            let param = FieldLookup::param(field.name, key, &raw);
             let is_active = active_field_filters.contains(&param);
             // Toggle URL: drop this filter when it is active, else
             // set it. The rest of the filter state is kept.
-            let mut toggle = list_query.without(&[field.name, &isnull_key]);
+            let mut toggle = list_query.without(&lookup_keys);
             if !is_active {
                 toggle = toggle.with(param.0, param.1);
             }
@@ -1002,7 +1038,7 @@ async fn compute_facets(
         // FK facets render as a `<select>`; this is the "All" option,
         // which removes the filter.
         let clear_url = if is_fk {
-            Some(list_query.without(&[field.name, &isnull_key]).url())
+            Some(list_query.without(&lookup_keys).url())
         } else {
             None
         };
