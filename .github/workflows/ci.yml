@@ -1406,6 +1406,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
       # `incr` was get-then-set, so parallel failed logins were lost (#1871).
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_incr_tri
+      # Login per-IP/global limits shared through a database cache (#1809).
+      - run: cargo test -p rustango --features mysql,testkit,admin --test login_throttle_cache_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live

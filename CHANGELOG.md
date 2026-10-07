@@ -16,6 +16,18 @@ The tombstone is looked up first and deleted by id; a DELETE by an unused slug g
 
 `psql -c` ignored the piped dump. The dump now goes through a staging database that renames `public` to the target schema; the smoke check runs before the Org row moves, and passwords go in `PGPASSWORD`, not argv.
 
+### Fixed — strict CSP on the SSO error page; no server HTML in `innerHTML` (#2144)
+
+The member SSO error page uses a nonce'd `<style>`. The console connection probe returns JSON the page renders as text, and the admin autocomplete builds its options as nodes, so row text is never parsed as HTML.
+
+### Added — admin actions can require `delete` with `ActionPerm` (#1818)
+
+`register_action_with_perm(.., ActionPerm::Delete, ..)` checks `{table}.delete` and the `delete` hook instead of `change`; the tenant admin and server builders have it too.
+
+### Added — `LoginThrottle::with_cache` shares login limits across replicas (#1809)
+
+The per-IP and global login limits can count in a Redis or database cache; the first login warns while they count per process.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

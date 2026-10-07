@@ -33,7 +33,7 @@ use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use tera::Context;
 
@@ -284,11 +284,7 @@ pub(super) async fn test_connection(
         }
     };
     let Some(url) = target else {
-        return Html(
-            "<p class=\"probe probe-bad\">Enter a slug, a database name, or a full URL first.</p>"
-                .to_owned(),
-        )
-        .into_response();
+        return probe_bad("Enter a slug, a database name, or a full URL first.");
     };
     let url = url.as_str();
 
@@ -301,28 +297,19 @@ pub(super) async fn test_connection(
     // migration chain over the registry.
     if let Some(p) = state.provisioner.as_ref() {
         if let Err(msg) = provision::refuse_registry_url(url, &p.registry_url()) {
-            return Html(format!(
-                "<p class=\"probe probe-bad\">{}</p>",
-                html_escape(&msg)
-            ))
-            .into_response();
+            return probe_bad(&msg);
         }
     }
 
     match preflight::check(url, &Preflight::default()).await {
-        Ok(ok) => Html(format!(
-            "<p class=\"probe probe-ok\">Reached <code>{}</code>. \
-             This role can create tables, so migrations will run.</p>",
-            html_escape(&ok.endpoint)
-        ))
+        Ok(ok) => Probe::Ok {
+            endpoint: Some(ok.endpoint),
+            message: "This role can create tables, so migrations will run.",
+        }
         .into_response(),
         // The diagnosis already leads with what to change — see
         // `sql::connect_diagnosis`. Rendering it verbatim is the point.
-        Err(d) => Html(format!(
-            "<p class=\"probe probe-bad\">{}</p>",
-            html_escape(&d.to_string())
-        ))
-        .into_response(),
+        Err(d) => probe_bad(&d.to_string()),
     }
 }
 
@@ -368,11 +355,11 @@ pub(super) async fn test_tenant_connection(
     };
 
     if org.database_url.is_none() {
-        return Html(
-            "<p class=\"probe probe-ok\">Schema-mode: this tenant lives in the registry's own \
-             database, which is already connected. There is no separate connection to test.</p>"
-                .to_owned(),
-        )
+        return Probe::Ok {
+            endpoint: None,
+            message: "Schema-mode: this tenant lives in the registry's own database, which is \
+                      already connected. There is no separate connection to test.",
+        }
         .into_response();
     }
 
@@ -388,20 +375,39 @@ pub(super) async fn test_tenant_connection(
         }
     };
     match preflight::check(&url, &Preflight::default()).await {
-        Ok(ok) => Html(format!(
-            "<p class=\"probe probe-ok\">Reached <code>{}</code>. This role can create tables.</p>",
-            html_escape(&ok.endpoint)
-        ))
+        Ok(ok) => Probe::Ok {
+            endpoint: Some(ok.endpoint),
+            message: "This role can create tables.",
+        }
         .into_response(),
         Err(d) => probe_bad(&d.to_string()),
     }
 }
 
+/// A connection probe's result, as JSON: the console builds the DOM
+/// from it, so no server HTML reaches `innerHTML` (#2144).
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum Probe {
+    Ok {
+        endpoint: Option<String>,
+        message: &'static str,
+    },
+    Bad {
+        message: String,
+    },
+}
+
+impl IntoResponse for Probe {
+    fn into_response(self) -> Response<Body> {
+        axum::Json(self).into_response()
+    }
+}
+
 fn probe_bad(message: &str) -> Response<Body> {
-    Html(format!(
-        "<p class=\"probe probe-bad\">{}</p>",
-        html_escape(message)
-    ))
+    Probe::Bad {
+        message: message.to_owned(),
+    }
     .into_response()
 }
 
@@ -652,9 +658,6 @@ pub(super) async fn provision_run_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-// The hand-built fragments carry a hostname and a driver message.
-use crate::text::html_escape;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,14 +748,6 @@ mod tests {
         )
         .expect_err("sqlite cannot do schema mode");
         assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn escaping_covers_the_characters_that_break_out_of_a_fragment() {
-        assert_eq!(
-            html_escape(r#"<script>"&"</script>"#),
-            "&lt;script&gt;&quot;&amp;&quot;&lt;/script&gt;"
-        );
     }
 }
 

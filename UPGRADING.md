@@ -154,6 +154,18 @@ untouched.
 
 It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. Extensions are not copied: create `vector`, `citext`, `pgcrypto` and the like in the registry first, or the restore fails and changes nothing (#1864).
 
+### The console connection probe returns JSON (#2144)
+
+`POST <console>/orgs/test-connection` and `/orgs/{slug}/test-connection` now answer `{"status": "ok"|"bad", "message", "endpoint"?}` instead of an HTML fragment.
+
+### Custom admin actions can require `delete` (#1818)
+
+Register an action that deletes with `register_action_with_perm(.., ActionPerm::Delete, ..)`; `register_action` still checks `change`.
+
+### Login limits warn when they count per process (#1809)
+
+The first login logs a warning while the per-IP and global limits live in process memory; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` to share them.
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

@@ -92,6 +92,7 @@ pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
 struct RegisteredAction {
     table: &'static str,
     name: &'static str,
+    perm: crate::admin::ActionPerm,
     handler: crate::admin::AdminActionFn,
 }
 
@@ -257,9 +258,36 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     /// the tenant's schema.
     #[must_use]
     pub fn register_action<F>(
+        self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(
+                &'a crate::sql::Pool,
+                &'a [crate::core::SqlValue],
+            ) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.register_action_with_perm(
+            model_table,
+            action_name,
+            crate::admin::ActionPerm::Change,
+            handler,
+        )
+    }
+
+    /// [`Self::register_action`] checked against `perm` (#1818). Same
+    /// semantics as [`crate::admin::Builder::register_action_with_perm`].
+    #[must_use]
+    pub fn register_action_with_perm<F>(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
+        perm: crate::admin::ActionPerm,
         handler: F,
     ) -> Self
     where
@@ -274,6 +302,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         self.actions.push(RegisteredAction {
             table: model_table,
             name: action_name,
+            perm,
             handler: Arc::new(handler),
         });
         self
@@ -1812,9 +1841,12 @@ fn build_inner_admin_router(
 
     for action in actions {
         let handler = action.handler.clone();
-        builder = builder.register_action(action.table, action.name, move |pool, pks| {
-            handler(pool, pks)
-        });
+        builder = builder.register_action_with_perm(
+            action.table,
+            action.name,
+            action.perm,
+            move |pool, pks| handler(pool, pks),
+        );
     }
     builder.build()
 }
