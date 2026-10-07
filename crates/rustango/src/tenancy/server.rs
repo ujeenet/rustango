@@ -63,19 +63,39 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// Read overrides from env: `RUSTANGO_BIND` and
-    /// `RUSTANGO_APEX_DOMAIN`. Anything unset uses the default.
+    /// Read overrides from env: `RUSTANGO_BIND` and the apex from
+    /// [`apex_domain`]. Anything unset uses the default.
     #[must_use]
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("RUSTANGO_BIND") {
             cfg.bind = v;
         }
-        if let Ok(v) = std::env::var("RUSTANGO_APEX_DOMAIN") {
+        if let Some(v) = configured_apex_domain() {
             cfg.apex_domain = v;
         }
         cfg
     }
+}
+
+/// `[tenancy] apex_domain`, recorded at boot by `Cli::with_settings`.
+static APEX_FROM_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record `[tenancy] apex_domain`. The first call wins, like the other boot globals.
+pub(crate) fn set_apex_domain_setting(apex: &str) -> bool {
+    !apex.is_empty() && APEX_FROM_SETTINGS.set(apex.to_owned()).is_ok()
+}
+
+/// `RUSTANGO_APEX_DOMAIN`, else `[tenancy] apex_domain`; env wins, as for `bind`.
+pub(crate) fn configured_apex_domain() -> Option<String> {
+    std::env::var("RUSTANGO_APEX_DOMAIN")
+        .ok()
+        .or_else(|| APEX_FROM_SETTINGS.get().cloned())
+}
+
+/// The apex host, defaulting to `localhost`.
+pub(crate) fn apex_domain() -> String {
+    configured_apex_domain().unwrap_or_else(|| "localhost".into())
 }
 
 /// Run the server until the process is signalled (Ctrl-C / SIGTERM).

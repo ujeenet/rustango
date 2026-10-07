@@ -4799,6 +4799,9 @@ fn deploy_audit_env() -> DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
         database_url: std::env::var("DATABASE_URL").ok(),
+        #[cfg(feature = "tenancy")]
+        apex_domain: crate::tenancy::server::configured_apex_domain(),
+        #[cfg(not(feature = "tenancy"))]
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
         #[cfg(feature = "admin")]

@@ -382,9 +382,9 @@ pub struct AdminSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TenancySettings {
-    /// Apex domain for subdomain-based tenant resolution. Mirrors the
-    /// `RUSTANGO_APEX_DOMAIN` env var, which still works as a
-    /// fallback.
+    /// Apex domain for subdomain-based tenant resolution. Applied by
+    /// `Cli::with_settings`; the `RUSTANGO_APEX_DOMAIN` env var wins
+    /// over it, as `RUSTANGO_BIND` does over `[server] bind`.
     pub apex_domain: Option<String>,
 }
 

@@ -548,6 +548,8 @@ impl Cli {
     ///   env var still wins (deploy-time overrides need to beat
     ///   committed config), and any subsequent explicit
     ///   [`Cli::bind`] call wins over both.
+    /// - `Settings.tenancy.apex_domain` → the tenancy apex host.
+    ///   `RUSTANGO_APEX_DOMAIN` still wins.
     ///
     /// Future fields land here as the wiring catches up — the method
     /// is forward-compatible because every Settings field is
@@ -575,6 +577,13 @@ impl Cli {
             if let Some(bind) = s.server.bind.as_deref() {
                 self.bind = bind.to_owned();
             }
+        }
+
+        // `[tenancy] apex_domain` was parsed and dropped (#1379).
+        // Process-wide like the cookie policy below; env still wins.
+        #[cfg(feature = "tenancy")]
+        if let Some(apex) = s.tenancy.apex_domain.as_deref() {
+            let _ = crate::tenancy::server::set_apex_domain_setting(apex);
         }
 
         // Pool sizing + timeouts, applied by every pool this process
@@ -1392,7 +1401,7 @@ impl Cli {
         let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
-        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let apex = crate::tenancy::server::apex_domain();
         let registry_url =
             std::env::var("DATABASE_URL")
                 .ok()
@@ -1972,6 +1981,23 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s);
         assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// `[tenancy] apex_domain` reaches the apex the server uses (#1379).
+    #[cfg(all(feature = "config", feature = "tenancy"))]
+    #[test]
+    fn with_settings_sets_the_tenancy_apex() {
+        if std::env::var("RUSTANGO_APEX_DOMAIN").is_ok() {
+            return; // env wins; nothing to observe
+        }
+        let mut s = crate::config::Settings::default();
+        s.tenancy.apex_domain = Some("apex.example.com".into());
+        let _cli = Cli::new().with_settings(&s);
+        assert_eq!(crate::tenancy::server::apex_domain(), "apex.example.com");
+        assert_eq!(
+            crate::tenancy::server::ServerConfig::from_env().apex_domain,
+            "apex.example.com"
+        );
     }
 
     /// Settings.server.bind = None doesn't clobber the existing

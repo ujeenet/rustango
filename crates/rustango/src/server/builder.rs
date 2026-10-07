@@ -119,8 +119,9 @@ struct PendingAction {
 #[cfg(feature = "postgres")]
 impl Builder<sqlx::Postgres> {
     /// Connect to `DATABASE_URL`, build [`TenantPools`], read
-    /// `RUSTANGO_APEX_DOMAIN`. Tracing init is left to the caller —
-    /// one `tracing_subscriber::fmt().init()` away.
+    /// `RUSTANGO_APEX_DOMAIN` (else `[tenancy] apex_domain`). Tracing
+    /// init is left to the caller — one `tracing_subscriber::fmt().init()`
+    /// away.
     ///
     /// PG-only: defaults to `postgres://...` and uses
     /// `PgPool::connect`. For sqlite / mysql tenancy apps, use
@@ -129,7 +130,7 @@ impl Builder<sqlx::Postgres> {
     /// # Errors
     /// Connection to `DATABASE_URL` failures.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let apex = crate::tenancy::server::apex_domain();
         let registry_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
         let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
