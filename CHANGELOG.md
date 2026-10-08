@@ -26,7 +26,7 @@ MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I
 
 ### Fixed — select_related on a NULL foreign key (#2293)
 
-A NULL or dangling FK now leaves the relation unloaded instead of failing the whole fetch, on every backend.
+A NULL FK now leaves the relation unloaded instead of failing the whole fetch; a set FK whose row is missing fails clearly on every backend.
 
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 

@@ -137,27 +137,32 @@ fn in_chunk_size(
     Ok(budget)
 }
 
-/// True when a `select_related` LEFT JOIN under `alias` matched no row:
-/// the target's PK cell is NULL, so the FK stays unloaded (#2293).
+/// Fails when the `select_related` LEFT JOIN under `alias` matched no row
+/// though the FK is set: the target's PK cell is NULL, so the row is missing.
 ///
 /// # Errors
-/// `sqlx::Error` if the aliased PK column is missing from the row.
+/// `sqlx::Error::ColumnDecode` for a missing target row, or a missing PK column.
 #[doc(hidden)]
-pub fn __rustango_join_missed<R>(
+pub fn __rustango_require_join<R>(
     row: &R,
     target: &crate::core::ModelSchema,
     alias: &str,
-) -> Result<bool, sqlx::Error>
+) -> Result<(), sqlx::Error>
 where
     R: sqlx::Row,
     for<'a> &'a str: sqlx::ColumnIndex<R>,
 {
     let Some(pk) = target.primary_key() else {
-        return Ok(false);
+        return Ok(());
     };
     let col = format!("{alias}__{}", pk.column);
-    let raw = row.try_get_raw(col.as_str())?;
-    Ok(sqlx::ValueRef::is_null(&raw))
+    if sqlx::ValueRef::is_null(&row.try_get_raw(col.as_str())?) {
+        return Err(sqlx::Error::ColumnDecode {
+            index: col,
+            source: format!("foreign-key target row in `{}` is missing", target.table).into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "postgres")]

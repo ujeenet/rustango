@@ -4,7 +4,7 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+use rustango::core::{BulkInsertQuery, FieldSchema, FieldType, Model as _, ModelSchema, SqlValue};
 use rustango::sql::{
     bulk_insert_pool, Auto, CounterPool as _, ExecError, FetcherPool as _, ForeignKey, Pool,
 };
@@ -81,6 +81,30 @@ pub struct Badge {
     #[rustango(max_length = 40)]
     pub label: String,
 }
+
+/// `rel2293_article` without its FK constraint, so a row can point nowhere.
+const LOOSE_ARTICLE: &ModelSchema = &{
+    const FIELDS: &[FieldSchema] = &[
+        {
+            let mut f = FieldSchema::new("id", "id", FieldType::I64);
+            f.primary_key = true;
+            f
+        },
+        {
+            let mut f = FieldSchema::new("title", "title", FieldType::String);
+            f.max_length = Some(40);
+            f
+        },
+        {
+            let mut f = FieldSchema::new("editor", "editor", FieldType::I64);
+            f.nullable = true;
+            f
+        },
+    ];
+    let mut s = ModelSchema::new("LooseArticle", "rel2293_article");
+    s.fields = FIELDS;
+    s
+};
 
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -164,6 +188,25 @@ async fn null_fk_order_by_relation(pool: &Pool) {
         .await
         .expect("ordering across a NULL FK must not fail the fetch");
     assert_eq!(rows.len(), 2);
+}
+
+/// A set FK whose row is missing stays an error; only a NULL FK is skipped.
+async fn dangling_fk_select_related_fails(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, LOOSE_ARTICLE.table).await;
+    rustango::testkit::create_tables(pool, &[LOOSE_ARTICLE])
+        .await
+        .expect("loose article");
+    let row = vec![1_i64.into(), "a".into(), 99_i64.into()];
+    let cols = vec!["id", "title", "editor"];
+    bulk_insert_pool(pool, &BulkInsertQuery::new(LOOSE_ARTICLE, cols, vec![row]))
+        .await
+        .expect("dangling row");
+    let err = Article::objects()
+        .select_related("editor")
+        .fetch(pool)
+        .await
+        .expect_err("a dangling FK must not read as unloaded");
+    assert!(err.to_string().contains("missing"), "{err}");
 }
 
 async fn shared_first_hop_joins_once(pool: &Pool) {
@@ -268,6 +311,7 @@ tri_dialect_test! {
         null_fk_select_related_skips_the_row,
         null_fk_multihop_select_related,
         null_fk_order_by_relation,
+        dangling_fk_select_related_fails,
         shared_first_hop_joins_once,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,

@@ -978,6 +978,29 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
+/// Guard before decoding a `select_related` target (#2293): a NULL nullable
+/// FK leaves the relation unloaded; a set FK whose row is missing is an error.
+fn join_guard_tokens(rel: &FkRelation, receiver: &TokenStream2) -> TokenStream2 {
+    let root = rustango_root();
+    let parent_ty = &rel.parent_type;
+    let field_ident = &rel.field_ident;
+    let null_fk = if rel.nullable {
+        quote! {
+            if #receiver.#field_ident.is_none() {
+                return ::core::result::Result::Ok(false);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    quote! {
+        #null_fk
+        #root::sql::__rustango_require_join(
+            row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
+        )?;
+    }
+}
+
 /// Emit `impl LoadRelated for #StructName` — slice 9.0d. Pattern-
 /// matches `field_name` against the model's FK fields and, for a
 /// match, decodes the FK target via the parent's macro-generated
@@ -996,6 +1019,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(self));
         let assign = if rel.nullable {
             quote! {
                 self.#field_ident = ::core::option::Option::Some(
@@ -1009,12 +1033,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         };
         quote! {
             #fk_col => {
-                // A NULL or dangling FK leaves the LEFT JOIN cells NULL (#2293).
-                if #root::sql::__rustango_join_missed(
-                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
-                )? {
-                    return ::core::result::Result::Ok(false);
-                }
+                #guard
                 let mut _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
                 // Audit #451 — multi-hop `select_related("a__b__c")`:
                 // stitch the deeper relation onto this parent first,
@@ -1106,6 +1125,7 @@ fn load_related_impl_my_tokens(
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(__self));
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1123,11 +1143,7 @@ fn load_related_impl_my_tokens(
         // and let the macro_rules rebind it to the receiver.
         quote! {
             #fk_col => {
-                if #root::sql::__rustango_join_missed(
-                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
-                )? {
-                    return ::core::result::Result::Ok(false);
-                }
+                #guard
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
@@ -1180,6 +1196,7 @@ fn load_related_impl_sqlite_tokens(
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(__self));
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1193,11 +1210,7 @@ fn load_related_impl_sqlite_tokens(
         };
         quote! {
             #fk_col => {
-                if #root::sql::__rustango_join_missed(
-                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
-                )? {
-                    return ::core::result::Result::Ok(false);
-                }
+                #guard
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto

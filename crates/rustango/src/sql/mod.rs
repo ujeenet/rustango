@@ -63,7 +63,7 @@ pub use executor::row_to_json_sqlite;
 #[cfg(feature = "admin")]
 pub(crate) use executor::select_one_row_as_json_tx;
 pub use executor::{
-    __rustango_join_missed, atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool,
+    __rustango_require_join, atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool,
     delete_pool, delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool,
     fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, get_or_create, insert_or_ignore, insert_pool, insert_returning_pool,
