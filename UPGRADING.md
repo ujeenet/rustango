@@ -152,7 +152,7 @@ untouched.
 
 ### `values()` returns `Bool` and `Json` on MySQL and SQLite
 
-A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Match on `Bool` / `Json` as on Postgres (#2296).
+A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Code matching `I64` / `String` for these columns must match `Bool` / `Json` now, as on Postgres. Aggregate aliases keep their own type (#2296).
 
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 

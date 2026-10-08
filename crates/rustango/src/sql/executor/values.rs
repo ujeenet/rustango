@@ -61,18 +61,36 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
 
 /// Per result column, the type `model` declares for it. MySQL and SQLite
 /// store a UUID as text and MySQL a bool as an integer, so only the model tells.
+///
+/// Only the leading `model_cols` count: an annotation or aggregate alias that
+/// shares a column name (`SUM(x) AS flag`) is not that column (#2296).
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn column_types<R: sqlx::Row>(
     rows: &[R],
     model: &crate::core::ModelSchema,
+    model_cols: &[&str],
 ) -> Vec<Option<crate::core::FieldType>> {
     use sqlx::Column as _;
     rows.first().map_or_else(Vec::new, |row| {
         row.columns()
             .iter()
-            .map(|c| model.field_by_column(c.name()).map(|f| f.ty))
+            .enumerate()
+            .map(|(i, c)| {
+                (model_cols.get(i) == Some(&c.name()))
+                    .then(|| model.field_by_column(c.name()).map(|f| f.ty))
+                    .flatten()
+            })
             .collect()
     })
+}
+
+/// The model columns a SELECT emits first: its projection, else every field.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn select_model_cols(query: &SelectQuery) -> Vec<&'static str> {
+    query
+        .projection
+        .clone()
+        .unwrap_or_else(|| query.model.scalar_fields().map(|f| f.column).collect())
 }
 
 #[cfg(feature = "mysql")]
@@ -276,7 +294,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -300,7 +318,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -362,7 +380,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &query.group_by);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -386,7 +404,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &query.group_by);
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -444,7 +462,7 @@ pub async fn fetch_values_list(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
@@ -465,7 +483,7 @@ pub async fn fetch_values_list(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model);
+            let col_types = column_types(&rows, query.model, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
