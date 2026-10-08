@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `i18n::middleware` gated on axum too (#2329)
 
-A build with `_tower` and without `_axum` failed to compile.
+Only reachable by enabling the internal `_tower` feature directly; every public feature that turns it on also turns on `_axum`.
 
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 

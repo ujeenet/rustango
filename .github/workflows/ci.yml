@@ -756,6 +756,9 @@ jobs:
   feature_combos:
     needs: gate
     runs-on: ubuntu-latest
+    # Job-wide so every step shares one build of the deps per row.
+    env:
+      RUSTFLAGS: "-D warnings"
     strategy:
       fail-fast: false
       matrix:
@@ -804,18 +807,14 @@ jobs:
         with:
           key: feature-combos
       - run: cargo check -p rustango --no-default-features --features ${{ matrix.features }}
-        env:
-          RUSTFLAGS: "-D warnings"
       # Also run the unit tests: `cargo check` misses `#[cfg(test)]` code, and
       # that is exactly where a gate mismatch hides — a test module can outlive
       # the gated item it exercises without the library ever noticing.
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
       # Build `tests/**` on the bare backends: no other job compiles a test
       # without tenancy, so a wrong single-backend `#![cfg]` stayed green (#2328).
-      - if: ${{ !contains(matrix.features, ',') }}
+      - if: ${{ !contains(matrix.features, ',') || matrix.features == 'sqlite,_tower' }}
         run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --tests --no-run
-        env:
-          RUSTFLAGS: "-D warnings"
 
   # #1285 — the first Windows coverage this repo has had. Every other job
   # is ubuntu, so a Windows-only bug was structurally uncatchable: #1271
