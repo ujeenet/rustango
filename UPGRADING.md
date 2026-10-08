@@ -165,6 +165,7 @@ A migration, `apply_all_pool` and testkit table creation run `CREATE EXTENSION I
 ### A type change no longer writes a separate default op
 
 makemigrations folds the new `DEFAULT` into `AlterColumnType`, so undoing it works on PG.
+
 ### `cursor_pagination` on a nullable column is logged, and will be refused in 0.61.0
 
 It logs `tracing::error!` at build time (#2230), and will panic from 0.61.0 (#2265). Paginate on a NOT NULL column such as the primary key.
