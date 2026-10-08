@@ -544,7 +544,7 @@ fn m2m_renames(
         [(a, b)] => vec![rename(a, b)],
         // A swap goes through a spare name.
         [(a, b), (c, d)] if b == c && d == a => {
-            let spare = format!("{a}_swap");
+            let spare = swap_spare(a, b);
             vec![rename(a, &spare), rename(c, d), rename(&spare, b)]
         }
         // `b` is still `c`'s name until `c` moves.
@@ -552,6 +552,19 @@ fn m2m_renames(
         [(a, b), (c, d)] => vec![rename(a, b), rename(c, d)],
         _ => Vec::new(),
     })
+}
+
+/// A junction column name that is neither `a` nor `b` and fits PG's 63 bytes.
+fn swap_spare(a: &str, b: &str) -> String {
+    let mut cut = a.len().min(56);
+    while !a.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let base = &a[..cut];
+    (0..)
+        .map(|i| format!("{base}_swp{i}"))
+        .find(|s| s != a && s != b)
+        .expect("an unbounded range finds a free name")
 }
 
 pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {

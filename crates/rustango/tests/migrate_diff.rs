@@ -1256,9 +1256,9 @@ fn junction_column_change_renames_it() {
     assert_eq!(
         detect_changes(&prev, &snap("tag_id", "post_id", "rj_post")),
         vec![
-            rename("post_id", "post_id_swap"),
+            rename("post_id", "post_id_swp0"),
             rename("tag_id", "post_id"),
-            rename("post_id_swap", "tag_id"),
+            rename("post_id_swp0", "tag_id"),
         ]
     );
     assert_eq!(
@@ -1269,6 +1269,16 @@ fn junction_column_change_renames_it() {
         detect_changes(&prev, &snap("tag_id", "y_id", "rj_post")),
         vec![rename("tag_id", "y_id"), rename("post_id", "tag_id")]
     );
+    // The swap's spare name fits 63 bytes and is not a junction column.
+    let long = "p".repeat(60);
+    for (src, dst) in [(long.as_str(), "tag_id"), ("x_id", "x_id_swp0")] {
+        let changes = detect_changes(&snap(src, dst, "rj_post"), &snap(dst, src, "rj_post"));
+        let SchemaChange::RenameColumn { new_column, .. } = &changes[0] else {
+            panic!("{changes:?}");
+        };
+        assert!(new_column.len() <= 63, "{new_column}");
+        assert!(new_column != src && new_column != dst, "{new_column}");
+    }
     // Self-referencing, both renamed: which is which is unknown.
     let self_ref = |a: &str, b: &str| -> SchemaSnapshot {
         serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
