@@ -150,6 +150,9 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// What `new` picks when `--backend` is absent.
+    const DEFAULT: Self = Self::Postgres;
+
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
@@ -229,7 +232,7 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("test_utils", "test-only constructors for downstream crates"),
 ];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Template {
     Api,
     Fullstack,
@@ -237,6 +240,9 @@ enum Template {
 }
 
 impl Template {
+    /// What `new` picks when `--template` is absent.
+    const DEFAULT: Self = Self::Fullstack;
+
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "api" => Ok(Self::Api),
@@ -294,7 +300,8 @@ impl Template {
         let feats = feature_list(self.base_features(), extras);
         match path {
             Some(p) => {
-                format!(r#"{{ path = "{p}", default-features = false, features = [{feats}] }}"#)
+                let p = templates::toml_string(p);
+                format!(r#"{{ path = {p}, default-features = false, features = [{feats}] }}"#)
             }
             // Track our own version, bumped in lockstep with rustango, so a
             // published scaffolder always pins a real, current release. It was
@@ -375,8 +382,31 @@ struct NewArgs {
     /// `--rustango-path <dir>`: emit a path dependency instead of the crates.io
     /// version. For in-repo examples and for testing the working tree (#1211).
     rustango_path: Option<String>,
+}
+
+/// `new`'s command line before defaults. `None` = the flag was absent, so the
+/// wizard asks rather than overriding a given flag (#2286).
+#[derive(Debug)]
+struct NewFlags {
+    name: String,
+    template: Option<Template>,
+    backend: Option<Backend>,
+    features: Vec<String>,
+    rustango_path: Option<String>,
     /// `-i` / `--interactive`, or a bare `new` on a terminal: ask the rest.
     interactive: bool,
+}
+
+impl NewFlags {
+    fn resolve(self) -> NewArgs {
+        NewArgs {
+            name: self.name,
+            template: self.template.unwrap_or(Template::DEFAULT),
+            backend: self.backend.unwrap_or(Backend::DEFAULT),
+            features: self.features,
+            rustango_path: self.rustango_path,
+        }
+    }
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
@@ -385,11 +415,14 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     // a prompt nobody can answer.
     let asked = args.iter().any(|a| a == "-i" || a == "--interactive");
     let bare = args.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin());
-    let mut parsed = parse_new_args(args, asked || bare)?;
-    if parsed.interactive {
-        let named = !parsed.name.is_empty();
-        parsed = wizard::run(parsed, named)?;
-    }
+    let flags = parse_new_flags(args, asked || bare)?;
+    let parsed = if flags.interactive {
+        let named = !flags.name.is_empty();
+        wizard::run(flags, named)?
+    } else {
+        flags.resolve()
+    };
+    validate_features(&parsed.features, parsed.template)?;
     validate_name(&parsed.name)?;
 
     let root = PathBuf::from(&parsed.name);
@@ -428,15 +461,22 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String> {
+    let args = parse_new_flags(args, interactive)?.resolve();
+    validate_features(&args.features, args.template)?;
+    Ok(args)
+}
+
 /// Parse `new`'s arguments.
 ///
 /// `interactive` relaxes the one requirement the flags impose — a project
-/// name — because the wizard asks for it. Everything else already has a
-/// default, so a bare `cargo rustango new` is a complete request.
-fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String> {
+/// name — because the wizard asks for it. Absent flags stay `None`;
+/// [`NewFlags::resolve`] or the wizard fills them in.
+fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, String> {
     let mut name: Option<String> = None;
-    let mut template = Template::Fullstack;
-    let mut backend = Backend::Postgres;
+    let mut template: Option<Template> = None;
+    let mut backend: Option<Backend> = None;
     let mut features: Vec<String> = Vec::new();
     let mut rustango_path: Option<String> = None;
     let mut iter = args.iter();
@@ -446,13 +486,13 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
                 let v = iter
                     .next()
                     .ok_or_else(|| "--backend requires a value".to_owned())?;
-                backend = Backend::parse(v)?;
+                backend = Some(Backend::parse(v)?);
             }
             _ if arg.starts_with("--backend=") => {
-                backend = Backend::parse(&arg["--backend=".len()..])?;
+                backend = Some(Backend::parse(&arg["--backend=".len()..])?);
             }
             _ if arg.starts_with("-b=") => {
-                backend = Backend::parse(&arg["-b=".len()..])?;
+                backend = Some(Backend::parse(&arg["-b=".len()..])?);
             }
             // Repeatable and comma-separated both work, matching cargo's own
             // `--features` so muscle memory carries over.
@@ -472,15 +512,15 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
                 let v = iter
                     .next()
                     .ok_or_else(|| "--template requires a value".to_owned())?;
-                template = Template::parse(v)?;
+                template = Some(Template::parse(v)?);
             }
             // #1211 — the equals form is universal CLI convention (cargo's own
             // flags take it) and used to be rejected as an unknown flag.
             _ if arg.starts_with("--template=") => {
-                template = Template::parse(&arg["--template=".len()..])?;
+                template = Some(Template::parse(&arg["--template=".len()..])?);
             }
             _ if arg.starts_with("-t=") => {
-                template = Template::parse(&arg["-t=".len()..])?;
+                template = Some(Template::parse(&arg["-t=".len()..])?);
             }
             // #1211 — generate against a local checkout instead of crates.io.
             // Every in-repo example has to hand-rewrite the dependency line
@@ -532,8 +572,12 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
         seen.push(f.clone());
         fresh
     });
-    validate_features(&features, template)?;
-    Ok(NewArgs {
+    // Early when the template is known; the wizard's pick is checked in
+    // `cmd_new`.
+    if template.is_some() || !interactive {
+        validate_features(&features, template.unwrap_or(Template::DEFAULT))?;
+    }
+    Ok(NewFlags {
         name,
         template,
         backend,
@@ -588,6 +632,13 @@ fn validate_name(name: &str) -> Result<(), String> {
         return Err(format!(
             "`{name}` cannot be a project name — `{ident}` is a Rust keyword or a \
              built-in crate name, so the generated code would not compile"
+        ));
+    }
+    // The library would share its name with a dependency (#2287).
+    if let Some(dep) = templates::dependency_names().find(|d| d.replace('-', "_") == ident) {
+        return Err(format!(
+            "`{name}` cannot be a project name — the generated project depends on \
+             `{dep}`, and a crate cannot share a name with its own dependency"
         ));
     }
     Ok(())
@@ -1184,6 +1235,20 @@ mod tests {
         }
     }
 
+    /// With no `--template`, the wizard picks it later; a feature only that
+    /// template has must not be refused against the default first.
+    #[test]
+    fn features_wait_for_the_wizards_template() {
+        let argv: Vec<String> = ["shop", "-i", "--features", "manage"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut flags = parse_new_flags(&argv, true).expect("not checked yet");
+        flags.template = Some(Template::Api);
+        let args = flags.resolve();
+        validate_features(&args.features, args.template).expect("api has manage");
+    }
+
     /// Caught at parse time, where the message can name the flag — not at
     /// dependency resolution, where it names the framework.
     #[test]
@@ -1226,6 +1291,63 @@ mod tests {
         ] {
             let err = validate_name(n).expect_err(n);
             assert!(err.contains("keyword"), "{n}: {err}");
+        }
+    }
+
+    /// `--rustango-path` is data, not TOML: backslashes and quotes must
+    /// survive into a manifest cargo can read (#2287).
+    #[test]
+    fn rustango_path_round_trips_through_cargo_toml() {
+        for path in [
+            r"..\a\b",
+            r"C:\Users\dev\rustango",
+            r#"dir "q"/x"#,
+            "tab\there",
+            "new\nline",
+            "del\u{7f}ete",
+        ] {
+            let toml =
+                templates::cargo_toml("app", Template::Api, Backend::Sqlite, &[], Some(path));
+            let doc: toml::Table = toml::from_str(&toml)
+                .unwrap_or_else(|e| panic!("{path:?} broke Cargo.toml: {e}\n{toml}"));
+            assert_eq!(doc["dependencies"]["rustango"]["path"].as_str(), Some(path));
+        }
+    }
+
+    /// A project named like one of its own dependencies does not build, so
+    /// every name the generated manifest depends on is refused (#2287).
+    #[test]
+    fn names_of_template_dependencies_are_refused() {
+        let jobs = vec!["jobs".to_owned()];
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let toml = templates::cargo_toml("app", template, Backend::Postgres, &jobs, None);
+            let doc: toml::Table = toml::from_str(&toml).expect("Cargo.toml parses");
+            for table in ["dependencies", "dev-dependencies"] {
+                for dep in doc[table].as_table().expect(table).keys() {
+                    for n in [dep.clone(), dep.replace('-', "_")] {
+                        let err = validate_name(&n).expect_err(&n);
+                        assert!(err.contains("depends on"), "{n}: {err}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The compose DB uses a published password, so its port stays on
+    /// loopback (#2287).
+    #[test]
+    fn compose_binds_the_database_to_loopback() {
+        for (backend, port) in [(Backend::Postgres, "5432"), (Backend::Mysql, "3306")] {
+            let compose = templates::docker_compose("app", backend);
+            let published: Vec<&str> = compose
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("- \"") && l.ends_with(&format!(":{port}\"")))
+                .collect();
+            assert!(!published.is_empty(), "{backend:?}:\n{compose}");
+            for line in published {
+                assert!(line.starts_with("- \"127.0.0.1:"), "{backend:?}: {line}");
+            }
         }
     }
 

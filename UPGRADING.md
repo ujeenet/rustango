@@ -158,6 +158,10 @@ untouched.
 
 It used to refuse every request with 429 (#2299).
 
+### i18n locale matching
+
+`languages = ["pt-BR"]` now loads `pt_BR.json` (#2288), and `negotiate_language` picks `en` over `en-GB` for `en-US` (#2289). Check any test that pinned the old pick.
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).
