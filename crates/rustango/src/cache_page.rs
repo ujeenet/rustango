@@ -12,6 +12,8 @@
 //! 3. [`never_cache`]: `Cache-Control: no-store, no-cache,
 //!    must-revalidate, max-age=0`.
 //! 4. [`vary_on`]: builds a `Vary` header from header names.
+//! 5. [`CachePageLayer::invalidate`]: purge a page's cached entries.
+//!    Never rebuild the key by hand.
 //!
 //! ## Quick start
 //!
@@ -74,6 +76,7 @@
 //! [`CachePageLayer::cache_authenticated`]: crate::cache_page::CachePageLayer::cache_authenticated
 //! [`CachePageLayer::tenant_agnostic`]: crate::cache_page::CachePageLayer::tenant_agnostic
 //! [`CachePageLayer::vary_on`]: crate::cache_page::CachePageLayer::vary_on
+//! [`CachePageLayer::invalidate`]: crate::cache_page::CachePageLayer::invalidate
 //! [`CacheControl`]: crate::cache_page::CacheControl
 //! [`never_cache`]: crate::cache_page::never_cache
 //! [`vary_on`]: crate::cache_page::vary_on
@@ -90,7 +93,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCo
 use tower::Service;
 
 use crate::body_limit::collect_capped;
-use crate::cache::BoxedCache;
+use crate::cache::{BoxedCache, CacheError};
 
 // ---------------------------------------------------------------- Wire format
 
@@ -227,6 +230,123 @@ impl CachePageLayer {
         self.cache_query = enabled;
         self
     }
+
+    /// The key this layer writes for a `GET` of `page`, built by the
+    /// layer's own key function. The tenant is ignored when the layer
+    /// does not key on tenants.
+    #[must_use]
+    pub(crate) fn key_for(&self, page: &PageKey) -> String {
+        let tenant = if tenant_keyed(self.tenant_agnostic) {
+            page.tenant.as_deref()
+        } else {
+            None
+        };
+        build_key(
+            &self.key_prefix,
+            "GET",
+            &page.path,
+            &page.query,
+            &page.host,
+            tenant,
+            self.vary_on
+                .iter()
+                .map(|name| (name.as_str(), page.vary_value(name))),
+            None,
+        )
+    }
+
+    /// Delete the cached `GET` response of every page given, from the
+    /// layer's own cache. Pass one [`PageKey`] per `vary_on` value set.
+    ///
+    /// Only the exact query string and vary values given are purged: the
+    /// key holds them raw, not sorted or decoded. Other variants (say
+    /// `?utm_source=x`) stay until the layer's timeout.
+    ///
+    /// # Errors
+    /// The cache backend's delete error.
+    pub async fn invalidate<'a, I>(&self, pages: I) -> Result<(), CacheError>
+    where
+        I: IntoIterator<Item = &'a PageKey>,
+    {
+        let keyed = tenant_keyed(self.tenant_agnostic);
+        let keys: Vec<String> = pages
+            .into_iter()
+            .inspect(|p| {
+                if keyed && p.tenant.is_none() {
+                    // Such a page is never cached, so this deletes nothing.
+                    tracing::warn!(
+                        target: "rustango::cache_page",
+                        path = %p.path,
+                        "invalidate: page has no tenant but the layer keys on it"
+                    );
+                }
+            })
+            .map(|p| self.key_for(p))
+            .collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        self.cache.delete_many(&refs).await
+    }
+}
+
+/// A cached page, for [`CachePageLayer::invalidate`].
+///
+/// Give path, query and host exactly as the request sends them: path
+/// percent-encoded (`/caf%C3%A9`) and relative to any `Router::nest`,
+/// host with the same case and port. A `vary_on` header not set here
+/// counts as missing, as on a request.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PageKey {
+    path: String,
+    query: String,
+    host: String,
+    tenant: Option<String>,
+    vary: Vec<(String, String)>,
+}
+
+impl PageKey {
+    /// The page at `path` (no query string) served for `host`, as the
+    /// request's `Host` header carries it, port included.
+    #[must_use]
+    pub fn new(path: impl Into<String>, host: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            query: String::new(),
+            host: host.into(),
+            tenant: None,
+            vary: Vec::new(),
+        }
+    }
+
+    /// The raw query string, without the `?`.
+    #[must_use]
+    pub fn query(mut self, query: impl Into<String>) -> Self {
+        self.query = query.into();
+        self
+    }
+
+    /// The tenant slug the page was resolved for.
+    #[must_use]
+    pub fn tenant(mut self, slug: impl Into<String>) -> Self {
+        self.tenant = Some(slug.into());
+        self
+    }
+
+    /// The request's value of a `vary_on` header. Names are case-insensitive.
+    #[must_use]
+    pub fn vary(mut self, name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        self.vary
+            .push((name.as_ref().to_ascii_lowercase(), value.into()));
+        self
+    }
+
+    fn vary_value(&self, name: &HeaderName) -> &str {
+        self.vary
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name.as_str())
+            .map_or("", |(_, v)| v.as_str())
+    }
 }
 
 impl<S> tower::Layer<S> for CachePageLayer {
@@ -331,10 +451,10 @@ where
                 return inner.call(req).await;
             }
 
-            let (req, tenant) = if tenant_agnostic {
-                (req, PageTenant::NoTenant)
-            } else {
+            let (req, tenant) = if tenant_keyed(tenant_agnostic) {
                 request_tenant(req).await
+            } else {
+                (req, PageTenant::NoTenant)
             };
             let tenant = match tenant {
                 PageTenant::Unknown => return inner.call(req).await,
@@ -515,13 +635,12 @@ fn warn_no_tenant_context() {
     });
 }
 
-/// Build the cache key, as `prefix|<len>:<bytes>|<len>:<bytes>|...`.
-///
-/// Each part is length-prefixed, so a value holding a separator
-/// cannot make two different requests produce the same key.
-///
-/// `Host` and the resolved tenant slug are always part of the key, so
-/// neither a per-host nor a per-header tenant gets another's page.
+/// Whether keys carry the resolved tenant, as the layer decides it.
+fn tenant_keyed(tenant_agnostic: bool) -> bool {
+    cfg!(feature = "tenancy") && !tenant_agnostic
+}
+
+/// The key of the request the layer is serving.
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
@@ -529,14 +648,6 @@ fn compute_cache_key(
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
 ) -> String {
-    use std::fmt::Write as _;
-    let mut k = String::with_capacity(prefix.len() + 128);
-    let _ = write!(&mut k, "{prefix}|");
-    write_lp(&mut k, req.method().as_str());
-    write_lp(&mut k, req.uri().path());
-    write_lp(&mut k, req.uri().query().unwrap_or(""));
-    // Default: partition on Host so multi-tenant deployments don't
-    // mix tenants' responses. `vary_on` can still add more.
     // HTTP/2 sends `:authority`, not `Host`.
     let host = req
         .headers()
@@ -548,16 +659,54 @@ fn compute_cache_key(
                 .map(axum::http::uri::Authority::as_str)
         })
         .unwrap_or("");
+    build_key(
+        prefix,
+        req.method().as_str(),
+        req.uri().path(),
+        req.uri().query().unwrap_or(""),
+        host,
+        tenant,
+        vary_on.iter().map(|name| {
+            let v = req
+                .headers()
+                .get(name)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("");
+            (name.as_str(), v)
+        }),
+        body_digest,
+    )
+}
+
+/// The only place the key format lives, as `prefix|<len>:<bytes>|...`.
+///
+/// Each part is length-prefixed, so a value holding a separator
+/// cannot make two different requests produce the same key.
+///
+/// `Host` and the resolved tenant slug are always part of the key, so
+/// neither a per-host nor a per-header tenant gets another's page.
+#[allow(clippy::too_many_arguments)]
+fn build_key<'a>(
+    prefix: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    host: &str,
+    tenant: Option<&str>,
+    vary: impl Iterator<Item = (&'a str, &'a str)>,
+    body_digest: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut k = String::with_capacity(prefix.len() + 128);
+    let _ = write!(&mut k, "{prefix}|");
+    write_lp(&mut k, method);
+    write_lp(&mut k, path);
+    write_lp(&mut k, query);
     write_lp(&mut k, host);
     // Slugs are never empty, so "" means "tenant-agnostic".
     write_lp(&mut k, tenant.unwrap_or(""));
-    for name in vary_on {
-        let v = req
-            .headers()
-            .get(name)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        write_lp(&mut k, name.as_str());
+    for (name, v) in vary {
+        write_lp(&mut k, name);
         write_lp(&mut k, v);
     }
     // QUERY carries its criteria in the body, so the digest joins the
