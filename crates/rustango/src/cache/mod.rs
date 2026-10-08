@@ -922,6 +922,8 @@ impl Cache for InMemoryCache {
         store.map.clear();
         store.used_bytes = 0;
         store.evictable = 0;
+        store.pinned_bytes = 0;
+        store.pinned = 0;
         Ok(())
     }
 
@@ -1885,5 +1887,19 @@ mod bound_tests {
         assert!(cache.inner.read().await.used_bytes >= 4096);
         cache.delete("k").await.unwrap();
         assert_eq!(cache.inner.read().await.used_bytes, 0);
+    }
+
+    /// #2302 — `clear` frees the pinned budget, so later `set_forever` still pins.
+    #[tokio::test]
+    async fn clear_resets_the_pinned_budget() {
+        let cache = InMemoryCache::new().with_max_pinned_entries(2);
+        for round in 0..3 {
+            cache.set_forever("a", "1").await.unwrap();
+            cache.set_forever("b", "1").await.unwrap();
+            assert!(cache.inner.read().await.map["b"].pinned, "round {round}");
+            cache.clear().await.unwrap();
+        }
+        let store = cache.inner.read().await;
+        assert_eq!((store.pinned, store.pinned_bytes), (0, 0));
     }
 }

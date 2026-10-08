@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `InMemoryCache::clear` resets the pinned budget (#2302)
+
 ### Fixed — MCP `rate_limit_per_minute = 0` is unlimited again (#2299)
 
 It built a zero-capacity limiter that sent 429 with `Retry-After: u64::MAX` on every request; `check --deploy` now flags 0 like unset.
