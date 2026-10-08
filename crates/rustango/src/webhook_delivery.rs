@@ -274,7 +274,8 @@ impl WebhookSubscription {
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let (name, value) = (name.into(), value.into());
         let bad = if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
-            format!("invalid header name {name:?}")
+            // Length only: a pasted "Authorization: Bearer …" name holds a secret.
+            format!("invalid header name ({} bytes)", name.len())
         } else if reqwest::header::HeaderValue::from_str(&value).is_err() {
             // The value often carries auth: name only.
             format!("invalid value for header {name:?}")
@@ -707,10 +708,13 @@ mod tests {
         let q = InMemoryJobQueue::with_workers(1);
         WebhookSubscription::register(&q).await;
         for sub in [
-            WebhookSubscription::new("https://example.com/hook", "s").header("X Bad", "v"),
+            WebhookSubscription::new("https://example.com/hook", "s")
+                .header("Authorization: Bearer SECRET", "v"),
             WebhookSubscription::new("https://example.com/hook", "s")
                 .header("X-Ok", "line\nbreak-SECRET"),
         ] {
+            let dbg = format!("{sub:?}");
+            assert!(!dbg.contains("SECRET"), "{dbg}");
             let err = sub.dispatch(&q, "ping", &()).await.unwrap_err();
             let msg = format!("{err:?}");
             assert!(matches!(err, JobError::Fatal(_)), "{msg}");

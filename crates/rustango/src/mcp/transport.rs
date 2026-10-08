@@ -152,8 +152,8 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// one indexed lookup per open stream, and a revoke ends it within 60s (#2237).
 const RECHECK_EVERY_KEEP_ALIVES: u32 = 4;
 
-/// The agent's frames until the JWT's `exp`, a failed liveness re-check
-/// (revoked, deactivated, rotated) or the bus closing.
+/// The agent's frames until the JWT's `exp`, a re-check that finds the agent
+/// revoked, deactivated or rotated, or the bus closing.
 fn agent_sse(
     pool: crate::sql::Pool,
     agent: super::McpAgent,
@@ -186,9 +186,11 @@ fn agent_sse(
                         &agent.secret_prefix,
                     )
                     .await;
-                    // Fail closed: the client reconnects and re-authenticates.
-                    if !matches!(live, Ok(true)) {
-                        break;
+                    match live {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        // A DB blip must not drop every open stream: retry next tick.
+                        Err(e) => tracing::warn!(error = %e, "mcp sse liveness re-check failed"),
                     }
                     continue;
                 }
@@ -232,22 +234,53 @@ mod tests {
     use super::*;
     use crate::tenancy::{create_agent_pool, rotate_agent_secret_pool};
 
-    /// A pool with agent `bot`, and a bearer for it from `jwt`.
-    async fn world(jwt: &JwtLifecycle) -> (crate::sql::Pool, super::super::McpAgent, Option<i64>) {
+    /// A pool with agent `bot`, authenticated by a JWT from `jwt`, or by its raw key.
+    async fn world(
+        jwt: &JwtLifecycle,
+        raw_key: bool,
+    ) -> (crate::sql::Pool, super::super::McpAgent, Option<i64>) {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let bot = create_agent_pool(&pool, "bot").await.unwrap();
-        let Ok(minted) =
-            super::super::auth::mint_agent_jwt(jwt, &pool, "acme", "bot", &bot.token).await
-        else {
-            panic!("mint");
+        let bearer = if raw_key {
+            bot.token
+        } else {
+            let Ok(minted) =
+                super::super::auth::mint_agent_jwt(jwt, &pool, "acme", "bot", &bot.token).await
+            else {
+                panic!("mint");
+            };
+            minted.token
         };
         let Ok((agent, exp)) =
-            super::super::auth::authenticate_bearer_until(jwt, &pool, "acme", &minted.token).await
+            super::super::auth::authenticate_bearer_until(jwt, &pool, "acme", &bearer).await
         else {
             panic!("authenticate");
         };
         (pool, agent, exp)
+    }
+
+    fn jwt() -> JwtLifecycle {
+        JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec())
+    }
+
+    /// Open a stream re-checking every 50ms, check it stays open, revoke, expect it to end.
+    async fn assert_ends_on_revoke(
+        pool: crate::sql::Pool,
+        agent: super::super::McpAgent,
+        exp: Option<i64>,
+    ) {
+        let body = drain(agent_sse(
+            pool.clone(),
+            agent,
+            exp,
+            Duration::from_millis(50),
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!body.is_finished(), "a live agent's stream must stay open");
+        rotate_agent_secret_pool(&pool, "bot").await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
+        assert!(ended.is_ok(), "the stream outlived the revoke");
     }
 
     fn drain(resp: Response) -> tokio::task::JoinHandle<()> {
@@ -259,9 +292,8 @@ mod tests {
     /// #2237 — the stream ends at the JWT's `exp`.
     #[tokio::test]
     async fn the_stream_ends_when_the_jwt_expires() {
-        let jwt =
-            JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec()).with_access_ttl(2);
-        let (pool, agent, exp) = world(&jwt).await;
+        let jwt = jwt().with_access_ttl(2);
+        let (pool, agent, exp) = world(&jwt, false).await;
         assert!(exp.is_some());
         let body = drain(agent_sse(pool, agent, exp, Duration::from_secs(3600)));
         let ended = tokio::time::timeout(Duration::from_secs(6), body).await;
@@ -271,8 +303,36 @@ mod tests {
     /// #2237 — a rotated (revoked) agent's stream ends at the next re-check.
     #[tokio::test]
     async fn the_stream_ends_when_the_agent_is_revoked() {
-        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
-        let (pool, agent, exp) = world(&jwt).await;
+        let (pool, agent, exp) = world(&jwt(), false).await;
+        assert_ends_on_revoke(pool, agent, exp).await;
+    }
+
+    /// A raw-key stream has no `exp`; the re-check alone ends it.
+    #[tokio::test]
+    async fn a_raw_key_stream_ends_when_the_agent_is_revoked() {
+        let (pool, agent, exp) = world(&jwt(), true).await;
+        assert_eq!(exp, None);
+        assert_ends_on_revoke(pool, agent, exp).await;
+    }
+
+    /// A failing re-check keeps the stream open; a later revoke still ends it.
+    #[tokio::test]
+    async fn a_failing_recheck_keeps_the_stream_open() {
+        let (pool, agent, exp) = world(&jwt(), false).await;
+        // Fault injection: hide the agents table so the re-check errors.
+        let rename = |from: &'static str, to: &'static str| {
+            let pool = pool.clone();
+            async move {
+                crate::sql::raw_execute_pool(
+                    &pool,
+                    &format!("ALTER TABLE {from} RENAME TO {to}"),
+                    vec![],
+                )
+                .await
+                .unwrap();
+            }
+        };
+        rename("rustango_agents", "rustango_agents_off").await;
         let body = drain(agent_sse(
             pool.clone(),
             agent,
@@ -280,7 +340,8 @@ mod tests {
             Duration::from_millis(50),
         ));
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!body.is_finished(), "a live agent's stream must stay open");
+        assert!(!body.is_finished(), "a DB error must not end the stream");
+        rename("rustango_agents_off", "rustango_agents").await;
         rotate_agent_secret_pool(&pool, "bot").await.unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
         assert!(ended.is_ok(), "the stream outlived the revoke");
