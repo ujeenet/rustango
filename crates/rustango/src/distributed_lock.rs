@@ -526,7 +526,8 @@ mod tests {
     /// A zero period is clamped, not a division by zero.
     #[tokio::test]
     async fn once_per_period_clamps_a_zero_period() {
-        let r = lock().once_per_period("z", Duration::ZERO, || async { Ok::<_, ()>(()) });
+        let l = lock();
+        let r = l.once_per_period("z", Duration::ZERO, || async { Ok::<_, ()>(()) });
         assert_eq!(r.await, Some(Ok(())));
     }
 
