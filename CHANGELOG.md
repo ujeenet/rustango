@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MCP SSE stream ends when its JWT is revoked (#2303)
+
 ### Fixed — MCP raw-key cache evicts its oldest entry, not all of them (#2301)
 
 ### Fixed — `InMemoryCache::clear` resets the pinned budget (#2302)

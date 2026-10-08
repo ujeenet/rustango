@@ -118,12 +118,12 @@ pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
     extensions: axum::http::Extensions,
 ) -> impl std::future::Future<Output = Response> + Send {
     let t = t.into();
-    async move { sse_in(t, &state.jwt, uri, headers, extensions).await }
+    async move { sse_in(t, state.jwt, uri, headers, extensions).await }
 }
 
 async fn sse_in(
     t: crate::extractors::TenantScope,
-    jwt: &JwtLifecycle,
+    jwt: std::sync::Arc<JwtLifecycle>,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     extensions: axum::http::Extensions,
@@ -135,16 +135,22 @@ async fn sse_in(
     // `auth::authenticate_bearer` for why this stream must not be
     // stricter than the endpoint next to it.
     let (agent, exp) =
-        match super::auth::authenticate_bearer_until(jwt, t.pool(), &t.org.slug, token).await {
+        match super::auth::authenticate_bearer_until(&jwt, t.pool(), &t.org.slug, token).await {
             Ok(v) => v,
             Err(e) => return e.into_response(&headers, &extensions, &uri),
         };
     agent_sse(
         t.pool().clone(),
         agent,
-        exp,
+        exp.map(|exp| JwtBound { jwt, exp }),
         KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
     )
+}
+
+/// A JWT stream's token: it ends at `exp` or when its JTI is revoked (#2303).
+struct JwtBound {
+    jwt: std::sync::Arc<JwtLifecycle>,
+    exp: i64,
 }
 
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -153,15 +159,16 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const RECHECK_EVERY_KEEP_ALIVES: u32 = 4;
 
 /// The agent's frames until the JWT's `exp`, a re-check that finds the agent
-/// revoked, deactivated or rotated, or the bus closing.
+/// revoked, deactivated or rotated or the JWT revoked, or the bus closing.
 fn agent_sse(
     pool: crate::sql::Pool,
     agent: super::McpAgent,
-    exp: Option<i64>,
+    token: Option<JwtBound>,
     recheck_every: Duration,
 ) -> Response {
     use tokio::sync::broadcast::error::RecvError;
     let mut rx = super::notifications::bus().subscribe();
+    let exp = token.as_ref().map(|t| t.exp);
     let stream = async_stream::stream! {
         let expired = async move {
             match exp {
@@ -179,6 +186,11 @@ fn agent_sse(
             let received = tokio::select! {
                 () = &mut expired => break,
                 _ = recheck.tick() => {
+                    if let Some(t) = &token {
+                        if t.jwt.is_blacklisted(&agent.jti).await {
+                            break;
+                        }
+                    }
                     let live = crate::tenancy::agent_token_still_valid_pool(
                         &pool,
                         agent.agent_id,
@@ -234,11 +246,16 @@ mod tests {
     use super::*;
     use crate::tenancy::{create_agent_pool, rotate_agent_secret_pool};
 
+    type World = (
+        crate::sql::Pool,
+        super::super::McpAgent,
+        Option<JwtBound>,
+        String,
+    );
+
     /// A pool with agent `bot`, authenticated by a JWT from `jwt`, or by its raw key.
-    async fn world(
-        jwt: &JwtLifecycle,
-        raw_key: bool,
-    ) -> (crate::sql::Pool, super::super::McpAgent, Option<i64>) {
+    async fn world(jwt: JwtLifecycle, raw_key: bool) -> World {
+        let jwt = std::sync::Arc::new(jwt);
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let bot = create_agent_pool(&pool, "bot").await.unwrap();
@@ -246,18 +263,18 @@ mod tests {
             bot.token
         } else {
             let Ok(minted) =
-                super::super::auth::mint_agent_jwt(jwt, &pool, "acme", "bot", &bot.token).await
+                super::super::auth::mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token).await
             else {
                 panic!("mint");
             };
             minted.token
         };
         let Ok((agent, exp)) =
-            super::super::auth::authenticate_bearer_until(jwt, &pool, "acme", &bearer).await
+            super::super::auth::authenticate_bearer_until(&jwt, &pool, "acme", &bearer).await
         else {
             panic!("authenticate");
         };
-        (pool, agent, exp)
+        (pool, agent, exp.map(|exp| JwtBound { jwt, exp }), bearer)
     }
 
     fn jwt() -> JwtLifecycle {
@@ -268,12 +285,12 @@ mod tests {
     async fn assert_ends_on_revoke(
         pool: crate::sql::Pool,
         agent: super::super::McpAgent,
-        exp: Option<i64>,
+        token: Option<JwtBound>,
     ) {
         let body = drain(agent_sse(
             pool.clone(),
             agent,
-            exp,
+            token,
             Duration::from_millis(50),
         ));
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -292,10 +309,9 @@ mod tests {
     /// #2237 — the stream ends at the JWT's `exp`.
     #[tokio::test]
     async fn the_stream_ends_when_the_jwt_expires() {
-        let jwt = jwt().with_access_ttl(2);
-        let (pool, agent, exp) = world(&jwt, false).await;
-        assert!(exp.is_some());
-        let body = drain(agent_sse(pool, agent, exp, Duration::from_secs(3600)));
+        let (pool, agent, token, _) = world(jwt().with_access_ttl(2), false).await;
+        assert!(token.is_some());
+        let body = drain(agent_sse(pool, agent, token, Duration::from_secs(3600)));
         let ended = tokio::time::timeout(Duration::from_secs(6), body).await;
         assert!(ended.is_ok(), "the stream outlived its token");
     }
@@ -303,22 +319,35 @@ mod tests {
     /// #2237 — a rotated (revoked) agent's stream ends at the next re-check.
     #[tokio::test]
     async fn the_stream_ends_when_the_agent_is_revoked() {
-        let (pool, agent, exp) = world(&jwt(), false).await;
-        assert_ends_on_revoke(pool, agent, exp).await;
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        assert_ends_on_revoke(pool, agent, token).await;
+    }
+
+    /// #2303 — revoking the JWT itself ends its stream at the next re-check.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_jwt_is_revoked() {
+        let (pool, agent, token, bearer) = world(jwt(), false).await;
+        let jwt = token.as_ref().map(|t| t.jwt.clone()).unwrap();
+        let body = drain(agent_sse(pool, agent, token, Duration::from_millis(50)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!body.is_finished(), "a live token's stream must stay open");
+        assert!(jwt.revoke(&bearer).await);
+        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
+        assert!(ended.is_ok(), "the stream outlived the JWT revoke");
     }
 
     /// A raw-key stream has no `exp`; the re-check alone ends it.
     #[tokio::test]
     async fn a_raw_key_stream_ends_when_the_agent_is_revoked() {
-        let (pool, agent, exp) = world(&jwt(), true).await;
-        assert_eq!(exp, None);
-        assert_ends_on_revoke(pool, agent, exp).await;
+        let (pool, agent, token, _) = world(jwt(), true).await;
+        assert!(token.is_none());
+        assert_ends_on_revoke(pool, agent, token).await;
     }
 
     /// A failing re-check keeps the stream open; a later revoke still ends it.
     #[tokio::test]
     async fn a_failing_recheck_keeps_the_stream_open() {
-        let (pool, agent, exp) = world(&jwt(), false).await;
+        let (pool, agent, token, _) = world(jwt(), false).await;
         // Fault injection: hide the agents table so the re-check errors.
         let rename = |from: &'static str, to: &'static str| {
             let pool = pool.clone();
@@ -336,7 +365,7 @@ mod tests {
         let body = drain(agent_sse(
             pool.clone(),
             agent,
-            exp,
+            token,
             Duration::from_millis(50),
         ));
         tokio::time::sleep(Duration::from_millis(300)).await;
