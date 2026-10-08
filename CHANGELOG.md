@@ -16,9 +16,9 @@ New `Job::retry_backoff` hook and `jobs::exponential_backoff`; `EmailJob` now re
 
 Both queues treat 0 as one run, including rows already queued.
 
-### Fixed — `register_email_job` on a second queue rerouted all mail (#2334)
+### Fixed — `register_email_job` on a second in-memory queue rerouted all mail (#2334)
 
-The handler holds its own mailer via the new `JobQueue::register_with`.
+Each in-memory queue's handler holds its own mailer. Database queues share `rustango_jobs`, so use one mailer per jobs table; a second one logs a warning (#2338).
 
 ### Fixed — `FileMailer` processes overwrote each other's files (#2335)
 

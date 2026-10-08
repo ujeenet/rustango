@@ -45,9 +45,8 @@ use serde::{Deserialize, Serialize};
 use crate::email::{BoxedMailer, Email};
 use crate::jobs::{Job, JobError, JobQueue};
 
-/// Mailers by [`Job::NAME`]. The worker looks one up here so the
-/// mailer stays out of the job payload, which would need
-/// `Mailer: Serialize`.
+/// Fallback mailer for a custom [`JobQueue`] that does not override
+/// `register_with`; the built-in queues keep the mailer in the handler.
 fn mailer_registry() -> &'static RwLock<std::collections::HashMap<&'static str, BoxedMailer>> {
     static REG: OnceLock<RwLock<std::collections::HashMap<&'static str, BoxedMailer>>> =
         OnceLock::new();
@@ -111,9 +110,14 @@ async fn send(mailer: &BoxedMailer, email: &Email) -> Result<(), JobError> {
 }
 
 /// Register the email job and its mailer on `queue`, once at startup.
-/// Calling it again on the same queue replaces the mailer; each queue
-/// keeps its own (#2334).
+/// Calling it again on the same queue replaces the mailer.
+///
+/// Each in-memory queue keeps its own mailer (#2334). Database queues
+/// share one `rustango_jobs` table, so any of them may send any queued
+/// mail: use one mailer per jobs table (#2338).
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
+    #[cfg(feature = "jobs-postgres")]
+    warn_on_second_db_mailer(queue, &cfg.mailer);
     // Only for a custom queue that does not override `register_with`.
     mailer_registry()
         .write()
@@ -126,6 +130,26 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
             async move { send(&mailer, &job.email).await }
         })
         .await;
+}
+
+/// Warn once when database queues in this process get different mailers.
+#[cfg(feature = "jobs-postgres")]
+fn warn_on_second_db_mailer<Q: JobQueue>(queue: &Q, mailer: &BoxedMailer) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FIRST: OnceLock<BoxedMailer> = OnceLock::new();
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let any: &dyn std::any::Any = queue;
+    if !any.is::<crate::jobs::pg::PgJobQueue>() {
+        return;
+    }
+    let first = FIRST.get_or_init(|| mailer.clone());
+    if !std::sync::Arc::ptr_eq(first, mailer) && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::email_jobs",
+            "register_email_job: a second mailer on a database queue; queues share \
+             rustango_jobs, so either mailer may send any queued mail (#2338)"
+        );
+    }
 }
 
 /// Queue an email and return at once; a worker delivers it.

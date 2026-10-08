@@ -156,7 +156,7 @@ untouched.
 
 ### Job retries
 
-`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). A custom `JobQueue` should override the new `register_with`; the default ignores the handler (#2334).
+`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). Per-queue mailers hold for in-memory queues only; with database queues use one mailer per jobs table (#2334, #2338).
 
 ### i18n locale matching
 

@@ -221,6 +221,41 @@ async fn a_jobs_backoff_hook_sets_its_retry_time(pool: &Pool) {
     assert_eq!(rows[0].0, 1, "retry not an hour out");
 }
 
+/// A database queue sends with the mailer it was registered with, not
+/// the process-wide fallback (#2334).
+async fn a_db_queue_sends_with_its_registered_mailer(pool: &Pool) {
+    #[cfg(feature = "email")]
+    {
+        use rustango::email::{Email, InMemoryMailer};
+        use rustango::email_jobs::{dispatch_email, register_email_job, EmailJobConfig};
+        let (mine, other) = (
+            Arc::new(InMemoryMailer::new()),
+            Arc::new(InMemoryMailer::new()),
+        );
+        let q = queue(pool, 1, Duration::from_secs(60)).await;
+        register_email_job(&q, EmailJobConfig::new(mine.clone())).await;
+        // Another queue overwrites the process-wide fallback.
+        let mem = rustango::jobs::InMemoryJobQueue::with_workers(1);
+        register_email_job(&mem, EmailJobConfig::new(other.clone())).await;
+        let email = Email::new()
+            .from("a@x.com")
+            .to("b@x.com")
+            .subject("s")
+            .body("b");
+        dispatch_email(&q, &email).await.unwrap();
+        q.start().await;
+        wait_for("the send", || mine.count() + other.count() > 0).await;
+        q.shutdown().await;
+        assert_eq!(
+            (mine.count(), other.count()),
+            (1, 0),
+            "sent by the fallback"
+        );
+    }
+    #[cfg(not(feature = "email"))]
+    let _ = pool;
+}
+
 async fn zero_max_attempts_runs_once(pool: &Pool) {
     let tok = token(pool, "zero");
     let q = queue(pool, 1, Duration::from_secs(60)).await;
@@ -772,5 +807,6 @@ tri_dialect_test! {
         a_dropped_queue_stops_its_workers,
         zero_max_attempts_runs_once,
         a_jobs_backoff_hook_sets_its_retry_time,
+        a_db_queue_sends_with_its_registered_mailer,
     ],
 }
