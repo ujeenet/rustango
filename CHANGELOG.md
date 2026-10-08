@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin audit feed hides tables whose rows a hook scopes from non-superusers (#2342)
+
+A queryset or `view` hook cannot be re-applied to a deleted row's snapshot, so those tables are superuser-only in the feed; a row's own history stays on its detail page.
+
 ### Fixed — `MediaPerms` refuses an upload attributed to another user or filed into a hidden collection (#2343)
 
 ### Fixed — admin detail page links a generic FK under the admin prefix (#2341)

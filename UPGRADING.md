@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin audit feed: hook-scoped tables are superuser-only
+
+Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables with a queryset or `view` hook (#2342).
+
 ### `MediaPerms`: upload attribution and collection checks
 
 `POST /uploads/begin` now answers 403 when `uploaded_by_id` is not the caller's id (superusers exempt), and a `collection_id` also needs `rustango_media_collections.view` (#2343).
