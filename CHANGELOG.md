@@ -14,7 +14,7 @@ It fell through to the single-tenant flush on the registry pool and deleted orgs
 
 ### Fixed — `flush` skips unmanaged models and views (#2285)
 
-It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail. Postgres also drops `CASCADE`, so a table outside the targets that references one makes the flush fail instead of being emptied.
+It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail. Postgres also drops `CASCADE`, so a table outside the targets that references one makes the flush fail instead of being emptied. MySQL and SQLite delete in one transaction, children first, so a failure clears nothing and self-referencing tables flush on MySQL.
 
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 

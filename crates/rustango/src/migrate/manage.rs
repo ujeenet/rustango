@@ -4299,6 +4299,91 @@ pub(crate) enum FlushScope<'a> {
     Tenant { schema: Option<&'a str> },
 }
 
+/// Tables this one references through an FK or one-to-one, itself included.
+fn referenced_tables(s: &crate::core::ModelSchema) -> impl Iterator<Item = &'static str> + '_ {
+    use crate::core::Relation;
+    let single = s.fields.iter().filter_map(|f| match f.relation {
+        Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) => Some(to),
+        _ => None,
+    });
+    single.chain(s.composite_relations.iter().map(|c| c.to))
+}
+
+/// `targets` reordered so every table comes after the targets that
+/// reference it. Tables left in a cycle keep their order at the end.
+fn flush_delete_order(
+    targets: &[&'static crate::core::ModelSchema],
+) -> Vec<&'static crate::core::ModelSchema> {
+    // How many other targets still reference each target.
+    let mut referrers: Vec<usize> = targets
+        .iter()
+        .map(|t| {
+            targets
+                .iter()
+                .filter(|o| o.table != t.table && referenced_tables(o).any(|r| r == t.table))
+                .count()
+        })
+        .collect();
+    let mut done = vec![false; targets.len()];
+    let mut order = Vec::with_capacity(targets.len());
+    while let Some(i) = (0..targets.len()).find(|&i| !done[i] && referrers[i] == 0) {
+        done[i] = true;
+        order.push(targets[i]);
+        for (j, t) in targets.iter().enumerate() {
+            if !done[j]
+                && t.table != targets[i].table
+                && referenced_tables(targets[i]).any(|r| r == t.table)
+            {
+                referrers[j] -= 1;
+            }
+        }
+    }
+    order.extend((0..targets.len()).filter(|&i| !done[i]).map(|i| targets[i]));
+    order
+}
+
+/// Delete every row of `order` in one transaction; on error nothing commits.
+async fn delete_all_in_tx(
+    pool: &Pool,
+    order: &[&'static crate::core::ModelSchema],
+) -> Result<(), (&'static str, crate::sql::ExecError)> {
+    use crate::core::{Assignment, DeleteQuery, Relation, SqlValue, UpdateQuery, WhereExpr};
+    let mut tx = crate::sql::write_transaction_pool(pool)
+        .await
+        .map_err(|e| ("BEGIN", e))?;
+    for schema in order {
+        // InnoDB checks each row as it goes, so a self-referencing table
+        // must drop its own links before the DELETE.
+        let self_links: Vec<Assignment> = schema
+            .fields
+            .iter()
+            .filter(|f| {
+                f.nullable
+                    && matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == schema.table)
+            })
+            .map(|f| Assignment::new(f.column, SqlValue::Null))
+            .collect();
+        if !self_links.is_empty() {
+            let unlink = UpdateQuery {
+                model: schema,
+                set: self_links,
+                where_clause: WhereExpr::And(Vec::new()),
+            };
+            crate::sql::update_tx(&mut tx, &unlink)
+                .await
+                .map_err(|e| (schema.table, e))?;
+        }
+        let all = DeleteQuery {
+            model: schema,
+            where_clause: WhereExpr::And(Vec::new()),
+        };
+        crate::sql::delete_tx(&mut tx, &all)
+            .await
+            .map_err(|e| (schema.table, e))?;
+    }
+    tx.commit().await.map_err(|e| ("COMMIT", e.into()))
+}
+
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
 /// all rows from registered model tables.
 /// Without `--yes`, prints what would happen and exits without
@@ -4306,8 +4391,9 @@ pub(crate) enum FlushScope<'a> {
 /// `manage flush` doesn't accidentally nuke production).
 ///
 /// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY` in a
-/// single statement so FK constraints resolve and sequences reset. On MySQL/SQLite, emits per-table `DELETE FROM
-/// <table>` in registration order; sequences are NOT reset
+/// single statement so FK constraints resolve and sequences reset. On
+/// MySQL/SQLite, emits per-table `DELETE FROM <table>` in one
+/// transaction, children before parents; sequences are NOT reset
 /// (caller can `DROP SEQUENCE` + `CREATE SEQUENCE` manually if
 /// they need that). The migrations ledger is left untouched —
 /// flush wipes data, not schema or schema history.
@@ -4348,7 +4434,7 @@ pub(crate) async fn flush_cmd<W: Write>(
         )?;
         writeln!(
             w,
-            "  MySQL / SQLite delete the rows and keep their id counters."
+            "  MySQL / SQLite delete the rows in one transaction and keep their id counters."
         )?;
         return Ok(());
     }
@@ -4424,19 +4510,11 @@ pub(crate) async fn flush_cmd<W: Write>(
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
         }
     } else {
-        // MySQL / SQLite: per-table DELETE in registration order, through
-        // the dialect's writer — hand-quoted `"t"` is a syntax error on
-        // MySQL (#1912). FK constraints from referencing tables may error;
-        // caller can scope with --app / --model.
-        for schema in &targets {
-            let all = crate::core::DeleteQuery {
-                model: schema,
-                where_clause: crate::core::WhereExpr::And(Vec::new()),
-            };
-            match crate::sql::delete_pool(pool, &all).await {
-                Ok(_) => cleared += 1,
-                Err(e) => failures.push((schema.table.to_owned(), e.to_string())),
-            }
+        // MySQL / SQLite: one transaction, children before parents, so a
+        // failure leaves every table as it was (#2285).
+        match delete_all_in_tx(pool, &flush_delete_order(&targets)).await {
+            Ok(()) => cleared = targets.len(),
+            Err((table, e)) => failures.push((table.to_owned(), e.to_string())),
         }
     }
 

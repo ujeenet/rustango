@@ -3,7 +3,9 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::Model as _;
-use rustango::sql::{raw_execute_pool, Array, Auto, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{
+    raw_execute_pool, Array, Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool,
+};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -95,6 +97,58 @@ pub struct TargetRef {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub target: ForeignKey<Target, i64>,
+}
+
+// Two parent/child pairs declared in opposite orders, so one pair has the
+// parent first whatever order the registry yields; plus a self-FK tree.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_parent_a", app = "cli2316")]
+pub struct ParentA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_child_a", app = "cli2316")]
+pub struct ChildA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent: ForeignKey<ParentA, i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_child_b", app = "cli2316")]
+pub struct ChildB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent: ForeignKey<ParentB, i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_parent_b", app = "cli2316")]
+pub struct ParentB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_tree", app = "cli2316")]
+pub struct Tree {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2316_tree", on = "id")]
+    pub parent_id: Option<i64>,
+}
+
+/// Managed, with rows, next to a target the flush cannot clear.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_bystander", app = "cli2315")]
+pub struct Bystander {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
 }
 
 async fn fresh_parent_child(pool: &Pool) {
@@ -256,11 +310,19 @@ async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) 
         target: ForeignKey::unloaded(t.id.get().copied().expect("pk")),
     };
     r.insert_pool(pool).await.expect("ref");
+    rustango::testkit::matrix::fresh_table::<Bystander>(pool).await;
+    let mut b = Bystander {
+        id: Auto::default(),
+        n: 1,
+    };
+    b.insert_pool(pool).await.expect("bystander");
 
     let out = manage(pool, &["flush", "--yes", "--app", "cli2315"]).await;
     let refs: Vec<TargetRef> = TargetRef::objects().fetch(pool).await.expect("refs");
     let targets: Vec<Target> = Target::objects().fetch(pool).await.expect("targets");
+    let bystanders: Vec<Bystander> = Bystander::objects().fetch(pool).await.expect("bystander");
     rustango::testkit::matrix::drop_table(pool, TargetRef::SCHEMA.table).await;
+    assert_eq!(bystanders.len(), 1, "a failed flush must clear nothing");
     assert_eq!(refs.len(), 1, "flush emptied the unmanaged table");
     assert_eq!(
         targets.len(),
@@ -268,6 +330,59 @@ async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) 
         "the refused flush still cleared the target"
     );
     assert!(out.is_err(), "flush must fail: {out:?}");
+}
+
+/// Parents with children and a self-FK tree all clear, children first.
+async fn flush_clears_children_before_parents(pool: &Pool) {
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, ChildA::SCHEMA.table).await;
+    drop_table(pool, ChildB::SCHEMA.table).await;
+    fresh_table::<ParentA>(pool).await;
+    fresh_table::<ParentB>(pool).await;
+    fresh_table::<ChildA>(pool).await;
+    fresh_table::<ChildB>(pool).await;
+    fresh_table::<Tree>(pool).await;
+    let mut pa = ParentA {
+        id: Auto::default(),
+        n: 1,
+    };
+    pa.insert_pool(pool).await.expect("parent a");
+    let mut pb = ParentB {
+        id: Auto::default(),
+        n: 1,
+    };
+    pb.insert_pool(pool).await.expect("parent b");
+    let mut ca = ChildA {
+        id: Auto::default(),
+        parent: ForeignKey::unloaded(pa.id.get().copied().expect("pk")),
+    };
+    ca.insert_pool(pool).await.expect("child a");
+    let mut cb = ChildB {
+        id: Auto::default(),
+        parent: ForeignKey::unloaded(pb.id.get().copied().expect("pk")),
+    };
+    cb.insert_pool(pool).await.expect("child b");
+    // root <- mid <- leaf: the DELETE meets the root first.
+    let mut parent_id = None;
+    for _ in 0..3 {
+        let mut n = Tree {
+            id: Auto::default(),
+            parent_id,
+        };
+        n.insert_pool(pool).await.expect("tree");
+        parent_id = n.id.get().copied();
+    }
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2316"]).await;
+    let left = [
+        ParentA::objects().count(pool).await.expect("a"),
+        ParentB::objects().count(pool).await.expect("b"),
+        ChildA::objects().count(pool).await.expect("ca"),
+        ChildB::objects().count(pool).await.expect("cb"),
+        Tree::objects().count(pool).await.expect("tree"),
+    ];
+    out.expect("flush --app cli2316");
+    assert_eq!(left, [0; 5], "rows left behind");
 }
 
 async fn dump(pool: &Pool) -> serde_json::Value {
@@ -352,6 +467,7 @@ tri_dialect_test! {
         flush_yes_clears_the_table,
         flush_skips_unmanaged_tables_and_views,
         flush_refuses_when_an_unmanaged_table_references_a_target,
+        flush_clears_children_before_parents,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
