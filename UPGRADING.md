@@ -154,6 +154,10 @@ untouched.
 
 Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
 
+### `S3Storage` requests time out after 60 s
+
+An object that takes longer to move now fails; pass a client with a longer timeout to `with_http` (#2220).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

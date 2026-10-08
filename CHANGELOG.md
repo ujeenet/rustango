@@ -12,6 +12,10 @@ It was replaced by an empty body with the old `Content-Length`; now it passes th
 
 A response that varies on `*` or on a request header outside the key (compression, locale, CORS) is no longer cached and replayed to every client.
 
+### Fixed — `S3Storage` default client times out (#2220)
+
+10 s to connect and 60 s per request, so a stalled endpoint errors instead of hanging; `with_http` still overrides.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

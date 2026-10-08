@@ -88,6 +88,10 @@ pub struct S3Storage {
     derivations: std::sync::atomic::AtomicUsize,
 }
 
+/// Default client timeouts; [`S3Storage::with_http`] replaces them.
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The endpoint without its `http(s)://` scheme.
 fn strip_scheme(endpoint: &str) -> &str {
     endpoint
@@ -100,8 +104,11 @@ impl S3Storage {
     #[must_use]
     pub fn new(cfg: S3Config) -> Self {
         // A redirect could take signed requests to a host the config never named (#1780).
+        // A stalled endpoint must fail, not hang the request holding it (#2220).
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+            .timeout(DEFAULT_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {
@@ -140,6 +147,7 @@ impl S3Storage {
 
     /// Use your own reqwest client, for custom timeouts, proxies or
     /// TLS roots. Turn its redirects off, as the default client does.
+    /// The default gives up after 10 s to connect and 60 s in total.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = http;
@@ -1123,6 +1131,18 @@ mod tests {
         assert!(matches!(call.await, Ok(Err(_))));
         let hop = tokio::time::timeout(std::time::Duration::from_millis(300), elsewhere.accept());
         assert!(hop.await.is_err(), "the redirect was followed");
+    }
+
+    /// A stalled endpoint errors within the default timeout, not never (#2220).
+    #[tokio::test(start_paused = true)]
+    async fn stalled_endpoint_times_out() {
+        // Never accepts or answers; the kernel backlog still completes the connect.
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let storage = mock_storage(format!("http://{}", stalled.local_addr().unwrap()));
+        let start = tokio::time::Instant::now();
+        let call = tokio::time::timeout(DEFAULT_TIMEOUT * 2, storage.exists("a.png"));
+        assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
+        assert!(start.elapsed() <= DEFAULT_TIMEOUT);
     }
 
     #[test]
