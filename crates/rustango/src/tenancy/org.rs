@@ -146,8 +146,13 @@ pub struct Org {
 impl Org {
     /// The schema a schema-mode tenant lives in: `schema_name`, else the slug.
     pub(crate) fn effective_schema(&self) -> &str {
-        self.schema_name.as_deref().unwrap_or(&self.slug)
+        effective_schema(self.schema_name.as_deref(), &self.slug)
     }
+}
+
+/// The one home of the "`schema_name`, else the slug" rule.
+pub(crate) fn effective_schema<'a>(schema_name: Option<&'a str>, slug: &'a str) -> &'a str {
+    schema_name.unwrap_or(slug)
 }
 
 /// Convenience enum for [`Org::storage_mode`]. The model field stays

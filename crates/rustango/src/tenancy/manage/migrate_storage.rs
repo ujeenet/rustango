@@ -133,9 +133,10 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         StorageMode::Database => None,
     };
     let target_schema = match parsed.target {
-        StorageMode::Schema => Some(SchemaName::parse(
-            parsed.schema_name.as_deref().unwrap_or(&parsed.slug),
-        )?),
+        StorageMode::Schema => Some(SchemaName::parse(crate::tenancy::org::effective_schema(
+            parsed.schema_name.as_deref(),
+            &parsed.slug,
+        ))?),
         StorageMode::Database => None,
     };
     if let Some(schema) = &target_schema {

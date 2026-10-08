@@ -707,7 +707,7 @@ where
     //
     // Before the row, not after: a failed `INSERT` must not leave an
     // orphan schema behind. Idempotent via `IF NOT EXISTS`.
-    provision_storage(pools, request, schema_name.as_deref(), rep).await?;
+    provision_storage(pools, schema_name.as_deref(), rep).await?;
 
     // ---- 4. Register the org ----
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
@@ -845,22 +845,21 @@ async fn check_connection(
 /// schema.
 async fn provision_storage<DB: Database>(
     pools: &TenantPools<DB>,
-    request: &ProvisionRequest,
     schema_name: Option<&str>,
     rep: &Reporter<'_>,
 ) -> Result<(), TenancyError> {
-    if request.mode != StorageMode::Schema {
+    // `schema_name_for` is `Some` exactly in schema mode.
+    let Some(schema) = schema_name else {
         rep.step(
             ProvisionStep::ProvisionStorage,
             Progress::Skipped("database-mode tenants bring their own database"),
         )
         .await;
         return Ok(());
-    }
+    };
 
     rep.step(ProvisionStep::ProvisionStorage, Progress::Started)
         .await;
-    let schema = schema_name.unwrap_or(&request.slug);
     if let Err(e) = provision_schema(pools, schema).await {
         return rep.fail(ProvisionStep::ProvisionStorage, e).await;
     }
@@ -1285,10 +1284,7 @@ fn endpoint_identity(url: &str) -> String {
 pub(crate) fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
     match request.mode {
         StorageMode::Schema => Some(
-            request
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| request.slug.clone()),
+            super::org::effective_schema(request.schema_name.as_deref(), &request.slug).to_owned(),
         ),
         StorageMode::Database => None,
     }

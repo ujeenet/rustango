@@ -403,15 +403,14 @@ pub(crate) async fn schema_claimed(
     except_org: Option<i64>,
 ) -> Result<bool, crate::sql::ExecError> {
     let mut rows: Vec<super::Org> = super::Org::objects()
-        .where_(super::Org::schema_name.eq(Some(schema.to_owned())))
+        .where_(
+            super::Org::schema_name
+                .eq(Some(schema.to_owned()))
+                .or(super::Org::slug.eq(schema.to_owned())),
+        )
         .fetch(registry)
         .await?;
-    rows.extend(
-        super::Org::objects()
-            .where_(super::Org::slug.eq(schema.to_owned()))
-            .fetch(registry)
-            .await?,
-    );
+    // Exact, and through the one rule: MySQL's `=` ignores case.
     rows.retain(|o| {
         o.storage_mode == super::StorageMode::Schema.as_str() && o.effective_schema() == schema
     });
