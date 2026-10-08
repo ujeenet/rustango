@@ -84,6 +84,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use tower::Service;
 
+use crate::body_limit::collect_capped;
 use crate::cache::BoxedCache;
 
 // ---------------------------------------------------------------- Wire format
@@ -388,22 +389,24 @@ where
 
             // Buffer the body so it can be stored and replayed.
             let (parts, body) = resp.into_parts();
-            let bytes = match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
-                Ok(b) => b,
+            let bytes = match collect_capped(body, MAX_CACHEABLE_BODY_BYTES).await {
+                Ok(Ok(b)) => b,
+                Ok(Err(whole)) => {
+                    // Too large to store: send it all, uncached (#2218).
+                    let mut resp = Response::from_parts(parts, whole);
+                    resp.headers_mut()
+                        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                    return Ok(resp);
+                }
                 Err(e) => {
+                    // The stream broke; a 500 beats a truncated 200.
                     tracing::warn!(
                         target: "rustango::cache_page",
                         error = %e,
-                        max_bytes = MAX_CACHEABLE_BODY_BYTES,
-                        "response body exceeds cache size limit or failed to buffer; \
-                         passing through uncached"
+                        "response body failed to buffer"
                     );
-                    // `body` is already consumed, so the original
-                    // cannot be returned. Send an empty body marked
-                    // BYPASS so monitoring can see it.
-                    let mut resp = Response::from_parts(parts, Body::empty());
-                    resp.headers_mut()
-                        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                    let mut resp = Response::new(Body::empty());
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                     return Ok(resp);
                 }
             };

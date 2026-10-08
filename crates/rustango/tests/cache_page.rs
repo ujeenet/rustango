@@ -463,6 +463,10 @@ async fn oversize_body_bypasses_cache_not_500() {
             .and_then(|h| h.to_str().ok()),
         Some("BYPASS")
     );
+    // The whole body still reaches the client, not an empty one (#2218).
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 2 * (1 << 20));
+    assert!(body.iter().all(|b| *b == b'A'));
 }
 
 /// `Vary` response header is set on cached responses to communicate

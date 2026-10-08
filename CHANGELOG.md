@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `cache_page` sends a body over 1 MiB in full (#2218)
+
+It was replaced by an empty body with the old `Content-Length`; now it passes through uncached.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
