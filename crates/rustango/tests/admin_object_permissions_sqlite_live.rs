@@ -279,3 +279,63 @@ async fn custom_action_refuses_when_a_row_hook_denies() {
         vec![rustango::core::SqlValue::I64(1)]
     );
 }
+
+// #2231: the "view" hook hides rows from the list, autocomplete and FK facet names.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_note", admin(list_display = "id", list_filter = "post_id"))]
+#[allow(dead_code)]
+pub struct OpNote {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(fk = "op_post", on = "id")]
+    pub post_id: i64,
+}
+
+/// Post 1 belongs to owner 7 (denied), post 2 to owner 42; one note on each.
+async fn view_pool() -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE op_post (id INTEGER PRIMARY KEY, title TEXT NOT NULL, owner_id INTEGER NOT NULL)",
+        "CREATE TABLE op_note (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
+        "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'theirs-row', 7), (2, 'mine-row', 42)",
+        "INSERT INTO op_note (id, post_id) VALUES (1, 1), (2, 2)",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    pool
+}
+
+async fn get_body(uri: &str) -> String {
+    use http_body_util::BodyExt as _;
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = build_app(view_pool().await).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn view_hook_hides_rows_from_the_list() {
+    let body = get_body("/op_post").await;
+    assert!(body.contains("mine-row"), "control: an allowed row shows");
+    assert!(!body.contains("theirs-row"), "a denied row is listed");
+}
+
+#[tokio::test]
+async fn view_hook_hides_rows_from_autocomplete() {
+    let body = get_body("/op_post/__autocomplete?q=row").await;
+    assert!(body.contains("mine-row"), "control: {body}");
+    assert!(
+        !body.contains("theirs-row"),
+        "a denied row is offered: {body}"
+    );
+}
+
+#[tokio::test]
+async fn view_hook_hides_fk_facet_names() {
+    let body = get_body("/op_note").await;
+    assert!(body.contains("mine-row"), "control: an allowed name shows");
+    assert!(!body.contains("theirs-row"), "a denied row's name shows");
+}

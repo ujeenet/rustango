@@ -481,6 +481,11 @@ pub(crate) async fn table_view(
     } else {
         false
     };
+    // The detail page's "view" hook hides a row here too (#2231). It runs
+    // in Rust after the page is read, so the total still counts denied rows.
+    rows.retain(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    });
 
     let fk_map = fk_map_from_joined_rows_json(&state, model, &rows);
 
@@ -1096,15 +1101,27 @@ async fn fk_display_names(
     keys: Vec<SqlValue>,
 ) -> Result<HashMap<String, String>, AdminError> {
     let scope = RowScope::of(target, parts);
+    // A target row its "view" hook denies keeps its raw key (#2231);
+    // the hook needs the whole row, not just the two columns.
+    let view_hooked = crate::admin::object_permissions::has_hook(target.table, "view");
+    let columns: Vec<&'static FieldSchema> = if view_hooked {
+        target.scalar_fields().collect()
+    } else {
+        vec![on_field, display_field]
+    };
     let mut names = HashMap::new();
     for chunk in keys.chunks(MAX_IN_KEYS) {
         let rows = crate::sql::select_rows_as_json(
             &state.pool,
             &scope.by_pk_in(target, on_field.column, chunk.to_vec()),
-            &[on_field, display_field],
+            &columns,
         )
         .await?;
         names.extend(rows.iter().filter_map(|row| {
+            if !crate::admin::object_permissions::is_allowed(target.table, "view", parts, Some(row))
+            {
+                return None;
+            }
             Some((
                 render::read_value_as_string_json(row, on_field)?,
                 render::read_value_as_string_json(row, display_field)?,
@@ -1513,8 +1530,12 @@ pub(crate) async fn autocomplete_view(
     )
     .await?;
 
+    // A row the "view" hook denies is not offered (#2231).
     let results: Vec<serde_json::Value> = rows
         .into_iter()
+        .filter(|row| {
+            crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+        })
         .filter_map(|row| {
             let id = row.get(pk_field.column)?.clone();
             let text = row

@@ -154,6 +154,10 @@ untouched.
 
 A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228).
 
+### A "view" object-permission hook now filters the admin list
+
+Denied rows vanish from the list, autocomplete and FK facet names; pages may come up short and totals still count them. Use `register_admin_queryset!` to scope counts too (#2231).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

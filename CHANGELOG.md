@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
 
+### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
+
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

@@ -8,6 +8,11 @@
 //! create, detail, edit, update and delete handlers all consult it and
 //! return 403 when a hook for that action denies.
 //!
+//! A `"view"` hook also drops denied rows from the list, autocomplete
+//! and FK facet names. It runs after the page is read, so a page may
+//! show fewer rows and the totals still count denied ones; a
+//! `register_admin_queryset!` filter hides rows from the counts too.
+//!
 //! `row` is `None` for a collection-level check, such as "may this
 //! user reach the add form?", and `Some(&json)` for a row check.
 //!
@@ -87,6 +92,14 @@ pub fn is_allowed(table: &str, action: &str, parts: &Parts, row: Option<&Value>)
         }
     }
     true
+}
+
+/// `true` when any hook is registered for `(table, action)`.
+#[must_use]
+pub(crate) fn has_hook(table: &str, action: &str) -> bool {
+    inventory::iter::<AdminObjectPermission>
+        .into_iter()
+        .any(|e| e.table == table && e.action == action)
 }
 
 /// Register a permission predicate for one model.
