@@ -150,6 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Tenancy verbs reject stray arguments
+
+`assign-role acme bob editor extra`, `set-operator-active alice bob --off` and similar used to ignore the extra word; they now fail. `set-superuser --on --off` fails instead of using the last flag (#1952).
+
+`create-role --help` and `create-api-key --help` now return an error with the usage instead of printing it and exiting 0. A `--password` (or `--current`) value that starts with `--` is refused as a missing value. `create-operator`, `reset-operator-password`, `change-password`, `change-operator-password` and `create-api-key` now also take flags before the positionals.
+
+### `[tenancy] apex_domain` now takes effect
+
+If your config sets it, `Cli::with_settings` uses it when `RUSTANGO_APEX_DOMAIN` is unset (#1379).
+
 ### Admin search never covers a secret field
 
 A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228). Only the `password` widget marks a secret: give `token` / `api_key` fields that widget too.

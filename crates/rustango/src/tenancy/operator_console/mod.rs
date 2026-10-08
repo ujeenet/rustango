@@ -2320,7 +2320,7 @@ async fn org_impersonate(
     } else {
         // No host pattern: a path-prefix tenant lives on the apex,
         // any other on `<slug>.<apex>`.
-        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let apex = crate::tenancy::server::apex_domain();
         if prefix.is_empty() {
             format!("{}.{}", slug, apex)
         } else {

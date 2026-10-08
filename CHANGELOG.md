@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — role, operator and user verbs refuse extra arguments (#1952)
+
+`assign-role`, `revoke-role`, `list-roles`, `create-role`, `set-operator-active`, `set-superuser`, `reset-password`, `list-operators` and `prewarm-pools` reject stray arguments and take flags anywhere. `set-superuser --on --off` is refused.
+
+### Fixed — `set-superuser` and `reset-password` write through the ORM (#1952)
+
+### Fixed — `startapp` refuses Rust keywords as app names (#1952)
+
+### Fixed — `make:serializer` docs show `Auto<i64>`, as the template writes (#1952)
+
+### Fixed — `[tenancy] apex_domain` is read (#1379)
+
+`Cli::with_settings` applies it; `RUSTANGO_APEX_DOMAIN` still wins.
+
+### Changed — settings that do nothing are documented and warned about (#1379)
+
+`[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
+
 ### Fixed — stale admin comment and source reference in docs
 
 The fullstack `urls.rs` comment names `nest_with`, as `main.rs` does; manage.md names `provision_tenant` instead of a line number.
@@ -15,6 +33,7 @@ They now cover the committed `system/migrations/`, the scaffolded login-gated `a
 ### Fixed — README links work on crates.io (#1405)
 
 crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+
 ### Fixed — admin search skips secret fields (#2228)
 
 `?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
