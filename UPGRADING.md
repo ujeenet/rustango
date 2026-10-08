@@ -158,6 +158,14 @@ Changing `src_col` / `dst_col` with the same `through` and tables now writes `Re
 
 Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail the migration before any DDL on PG and MySQL; rename a table or column (#2245).
 
+### Purge pages with `CachePageLayer::invalidate`
+
+Replace hand-built page-cache keys with `layer.invalidate([&PageKey::new(path, host).tenant(slug)])`; since 0.60 they miss the tenant and delete nothing (#2252).
+
+### `RUSTANGO__LOGGING__FORMAT` now applies under `#[rustango::main]`
+
+If it is set in the env or `./.env`, the default subscriber uses that format; before, it was ignored there (#2258).
+
 ### `Cli` behind a reverse proxy
 
 Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).

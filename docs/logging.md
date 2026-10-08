@@ -62,6 +62,9 @@ It uses `RUST_LOG` when set, and `info,sqlx=warn` when not — the value of
 every statement at `info`, so an unfiltered `info` buries your own events under
 SQL.
 
+For JSON logs set `RUSTANGO__LOGGING__FORMAT=json` (also `pretty`, `compact`,
+`full`). Like `RUST_LOG`, it is read from the environment, else from `./.env`.
+
 To configure anything beyond the level, install a subscriber yourself. Every
 installer is idempotent (`try_init` underneath), so an extra call is a no-op
 rather than a panic:
