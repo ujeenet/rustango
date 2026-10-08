@@ -116,21 +116,19 @@ impl Dialect for Postgres {
     }
 
     fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON COLUMN {}.{} IS '{}'",
+            "COMMENT ON COLUMN {}.{} IS {}",
             self.quote_ident(table),
             self.quote_ident(column),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 
     fn table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON TABLE {} IS '{}'",
+            "COMMENT ON TABLE {} IS {}",
             self.quote_ident(table),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 

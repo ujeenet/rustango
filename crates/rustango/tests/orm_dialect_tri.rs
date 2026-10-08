@@ -68,6 +68,18 @@ pub struct Reading {
 }
 
 /// Seed one `Meas` row at the RFC 3339 instant `at`.
+/// Comments ending in `\`, which closed nothing on MySQL (#2232).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_noted")]
+#[rustango(app = "orm_dialect_tri")]
+#[rustango(db_table_comment = "C:\\dir\\")]
+pub struct Noted {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(db_comment = "C:\\path 'q' \\'\\")]
+    pub n: i64,
+}
+
 /// Seed one `Meas` row at the RFC 3339 instant `at`, plus a `Reading`
 /// of it.
 async fn seed_meas(pool: &Pool, n: i64, at: &str) {
@@ -104,6 +116,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Reading::SCHEMA.table).await;
     fresh_table::<Meas>(pool).await;
     fresh_table::<Reading>(pool).await;
+    fresh_table::<Noted>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -555,6 +568,49 @@ async fn ilike_on_int_and_uuid_columns(pool: &Pool) {
     }
 }
 
+/// #2232: MySQL inlined the delimiter with only `'` doubled, so a `\`
+/// broke the statement.
+async fn string_agg_delimiter_with_backslash(pool: &Pool) {
+    seed(pool, &[("a", "x"), ("b", "y")]).await;
+    for delim in ["\\", "\\'), x", "'\\'"] {
+        let rows = Post::objects()
+            .aggregate()
+            .values(&[])
+            .annotate(
+                "t",
+                AggregateExpr::string_agg_ordered("title", delim, &[("title", false)]),
+            )
+            .fetch(pool)
+            .await
+            .expect("string_agg");
+        assert_eq!(
+            rows[0]["t"],
+            SqlValue::String(format!("x{delim}y")),
+            "{delim}"
+        );
+    }
+}
+
+/// #2232: a comment ending in `\` must create the table and read back as written.
+async fn comment_with_backslash(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return; // `setup` already created the table on every backend.
+    }
+    let sql = format!(
+        "SELECT CAST(COLUMN_COMMENT AS CHAR) FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {} AND COLUMN_NAME = 'n'",
+        pool.dialect().placeholder(1)
+    );
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(
+        &sql,
+        vec![SqlValue::String(Noted::SCHEMA.table.into())],
+        pool,
+    )
+    .await
+    .expect("read comment");
+    assert_eq!(got, [("C:\\path 'q' \\'\\".to_owned(),)]);
+}
+
 /// #2004: `values()` read date and timestamp cells as Null on PG and MySQL.
 async fn values_decode_dates_and_timestamps(pool: &Pool) {
     if pool.dialect().name() == "sqlite" {
@@ -633,6 +689,8 @@ tri_dialect_test! {
         paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
         ilike_on_int_and_uuid_columns,
+        string_agg_delimiter_with_backslash,
+        comment_with_backslash,
         values_decode_dates_and_timestamps,
         integer_division_truncates,
         second_lookup_truncates,

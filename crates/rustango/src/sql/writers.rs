@@ -1182,7 +1182,7 @@ fn write_aggregate_expr(
             match b.d.name() {
                 "mysql" => {
                     // `SEPARATOR` takes no bound parameter, so the
-                    // delimiter is inlined with its quotes doubled.
+                    // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
@@ -1190,9 +1190,9 @@ fn write_aggregate_expr(
                     }
                     b.write_ident(column);
                     b.sql.push_str(&order_sql);
-                    b.sql.push_str(" SEPARATOR '");
-                    b.sql.push_str(&delimiter.replace('\'', "''"));
-                    b.sql.push_str("')");
+                    b.sql.push_str(" SEPARATOR ");
+                    b.sql.push_str(&b.d.quote_literal(delimiter));
+                    b.sql.push(')');
                 }
                 "sqlite" => {
                     // A SQLite DISTINCT aggregate takes exactly one

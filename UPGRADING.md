@@ -154,6 +154,10 @@ untouched.
 
 New provided method; the writers call it with the column's field type. A custom dialect that needs a cast before `ILIKE` overrides it (#2229).
 
+### `Dialect::quote_literal`
+
+New provided method for inline string literals. On MySQL a `\` in a comment or `string_agg` separator is now kept as written (#2232).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

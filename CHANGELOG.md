@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 On PostgreSQL, search and `Q::ilike` on an int, UUID or FK column cast it to text instead of failing with `bigint ~~* text`. SQLite matches a UUID by its text form.
 
+### Fixed — MySQL inline literals escape backslashes (#2232)
+
+The `string_agg` separator and DDL `COMMENT`s go through one `Dialect::quote_literal`; a `\` no longer breaks the statement or the value.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

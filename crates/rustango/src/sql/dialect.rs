@@ -67,6 +67,12 @@ pub trait Dialect: Send + Sync {
         format!("\"{escaped}\"")
     }
 
+    /// Quote text as an inline string literal, for the few spots
+    /// that take no bind. The default doubles `'`; MySQL also escapes `\`.
+    fn quote_literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
     /// Render the placeholder for the `n`-th bind, counting from 1.
     ///
     /// **`n` is advisory.** Only PostgreSQL uses it, as `$n`. SQLite

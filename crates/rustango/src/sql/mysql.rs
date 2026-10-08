@@ -65,18 +65,22 @@ impl Dialect for MySql {
         format!("`{escaped}`")
     }
 
+    /// MySQL reads `\` as an escape inside a string literal under the
+    /// default `sql_mode`, so it is doubled along with `'` (#2232).
+    fn quote_literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    }
+
     /// MySQL writes a column comment inline, after the rest of the
-    /// column definition. Single quotes are doubled.
+    /// column definition.
     fn write_inline_column_comment(&self, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
-        Some(format!(" COMMENT '{escaped}'"))
+        Some(format!(" COMMENT {}", self.quote_literal(comment)))
     }
 
     /// MySQL writes a table comment as a `COMMENT='…'` trailer after
-    /// the closing paren. Single quotes are doubled.
+    /// the closing paren.
     fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
-        Some(format!(" COMMENT='{escaped}'"))
+        Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
     // `?` placeholders are the trait default.
@@ -821,6 +825,12 @@ mod tests {
     #[test]
     fn name_is_mysql() {
         assert_eq!(MySql.name(), "mysql");
+    }
+
+    #[test]
+    fn quote_literal_escapes_backslash_and_quote() {
+        assert_eq!(MySql.quote_literal(r"a\'b"), r"'a\\''b'");
+        assert_eq!(crate::sql::Postgres.quote_literal(r"a\'b"), r"'a\''b'");
     }
 
     #[test]
