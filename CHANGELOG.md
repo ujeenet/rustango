@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — scaffold compile tests on the pinned 1.88 toolchain (#2310)
+
+The harness resolves the generated project's deps MSRV-aware, so `uuid` 1.27 (rustc 1.89) no longer breaks them.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.
