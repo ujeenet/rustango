@@ -112,6 +112,7 @@ fn no_module_hand_rolls_the_redirect_check() {
 /// tests-004). Calling the function is the only version of this check
 /// that means anything.
 #[test]
+#[cfg(feature = "_axum")]
 fn the_canonical_rule_rejects_what_the_copies_missed() {
     use rustango::auth_decorators::safe_next;
 
@@ -147,6 +148,7 @@ fn the_canonical_rule_rejects_what_the_copies_missed() {
 /// The control: tightening must not reject ordinary paths, or every
 /// post-login redirect silently becomes `/`.
 #[test]
+#[cfg(feature = "_axum")]
 fn the_canonical_rule_accepts_ordinary_paths() {
     use rustango::auth_decorators::safe_next;
 

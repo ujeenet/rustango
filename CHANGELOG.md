@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — test builds on a single backend pass `-D warnings` (#2313)
+
+`--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.
+
 ### Fixed — example compose files publish the DB on loopback only (#2311)
 
 Postgres binds to `127.0.0.1:5432` as the scaffolder's does; the stale `migrate_framework` doc is corrected.

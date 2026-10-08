@@ -9,6 +9,8 @@
 //! 3. POST with matching cookie + X-CSRF-Token header → passes.
 //! 4. POST with mismatched cookie / header → 403.
 
+#![cfg(feature = "csrf")]
+
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::routing::{get, post};

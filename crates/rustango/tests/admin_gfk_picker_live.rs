@@ -8,7 +8,7 @@
 //! the column now renders as a `<select>` populated from the seeded
 //! ContentType table.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

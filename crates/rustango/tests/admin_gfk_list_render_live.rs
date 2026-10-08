@@ -7,7 +7,7 @@
 //! and asserts the `content_object` column renders an `<a href>` for
 //! each row.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
