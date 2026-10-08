@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant resolver state is per registry (#2077)
+
+The org/host caches, fingerprint polls and breakers are keyed by registry pool, so two registries in one process no longer share them.
+
+### Fixed — `FileCache` no longer blocks the async runtime (#1530)
+
+All its file I/O now runs on tokio's blocking pool.
+
 ### Fixed — role, operator and user verbs refuse extra arguments (#1952)
 
 `assign-role`, `revoke-role`, `list-roles`, `create-role`, `set-operator-active`, `set-superuser`, `reset-password`, `list-operators` and `prewarm-pools` reject stray arguments and take flags anywhere. `set-superuser --on --off` is refused.

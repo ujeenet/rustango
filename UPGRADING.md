@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Resolver caches are per registry
+
+`invalidate_org_cache`, `invalidate_host_cache` and the testkit resolver resets still act on every registry in the process (#2077).
+
 ### Tenancy verbs reject stray arguments
 
 `assign-role acme bob editor extra`, `set-operator-active alice bob --off` and similar used to ignore the extra word; they now fail. `set-superuser --on --off` fails instead of using the last flag (#1952).
