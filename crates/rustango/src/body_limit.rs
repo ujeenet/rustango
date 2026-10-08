@@ -153,10 +153,17 @@ pub(crate) async fn collect_capped(
             continue;
         };
         if buf.len() + data.len() > cap {
-            buf.extend_from_slice(&data);
+            // Hand the crossing frame on as is; copying it would double a big body.
+            let rest = Body::new(Prefixed {
+                head: Some(data),
+                rest: body,
+            });
+            if buf.is_empty() {
+                return Ok(Err(rest));
+            }
             return Ok(Err(Body::new(Prefixed {
                 head: Some(axum::body::Bytes::from(buf)),
-                rest: body,
+                rest,
             })));
         }
         buf.extend_from_slice(&data);
@@ -221,6 +228,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    /// A frame over the cap goes back as the same bytes, not a copy.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn capped_collect_passes_the_crossing_frame_on_uncopied() {
+        use http_body_util::BodyExt as _;
+        let big = axum::body::Bytes::from(vec![7u8; 2 << 20]);
+        let ptr = big.as_ptr();
+        let Ok(Err(mut back)) = collect_capped(Body::from(big), 1 << 20).await else {
+            panic!("over the cap");
+        };
+        let frame = back.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!((frame.as_ptr(), frame.len()), (ptr, 2 << 20));
+        assert!(back.frame().await.is_none());
     }
 
     #[tokio::test]

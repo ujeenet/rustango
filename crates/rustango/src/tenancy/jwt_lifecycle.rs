@@ -488,8 +488,9 @@ impl JwtLifecycle {
             || self.jti_store.is_used(&grace_key(jti, bucket - 1)).await
     }
 
-    pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
-        self.jti_store.is_used(&family_key(fam)).await
+    /// The store revocations and refresh families live in.
+    pub(crate) fn jti_store(&self) -> &dyn JtiStore {
+        &*self.jti_store
     }
 
     /// Signature and expiry, no store lookup. Expiry comes first, so an
@@ -598,6 +599,11 @@ impl JwtLifecycle {
         // ever consulted.
         self.jti_store.is_used(jti).await
     }
+}
+
+/// `true` when refresh family `fam` was revoked in `store` (#1854).
+pub(crate) async fn family_revoked_in(store: &dyn JtiStore, fam: &str) -> bool {
+    store.is_used(&family_key(fam)).await
 }
 
 /// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.

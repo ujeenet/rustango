@@ -33,7 +33,7 @@ pub(super) async fn list_operators<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    super::args::reject_extra_positionals(args, 0, "list-operators")?;
+    super::args::no_args(args, "list-operators")?;
     let rows = ops::list(&pools.registry_pool()).await.map_err(explain)?;
     if rows.is_empty() {
         writeln!(w, "(no operators — create one with `create-operator`)")?;
@@ -63,7 +63,21 @@ pub(super) async fn set_operator_active<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let username = match args.iter().find(|a| !a.starts_with("--")) {
+    // A second positional was once ignored (#1952).
+    let parsed = super::args::parse(
+        args,
+        &super::args::Spec {
+            verb: "set-operator-active",
+            usage: "set-operator-active <username> --on|--off",
+            switches: &["--on", "--off"],
+            valued: &[],
+            max_positionals: 1,
+        },
+    )?;
+    // `--on --off` is refused rather than last-wins: guessing revokes or
+    // restores access, and both are wrong to do silently (#1355).
+    let active = parsed.on_off()?;
+    let username = match parsed.positional(0) {
         Some(u) => u.clone(),
         None => manage_interactive::ask("Operator username: ")
             .map_err(TenancyError::Io)?
@@ -71,22 +85,6 @@ where
                 TenancyError::Validation("set-operator-active requires a username".into())
             })?,
     };
-
-    let mut active: Option<bool> = None;
-    for flag in args {
-        match flag.as_str() {
-            // Refused rather than last-wins: guessing revokes or restores
-            // access, and both are wrong to do silently (#1355).
-            "--on" => super::hosts::set_direction(&mut active, true, ("--on", "--off"))?,
-            "--off" => super::hosts::set_direction(&mut active, false, ("--on", "--off"))?,
-            other if other.starts_with("--") => {
-                return Err(TenancyError::Validation(format!(
-                    "unknown flag `{other}` — set-operator-active takes --on or --off"
-                )))
-            }
-            _ => {}
-        }
-    }
     let active = active.ok_or_else(|| {
         TenancyError::Validation("set-operator-active requires --on or --off".into())
     })?;

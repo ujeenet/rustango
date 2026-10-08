@@ -1046,6 +1046,23 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     .0;
     assert_eq!(user_count, 1);
 
+    // 6b. set-superuser / reset-password update the schema-mode row (#1952).
+    for parts in [
+        &["set-superuser", &slug, "alice", "--off"][..],
+        &["reset-password", &slug, "alice", "--password", "hunter3"],
+    ] {
+        let (_out, res) = run(&pools, &url, &dir, parts).await;
+        res.unwrap();
+    }
+    let (is_super, hash): (bool, String) = sqlx::query_as(&format!(
+        r#"SELECT is_superuser, password_hash FROM "{slug}"."rustango_users" WHERE username = 'alice'"#,
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!is_super, "set-superuser --off did not land");
+    assert!(rustango::tenancy::password::verify("hunter3", &hash).unwrap());
+
     // 7. Org row landed.
     let org_count: i64 =
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")

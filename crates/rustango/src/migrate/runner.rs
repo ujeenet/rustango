@@ -352,6 +352,9 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     .await;
     let dialect = pool.dialect();
     let models = bootstrap_models();
+    if let Some(sql) = ddl::ci_text_extension_sql(dialect, &models) {
+        crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await?;
+    }
     for model in &models {
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;

@@ -327,37 +327,25 @@ impl AuthBackend for ApiKeyBackend {
             return Ok(None);
         }
 
-        // v0.38 — replaced the hand-rolled JOIN with two ORM round-
-        // trips because tri-dialect sqlx doesn't expose a portable
-        // raw-row decode path (PgRow/MySqlRow/SqliteRow are distinct
-        // types). One round-trip per ApiKey lookup + one per user
-        // resolve; both indexed (key_prefix UNIQUE + id PK) so the
-        // total latency on the hot path is two index seeks.
+        // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
             .await?;
-        let Some(key) = keys.into_iter().next() else {
-            // Audit N4 — equalize timing on the unknown-prefix path so it
-            // doesn't reveal whether a key prefix exists.
-            password::verify_dummy_async_in(HashLane::Credential, secret)
-                .await
-                .map_err(AuthError::from_hash)?;
+        // The prefix is random, not unique: try every row (#2250). An unknown
+        // prefix still spends a verify (audit N4).
+        let key = password::first_verified(keys, secret, |k| &k.key_hash)
+            .await
+            .map_err(AuthError::from_hash)?;
+        let Some(key) = key else {
             attempt.failed().await;
             return Ok(None);
         };
 
         // Verify before judging expiry, so an expired prefix costs the
         // same as an unknown one (#1729).
-        let ok = password::verify_async_in(HashLane::Credential, secret, &key.key_hash)
-            .await
-            .map_err(AuthError::from_hash)?;
-        if !ok {
-            attempt.failed().await;
-            return Ok(None);
-        }
         if key.expires_at.is_some_and(|exp| chrono::Utc::now() > exp) {
             return Err(AuthError::InvalidToken);
         }
@@ -441,6 +429,8 @@ pub async fn create_api_key(
 /// themselves until then).
 pub struct JwtBackend {
     secret: Vec<u8>,
+    /// Same key, for the login-session `pwf` claim (#2247).
+    pwf_secret: crate::session::SessionSecret,
     /// Token lifetime in seconds for tokens issued via [`JwtBackend::issue`].
     pub ttl_secs: i64,
     /// Revocation list consulted on every authentication (#1402).
@@ -474,6 +464,7 @@ impl JwtBackend {
             "JwtBackend signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
+            pwf_secret: crate::session::SessionSecret::from_bytes(secret.clone()),
             secret,
             ttl_secs: 3600,
             jti_store: None,
@@ -490,6 +481,9 @@ impl JwtBackend {
     /// nothing on the authentication path reads — a revoked token keeps
     /// authenticating until it expires, and a deployment can watch a
     /// shared Redis store fill with JTIs that all still work.
+    ///
+    /// Without it, a single-login logout and a refresh-replay revoke go
+    /// unseen; a password change and logout-all still end the token (#2247).
     ///
     /// Off by default because turning it on changes what an existing
     /// deployment's live tokens do, which is not a thing to do silently
@@ -548,7 +542,7 @@ impl JwtBackend {
         format!("{payload_b64}.{sig_b64}")
     }
 
-    /// Verify and return `(sub, jti)`.
+    /// Verify and return `(sub, jti, login session)`.
     ///
     /// Accepts both token shapes. Three segments is what `JwtLifecycle`
     /// issues since #1397 and what any standard JWT looks like; two is
@@ -573,7 +567,11 @@ impl JwtBackend {
         &self,
         token: &str,
         scope: super::jwt_lifecycle::UserTokenScope<'_>,
-    ) -> Option<(i64, Option<String>)> {
+    ) -> Option<(
+        i64,
+        Option<String>,
+        Option<super::auth_routes::RefreshSession>,
+    )> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -614,13 +612,14 @@ impl JwtBackend {
                 return None;
             }
         }
-        scope.admits(payload.as_object()?).ok()?;
+        let claims = payload.as_object()?;
+        scope.admits(claims).ok()?;
         let sub = payload.get("sub")?.as_i64()?;
         let jti = payload
             .get("jti")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        Some((sub, jti))
+        Some((sub, jti, super::auth_routes::RefreshSession::read(claims)))
     }
 }
 
@@ -677,7 +676,7 @@ impl AuthBackend for JwtBackend {
             Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,
         };
-        let (user_id, jti) = match self.verify_claims(token, scope) {
+        let (user_id, jti, session) = match self.verify_claims(token, scope) {
             Some(c) => c,
             None => return Err(AuthError::InvalidToken),
         };
@@ -705,6 +704,18 @@ impl AuthBackend for JwtBackend {
 
         if !user.active {
             return Err(AuthError::Inactive);
+        }
+
+        // A login token ends with its session, as on `require_bearer` (#2247).
+        if let Some(session) = session {
+            let check = super::auth_routes::SessionCheck {
+                pwf_secret: &self.pwf_secret,
+                families: self.jti_store.as_deref(),
+                cap_secs: None,
+            };
+            if !session.admits(&check, &user).await {
+                return Err(AuthError::InvalidToken);
+            }
         }
 
         Ok(Some(AuthUser {

@@ -871,6 +871,37 @@ async fn api_key_failures_are_limited_per_ip() {
     assert!(is_429(&env.api_key(&ip, &good).await));
 }
 
+/// #2250 — keys whose random prefixes collide each still authenticate.
+#[tokio::test]
+async fn api_keys_sharing_a_prefix_each_authenticate() {
+    use rustango::tenancy::auth_backends::{create_api_key, ApiKey};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let uid = env.user(&unique("pfx")).await;
+    let first = create_api_key(uid, "a", None, &env.tenant).await.unwrap();
+    let second = create_api_key(uid, "b", None, &env.tenant).await.unwrap();
+    let (prefix, _) = first.split_once('.').unwrap();
+    let (old, secret) = second.split_once('.').unwrap();
+    let mut row = ApiKey::objects()
+        .where_(ApiKey::key_prefix.eq(old.to_owned()))
+        .fetch(&env.tenant)
+        .await
+        .unwrap()
+        .remove(0);
+    row.key_prefix = prefix.to_owned();
+    row.save_pool(&env.tenant).await.unwrap();
+
+    let second = format!("{prefix}.{secret}");
+    assert_eq!(
+        env.api_key(&next_ip(), &first).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        env.api_key(&next_ip(), &second).await.status(),
+        StatusCode::OK
+    );
+}
+
 /// #1729 — an expired key is verified before it is refused, so a full
 /// hash queue answers it 503, the same as an unknown prefix.
 #[cfg(feature = "testkit")]

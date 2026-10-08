@@ -931,8 +931,7 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
     let mut out = request.clone();
     // The `<slug>.<APEX>` default is filled in here so it is validated too.
     let pattern = request.host_pattern.clone().or_else(|| {
-        std::env::var("RUSTANGO_APEX_DOMAIN")
-            .ok()
+        crate::tenancy::server::configured_apex_domain()
             .map(|apex| format!("{}.{apex}", request.slug))
     });
     out.host_pattern = pattern.as_deref().map(validate_host_pattern).transpose()?;
@@ -1770,6 +1769,25 @@ mod validation_tests {
         req.host_pattern = Some("ACME.Example.com".into());
         let out = validate_fields(&req).expect("a legal hostname");
         assert_eq!(out.host_pattern.as_deref(), Some("acme.example.com"));
+    }
+
+    /// The default host pattern uses `[tenancy] apex_domain` too (#2225).
+    #[test]
+    fn the_default_host_pattern_reads_the_apex_setting() {
+        assert!(
+            std::env::var("RUSTANGO_APEX_DOMAIN").is_err(),
+            "unset RUSTANGO_APEX_DOMAIN to run this test; env wins over the setting"
+        );
+        let _g = crate::tenancy::server::APEX_TEST_LOCK.blocking_lock();
+        crate::tenancy::server::reset_apex_domain_setting();
+        crate::tenancy::server::set_apex_domain_setting("apex.test");
+        let req = ProvisionRequest::database("acme", "postgres://h/tenant");
+        let out = validate_fields(&req);
+        crate::tenancy::server::reset_apex_domain_setting();
+        assert_eq!(
+            out.expect("legal").host_pattern.as_deref(),
+            Some("acme.apex.test")
+        );
     }
 
     #[test]

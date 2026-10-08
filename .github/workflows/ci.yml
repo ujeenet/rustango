@@ -1043,6 +1043,7 @@ jobs:
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test m2m_non_int_pk_tri \
+            --test m2m_changed_noop_tri \
             --test update_validation_tri \
             --test uuid_v7_pk_writes_tri \
             --test media_sqlite_live \
@@ -1062,6 +1063,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
@@ -1082,6 +1084,7 @@ jobs:
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
           --test system_chain_order_tri
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1311,23 +1314,27 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_filters_tri
       - run: cargo test -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
       - run: cargo test -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
+      - run: cargo test -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       - run: cargo test -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
       - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
+      - run: cargo test -p rustango --features mysql,signals,testkit --test m2m_changed_noop_tri
       - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
       - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
       # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.
