@@ -2766,6 +2766,25 @@ async fn fk_index_drop_then_alter(pool: &Pool) {
     orphan_refused(pool, b, "author_id").await;
 }
 
+/// An alter of the FK column, then DropIndex, in one migration: both
+/// re-added the FK on MySQL (1826) (#2244).
+async fn fk_alter_then_index_drop(pool: &Pool) {
+    let (a, b) = ("mad_fb_author", "mad_fb_book");
+    let chain = fk_index_chain(pool, "fb", a, b, false).await;
+    let alter = SchemaChange::AlterColumnType {
+        table: b.into(),
+        column: "author_id".into(),
+        from: "i64".into(),
+        to: "i64".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), book(a, b)]}),
+        vec![Operation::Schema(alter), drop_index(b)],
+    );
+    chain.migrate(pool).await.expect("the FK comes back once");
+    orphan_refused(pool, b, "author_id").await;
+}
+
 /// DropIndex, then a rename of the FK column in the same migration: the
 /// re-add named the old column on MySQL (1072) (#2244).
 async fn fk_index_drop_then_rename(pool: &Pool) {
@@ -3119,6 +3138,7 @@ tri_dialect_test!(
         fk_index_drops,
         fk_index_drop_keeps_a_served_fk,
         fk_index_drop_then_alter,
+        fk_alter_then_index_drop,
         fk_index_drop_then_rename,
         fk_index_drop_refuses_an_unknown_shape,
         auto_pk_widens_its_sequence,

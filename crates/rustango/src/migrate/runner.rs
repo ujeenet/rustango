@@ -944,7 +944,11 @@ fn preview_schema_op(
         statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
     }
     // An index's FK, as apply finds it: by the index's first column, when no
-    // other index (declared, UNIQUE or the PK) starts with it.
+    // other index (declared, UNIQUE or the PK) starts with it at this op.
+    let earlier = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[..i]);
     let (drops, readd) = step
         .index_fks
         .as_ref()
@@ -957,19 +961,17 @@ fn preview_schema_op(
                 .first()?;
             let field = before.table(&ix.table).and_then(|t| t.field(column));
             let served = field.is_some_and(|f| f.unique || f.primary_key)
-                || before.indexes.iter().any(|i| {
-                    i.name != ix.index && i.table == ix.table && i.columns.first() == Some(column)
-                });
+                || leading_indexes_at(before, earlier, &ix.table, column)
+                    .iter()
+                    .any(|name| *name != ix.index);
             if served {
                 return None;
             }
+            // An earlier op of the migration already dropped a live one.
+            let live = field.is_some_and(|f| f.fk.is_some())
+                && !fk_deferred_earlier(&ix.table, column, earlier);
             let names = [ddl::fk_constraint_name(&ix.table, column)];
-            let live = if field.is_some_and(|f| f.fk.is_some()) {
-                &names[..]
-            } else {
-                &[]
-            };
-            Some(ix.plan(column, live, dialect))
+            Some(ix.plan(column, if live { &names[..] } else { &[] }, dialect))
         })
         .unwrap_or_default();
     statements.extend(drops);
@@ -2802,9 +2804,77 @@ struct IndexFks {
     table: String,
     index: String,
     /// The table's columns at the op, with their FK to re-add. A column
-    /// missing here goes away later, so its FK just drops; `None` if the
-    /// whole table does.
+    /// missing here goes away later, or an earlier op already defers its
+    /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
+}
+
+/// The indexes on `table` that start with `column` once `earlier` ran on
+/// `before`: its own, less those dropped, plus those created.
+fn leading_indexes_at<'a>(
+    before: &'a SchemaSnapshot,
+    earlier: &'a [Operation],
+    table: &str,
+    column: &str,
+) -> Vec<&'a str> {
+    use super::SchemaChange as SC;
+    let mut names: Vec<&str> = before
+        .indexes
+        .iter()
+        .filter(|i| i.table == table && i.columns.first().is_some_and(|c| c == column))
+        .map(|i| i.name.as_str())
+        .collect();
+    for op in earlier {
+        match op {
+            Operation::Schema(SC::DropIndex { name, .. }) => names.retain(|n| n != name),
+            Operation::Schema(SC::CreateIndex {
+                name,
+                table: t,
+                columns,
+                ..
+            }) if t == table && columns.first().is_some_and(|c| c == column) => {
+                names.push(name);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Whether an earlier op of the migration defers `table.column`'s FK
+/// (re-)add, which a re-add at the DropIndex would then duplicate (1826).
+fn fk_deferred_earlier(table: &str, column: &str, earlier: &[Operation]) -> bool {
+    use super::SchemaChange as SC;
+    earlier.iter().any(|op| match op {
+        Operation::Schema(SC::CreateTable(t)) => t == table,
+        Operation::Schema(
+            SC::AddColumn {
+                table: t,
+                column: c,
+            }
+            | SC::AlterColumnType {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterColumnMaxLength {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterFkOnDelete {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterColumnUnique {
+                table: t,
+                column: c,
+                unique: false,
+            },
+        ) => t == table && c == column,
+        _ => false,
+    })
 }
 
 /// What happens to the FK on an index's first column.
@@ -2817,15 +2887,17 @@ enum FkFate<'a> {
 }
 
 impl IndexFks {
-    /// For dropping `index` on `table`, one of `later`'s predecessors.
+    /// For dropping `index` on `table`, `ops[at_op]`.
     fn at(
         table: &str,
         index: &str,
-        later: &[Operation],
+        ops: &[Operation],
+        at_op: Option<usize>,
         after: &SchemaSnapshot,
         dialect: &dyn crate::sql::Dialect,
         schema: Option<&str>,
     ) -> Result<Self, MigrateError> {
+        let (earlier, later) = at_op.map_or((&[][..], &[][..]), |i| (&ops[..i], &ops[i + 1..]));
         // Only a later DropTable means the table goes; any other failure to
         // build its shape at the op is an error, not a reason to drop FKs.
         let columns = if dropped_later(table, later) {
@@ -2833,10 +2905,15 @@ impl IndexFks {
         } else {
             let (at, _) = super::rebuild::snapshot_at(table, later, after)
                 .map_err(MigrateError::Validation)?;
-            at.table(table)
+            let mut columns = at
+                .table(table)
                 .map(|t| super::diff::column_fks(t, dialect, schema))
                 .transpose()
-                .map_err(MigrateError::Validation)?
+                .map_err(MigrateError::Validation)?;
+            if let Some(cs) = &mut columns {
+                cs.retain(|(c, fk)| fk.is_none() || !fk_deferred_earlier(table, c, earlier));
+            }
+            columns
         };
         Ok(Self {
             table: table.to_owned(),
@@ -2917,10 +2994,10 @@ fn render_step(
 ) -> Result<Step, MigrateError> {
     use super::SchemaChange as SC;
     // The ops after `change`, which is borrowed from `ops`.
-    let later = ops
+    let at_op = ops
         .iter()
-        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
-        .map_or(&[][..], |i| &ops[i + 1..]);
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)));
+    let later = at_op.map_or(&[][..], |i| &ops[i + 1..]);
     // Its FK is deferred past the later renames, so it takes their names (#2190).
     let ended = match change {
         SC::AddCompositeFk {
@@ -3025,9 +3102,11 @@ fn render_step(
         _ => None,
     };
     let index_fks = match change {
-        SC::DropIndex { name, table } if dialect.sole_leading_column_sql().is_some() => Some(
-            Box::new(IndexFks::at(table, name, later, after, dialect, schema)?),
-        ),
+        SC::DropIndex { name, table } if dialect.sole_leading_column_sql().is_some() => {
+            Some(Box::new(IndexFks::at(
+                table, name, ops, at_op, after, dialect, schema,
+            )?))
+        }
         _ => None,
     };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
@@ -4153,5 +4232,46 @@ mod tests {
             super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::Postgres)
                 .unwrap();
         assert_eq!(pg.len(), 1, "PG needs no index under an FK: {pg:?}");
+    }
+
+    /// #2244 — the second of two index drops is the one the FK needs: the
+    /// first no longer serves it once dropped.
+    #[test]
+    fn render_between_takes_the_fk_off_for_the_last_index() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |indexed: bool| -> SchemaSnapshot {
+            let indexes = if indexed {
+                serde_json::json!([
+                    { "name": "idx_a", "table": "child", "columns": ["p_id", "x"], "unique": false },
+                    { "name": "idx_b", "table": "child", "columns": ["p_id", "y"], "unique": false }])
+            } else {
+                serde_json::json!([])
+            };
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "p", "column": "p_id", "ty": "i64",
+                      "nullable": true, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }],
+                "indexes": indexes }))
+            .unwrap()
+        };
+        let drop = |name: &str| SchemaChange::DropIndex {
+            name: name.into(),
+            table: "child".into(),
+        };
+        let out = super::render_changes_between(
+            &[drop("idx_a"), drop("idx_b")],
+            &snap(true),
+            &snap(false),
+            &crate::sql::MySql,
+        )
+        .unwrap();
+        assert!(out[0].starts_with("DROP INDEX `idx_a`"), "{out:?}");
+        assert!(out[1].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[2].starts_with("DROP INDEX `idx_b`"), "{out:?}");
+        assert!(out[3].contains("ADD CONSTRAINT"), "{out:?}");
+        assert_eq!(out.len(), 4, "{out:?}");
     }
 }
