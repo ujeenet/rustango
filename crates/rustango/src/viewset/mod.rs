@@ -784,8 +784,9 @@ impl ViewSet {
     ///
     /// # Panics
     ///
-    /// If `field` is not on the model, is nullable, or has a type that
-    /// cannot be a cursor (float, bool, json or blob). Caught at mount time, not
+    /// If `field` is not on the model, or has a type that cannot be a
+    /// cursor (float, bool, json or blob). A nullable field is logged as
+    /// an error for now and refused from 0.61.0. Caught at mount time, not
     /// per request, so a misconfigured ViewSet fails where the
     /// mistake is instead of returning 500 to every caller.
     #[must_use]
@@ -829,12 +830,15 @@ impl ViewSet {
              totally. Use an integer, timestamp, date, uuid or string column.",
             f.ty
         );
-        // NULL has no place in `col > v`: rows go missing, or the token fails (#2230).
-        assert!(
-            !f.nullable,
-            "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable, and a NULL \
-             cannot be a cursor position. Use a NOT NULL column."
-        );
+        // NULL has no place in `col > v`: rows go missing, or the token
+        // fails (#2230). Logged, not refused, until 0.61.0.
+        if f.nullable {
+            tracing::error!(
+                target: "rustango::viewset",
+                "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable; NULL rows \
+                 are skipped or fail the page. Use a NOT NULL column; 0.61.0 refuses this."
+            );
+        }
     }
 
     /// A `.fields([..])` projection must include the cursor column and
@@ -2250,6 +2254,14 @@ fn build_lookup_filter(
         // Escape LIKE metacharacters in the URL-supplied `raw`, so
         // `%` and `_` match literally, and use the `*Escaped` ops so
         // an ESCAPE clause is emitted. SQLite needs that clause.
+        "iexact" | "contains" | "icontains" | "startswith" | "istartswith" | "endswith"
+        | "iendswith"
+            if field.ty != FieldType::String =>
+        {
+            return Err(FilterError::Invalid(
+                "this lookup needs a string field".into(),
+            ));
+        }
         "iexact" => escaped_like("", "", raw, true),
         "contains" => escaped_like("%", "%", raw, false),
         "icontains" => escaped_like("%", "%", raw, true),
@@ -2409,6 +2421,10 @@ async fn run_list(
                 filters.push(predicate);
             }
             Ok(None) => {}
+            // A backend may own keys like `price__min` (#2264).
+            Err(FilterError::UnknownLookup) if !state.vs.filter_backends.is_empty() => {
+                tracing::debug!(target: "rustango::viewset", param = %param_key, "lookup left to filter backends");
+            }
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.message(param_key)),
         }
     }
@@ -2728,12 +2744,6 @@ async fn handle_list_cursor(
             ),
         );
     }
-    if cursor_schema.nullable {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("cursor pagination needs a NOT NULL column; `{cursor_field}` is nullable."),
-        );
-    }
 
     // The primary key breaks ties. A non-unique cursor column, such
     // as any timestamp, can put equal values on both sides of a page
@@ -2855,6 +2865,16 @@ async fn handle_list_cursor(
         };
         match cursor_value_of(last, cursor_schema.name) {
             Some(v) => Some(encode_cursor(&v, pk_part.as_deref())),
+            None if last.get(cursor_schema.name).is_some_and(Value::is_null) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "cursor field `{}` is NULL in this row, so no `next` token can \
+                         be issued. Paginate on a NOT NULL column.",
+                        cursor_schema.name
+                    ),
+                );
+            }
             // The cursor column is not in the rendered row, almost
             // always because `.fields([...])` or a serializer
             // projected it away. `next: null` here would be silent
@@ -4298,6 +4318,8 @@ mod lookup_tests {
         let date = &DATE;
         for (field, lk, raw) in [
             (int_field(), Some("frobulate"), "1"),
+            (int_field(), Some("iexact"), "1"),
+            (int_field(), Some("contains"), "1"),
             (int_field(), Some("gt"), "not-a-number"),
             (int_field(), None, "abc"),
             (int_field(), Some("in"), "1,abc"),

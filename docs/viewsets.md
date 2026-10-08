@@ -607,7 +607,9 @@ followed by a comparison (`created_at__date__gte=2026-01-01`). No suffix = exact
 A plain date on a datetime `__gte` / `__lte` covers that whole UTC day.
 
 An empty value is no filter. An unknown lookup or a value that does not parse
-is a `400` naming the param. Fields not in `filter_fields` are ignored.
+is a `400` naming the param; with a `filter_backend` registered, an unknown
+lookup is left to the backend. The LIKE lookups need a string field. Fields not
+in `filter_fields` are ignored.
 
 **Search** — `?search=term` matches `search_fields` with a case-insensitive OR.
 

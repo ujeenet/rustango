@@ -4,13 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed — ViewSet refuses a nullable cursor column (#2230)
+### Fixed — ViewSet warns about a nullable cursor column (#2230)
 
-`cursor_pagination` on a nullable field now panics at build time; a NULL row made a 500 on MySQL/SQLite and was skipped on PostgreSQL.
+`cursor_pagination` on a nullable field logs an error at build time, and a NULL at a page end is a clear 500. 0.61.0 refuses the field (#2265).
 
 ### Fixed — a bad ViewSet filter is a 400, not a dropped filter (#2227)
 
-An unparsable value or unknown lookup returned every row; it is now a `400` naming the param. `iexact`, `range` and the date parts (`year`, `date__gte`, ...) are accepted, and a plain date on a datetime `__gte`/`__lte` covers the whole UTC day.
+An unparsable value or unknown lookup returned every row; it is now a `400` naming the param. With a filter backend, an unknown lookup is left to the backend; a LIKE lookup on a non-string field is a `400`. `iexact`, `range` and the date parts (`year`, `date__gte`, ...) are accepted, and a plain date on a datetime `__gte`/`__lte` covers the whole UTC day.
 
 ### Fixed — an empty ViewSet filter value is no filter (#2226)
 
