@@ -205,6 +205,12 @@ impl McpSettings {
     pub fn max_body_bytes(&self) -> usize {
         self.max_body_bytes.unwrap_or(1024 * 1024)
     }
+    /// Per-IP cap per minute; `None` when unset or `0`, both unlimited (#2299).
+    #[must_use]
+    pub fn rate_limit(&self) -> Option<std::num::NonZeroU32> {
+        self.rate_limit_per_minute
+            .and_then(std::num::NonZeroU32::new)
+    }
 }
 
 /// **Has no effect yet: nothing in the framework reads this section**

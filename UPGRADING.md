@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `[mcp] rate_limit_per_minute = 0` means unlimited
+
+It used to refuse every request with 429 (#2299).
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).
