@@ -578,7 +578,8 @@ fn detect_changes_emits_alter_column_type_for_metadata_diff() {
     assert!(changes
         .iter()
         .any(|c| matches!(c, SchemaChange::AlterColumnNullable { .. })));
-    assert!(changes
+    // The type change writes the new default itself.
+    assert!(!changes
         .iter()
         .any(|c| matches!(c, SchemaChange::AlterColumnDefault { .. })));
 }

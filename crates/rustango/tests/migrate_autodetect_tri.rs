@@ -2726,7 +2726,7 @@ async fn type_change_with_a_default(pool: &Pool) {
     )
     .await
     .unwrap();
-    chain
+    let name = chain
         .step(pool, with(("i32", "7"), "uuid"))
         .await
         .expect("bool → i32 and string → uuid apply with their defaults");
@@ -2738,6 +2738,24 @@ async fn type_change_with_a_default(pool: &Pool) {
         .await
         .unwrap();
     assert_eq!(got, [(1,), (7,)], "the old value cast, the new default set");
+
+    // Undo: the old type comes back with its old default.
+    exec(pool, "DELETE FROM {} WHERE {} = 2", &[t, "id"])
+        .await
+        .unwrap();
+    chain.undo(pool, &name).await.expect("unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (3)", &[t, "id"])
+        .await
+        .unwrap();
+    let sql = q(
+        pool,
+        &format!("SELECT {{}} FROM {{}} WHERE {{}} = {f} ORDER BY {{}}"),
+        &["id", t, "flag", "id"],
+    );
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3,)], "the old default is back");
 }
 
 tri_dialect_test!(

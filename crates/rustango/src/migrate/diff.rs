@@ -608,7 +608,9 @@ fn push_alter_changes(
         out.extend(max_length);
     }
     // The default first: a SQLite rebuild to NOT NULL fills NULLs with it.
-    if pf.default != cf.default {
+    // A type change writes the new default itself; a separate op undid
+    // into `SET DEFAULT <old>` on the new type.
+    if pf.default != cf.default && pf.ty == cf.ty {
         out.push(SchemaChange::AlterColumnDefault {
             table: table.to_owned(),
             column: cf.column.clone(),
