@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a locked scheduler job ran once per pod (#2330)
+
+New `DistributedLock::once_per_period` keys the lock by wall-clock window and keeps it until the TTL, so staggered pods run a job once per period.
+
+### Fixed — job retries gave up after ~15s (#2332)
+
+New `Job::retry_backoff` hook and `jobs::exponential_backoff`; `EmailJob` now retries 8 times over about ten minutes.
+
+### Fixed — `MAX_ATTEMPTS = 0` never ran the job (#2333)
+
+Both queues treat 0 as one run, including rows already queued.
+
+### Fixed — `register_email_job` on a second queue rerouted all mail (#2334)
+
+The handler holds its own mailer via the new `JobQueue::register_with`.
+
+### Fixed — `FileMailer` processes overwrote each other's files (#2335)
+
+Names carry the pid and are opened with `create_new`, moving to the next number on a clash.
+
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 
 The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres. Its echoed command now includes `--rustango-path`.

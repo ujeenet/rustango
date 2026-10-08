@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Scheduled jobs under a lock: use `once_per_period`
+
+`with_lock` inside `Scheduler::every` still runs once per pod per period. Switch to `lock.once_per_period(name, period, body)` (#2330).
+
+### Job retries
+
+`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). A custom `JobQueue` should override the new `register_with`; the default ignores the handler (#2334).
+
 ### i18n locale matching
 
 `languages = ["pt-BR"]` now loads `pt_BR.json` (#2288), and `negotiate_language` picks `en` over `en-GB` for `en-US` (#2289). Check any test that pinned the old pick.
