@@ -1043,6 +1043,7 @@ jobs:
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test m2m_non_int_pk_tri \
+            --test m2m_changed_noop_tri \
             --test update_validation_tri \
             --test uuid_v7_pk_writes_tri \
             --test media_sqlite_live \
@@ -1333,6 +1334,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
       - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
+      - run: cargo test -p rustango --features mysql,signals,testkit --test m2m_changed_noop_tri
       - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
       - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
       # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.

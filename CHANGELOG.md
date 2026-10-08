@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `cache_page` sends a body over 1 MiB in full (#2218)
+
+It was replaced by an empty body with the old `Content-Length`; now it passes through uncached.
+
+### Fixed — `cache_page` honours the response `Vary` (#2219)
+
+A response that varies on `*` or on a request header outside the key (compression, locale, CORS) is no longer cached and replayed to every client.
+
+### Fixed — `S3Storage` default client times out (#2220)
+
+10 s to connect, 60 s without a reply or body chunk, and 60 s + size / 256 KiB/s for an upload, so a stalled endpoint errors instead of hanging; `with_http` still overrides.
+
+### Fixed — m2m `add` / `remove` fire `m2m_changed` only on a change (#2221)
+
+A duplicate `add` or a `remove` of a missing link no longer fires the signal; `GenericM2MManager` too.
+
 ### Fixed — `JwtBackend` ends a login token with its session (#2247)
 
 A revoked refresh family, a password change or a logout-all now refuse the access token there too, as on `require_bearer`. Without `with_jti_store` it cannot see a single-login logout or a refresh-replay revoke; a password change and logout-all still apply.

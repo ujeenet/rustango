@@ -622,7 +622,8 @@ libc = { workspace = true, optional = true }
 # `default-features = false` matters: without it this would quietly
 # re-enable postgres and make `--no-default-features` meaningless.
 rustango       = { path = ".", default-features = false, features = ["testkit"] }
-tokio          = { workspace = true }
+# `test-util` pauses the clock for timeout tests.
+tokio          = { workspace = true, features = ["test-util"] }
 chrono         = { workspace = true }
 uuid           = { workspace = true }
 serde_json     = { workspace = true }

@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `CachePageLayer` skips responses whose `Vary` is not in the key
+
+Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
+
+### `S3Storage` default timeouts
+
+10 s to connect; GET, HEAD and DELETE fail after 60 s without a reply or body chunk; an upload gets 60 s + size / 256 KiB/s. A client passed to `with_http` replaces all of them (#2220).
+
+### `m2m_changed` skips no-op `add` / `remove`
+
+A receiver that counted on a signal for a duplicate `add` or a missing `remove` no longer gets one (#2221).
+
 ### Password-reset links from before the upgrade are refused
 
 `confirm_password_reset_pool` / `_single_use` need the issue time new links carry, and return `Expired` for older ones and for a link older than the last password change (#2248). Users request a new link. The `_into` forms are unchanged.
