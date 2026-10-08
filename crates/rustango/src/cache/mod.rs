@@ -169,7 +169,8 @@ pub trait Cache: Send + Sync + 'static {
     /// `ttl = None` makes the entry last forever, as `set` does.
     ///
     /// The default is a `get` then a `set`, which can bring back a key
-    /// deleted in between. Every built-in backend overrides it (#2300).
+    /// deleted in between. Every built-in backend that stores data
+    /// overrides it (#2300); `NullCache` keeps it, as it stores nothing.
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         match self.get(key).await? {
             Some(value) => {
@@ -911,14 +912,19 @@ impl Cache for InMemoryCache {
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let expires_at = self.resolve_ttl(ttl);
         let mut store = self.inner.write().await;
-        match store.map.get_mut(key) {
-            Some(e) if !e.is_expired() => {
-                e.expires_at = expires_at;
-                e.last_used.store(self.next_tick(), Ordering::Relaxed);
-                Ok(true)
-            }
-            _ => Ok(false),
+        if !store.map.get(key).is_some_and(|e| !e.is_expired()) {
+            return Ok(false);
         }
+        let Some(mut e) = store.take(key) else {
+            return Ok(false);
+        };
+        e.expires_at = expires_at;
+        e.last_used.store(self.next_tick(), Ordering::Relaxed);
+        // An expiring entry is no longer `set_forever`: move it to the evictable budget.
+        e.pinned &= expires_at.is_none();
+        store.put(key.to_owned(), e);
+        self.evict_locked(&mut store);
+        Ok(true)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -1291,7 +1297,8 @@ impl FileCache {
             return Ok(());
         }
         // Locked, so a `touch` mid-rewrite cannot put the entry back (#2300).
-        let _lock = self.lock_entry(&path)?;
+        // A lock failure still deletes: a logout must never fail.
+        let _lock = self.lock_entry(&path).ok();
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1748,6 +1755,20 @@ mod file_cache_tests {
         assert_eq!(after, None);
     }
 
+    /// A stripe held past the deadline still lets `delete` remove the entry.
+    #[tokio::test]
+    async fn delete_still_removes_when_the_lock_times_out() {
+        let dir = tmp_dir("del-timeout");
+        let cache = FileCache::new(&dir);
+        cache.set("k", "v", None).await.unwrap();
+        let _held = hold_stripe(&cache, "k");
+        let res = cache.delete("k").await;
+        let after = cache.get("k").await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(after.unwrap(), None);
+    }
+
     /// A planted symlink at a lock path is refused, not followed.
     #[cfg(unix)]
     #[tokio::test]
@@ -1940,6 +1961,26 @@ mod bound_tests {
         }
         let store = cache.inner.read().await;
         assert_eq!((store.pinned, store.pinned_bytes), (0, 0));
+    }
+
+    /// `touch` with a TTL on a `set_forever` entry moves it to the evictable budget.
+    #[tokio::test]
+    async fn touch_with_a_ttl_unpins() {
+        let cache = InMemoryCache::new();
+        cache.set_forever("flag", "on").await.unwrap();
+        assert!(cache.touch("flag", None).await.unwrap());
+        assert!(
+            cache.inner.read().await.map["flag"].pinned,
+            "no TTL keeps it pinned"
+        );
+        assert!(cache
+            .touch("flag", Some(Duration::from_secs(60)))
+            .await
+            .unwrap());
+        let store = cache.inner.read().await;
+        assert!(!store.map["flag"].pinned);
+        assert_eq!((store.pinned, store.pinned_bytes), (0, 0));
+        assert_eq!((store.evictable, store.used_bytes), (1, "flagon".len()));
     }
 
     /// #2300 — `touch` extends a live entry and never brings back a gone one.
