@@ -1990,7 +1990,10 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
                 .filter(|f| f.unique && !f.primary_key)
                 .map(|f| f.name)
                 .collect();
-            if unique.is_empty() {
+            // A typed PK or a composite unique may be what clashed instead.
+            let other_keys = model.primary_key().is_none_or(|pk| !pk.auto)
+                || model.indexes.iter().any(|i| i.unique);
+            if unique.is_empty() || other_keys {
                 format!("A {} with these values already exists.", model.name)
             } else {
                 format!(

@@ -42,6 +42,17 @@ pub struct Child {
     pub note: String,
 }
 
+/// A typed PK beside a unique field (correctness-002).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "wrerr_coded", admin(list_display = "slug"))]
+#[allow(dead_code)]
+pub struct Coded {
+    #[rustango(primary_key, max_length = 16)]
+    pub code: String,
+    #[rustango(max_length = 32, unique)]
+    pub slug: String,
+}
+
 rustango::register_admin_inline!(
     parent = "wrerr_parent",
     child = "wrerr_child",
@@ -55,6 +66,7 @@ async fn setup(pool: &Pool) {
     drop_table(pool, "wrerr_child").await;
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
+    fresh_table::<Coded>(pool).await;
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -125,6 +137,19 @@ async fn unique_refusal_is_a_plain_message(pool: &Pool) {
             "{uri}: {body}"
         );
     }
+}
+
+/// A clash on a typed PK does not blame the unique field.
+async fn unique_refusal_on_a_typed_pk_names_no_field(pool: &Pool) {
+    let (status, body) = post(pool, "/wrerr_coded", "code=a&slug=one").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let (status, body) = post(pool, "/wrerr_coded", "code=a&slug=two").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("this slug"), "{body}");
+    assert!(
+        body.contains("A Coded with these values already exists."),
+        "{body}"
+    );
 }
 
 /// A missing FK target is a plain message too.
@@ -243,6 +268,7 @@ tri_dialect_test! {
     scenarios: [
         unknown_action_is_a_400,
         unique_refusal_is_a_plain_message,
+        unique_refusal_on_a_typed_pk_names_no_field,
         fk_refusal_is_a_plain_message,
         deleting_a_referenced_row_is_a_409,
         bad_inline_value_rerenders_the_form,
