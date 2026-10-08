@@ -531,9 +531,9 @@ impl Mailer for InMemoryMailer {
 /// development without wiring an SMTP relay or piping stdout into a
 /// log file.
 ///
-/// File names are `YYYYMMDDHHMMSS-<seq>.eml` so a burst of emails
-/// inside the same second still get unique paths. The directory is
-/// created on `send` if it doesn't yet exist.
+/// File names are `YYYYMMDDHHMMSS-<pid>-<seq>.eml`, and a send never
+/// overwrites an existing file, so several processes can share one
+/// directory. The directory is created on `send` if it doesn't yet exist.
 pub struct FileMailer {
     dir: std::path::PathBuf,
     seq: std::sync::atomic::AtomicU64,
@@ -623,13 +623,33 @@ impl Mailer for FileMailer {
         email.validate()?;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| MailError::Transport(format!("create_dir_all: {e}")))?;
-        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-        let name = format!("{stamp}-{seq:04}.eml");
-        let path = self.dir.join(name);
-        std::fs::write(&path, serialize_eml(email))
-            .map_err(|e| MailError::Transport(format!("write {}: {e}", path.display())))?;
-        Ok(())
+        let pid = std::process::id();
+        // `create_new` never overwrites: another process (or a container
+        // with the same pid) writing this name makes us take the next seq.
+        loop {
+            let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = self.dir.join(format!("{stamp}-{pid}-{seq:04}.eml"));
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path);
+            match file {
+                Ok(mut f) => {
+                    use std::io::Write as _;
+                    return f.write_all(serialize_eml(email).as_bytes()).map_err(|e| {
+                        MailError::Transport(format!("write {}: {e}", path.display()))
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(MailError::Transport(format!(
+                        "write {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
     }
 }
 
@@ -876,6 +896,20 @@ mod tests {
         assert_eq!(e.to, vec!["a@x.com", "b@x.com"]);
         assert_eq!(e.from.as_deref(), Some("noreply@my.app"));
         assert_eq!(e.subject, "hi");
+    }
+
+    /// Two mailers on one directory stand in for two processes: each
+    /// starts at seq 0, so neither may overwrite the other (#2335).
+    #[tokio::test]
+    async fn file_mailers_sharing_a_dir_never_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (FileMailer::new(dir.path()), FileMailer::new(dir.path()));
+        let e = Email::new().to("a@x.com").subject("s").body("b");
+        for _ in 0..5 {
+            a.send(&e).await.unwrap();
+            b.send(&e).await.unwrap();
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 10);
     }
 
     #[tokio::test]
