@@ -2719,6 +2719,7 @@ async fn fk_index_drops(pool: &Pool) {
 async fn fk_index_drop_keeps_a_served_fk(pool: &Pool) {
     let (a, b) = ("mad_fo_author", "mad_fo_book");
     let chain = fk_index_chain(pool, "fo", a, b, true).await;
+    #[cfg(feature = "mysql")]
     if let Some(my) = pool.as_mysql() {
         let mut conn = my.acquire().await.unwrap();
         for sql in [
