@@ -224,22 +224,12 @@ impl Dialect for Postgres {
         true
     }
 
-    /// `bigint ILIKE text` has no operator, so a non-text column is
-    /// cast first (#2229).
-    fn write_ilike_typed(
-        &self,
-        sql: &mut String,
-        qualified_col: &str,
-        ty: Option<FieldType>,
-        placeholder: &str,
-        negated: bool,
-    ) {
+    /// `bigint LIKE text` has no operator, so a non-text column is
+    /// cast first (#2229, #2263).
+    fn like_operand(&self, qualified_col: &str, ty: Option<FieldType>) -> String {
         match ty {
-            Some(ty) if ty != FieldType::String => {
-                let cast = format!("CAST({qualified_col} AS TEXT)");
-                self.write_ilike(sql, &cast, placeholder, negated);
-            }
-            _ => self.write_ilike(sql, qualified_col, placeholder, negated),
+            Some(ty) if ty != FieldType::String => format!("CAST({qualified_col} AS TEXT)"),
+            _ => qualified_col.to_owned(),
         }
     }
 
