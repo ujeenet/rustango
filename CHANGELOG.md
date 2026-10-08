@@ -15,6 +15,14 @@ They now cover the committed `system/migrations/`, the scaffolded login-gated `a
 ### Fixed — README links work on crates.io (#1405)
 
 crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+### Fixed — admin search skips secret fields (#2228)
+
+`?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
+
+### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
+
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267). Autocomplete reads up to 5 pages to fill its limit past denied rows. A password-widget field in `list_filter` gets no facet.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
