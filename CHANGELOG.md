@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — live tests drop the databases they create (#2222)
+
+A per-test database is now a guard that drops it at the end, also when the test fails.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)

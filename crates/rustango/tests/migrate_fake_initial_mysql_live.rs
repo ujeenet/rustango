@@ -16,6 +16,10 @@ use rustango::migrate::{
 use rustango::sql::sqlx::{self, Row};
 use rustango::sql::Pool;
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 const LEDGER: &str = "__rustango_system_migrations__";
 
@@ -246,20 +250,8 @@ async fn migrate_from_a_dir_without_system_restores_the_schema_on_mysql() {
         eprintln!("skipping — set MYSQL_TEST_URL");
         return;
     };
-    let admin = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
-    let db = format!("rustango_1988_{}", std::process::id());
-    let (base, _) = url.rsplit_once('/').unwrap();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let my = sqlx::MySqlPool::connect(&format!("{base}/{db}"))
-        .await
-        .unwrap();
+    let db = ScratchDb::create(&url, "rustango_1988").await;
+    let my = sqlx::MySqlPool::connect(db.url()).await.unwrap();
     let pool = Pool::Mysql(my.clone());
     let root = std::env::temp_dir().join(format!("rustango_1988_my_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -295,9 +287,6 @@ async fn migrate_from_a_dir_without_system_restores_the_schema_on_mysql() {
     .unwrap();
     let present: (i64, i64) = (row.get("t"), row.get("c"));
     my.close().await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await;
     let _ = std::fs::remove_dir_all(&root);
     result.expect("a second dir migrates the same database");
     assert_eq!(present, (1, 1), "the dropped table or column was skipped");
@@ -312,26 +301,12 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
         eprintln!("skipping — set MYSQL_TEST_URL");
         return;
     };
-    let admin = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
-    let (base, _) = url.rsplit_once('/').unwrap();
     let pid = std::process::id();
-    let names: Vec<String> = ["reg", "t1", "t2", "t3"]
-        .iter()
-        .map(|n| format!("rustango_1988t_{n}_{pid}"))
-        .collect();
-    for db in &names {
-        sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE DATABASE {db}"))
-            .execute(&admin)
-            .await
-            .unwrap();
+    let mut dbs = Vec::new();
+    for n in ["reg", "t1", "t2", "t3"] {
+        dbs.push(ScratchDb::create(&url, &format!("rustango_1988t_{n}")).await);
     }
-    let reg = sqlx::MySqlPool::connect(&format!("{base}/{}", names[0]))
-        .await
-        .unwrap();
+    let reg = sqlx::MySqlPool::connect(dbs[0].url()).await.unwrap();
     let pools = rustango::tenancy::TenantPools::new(reg.clone());
     let registry = Pool::Mysql(reg);
     let root = std::env::temp_dir().join(format!("rustango_1988t_my_{pid}"));
@@ -344,20 +319,18 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
     rustango::tenancy::migrate_registry_pool(&registry, &dir("boot"))
         .await
         .unwrap();
-    for (slug, db) in ["t1", "t2", "t3"].iter().zip(&names[1..]) {
+    for (slug, db) in ["t1", "t2", "t3"].iter().zip(&dbs[1..]) {
         let mut org = rustango::tenancy::Org {
             slug: (*slug).into(),
             display_name: (*slug).into(),
             storage_mode: "database".into(),
             backend_kind: "mysql".into(),
-            database_url: Some(format!("{base}/{db}")),
+            database_url: Some(db.url().to_owned()),
             ..rustango::testkit::org()
         };
         org.insert_pool(&registry).await.unwrap();
     }
-    let t2 = sqlx::MySqlPool::connect(&format!("{base}/{}", names[2]))
-        .await
-        .unwrap();
+    let t2 = sqlx::MySqlPool::connect(dbs[2].url()).await.unwrap();
     let mut outcome = Ok(());
     for label in ["deploy1", "deploy2"] {
         let d = dir(label);
@@ -395,11 +368,6 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
     let present: (i64, i64) = (row.get("t"), row.get("c"));
     t2.close().await;
     registry.close().await;
-    for db in &names {
-        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-            .execute(&admin)
-            .await;
-    }
     let _ = std::fs::remove_dir_all(&root);
     outcome.expect("every tenant migrates");
     assert_eq!(

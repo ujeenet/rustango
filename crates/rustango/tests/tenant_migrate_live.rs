@@ -24,6 +24,10 @@ use rustango::migrate as rmig;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{migrate_registry, migrate_tenants, Org, StorageMode, TenantPools};
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
 fn unique(prefix: &str) -> String {
@@ -436,17 +440,11 @@ async fn tenant_migrate_skips_inactive_orgs() {
 #[tokio::test]
 async fn tenants_after_the_registry_restore_the_schema() {
     let _g = live_lock().lock().await;
-    let Some(admin) = pool().await else {
+    let Ok(base_url) = std::env::var("DATABASE_URL") else {
         return;
     };
-    let base_url = std::env::var("DATABASE_URL").unwrap();
-    let db = unique("rustango_1988_tenants");
-    let (base, _) = base_url.rsplit_once('/').unwrap();
-    let url = format!("{base}/{db}");
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    let db = ScratchDb::create(&base_url, "rustango_1988_tenants").await;
+    let url = db.url().to_owned();
     let pg = sqlx::PgPool::connect(&url).await.unwrap();
     let pools = TenantPools::new(pg.clone());
     let boot = fresh_dir("1988_boot");
@@ -493,9 +491,6 @@ async fn tenants_after_the_registry_restore_the_schema() {
     .await
     .unwrap();
     pg.close().await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-        .execute(&admin)
-        .await;
     assert!(table, "the 2nd tenant's dropped table was skipped");
     assert!(column, "the 2nd tenant's dropped column was skipped");
 }

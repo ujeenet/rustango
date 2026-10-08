@@ -9,10 +9,9 @@ use rustango::sql::sqlx;
 use rustango::sql::{CounterPool as _, FetcherPool as _};
 use rustango::tenancy::{manage, Org, TenantPools};
 
-fn sibling_database_url(url: &str, database: &str) -> String {
-    let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
-    format!("{base}/{database}")
-}
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
 
 /// FKs declared on `schema`'s tables whose target lives in another schema.
 async fn cross_schema_fks(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
@@ -45,15 +44,8 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
     let Ok(admin_url) = std::env::var("DATABASE_URL") else {
         return;
     };
-    let admin = sqlx::PgPool::connect(&admin_url).await.unwrap();
-    let db = "rustango_t1645";
-    let drop_db = format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)");
-    sqlx::query(&drop_db).execute(&admin).await.unwrap();
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let url = sibling_database_url(&admin_url, &db);
+    let db = ScratchDb::create(&admin_url, "rustango_t1645").await;
+    let url = db.url().to_owned();
 
     // The registry's `public` holds every framework table, `rustango_users` included.
     let registry = sqlx::PgPool::connect(&url).await.unwrap();
@@ -140,7 +132,6 @@ async fn seed_permissions_never_binds_a_tenant_fk_to_public() {
     drop(scoped);
     drop(pools);
     registry.close().await;
-    sqlx::query(&drop_db).execute(&admin).await.unwrap();
 }
 
 /// A tenant whose seeding fails must not stop the next one (#2156).
@@ -149,15 +140,8 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
     let Ok(admin_url) = std::env::var("DATABASE_URL") else {
         return;
     };
-    let admin = sqlx::PgPool::connect(&admin_url).await.unwrap();
-    let db = format!("rustango_t2156_{}", std::process::id());
-    let drop_db = format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)");
-    sqlx::query(&drop_db).execute(&admin).await.unwrap();
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let url = sibling_database_url(&admin_url, &db);
+    let db = ScratchDb::create(&admin_url, "rustango_t2156").await;
+    let url = db.url().to_owned();
     let registry = sqlx::PgPool::connect(&url).await.unwrap();
     rustango::testkit::migrate_framework(&rustango::sql::Pool::from(registry.clone()))
         .await
@@ -206,5 +190,4 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
     drop(scoped);
     drop(pools);
     registry.close().await;
-    sqlx::query(&drop_db).execute(&admin).await.unwrap();
 }
