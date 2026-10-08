@@ -136,6 +136,15 @@ impl ConnectDiagnosis {
     }
 }
 
+impl ConnectDiagnosis {
+    /// The advice and the endpoint, without the driver's text: for
+    /// anything stored or shown past the person probing (#2212).
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!("{} (tried {})", self.fault.advice(), self.endpoint)
+    }
+}
+
 impl fmt::Display for ConnectDiagnosis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Advice first: it is the part that is actionable, and the part
@@ -252,18 +261,21 @@ pub fn redact(url: &str) -> String {
         .collect()
 }
 
-fn redact_userinfo(url: &str) -> String {
+/// `url` as scheme, userinfo and the rest after the `@`, when it has a userinfo.
+pub(crate) fn split_userinfo(url: &str) -> Option<(&str, &str, &str)> {
     // `scheme://user:password@host:port/db?params`. Userinfo runs to the last
     // `@` before any `?`/`#`: a password may hold a raw `@` or `/` (#2109).
-    let Some((scheme, rest)) = url.split_once("://") else {
-        // `sqlite:path` and friends carry no credentials.
-        return url.to_owned();
-    };
+    // `sqlite:path` and friends carry no credentials.
+    let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split(['?', '#']).next().unwrap_or(rest);
-    let Some(at) = authority.rfind('@') else {
+    let at = authority.rfind('@')?;
+    Some((scheme, &rest[..at], &rest[at + 1..]))
+}
+
+fn redact_userinfo(url: &str) -> String {
+    let Some((scheme, userinfo, hostpart)) = split_userinfo(url) else {
         return url.to_owned();
     };
-    let (userinfo, hostpart) = (&rest[..at], &rest[at + 1..]);
     let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
     if userinfo.contains(':') {
         format!("{scheme}://{user}:***@{hostpart}")

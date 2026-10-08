@@ -1004,11 +1004,14 @@ fn clear_flow(mut resp: Response, path: &str) -> Response {
 /// template dependency, so it renders even when tenant templates are
 /// missing. Links back to the login page under `mount`.
 fn sso_error(message: &str, mount: &Mount) -> Response {
-    let back = mount.login_url();
+    let back = crate::text::html_escape(&mount.login_url());
+    let message = crate::text::html_escape(message);
+    // A nonce'd `<style>`, not a style attribute: strict CSP (#2144).
+    let nonce = crate::csp_nonce::nonce_attr();
     let html = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Sign-in error</title>\
-         <body style=\"font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem\">\
-         <h1>Sign-in error</h1><p>{message}</p><p><a href=\"{back}\">Back to sign-in</a></p></body>"
+         <style{nonce}>body{{font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem}}</style>\
+         <body><h1>Sign-in error</h1><p>{message}</p><p><a href=\"{back}\">Back to sign-in</a></p></body>"
     );
     Response::builder()
         .status(StatusCode::OK)
@@ -1029,6 +1032,41 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
+    /// #2144: the SSO error page passes a strict CSP: no style attribute,
+    /// and its `<style>` carries the request's nonce.
+    #[tokio::test]
+    async fn sso_error_page_passes_a_strict_csp() {
+        use crate::csp_nonce::{CspNonceLayer, CspNonceRouterExt as _, Nonce};
+        use tower::ServiceExt as _;
+        let app = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(|axum::Extension(n): axum::Extension<Nonce>| async move {
+                    let mount = Mount {
+                        path: "/".into(),
+                        login: "/login".into(),
+                    };
+                    let mut resp = sso_error("bad", &mount);
+                    resp.headers_mut()
+                        .insert("x-nonce", n.value().parse().unwrap());
+                    resp
+                }),
+            )
+            .csp_nonce(CspNonceLayer::default());
+        let req = axum::http::Request::new(Body::empty());
+        let resp = app.oneshot(req).await.unwrap();
+        let nonce = resp.headers()["x-nonce"].to_str().unwrap().to_owned();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!html.contains(" style="), "{html}");
+        assert!(
+            html.contains(&format!(r#"<style nonce="{nonce}">"#)),
+            "{html}"
+        );
     }
 
     // ---- A. domain separation (security-critical) -------------------

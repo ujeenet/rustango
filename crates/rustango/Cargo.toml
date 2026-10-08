@@ -143,7 +143,7 @@ _http_layers  = [
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 # `signals`: `test_settings` fires `setting_changed` (#1739).
-config = ["dep:toml", "signals"]
+config = ["dep:toml", "dep:serde_path_to_error", "signals"]
 
 # Public forms framework (`rustango::forms`) — value parsing for HTML
 # form payloads, shared between admin and user route handlers. Slice
@@ -511,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.60.1", path = "../rustango-macros" }
+rustango-macros = { version = "0.60.2", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -528,6 +528,7 @@ uuid         = { workspace = true }
 
 # `config` feature dep — optional.
 toml = { workspace = true, optional = true }
+serde_path_to_error = { workspace = true, optional = true }
 
 # `mcp` feature dep — optional. SSE stream macro for the server→client
 # notification channel (same crate the `sse` module's docs point at).

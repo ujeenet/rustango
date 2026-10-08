@@ -295,6 +295,12 @@ Pick rows with the checkboxes, choose the action in the picker, and submit
 register it. An action name listed in `admin(actions = ...)` without a
 registered handler simply won't appear.
 
+A custom action is checked like an edit: `{table}.change` plus an object hook
+named after the action. An action that deletes should say so with
+`register_action_with_perm(table, name, ActionPerm::Delete, handler)`, so it
+needs `{table}.delete` and runs the `delete` hook instead. It still needs
+`{table}.change`, and it is audited and signalled as an edit.
+
 ---
 
 ## Audit trail
@@ -467,6 +473,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `skip_count_for([tables])` | Skip `COUNT(*)` on huge tables (pager shows "Page N"). |
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
+| `register_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |

@@ -244,7 +244,7 @@ pub(super) async fn operator_create(
                 .await;
             }
         }
-        Err(e) => return back_err(&state, &op, &format!("Registry lookup failed: {e}")).await,
+        Err(e) => return back_err(&state, &op, &withheld(&op, "Registry lookup failed", &e)).await,
     }
 
     let generated = form.generate.is_some();
@@ -255,7 +255,12 @@ pub(super) async fn operator_create(
 
     let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
-        Err(e) => return back_err(&state, &op, &format!("Could not hash password: {e}")).await,
+        Err(e) => {
+            let msg = e
+                .user_facing()
+                .unwrap_or_else(|| withheld(&op, "Could not hash the password", &e));
+            return back_err(&state, &op, &msg).await;
+        }
     };
 
     let mut row = auth::Operator {
@@ -268,7 +273,8 @@ pub(super) async fn operator_create(
         sessions_revoked_at: None,
     };
     if let Err(e) = row.insert_pool(&state.registry).await {
-        return back_err(&state, &op, &format!("Could not create the operator: {e}")).await;
+        let msg = withheld(&op, "Could not create the operator", &e);
+        return back_err(&state, &op, &msg).await;
     }
 
     audit(&state, &op, id_of(&row), "operator_create", &username).await;
@@ -290,7 +296,7 @@ pub(super) async fn operator_set_active(
     Form(form): Form<ActiveForm>,
 ) -> Response<Body> {
     let activate = form.active.is_some();
-    let mut target = match one_operator(&state, id).await {
+    let mut target = match one_operator(&state, &op, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return back_err(&state, &op, "No such operator.").await,
         Err(e) => return back_err(&state, &op, &e).await,
@@ -308,6 +314,9 @@ pub(super) async fn operator_set_active(
             ));
         }
         Ok(ops::Outcome::Changed) => {}
+        Err(ops::OperatorError::Driver(e)) => {
+            return back_err(&state, &op, &withheld(&op, "Could not save", &e)).await
+        }
         Err(e) => return back_err(&state, &op, &sentence(&e.to_string())).await,
     }
 
@@ -332,7 +341,7 @@ pub(super) async fn operator_reset_password(
     Path(id): Path<i64>,
     Form(form): Form<ResetForm>,
 ) -> Response<Body> {
-    let mut target = match one_operator(&state, id).await {
+    let mut target = match one_operator(&state, &op, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return back_err(&state, &op, "No such operator.").await,
         Err(e) => return back_err(&state, &op, &e).await,
@@ -345,7 +354,12 @@ pub(super) async fn operator_reset_password(
     };
     let hash = match password::hash_async(&plain).await {
         Ok(h) => h,
-        Err(e) => return back_err(&state, &op, &format!("Could not hash password: {e}")).await,
+        Err(e) => {
+            let msg = e
+                .user_facing()
+                .unwrap_or_else(|| withheld(&op, "Could not hash the password", &e));
+            return back_err(&state, &op, &msg).await;
+        }
     };
 
     // The new hash is what signs them out: sessions carry a fingerprint
@@ -353,7 +367,7 @@ pub(super) async fn operator_reset_password(
     target.password_hash = hash;
     target.password_changed_at = Some(chrono::Utc::now());
     if let Err(e) = target.save_pool(&state.registry).await {
-        return back_err(&state, &op, &format!("Could not save: {e}")).await;
+        return back_err(&state, &op, &withheld(&op, "Could not save", &e)).await;
     }
 
     audit(&state, &op, id, "operator_reset_password", &target.username).await;
@@ -389,13 +403,27 @@ fn chosen_password(generate: bool, typed: &str, confirm: &str) -> Result<String,
     Ok(typed.to_owned())
 }
 
-async fn one_operator(state: &ConsoleState, id: i64) -> Result<Option<auth::Operator>, String> {
+async fn one_operator(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    id: i64,
+) -> Result<Option<auth::Operator>, String> {
     auth::Operator::objects()
         .where_(auth::Operator::id.eq(id))
         .fetch(&state.registry)
         .await
         .map(|rows: Vec<auth::Operator>| rows.into_iter().next())
-        .map_err(|e| format!("could not read the operator: {e}"))
+        .map_err(|e| withheld(op, "Could not read the operator", &e))
+}
+
+/// [`super::withheld`], logged under the acting operator (#2171).
+fn withheld(op: &auth::Operator, what: &str, e: &dyn std::fmt::Display) -> String {
+    super::withheld_in(
+        &tracing::error_span!("operator_console", operator = %op.username),
+        "operator_console::operators",
+        what,
+        e,
+    )
 }
 
 fn id_of(op: &auth::Operator) -> i64 {
