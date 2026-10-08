@@ -1,7 +1,8 @@
 //! Admin write errors on every backend: a bad action is a 400 (#2346);
 //! a refused write shows a plain message, never the driver's text (#2345);
 //! deleting a referenced row is a 409 naming a visible referrer (#2340); a bad
-//! inline row re-renders the form and saves no inline row (#2339).
+//! inline row re-renders the form and saves no inline row (#2339);
+//! `admin_post_save` fires only after the edit commits.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -255,13 +256,68 @@ async fn parent_names(pool: &Pool) -> Vec<String> {
         .collect()
 }
 
+/// Signal receivers are process-global; the SQLite arm takes no live lock.
+fn signal_lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// POST `form` to the parent edit page, recording what an `admin_post_save`
+/// receiver reads back from the pool for that parent.
+async fn post_recording_saves(
+    pool: &Pool,
+    p: i64,
+    form: &str,
+) -> (StatusCode, String, Vec<String>) {
+    use rustango::signals::admin::{clear_all, connect_admin_post_save};
+    use std::sync::{Arc, Mutex};
+    let _guard = signal_lock().lock().await;
+    clear_all();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (log, rx_pool) = (seen.clone(), pool.clone());
+    connect_admin_post_save(move |ctx| {
+        let (log, pool) = (log.clone(), rx_pool.clone());
+        async move {
+            if ctx.table != "wrerr_parent" {
+                return;
+            }
+            // Fired inside the tx, the read waits on SQLite's one connection.
+            let read = Parent::objects().fetch(&pool);
+            let name = match tokio::time::timeout(std::time::Duration::from_secs(5), read).await {
+                Ok(Ok(rows)) => rows
+                    .into_iter()
+                    .map(|r| r.name)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                Ok(Err(e)) => format!("read failed: {e}"),
+                Err(_) => "read blocked by the open tx".to_owned(),
+            };
+            log.lock().unwrap().push(name);
+        }
+    });
+    let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), form).await;
+    clear_all();
+    let seen = seen.lock().unwrap().clone();
+    (status, body, seen)
+}
+
+/// Control: a good edit fires `post_save` once, after the commit.
+async fn post_save_sees_the_committed_edit(pool: &Pool) {
+    let p = seed_parent(pool, "p").await;
+    let form = inline_form(&[("1", "fresh")]);
+    let (status, body, seen) = post_recording_saves(pool, p, &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(seen, ["renamed"], "post_save before the commit");
+}
+
 /// A refused inline write rolls back the inline rows and the parent edit (#2339).
 async fn refused_inline_write_rolls_back(pool: &Pool) {
     let p = seed_parent(pool, "p").await;
     seed_child(pool, p, "taken").await;
     let form = inline_form(&[("1", "fresh"), ("2", "taken")]);
-    let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
+    let (status, body, seen) = post_recording_saves(pool, p, &form).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(seen.is_empty(), "post_save on a rolled-back edit: {seen:?}");
     assert_eq!(notes(pool).await, ["taken"], "partial inline write kept");
     assert_eq!(parent_names(pool).await, ["p"], "parent edit kept");
     assert_no_driver_text(&body);
@@ -279,5 +335,6 @@ tri_dialect_test! {
         deleting_a_referenced_row_is_a_409,
         bad_inline_value_rerenders_the_form,
         refused_inline_write_rolls_back,
+        post_save_sees_the_committed_edit,
     ],
 }
