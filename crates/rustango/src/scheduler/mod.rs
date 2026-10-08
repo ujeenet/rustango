@@ -43,8 +43,12 @@
 //! ## Production note
 //!
 //! For multi-process deployments where the same job must run on exactly one
-//! node (not per-replica), pair this with the cache layer for distributed
-//! locks, or use an external scheduler (Kubernetes CronJob, GitHub Actions).
+//! node (not per-replica), wrap the job body in
+//! [`DistributedLock::once_per_period`] with the same period, or use an
+//! external scheduler (Kubernetes CronJob, GitHub Actions). `with_lock`
+//! is not enough: each pod ticks from its own start time.
+//!
+//! [`DistributedLock::once_per_period`]: crate::distributed_lock::DistributedLock::once_per_period
 
 use std::future::Future;
 use std::pin::Pin;
@@ -446,5 +450,43 @@ mod tests {
         assert!(a_count.load(Ordering::SeqCst) >= 1);
         assert!(b_count.load(Ordering::SeqCst) >= 1);
         handle.shutdown().await;
+    }
+
+    /// Two pods started apart share one lock: the job runs once per
+    /// period, not once per pod (#2330).
+    #[cfg(feature = "cache")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn staggered_pods_run_a_locked_job_once_per_period() {
+        use crate::cache::{BoxedCache, InMemoryCache};
+        use crate::distributed_lock::DistributedLock;
+        let period = Duration::from_millis(100);
+        let cache: BoxedCache = Arc::new(InMemoryCache::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let pod = |cache: BoxedCache| {
+            let s = Scheduler::new();
+            let lock = DistributedLock::new(cache);
+            let runs = runs.clone();
+            s.every("daily_report", period, move || {
+                let (lock, runs) = (lock.clone(), runs.clone());
+                async move {
+                    lock.once_per_period("daily_report", period, || async {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .await;
+                }
+            });
+            s.start()
+        };
+        let started = std::time::Instant::now();
+        let a = pod(cache.clone());
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let b = pod(cache);
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        a.shutdown().await;
+        b.shutdown().await;
+        let windows = started.elapsed().as_millis() / period.as_millis() + 1;
+        let runs = runs.load(Ordering::SeqCst) as u128;
+        assert!(runs >= 1, "the job never ran");
+        assert!(runs <= windows, "{runs} runs in {windows} periods");
     }
 }

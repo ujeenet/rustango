@@ -30,10 +30,20 @@
 //!     guard.release().await;
 //! }
 //!
-//! // Or use the closure form which auto-releases on drop:
-//! lock.with_lock("daily_report", Duration::from_secs(60), || async {
-//!     run_daily_report().await;
+//! // Or use the closure form, which releases when the body ends:
+//! lock.with_lock("rebuild_index", Duration::from_secs(60), || async {
+//!     rebuild_index().await;
 //! }).await;
+//!
+//! // From a scheduler: once per day across every pod. `with_lock`
+//! // would let a pod started later run it again the same day.
+//! let day = Duration::from_secs(86_400);
+//! scheduler.every("daily_report", day, move || {
+//!     let lock = lock.clone();
+//!     async move {
+//!         lock.once_per_period("daily_report", day, || run_daily_report()).await;
+//!     }
+//! });
 //! ```
 //!
 //! ## Warnings
@@ -166,6 +176,35 @@ impl DistributedLock {
         guard.release().await;
         Some(result)
     }
+
+    /// Run `body` at most once per `period` across every caller sharing
+    /// the cache. Use this, not [`Self::with_lock`], for a scheduled job.
+    ///
+    /// Windows follow the wall clock from the Unix epoch, so pods started
+    /// minutes apart agree on them. The lock is kept until its TTL, so a
+    /// later pod in the same window skips even after `body` finished.
+    pub async fn once_per_period<F, Fut, R>(
+        &self,
+        name: &str,
+        period: Duration,
+        body: F,
+    ) -> Option<R>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let period = period.max(Duration::from_millis(1));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let window = now.as_millis() / period.as_millis();
+        let guard = self
+            .try_acquire(&format!("{name}@{window}"), period)
+            .await?;
+        let result = body().await;
+        guard.keep_until_ttl();
+        Some(result)
+    }
 }
 
 /// Holds a lock until released or until the TTL expires.
@@ -181,6 +220,12 @@ impl LockGuard {
     /// nothing.
     pub async fn release(self) {
         self.release_inner().await;
+    }
+
+    /// Drop the guard without releasing: the TTL frees the lock.
+    fn keep_until_ttl(self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn release_inner(&self) {
@@ -373,6 +418,16 @@ mod tests {
         assert!(r.is_some());
         let g = l.try_acquire("job", Duration::from_secs(5)).await;
         assert!(g.is_some());
+    }
+
+    /// A finished period run keeps its lock, so a caller later in the
+    /// same window skips (#2330).
+    #[tokio::test]
+    async fn once_per_period_holds_the_window_after_the_body() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        assert_eq!(l.once_per_period("j", day, || async { 1 }).await, Some(1));
+        assert_eq!(l.once_per_period("j", day, || async { 2 }).await, None);
     }
 
     /// Unscoped, two tenants share one lock name and the second is
