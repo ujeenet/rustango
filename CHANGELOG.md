@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — M2M `set` with a repeated id (#2297)
+
+Repeated ids (e.g. a form posting `tags=1&tags=1`) are linked once instead of failing the whole set.
+
 ### Fixed — bulk_update and IN-list prefetches past the bind cap (#2295)
 
 `Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists.

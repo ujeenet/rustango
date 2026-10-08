@@ -5,7 +5,7 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
-use rustango::sql::{bulk_insert_pool, CounterPool as _, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{bulk_insert_pool, Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -45,6 +45,32 @@ pub struct Row {
     pub n: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rel2293_post",
+    app = "rel2293",
+    m2m(
+        name = "tags",
+        to = "rel2293_tag",
+        through = "rel2293_post_tag",
+        src = "post_id",
+        dst = "tag_id"
+    )
+)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_post_tag", app = "rel2293")]
+pub struct PostTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub post_id: i64,
+    pub tag_id: i64,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, Article::SCHEMA.table).await;
@@ -53,6 +79,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Editor>(pool).await;
     fresh_table::<Article>(pool).await;
     fresh_table::<Row>(pool).await;
+    fresh_table::<PostTag>(pool).await;
 }
 
 /// Article 1 has no editor; article 2 is edited by "Ada".
@@ -174,6 +201,17 @@ async fn in_bulk_past_the_bind_cap(pool: &Pool) {
     assert_eq!(got.len(), 10);
 }
 
+async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
+    let post = Post { id: 1 };
+    post.tags_m2m()
+        .set(&[3_i64, 3, 4], pool)
+        .await
+        .expect("a repeated id is linked once");
+    let mut tags = post.tags_m2m().all(pool).await.unwrap();
+    tags.sort_unstable();
+    assert_eq!(tags, vec![3, 4]);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -183,5 +221,6 @@ tri_dialect_test! {
         shared_first_hop_joins_once,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
+        m2m_set_ignores_repeated_ids,
     ],
 }
