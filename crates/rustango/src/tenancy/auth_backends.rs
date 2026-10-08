@@ -482,6 +482,9 @@ impl JwtBackend {
     /// authenticating until it expires, and a deployment can watch a
     /// shared Redis store fill with JTIs that all still work.
     ///
+    /// Without it, a single-login logout and a refresh-replay revoke go
+    /// unseen; a password change and logout-all still end the token (#2247).
+    ///
     /// Off by default because turning it on changes what an existing
     /// deployment's live tokens do, which is not a thing to do silently
     /// in a patch release.

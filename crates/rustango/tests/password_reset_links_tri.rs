@@ -87,6 +87,13 @@ async fn a_link_issued_after_the_last_change_works(pool: &Pool) {
     assert_ne!(hash(pool, id).await, "OLD-HASH");
 }
 
+async fn a_link_asked_for_just_after_a_change_works(pool: &Pool) {
+    let id = user(pool, Some(chrono::Utc::now())).await;
+    confirm_password_reset_pool(pool, &link(id), STRONG, SECRET)
+        .await
+        .expect("a link from the same second, after the change");
+}
+
 async fn a_link_without_an_issue_time_is_refused(pool: &Pool) {
     let id = user(pool, None).await;
     let url = format!("https://x/reset?user_id={id}&purpose=pwreset");
@@ -102,6 +109,7 @@ tri_dialect_test! {
         using_a_newer_link_ends_an_older_one,
         a_used_link_cannot_be_replayed,
         a_link_issued_after_the_last_change_works,
+        a_link_asked_for_just_after_a_change_works,
         a_link_without_an_issue_time_is_refused,
     ],
 }

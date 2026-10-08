@@ -77,22 +77,24 @@ async fn login_response(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
-    login_page(state, headers, error, false).await
+    login_page(state, extensions, headers, error, false).await
 }
 
 /// The authenticator-code step an SSO sign-in owes (#2249).
 #[cfg(all(feature = "admin-sso", feature = "totp"))]
 pub(super) async fn sso_totp_response(
     state: &AppState,
+    extensions: &axum::http::Extensions,
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
-    login_page(state, headers, error, true).await
+    login_page(state, extensions, headers, error, true).await
 }
 
 /// `totp_step` renders only the code field, posting to the SSO step.
 async fn login_page(
     state: &AppState,
+    extensions: &axum::http::Extensions,
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
     totp_step: bool,

@@ -117,12 +117,12 @@ impl PasswordReset {
             user_id,
             Self::PURPOSE,
             Self::ISSUED_AT,
-            chrono::Utc::now().timestamp(),
+            chrono::Utc::now().timestamp_micros(),
         );
         sign(&url, secret, Some(ttl))
     }
 
-    /// Query param holding the issue time, unix seconds.
+    /// Query param holding the issue time, unix microseconds.
     const ISSUED_AT: &'static str = "iat";
 
     /// [`Self::verify`] plus the link's issue time; `Expired` for a link
@@ -363,6 +363,7 @@ fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
 /// issue time. Only `rustango_users` is known to have it.
 #[cfg(feature = "passwords")]
 struct Rotation {
+    /// Unix microseconds, so a link asked for just after a change still works.
     link_issued_at: i64,
 }
 
@@ -372,6 +373,10 @@ impl Rotation {
 
     fn since(link_issued_at: i64) -> Self {
         Self { link_issued_at }
+    }
+
+    fn issued(&self) -> Result<chrono::DateTime<chrono::Utc>, AuthFlowError> {
+        chrono::DateTime::from_timestamp_micros(self.link_issued_at).ok_or(AuthFlowError::Malformed)
     }
 }
 
@@ -395,44 +400,92 @@ async fn write_password_hash(
     let hash = crate::passwords::hash_async(new_password)
         .await
         .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+    if let Some(rotation) = rotation {
+        let written = rotate_user_password(pool, user_id, hash, &rotation).await?;
+        // A changed password (or a missing row) ends the link (#2248).
+        return if written == 0 {
+            Err(AuthFlowError::Expired)
+        } else {
+            Ok(user_id)
+        };
+    }
+    // Raw: the table and columns are caller-named, so there is no model.
     let dialect = pool.dialect();
-    let t = dialect.quote_ident(user_table);
-    let pw = dialect.quote_ident(password_column);
-    let pk = dialect.quote_ident(pk_column);
-
-    let rot = dialect.quote_ident(Rotation::COLUMN);
-    let mut sets = format!("{pw} = {}", dialect.placeholder(1));
-    let mut args = vec![crate::core::SqlValue::String(hash)];
-    if rotation.is_some() {
-        // Same statement as the hash: a reset that rotated the password
-        // but not the timestamp would leave every existing session live,
-        // which is the failure this closes.
-        sets.push_str(&format!(", {rot} = {}", dialect.placeholder(2)));
-        args.push(crate::core::SqlValue::DateTime(chrono::Utc::now()));
-    }
-    // Binds follow text order: MySQL and SQLite placeholders are positional.
-    let mut sql = format!(
-        "UPDATE {t} SET {sets} WHERE {pk} = {}",
-        dialect.placeholder(args.len() + 1)
+    let sql = format!(
+        "UPDATE {} SET {} = {} WHERE {} = {}",
+        dialect.quote_ident(user_table),
+        dialect.quote_ident(password_column),
+        dialect.placeholder(1),
+        dialect.quote_ident(pk_column),
+        dialect.placeholder(2),
     );
-    args.push(crate::core::SqlValue::I64(user_id));
-    if let Some(rotation) = &rotation {
-        let since = chrono::DateTime::from_timestamp(rotation.link_issued_at, 0)
-            .ok_or(AuthFlowError::Malformed)?;
-        sql.push_str(&format!(
-            " AND ({rot} IS NULL OR {rot} < {})",
-            dialect.placeholder(args.len() + 1)
-        ));
-        args.push(crate::core::SqlValue::DateTime(since));
-    }
-    let written = crate::sql::raw_execute_pool(pool, &sql, args)
+    let args = vec![
+        crate::core::SqlValue::String(hash),
+        crate::core::SqlValue::I64(user_id),
+    ];
+    crate::sql::raw_execute_pool(pool, &sql, args)
         .await
         .map_err(|e| AuthFlowError::Database(e.to_string()))?;
-    // A changed password (or a missing row) ends the link (#2248).
-    if rotation.is_some() && written == 0 {
-        return Err(AuthFlowError::Expired);
-    }
     Ok(user_id)
+}
+
+/// Store `hash` and stamp the rotation, only while the password is
+/// unchanged since the link. Rows written.
+#[cfg(all(feature = "passwords", feature = "tenancy"))]
+async fn rotate_user_password(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    hash: String,
+    rotation: &Rotation,
+) -> Result<u64, AuthFlowError> {
+    use crate::core::Column as _;
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    use crate::tenancy::User;
+    let since = rotation.issued()?;
+    User::objects()
+        .where_(User::id.eq(user_id))
+        .where_(Q::is_null(Rotation::COLUMN) | Q::lt(Rotation::COLUMN, since))
+        .update()
+        .set_typed(User::password_hash.set(hash))
+        .set_typed(User::password_changed_at.set(Some(chrono::Utc::now())))
+        .execute_pool(pool)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))
+}
+
+/// [`rotate_user_password`] without `tenancy`. Raw: `rustango_users` has
+/// no model in that build (#2273).
+#[cfg(all(feature = "passwords", not(feature = "tenancy")))]
+async fn rotate_user_password(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    hash: String,
+    rotation: &Rotation,
+) -> Result<u64, AuthFlowError> {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let rot = d.quote_ident(Rotation::COLUMN);
+    // Binds follow text order: MySQL and SQLite placeholders are positional.
+    let sql = format!(
+        "UPDATE {} SET {} = {}, {rot} = {} WHERE {} = {} AND ({rot} IS NULL OR {rot} < {})",
+        d.quote_ident("rustango_users"),
+        d.quote_ident("password_hash"),
+        d.placeholder(1),
+        d.placeholder(2),
+        d.quote_ident("id"),
+        d.placeholder(3),
+        d.placeholder(4),
+    );
+    let args = vec![
+        SqlValue::String(hash),
+        SqlValue::DateTime(chrono::Utc::now()),
+        SqlValue::I64(user_id),
+        SqlValue::DateTime(rotation.issued()?),
+    ];
+    crate::sql::raw_execute_pool(pool, &sql, args)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))
 }
 
 // ------------------------------------------------------------------ Email verification

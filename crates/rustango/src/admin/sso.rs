@@ -224,7 +224,9 @@ async fn sso_callback(
     #[cfg(feature = "totp")]
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
         Ok(None) => {}
-        Ok(Some(_)) => return second_factor::prompt(&state, &headers, secret, &user).await,
+        Ok(Some(_)) => {
+            return second_factor::prompt(&state, &extensions, &headers, secret, &user).await
+        }
         Err(e) => {
             // Fail closed: an unreadable device is not "no second factor" (#1644).
             tracing::error!(target: "rustango::admin::sso", user_id = uid, error = %e, "cannot read the TOTP device");
@@ -321,6 +323,7 @@ mod second_factor {
     /// Ask for the code: the TOTP-only login form plus the pending cookie.
     pub(super) async fn prompt(
         state: &AppState,
+        extensions: &axum::http::Extensions,
         headers: &HeaderMap,
         secret: &session::AdminSessionSecret,
         user: &AdminUser,
@@ -335,7 +338,8 @@ mod second_factor {
             seal(secret, &pending),
             s = cookie_attrs(state.config.secure_cookies),
         );
-        let mut resp = crate::admin::login_view::sso_totp_response(state, headers, None).await;
+        let mut resp =
+            crate::admin::login_view::sso_totp_response(state, extensions, headers, None).await;
         if let Ok(v) = HeaderValue::from_str(&cookie) {
             resp.headers_mut().append(header::SET_COOKIE, v);
         }
@@ -355,6 +359,7 @@ mod second_factor {
     pub(super) async fn submit(
         State(state): State<AppState>,
         ip: crate::login_throttle::ClientIp,
+        extensions: axum::http::Extensions,
         headers: HeaderMap,
         axum::Form(form): axum::Form<CodeInput>,
     ) -> Response {
@@ -365,6 +370,7 @@ mod second_factor {
         if !crate::forms::csrf::verify_form_token(&headers, form.csrf_token.as_deref()) {
             return crate::admin::login_view::sso_totp_response(
                 &state,
+                &extensions,
                 &headers,
                 Some("Your session expired or the form was invalid. Please try again."),
             )
@@ -412,8 +418,21 @@ mod second_factor {
             } else {
                 attempt.failed().await;
             }
+            use crate::signals::auth::{send_user_login_failed, AuthFailureReason};
+            send_user_login_failed(crate::signals::auth::UserLoginFailedContext {
+                source: "admin",
+                attempted_username: Some(user.username.clone()),
+                reason: AuthFailureReason::InvalidCredentials,
+                request: crate::signals::auth::meta_from_parts(
+                    &extensions,
+                    &headers,
+                    Some("/login/sso-totp"),
+                ),
+            })
+            .await;
             return crate::admin::login_view::sso_totp_response(
                 &state,
+                &extensions,
                 &headers,
                 Some("Enter the 6-digit code from your authenticator app."),
             )

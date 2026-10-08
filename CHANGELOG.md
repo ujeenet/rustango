@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `JwtBackend` ends a login token with its session (#2247)
 
-A revoked refresh family, a password change or a logout-all now refuse the access token there too, as on `require_bearer`.
+A revoked refresh family, a password change or a logout-all now refuse the access token there too, as on `require_bearer`. Without `with_jti_store` it cannot see a single-login logout or a refresh-replay revoke; a password change and logout-all still apply.
 
 ### Fixed — a password change ends every older reset link (#2248)
 
