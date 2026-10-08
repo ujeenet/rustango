@@ -5,7 +5,9 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
-use rustango::sql::{bulk_insert_pool, Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{
+    bulk_insert_pool, Auto, CounterPool as _, ExecError, FetcherPool as _, ForeignKey, Pool,
+};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -211,6 +213,19 @@ async fn in_bulk_past_the_bind_cap(pool: &Pool) {
     assert_eq!(got.len(), 10);
 }
 
+/// Batching would apply the limit per batch, so it is refused instead.
+async fn sliced_in_bulk_past_the_bind_cap_is_refused(pool: &Pool) {
+    let err = Row::objects()
+        .limit(5)
+        .in_bulk(Row::id, 0..70_000_i64, |r| r.id, pool)
+        .await
+        .expect_err("a sliced queryset cannot be split");
+    assert!(
+        matches!(err, ExecError::InListTooLongForSlice { keys: 70_000, .. }),
+        "{err}"
+    );
+}
+
 async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
     let post = Post { id: 1 };
     post.tags_m2m()
@@ -256,6 +271,7 @@ tri_dialect_test! {
         shared_first_hop_joins_once,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
+        sliced_in_bulk_past_the_bind_cap_is_refused,
         m2m_set_ignores_repeated_ids,
         prefetch_generic_keeps_i32_pks,
     ],

@@ -317,6 +317,16 @@ pub enum ExecError {
     #[error("m2m on `{through}` needs a saved source row; its primary key is unset")]
     M2mUnsavedSource { through: &'static str },
 
+    /// A prefetch or `in_bulk` needed more keys than one `IN` list takes, on a
+    /// queryset with a limit or offset that batching would change (#2295).
+    #[error(
+        "`{table}`: {keys} keys exceed one IN list ({max}) and the queryset has a limit or offset"
+    )]
+    InListTooLongForSlice {
+        table: &'static str,
+        keys: usize,
+        max: usize,
+    },
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
     /// filter that matches more than one row, so there is no single
     /// object to return. Tighten the filter or use

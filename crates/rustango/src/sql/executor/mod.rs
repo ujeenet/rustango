@@ -93,8 +93,12 @@ pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static s
 
 /// Run `fetch` once per slice of `keys` that fits one `IN` list under the
 /// backend's bind cap, and concatenate the rows (#2295).
+///
+/// `sliced` is whether the query carries a limit or offset; see [`in_chunk_size`].
 pub(crate) async fn fetch_in_chunks<C, F, Fut>(
     pool: &Pool,
+    table: &'static str,
+    sliced: bool,
     keys: Vec<SqlValue>,
     mut fetch: F,
 ) -> Result<Vec<C>, ExecError>
@@ -102,15 +106,35 @@ where
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params()).max(1);
-    if keys.len() <= budget {
+    let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params());
+    let size = in_chunk_size(table, keys.len(), budget, sliced)?;
+    if keys.len() <= size {
         return fetch(keys).await;
     }
     let mut out = Vec::new();
-    for chunk in keys.chunks(budget) {
+    for chunk in keys.chunks(size) {
         out.extend(fetch(chunk.to_vec()).await?);
     }
     Ok(out)
+}
+
+/// Keys per `IN` list: `budget` (at least 1). A limit or offset would apply
+/// per batch, so a sliced query over budget is refused instead.
+fn in_chunk_size(
+    table: &'static str,
+    keys: usize,
+    budget: usize,
+    sliced: bool,
+) -> Result<usize, ExecError> {
+    let budget = budget.max(1);
+    if sliced && keys > budget {
+        return Err(ExecError::InListTooLongForSlice {
+            table,
+            keys,
+            max: budget,
+        });
+    }
+    Ok(budget)
 }
 
 /// True when a `select_related` LEFT JOIN under `alias` matched no row:
@@ -2909,7 +2933,8 @@ where
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let rows = fetch_in_chunks(pool, id_values, |keys| {
+        let sliced = self.is_sliced();
+        let rows = fetch_in_chunks(pool, T::SCHEMA.table, sliced, id_values, |keys| {
             self.clone()
                 .filter_op(
                     C::COLUMN,
@@ -2998,6 +3023,26 @@ where
 
 mod iter;
 pub use iter::ChunkedIter;
+
+#[cfg(test)]
+mod in_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn a_sliced_query_over_budget_is_refused() {
+        assert_eq!(in_chunk_size("t", 10, 10, true).unwrap(), 10);
+        assert!(matches!(
+            in_chunk_size("t", 11, 10, true),
+            Err(ExecError::InListTooLongForSlice {
+                keys: 11,
+                max: 10,
+                ..
+            })
+        ));
+        assert_eq!(in_chunk_size("t", 11, 10, false).unwrap(), 10);
+        assert_eq!(in_chunk_size("t", 5, 0, false).unwrap(), 1);
+    }
+}
 
 #[cfg(test)]
 mod pool_dispatch_tests {

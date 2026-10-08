@@ -959,6 +959,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Whether a limit or offset is set, on the query or its head branch.
+    pub(crate) fn is_sliced(&self) -> bool {
+        self.limit.is_some()
+            || self.offset.is_some()
+            || self.head_limit.is_some()
+            || self.head_offset.is_some()
+    }
+
     /// Whether any `ORDER BY` item is registered. The executor's
     /// `ensure_pk_ordering` uses it to spot "no ordering set" without
     /// looking at the entry variants.
