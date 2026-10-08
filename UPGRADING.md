@@ -156,7 +156,7 @@ untouched.
 
 ### A provisioning retry only resumes a never-activated tenant
 
-Once an operator activates or deactivates a tenant, a webhook replay for its failed run fails as "slug already exists" (#2292).
+Activating an org, editing an active one, or deactivating it drops its link to failed provision runs. A half-provisioned tenant activated by hand can no longer be resumed; a replay fails as "slug already exists" (#2292).
 
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
