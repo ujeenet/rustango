@@ -291,6 +291,26 @@ async fn bad_inline_value_rerenders_the_form(pool: &Pool) {
     assert_eq!(parent_names(pool).await, ["p"]);
 }
 
+/// A bad value or PK on an existing inline row refuses too, not skips (#2339).
+async fn bad_existing_inline_row_rerenders_the_form(pool: &Pool) {
+    let p = seed_parent(pool, "p").await;
+    seed_child(pool, p, "c").await;
+    let cid = *Child::objects().fetch(pool).await.expect("fetch")[0]
+        .id
+        .get()
+        .expect("pk");
+    for (id, qty) in [(cid.to_string(), "abc"), ("xyz".to_owned(), "2")] {
+        let form = format!(
+            "name=renamed&wrerr_child-TOTAL_FORMS=1&wrerr_child-INITIAL_FORMS=1\
+             &wrerr_child-0-id={id}&wrerr_child-0-qty={qty}&wrerr_child-0-note=c"
+        );
+        let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {body}");
+        assert!(body.contains("Child row 1"), "{id}: {body}");
+        assert_eq!(parent_names(pool).await, ["p"], "{id}");
+    }
+}
+
 async fn parent_names(pool: &Pool) -> Vec<String> {
     Parent::objects()
         .fetch(pool)
@@ -428,6 +448,7 @@ tri_dialect_test! {
         fk_refusal_is_a_plain_message,
         deleting_a_referenced_row_is_a_409,
         bad_inline_value_rerenders_the_form,
+        bad_existing_inline_row_rerenders_the_form,
         refused_inline_write_rolls_back,
         post_save_sees_the_committed_edit,
         rolled_back_edit_leaves_no_audit_row,
