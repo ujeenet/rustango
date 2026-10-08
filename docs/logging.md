@@ -422,6 +422,12 @@ The span carries `http.request.method`, `url.path`, `url.query`,
 recorded too, which is what a `tracing-opentelemetry` layer picks up to join
 the trace.
 
+Status, body size and duration are recorded when the response comes back,
+after the request's events are already written. The `fmt` subscriber prints
+span fields only on events, so it never shows those three. Read them from the
+access-log line, or from an OpenTelemetry layer, which reads the span when it
+closes.
+
 This layer earns its keep through the tenant field: because the fields sit on
 the *span*, every event emitted during the request — including the ORM's —
 carries them in span context, with no subsystem knowing what a tenant is.
@@ -481,5 +487,5 @@ covers.
 - **Two subscribers, second one ignored.** `try_init` means first install wins.
   If you call `logging::setup()` *and* `Cli::with_logging()`, the
   settings-driven one loses. `install()` warns when this happens — look for
-  `[logging] settings ignored` on stderr. Under `#[rustango::main]`, add
+  `logging setup ignored` on stderr. Under `#[rustango::main]`, add
   `logging = false`.

@@ -55,10 +55,12 @@ pub fn parse_target(url: &str) -> Result<DbTarget, String> {
     if url.is_empty() {
         return Err("DATABASE_URL is empty".to_owned());
     }
-    let (scheme, rest) = url
-        .split_once("://")
-        .or_else(|| url.split_once(":"))
-        .ok_or_else(|| format!("DATABASE_URL has no scheme: `{url}`"))?;
+    // The scheme ends at the first `:`; a later `://` (say, in the query)
+    // would put userinfo in it, and it is echoed below.
+    let (scheme, after) = url
+        .split_once(':')
+        .ok_or_else(|| "DATABASE_URL has no scheme".to_owned())?;
+    let rest = after.strip_prefix("//").unwrap_or(after);
 
     match scheme.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" => Ok(parse_userinfo_host_db(rest, |h, p, u, pw, db| {
@@ -387,6 +389,14 @@ mod tests {
         let err = parse_target("redis://localhost").unwrap_err();
         assert!(err.contains("unsupported"), "got: {err}");
         assert!(err.contains("redis"), "got: {err}");
+    }
+
+    /// The echoed scheme stops at the first `:`, before any userinfo.
+    #[test]
+    fn an_unknown_scheme_error_never_shows_userinfo() {
+        let err = parse_target("x:pw@h/db?a=b://c").unwrap_err();
+        assert!(err.contains("`x`"), "got: {err}");
+        assert!(!err.contains("pw"), "got: {err}");
     }
 
     #[test]

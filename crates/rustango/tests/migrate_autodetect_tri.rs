@@ -1530,10 +1530,6 @@ async fn rebuild_uses_the_shape_at_its_op(pool: &Pool) {
 /// #2140 — a rebuild before a RenameTable of the same table keeps its CHECK,
 /// which the final snapshot keys by the new name.
 async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
-    if pool.dialect().name() == "mysql" {
-        eprintln!("skipping — MySQL renders the alter against the final snapshot (#2149)");
-        return;
-    }
     let (t, u) = ("mad_rk_old", "mad_rk_new");
     let chain = Chain::new(pool, "rk", &[u, t]).await;
     let with = |name: &str, default: Value| {
@@ -1572,6 +1568,357 @@ async fn rebuild_before_rename_keeps_checks(pool: &Pool) {
         "the CHECK survives on {}",
         pool.dialect().name()
     );
+}
+
+/// #2149 — an FK column's UNIQUE dropped before its table is renamed: MySQL
+/// still finds the FK that the index backs.
+async fn fk_unique_drop_before_rename(pool: &Pool) {
+    let (a, t, u) = ("mad_fr_author", "mad_fr_old", "mad_fr_new");
+    let chain = Chain::new(pool, "fr", &[u, t, a]).await;
+    let with = |name: &str, unique: bool| {
+        let mut owner = fk(a);
+        owner["unique"] = json!(unique);
+        json!({"tables": [table(a, vec![id()]),
+                          table(name, vec![id(), col("author_id", "i64", owner)])]})
+    };
+    chain.step(pool, with(t, true)).await.expect("initial");
+    chain
+        .hand(
+            pool,
+            with(u, false),
+            vec![
+                SchemaChange::AlterColumnUnique {
+                    table: t.into(),
+                    column: "author_id".into(),
+                    unique: false,
+                },
+                SchemaChange::RenameTable {
+                    old_name: t.into(),
+                    new_name: u.into(),
+                },
+            ],
+            None,
+        )
+        .await
+        .expect("drop unique then rename");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 1)"),
+            &[u, "id", "author_id"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+}
+
+/// #2188 review — the FK that comes back before a rename names the tables
+/// as they are then: a self-FK, and a target renamed later.
+async fn fk_comes_back_under_names_at_its_op(pool: &Pool) {
+    let (t, u) = ("mad_sf_old", "mad_sf_new");
+    let chain = Chain::new(pool, "sf", &[u, t]).await;
+    let with = |name: &str, unique: bool| {
+        let mut parent = fk(name);
+        parent["unique"] = json!(unique);
+        json!({"tables": [table(name, vec![id(), col("parent_id", "i64", parent)])]})
+    };
+    chain.step(pool, with(t, true)).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AlterColumnUnique {
+            table: t.into(),
+            column: "parent_id".into(),
+            unique: false,
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(u, false), ops, None)
+        .await
+        .expect("self-FK: drop unique then rename");
+    for (id, parent) in [(1, "NULL"), (2, "1"), (3, "1")] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, {parent})"),
+            &[u, "id", "parent_id"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+
+    let (a, a2, t, u) = ("mad_rt_a", "mad_rt_a2", "mad_rt_old", "mad_rt_new");
+    let chain = Chain::new(pool, "rt", &[u, t, a2, a]).await;
+    let with = |a: &str, name: &str, unique: bool| {
+        let mut owner = fk(a);
+        owner["unique"] = json!(unique);
+        json!({"tables": [table(a, vec![id()]),
+                          table(name, vec![id(), col("author_id", "i64", owner)])]})
+    };
+    chain.step(pool, with(a, t, true)).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AlterColumnUnique {
+            table: t.into(),
+            column: "author_id".into(),
+            unique: false,
+        },
+        SchemaChange::RenameTable {
+            old_name: a.into(),
+            new_name: a2.into(),
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(a2, u, false), ops, None)
+        .await
+        .expect("renamed target: drop unique then renames");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a2, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 1)"),
+            &[u, "id", "author_id"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (3, 99)",
+            &[u, "id", "author_id"]
+        )
+        .await
+        .is_err(),
+        "the FK into {a2} is back on {}",
+        pool.dialect().name()
+    );
+}
+
+/// #2188 review — an ON DELETE change before a rename of its table.
+async fn on_delete_change_before_rename(pool: &Pool) {
+    let (a, t, u) = ("mad_odr_author", "mad_odr_old", "mad_odr_new");
+    let chain = Chain::new(pool, "odr", &[u, t, a]).await;
+    let with = |name: &str, action: &str| {
+        let owner = json!({"fk": {"kind": "fk", "to": a, "on": "id", "on_delete": action}});
+        json!({"tables": [table(a, vec![id()]),
+                          table(name, vec![id(), col("author_id", "i64", owner)])]})
+    };
+    chain.step(pool, with(t, "CASCADE")).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AlterFkOnDelete {
+            table: t.into(),
+            column: "author_id".into(),
+            from: Some("CASCADE".into()),
+            to: Some("SET NULL".into()),
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(u, "SET NULL"), ops, None)
+        .await
+        .expect("on delete then rename");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1)",
+        &[u, "id", "author_id"],
+    )
+    .await
+    .unwrap();
+    exec(pool, "DELETE FROM {} WHERE {} = 1", &[a, "id"])
+        .await
+        .unwrap();
+    let sql = q(pool, "SELECT {} FROM {}", &["author_id", u]);
+    let got: Vec<(Option<i64>,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(None,)], "SET NULL on {}", pool.dialect().name());
+}
+
+/// #2188 review — a column's UNIQUE dropped before a rename keeps the
+/// declared unique index on it.
+async fn declared_index_survives_unique_drop_before_rename(pool: &Pool) {
+    let (t, u) = ("mad_di_old", "mad_di_new");
+    let chain = Chain::new(pool, "di", &[u, t]).await;
+    let with = |name: &str, unique: bool| {
+        json!({"tables": [table(name, vec![id(), col("code", "i64", json!({"unique": unique}))])],
+               "indexes": [{"name": "mad_di_code_uq", "table": name, "columns": ["code"], "unique": true}]})
+    };
+    chain.step(pool, with(t, true)).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AlterColumnUnique {
+            table: t.into(),
+            column: "code".into(),
+            unique: false,
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(u, false), ops, None)
+        .await
+        .expect("drop unique then rename");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 5)",
+        &[u, "id", "code"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 5)",
+            &[u, "id", "code"]
+        )
+        .await
+        .is_err(),
+        "the declared index still makes code unique on {}",
+        pool.dialect().name()
+    );
+}
+
+/// #2190 — a composite FK added before its table is renamed.
+async fn composite_fk_add_before_rename(pool: &Pool) {
+    let (parent, t, u) = ("mad_cr_parent", "mad_cr_old", "mad_cr_new");
+    let chain = Chain::new(pool, "cr", &[u, t, parent]).await;
+    let ab = || vec![id(), col("a", "i64", json!({})), col("b", "i64", json!({}))];
+    let with = |name: &str, with_fk: bool| {
+        let mut kid = table(name, ab());
+        if with_fk {
+            kid["composite_fks"] =
+                json!([{"name": "mad_cr_fk", "to": parent, "from": ["a", "b"], "on": ["a", "b"]}]);
+        }
+        json!({"tables": [table(parent, ab()), kid],
+               "indexes": [{"name": "mad_cr_ab_uq", "table": parent, "columns": ["a", "b"],
+                            "unique": true}]})
+    };
+    chain.step(pool, with(t, false)).await.expect("initial");
+    let ops = vec![
+        SchemaChange::AddCompositeFk {
+            table: t.into(),
+            name: "mad_cr_fk".into(),
+            to: parent.into(),
+            from: vec!["a".into(), "b".into()],
+            on: vec!["a".into(), "b".into()],
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, with(u, true), ops, None)
+        .await
+        .expect("add composite FK then rename");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[u, "id", "a", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+}
+
+/// #2195 review — as above, with its columns and its target renamed later.
+async fn composite_fk_add_before_target_and_column_renames(pool: &Pool) {
+    let (p, p2, t, u) = (
+        "mad_cc_parent",
+        "mad_cc_parent2",
+        "mad_cc_old",
+        "mad_cc_new",
+    );
+    let chain = Chain::new(pool, "cc", &[u, t, p2, p]).await;
+    let cols = |a: &str, b: &str| vec![id(), col(a, "i64", json!({})), col(b, "i64", json!({}))];
+    let snap = |p: &str, pb: &str, kid: Value| {
+        json!({"tables": [table(p, cols("a", pb)), kid],
+               "indexes": [{"name": "mad_cc_ab_uq", "table": p, "columns": ["a", pb],
+                            "unique": true}]})
+    };
+    chain
+        .step(pool, snap(p, "b", table(t, cols("a", "b"))))
+        .await
+        .expect("initial");
+    let mut kid = table(u, cols("a2", "b"));
+    kid["composite_fks"] =
+        json!([{"name": "mad_cc_fk", "to": p2, "from": ["a2", "b"], "on": ["a", "b2"]}]);
+    let ops = vec![
+        SchemaChange::AddCompositeFk {
+            table: t.into(),
+            name: "mad_cc_fk".into(),
+            to: p.into(),
+            from: vec!["a".into(), "b".into()],
+            on: vec!["a".into(), "b".into()],
+        },
+        SchemaChange::RenameColumn {
+            table: t.into(),
+            old_column: "a".into(),
+            new_column: "a2".into(),
+        },
+        SchemaChange::RenameColumn {
+            table: p.into(),
+            old_column: "b".into(),
+            new_column: "b2".into(),
+        },
+        SchemaChange::RenameTable {
+            old_name: p.into(),
+            new_name: p2.into(),
+        },
+        SchemaChange::RenameTable {
+            old_name: t.into(),
+            new_name: u.into(),
+        },
+    ];
+    chain
+        .hand(pool, snap(p2, "b2", kid), ops, None)
+        .await
+        .expect("add composite FK, then column and table renames");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+            &[u, "id", "a2", "b"]
+        )
+        .await
+        .is_err(),
+        "the composite FK holds on {}",
+        pool.dialect().name()
+    );
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 9, 9)",
+        &[p2, "id", "a", "b2"],
+    )
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (2, 9, 9)",
+        &[u, "id", "a2", "b"],
+    )
+    .await
+    .expect("a row that matches the parent");
 }
 
 /// SQLite: a rebuild that orphans a row rolls back; an orphan that was
@@ -2411,6 +2758,12 @@ tri_dialect_test!(
         hand_named_and_composite_fks_survive,
         rebuild_uses_the_shape_at_its_op,
         rebuild_before_rename_keeps_checks,
+        fk_unique_drop_before_rename,
+        fk_comes_back_under_names_at_its_op,
+        on_delete_change_before_rename,
+        composite_fk_add_before_rename,
+        composite_fk_add_before_target_and_column_renames,
+        declared_index_survives_unique_drop_before_rename,
         rebuild_checks_only_its_own_orphans,
         legacy_pg_runner_replaces_the_fk,
         cross_ledger_squash_runs_its_other_changes,

@@ -24,6 +24,143 @@ A `case_insensitive` change is an `AlterColumnType`, a comment change the new `A
 
 `CREATE EXTENSION IF NOT EXISTS citext` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`.
 
+## [0.60.2] — 2026-10-07
+
+### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
+
+A `citext`, `pg_trgm` or `vector` column no longer fails the restore: the extension is created on the target and the restored objects use it, both ways. Only extensions the tenant uses are created, and only trusted ones unless `--allow-extension` names them.
+
+### Fixed — `AddCompositeFk` before a `RenameTable` on MySQL and PG (#2190)
+
+The deferred FK names the tables as they are at the end of the migration.
+
+### Fixed — `migrate-tenant-storage --to database` from schema mode (#2189)
+
+The restored schema is renamed to `public` in the same transaction as the restore, replacing the new database's empty `public`.
+
+### Fixed — MySQL AlterColumn* before a RenameTable in one migration (#2149)
+
+The MODIFY uses the table's shape at its op, like SQLite's rebuild, so it no longer fails on the old name. An `AlterFkOnDelete` before a rename works on MySQL and PG too.
+
+### Fixed — parallel `create_collection` deadlocked on MySQL (#2182)
+
+The tombstone is looked up first and deleted by id; a DELETE by an unused slug gap-locked the index.
+
+### Fixed — `migrate-tenant-storage --to schema` restores the data (#1864)
+
+`psql -c` ignored the piped dump. The dump now goes through a staging database that renames `public` to the target schema; the smoke check runs before the Org row moves, and passwords go in `PGPASSWORD`, not argv.
+
+### Fixed — strict CSP on the SSO error page; no server HTML in `innerHTML` (#2144)
+
+The member SSO error page uses a nonce'd `<style>`. The console connection probe returns JSON the page renders as text, and the admin autocomplete builds its options as nodes, so row text is never parsed as HTML.
+
+### Added — admin actions can require `delete` with `ActionPerm` (#1818)
+
+`register_action_with_perm(.., ActionPerm::Delete, ..)` checks `{table}.delete` and the `delete` hook instead of `change`; the tenant admin and server builders have it too.
+
+### Added — `LoginThrottle::with_cache` shares login limits across replicas (#1809)
+
+The per-IP and global login limits can count in a Redis or database cache; the first login warns while they count per process.
+
+### Security — `PoolError::UnsupportedScheme` holds the scheme only (#2172)
+
+It used to hold the whole URL, password included.
+
+### Security — `ConfigError::Shape` never quotes the value (#2159)
+
+It names the key and the expected type; the TOML value can be a secret.
+
+### Security — webhook Debug shows the URL origin and header names only (#2161)
+
+`WebhookSubscription` and `WebhookEvent` no longer print the URL path, query or a header value.
+
+### Security — operator console withholds driver text on every redirect (#2171)
+
+Operator, decommission, pre-warm, org-edit and password-hash failures log the cause and show an opaque message.
+
+### Security — tenant-create form and run stream withhold driver text (#2193)
+
+A failed `provision()` and a failed run read show an opaque message; the cause is logged.
+
+### Security — provisioning run log stores operator-safe failure text (#2198)
+
+A failed step's event and the run's `error` keep validation text, else "Step failed (…)"; the cause is logged with the org slug and run id.
+
+### Security — migration failures in the run log withhold driver text (#2209)
+
+Provision and console "Run migrations" runs store "`<name>` failed (…)" and log the cause. Both now render migration events through one renderer, so provision runs log them as `plan` / `tenant` / `migration` steps.
+
+### Security — run-log text is a type; connection checks keep the driver's words out (#2212)
+
+New `append_event_text` and `finish_run_text` take `RunText`, which cannot hold raw error text; `append_event` and `finish_run` are deprecated. A failed connection check stores the advice and endpoint and logs the driver detail. Each tenant's failure is logged once, under a `ref` the stored lines repeat.
+
+### Security — `Settings` Debug redacts secrets
+
+`database.url` and `cache.redis_url` show without their password; `sso.client_secret` and `mail.smtp_password` show as `<redacted>`.
+
+### Fixed — admin CSRF follows the outer layer's cookie (#2160)
+
+Under `csrf::with_config`, admin pages and both login forms set and check that layer's cookie name and `Secure` flag; POSTs no longer 403.
+
+### Fixed — the translations editor clears one locale's override (#2091)
+
+Emptying a cell the page showed non-empty deletes that `(locale, key)` row, so the locale falls back to its file. A gap someone filled after the page loaded is kept.
+
+### Fixed — SQLite honours a DB default on an integer primary key (#2137)
+
+A non-`Auto` integer PK with a `default` is created as `BIGINT`, not the rowid alias that skipped the default.
+
+### Fixed — ViewSet PATCH validates the row it overwrites (#2010)
+
+The cross-field check reads the row locked, and the UPDATE and its audit entry run in the same transaction.
+
+### Fixed — two tenants can no longer claim one host at once (#2099)
+
+`add_host`, tenant edit and tenant create claim the host through its `rustango_org_hosts` unique index in the write's transaction; a concurrent claim waits, then is refused. A MySQL deadlock between two claims is retried once.
+
+### Fixed — media collection listing is paged (#1570)
+
+`GET /collections` takes `?limit=&offset=` (max 1000) through the new `list_collections_paged`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0. `list_collections` is deprecated and still unbounded.
+
+### Fixed — `GET /tags` reads one page of tags (#1570)
+
+It pages by slug through the new `MediaManager::list_tags` instead of counting every tag link for `popular_tags(1000)`. With no `?limit` it returns 1000 rows; that default drops to 100 in 0.61.0.
+
+### Fixed — tagging costs a fixed number of queries (#1570)
+
+`tag` and `set_tags` resolve and link all slugs in batched statements instead of two round trips per slug, and refuse more than 1000 distinct slugs. `set_tags` retries its transaction when the server reports a deadlock, which two concurrent sets on MySQL hit.
+
+### Fixed — recursive collection listing past the bind limit (#1570)
+
+A subtree with more collections than the backend's bind limit is listed in several `IN` lists instead of failing; there, an `offset` above 10 000 is refused with 400.
+
+### Fixed — test hygiene (#2165, #2166, #1945, #1941)
+
+- The FileCache add race test backdates its entry instead of waiting on a 1 ms wall-clock TTL (#2165).
+- One-backend builds compile their tests under `-D warnings`: typed `Pool` accessors replace irrefutable patterns (#2166).
+- `cache_db_long_keys_tri` gives each scenario its own table, so parallel runs no longer drop each other's (#1945).
+- Test-only helpers are gated on the features that use them (#1941).
+
+### Fixed — logging follow-ups from the #1479 reviews (#1493)
+
+The access log writes its field list once; query redaction no longer allocates for a clean query; `#[rustango::main]` installs through `logging::Setup`; `bin/bump-version.sh` no longer rewrites an inline third-party pin at our version (a `[dependencies.foo]` table still matches). `docs/logging.md` now says `fmt` never shows the span's status, size and duration.
+
+### Fixed — flaky SQLite file-pool test on Windows (#2205)
+
+The testkit self-test holds all connections at once, then inserts one at a time, so it no longer races the write lock.
+
+### Fixed — MySQL `DoNothing`/`DoUpdate` on an auto-increment PK no longer fails with 1869 (#2200)
+
+The no-op write now targets a non-auto-increment column, so two rows of one batch that hit the same unique key are skipped or merged.
+
+### Fixed — ViewSet OpenAPI lists the 409 conflict response on create and update (#2164)
+
+POST, PUT and PATCH map a unique violation to 409; the spec now says so.
+
+### Fixed — ViewSet OpenAPI lists every write status (#2207)
+
+PUT and PATCH now list `400` and the `204` sent when the updated row leaves the caller's scope; the `201` notes its empty body in the same case.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

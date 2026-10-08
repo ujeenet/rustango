@@ -765,19 +765,14 @@ pub fn ensure_token(
     ensure_token_for(headers, &CsrfCookieSpec::session_policy(cookie_name))
 }
 
-/// [`ensure_token`] for `cookie_name`, with `Secure` chosen as the CSRF
-/// layer on this request chooses it (#2117).
+/// [`ensure_token`] for the cookie, name and `Secure`, of the CSRF layer
+/// on this request (#2117, #2160).
 #[cfg(feature = "admin")]
 pub(crate) fn ensure_token_under_layer(
     headers: &axum::http::HeaderMap,
     extensions: &axum::http::Extensions,
-    cookie_name: &str,
 ) -> (String, Option<String>) {
-    let spec = CsrfCookieSpec {
-        name: cookie_name.to_owned(),
-        secure: CsrfCookieSpec::active(extensions).secure,
-    };
-    ensure_token_for(headers, &spec)
+    ensure_token_for(headers, &CsrfCookieSpec::active(extensions))
 }
 
 fn ensure_token_for(
@@ -808,11 +803,30 @@ fn ensure_token_for(
 /// token in the handler would set two conflicting cookies.
 #[must_use]
 pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str>) -> bool {
+    verify_form_token_named(headers, CSRF_COOKIE, submitted)
+}
+
+/// [`verify_form_token`] against the cookie of the CSRF layer on this
+/// request, so it checks the cookie [`ensure_token_under_layer`] set (#2160).
+#[cfg(feature = "admin")]
+pub(crate) fn verify_form_token_under_layer(
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    submitted: Option<&str>,
+) -> bool {
+    verify_form_token_named(headers, &CsrfCookieSpec::active(extensions).name, submitted)
+}
+
+fn verify_form_token_named(
+    headers: &axum::http::HeaderMap,
+    cookie_name: &str,
+    submitted: Option<&str>,
+) -> bool {
     if !origin_allowed_in(headers, false, &[]) {
         return false;
     }
     tokens_match(
-        read_csrf_cookie_from_headers(headers, CSRF_COOKIE).as_deref(),
+        read_csrf_cookie_from_headers(headers, cookie_name).as_deref(),
         submitted,
     )
 }

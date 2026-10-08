@@ -131,7 +131,10 @@ async fn collection_crud_and_list_in_collection_on_sqlite() {
 
     // list_collections — ordered by "parent_id IS NULL DESC, parent_id, name"
     // so the root collection comes first.
-    let all = mgr.list_collections().await.expect("list_collections");
+    let all = mgr
+        .list_collections_paged(1000, 0)
+        .await
+        .expect("list_collections");
     assert_eq!(all.len(), 2);
     assert_eq!(all[0].slug, "launch", "root collection ordered first");
     assert_eq!(all[1].slug, "hero");
