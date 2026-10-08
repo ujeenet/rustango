@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG file migrations create the `citext` extension (#2240)
+
+`CREATE EXTENSION IF NOT EXISTS citext` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

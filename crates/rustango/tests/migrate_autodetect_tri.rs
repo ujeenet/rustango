@@ -2081,9 +2081,97 @@ async fn alter_column_unapplies(pool: &Pool) {
     .expect("nullable and not unique again");
 }
 
+// ---------------------------------------------------------------- #2240
+
+/// A new PG database, which has no `citext` yet; `None` elsewhere.
+async fn fresh_pg(pool: &Pool, tag: &str) -> Option<(Pool, String)> {
+    if pool.dialect().name() != "postgres" {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db = format!("rustango_mad_{tag}_{}_{nanos}", std::process::id());
+    raw_execute_pool(pool, &format!("CREATE DATABASE {db}"), Vec::new())
+        .await
+        .expect("create database");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (base, _) = url.rsplit_once('/').unwrap();
+    let fresh = Pool::connect(&format!("{base}/{db}"))
+        .await
+        .expect("connect");
+    Some((fresh, db))
+}
+
+async fn drop_fresh_pg(pool: &Pool, fresh: Option<(Pool, String)>) {
+    if let Some((fresh, db)) = fresh {
+        fresh.close().await;
+        let _ = raw_execute_pool(pool, &format!("DROP DATABASE {db}"), Vec::new()).await;
+    }
+}
+
+/// A unique case-insensitive `email` refuses `a@X.COM` next to `A@x.com`.
+async fn assert_ci_unique(pool: &Pool, t: &str, column: &str) {
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'A@x.com')",
+        &[t, "id", column],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 'a@X.COM')",
+            &[t, "id", column]
+        )
+        .await
+        .is_err(),
+        "`{t}.{column}` is unique ignoring case on {}",
+        pool.dialect().name()
+    );
+}
+
+fn ci_email(name: &str) -> Value {
+    col(
+        name,
+        "string",
+        json!({"max_length": 100, "case_insensitive": true, "unique": true}),
+    )
+}
+
+/// CreateTable and AddColumn of a CITEXT column on a database without
+/// the extension: PG said `type "citext" does not exist`.
+async fn citext_column_on_a_fresh_database(shared: &Pool) {
+    let t = "mad_ci_user";
+    let steps: [&[Value]; 2] = [
+        &[json!({"tables": [table(t, vec![id(), ci_email("email")])]})],
+        &[
+            json!({"tables": [table(t, vec![id()])]}),
+            json!({"tables": [table(t, vec![id(), ci_email("email")])]}),
+        ],
+    ];
+    for (i, steps) in steps.into_iter().enumerate() {
+        let fresh = fresh_pg(shared, &format!("ci{i}")).await;
+        let pool = fresh.as_ref().map_or(shared, |(p, _)| p);
+        let chain = Chain::new(pool, &format!("ci{i}"), &[t]).await;
+        for s in steps {
+            chain
+                .step(pool, s.clone())
+                .await
+                .expect("the CITEXT column applies");
+        }
+        assert_ci_unique(pool, t, "email").await;
+        drop_fresh_pg(shared, fresh).await;
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
         no_action_is_not_a_change,

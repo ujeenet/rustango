@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### PG migrations create `citext` themselves
+
+A migration that writes a CITEXT column runs `CREATE EXTENSION IF NOT EXISTS citext` first. Where the role cannot create extensions, install it once by hand (#2240).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

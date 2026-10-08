@@ -1028,7 +1028,12 @@ fn render_changes_split_inner(
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
+    // Once, before the first change that writes a CITEXT column (#2240).
+    let mut ci_extension = dialect.ci_text_extension_sql();
     for change in changes {
+        if writes_ci_text(change, current) {
+            out.immediate.extend(ci_extension.take().map(str::to_owned));
+        }
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
@@ -1615,6 +1620,27 @@ fn render_changes_split_inner(
     Ok(out)
 }
 
+/// A case-insensitive string column, typed by `dialect.ci_text_type`.
+fn is_ci_text(f: &FieldSnapshot) -> bool {
+    f.case_insensitive && f.ty == "string"
+}
+
+/// Whether `change` gives a column its case-insensitive type.
+fn writes_ci_text(change: &SchemaChange, current: &SchemaSnapshot) -> bool {
+    let field = |t: &str, c: &str| current.table(t).and_then(|t| t.field(c));
+    match change {
+        SchemaChange::CreateTable(t) => current
+            .table(t)
+            .is_some_and(|t| t.fields.iter().any(is_ci_text)),
+        SchemaChange::AddColumn { table, column }
+        | SchemaChange::AlterColumnType { table, column, .. }
+        | SchemaChange::AlterColumnMaxLength { table, column, .. } => {
+            field(table, column).is_some_and(is_ci_text)
+        }
+        _ => false,
+    }
+}
+
 /// Map a `FieldSnapshot.ty` name (matches `FieldType::as_str` in
 /// rustango-core, but kept loose here for forward-compat with future
 /// types externally-supplied migration files might carry) to its
@@ -2047,10 +2073,8 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
     // #344 — case-insensitive String columns route through
     // `dialect.ci_text_type` (PG → CITEXT, SQLite → TEXT COLLATE
     // NOCASE, MySQL → LONGTEXT COLLATE utf8mb4_general_ci).
-    if f.case_insensitive {
-        if matches!(ty, Some(FieldType::String)) {
-            return dialect.ci_text_type(f.max_length);
-        }
+    if is_ci_text(f) {
+        return dialect.ci_text_type(f.max_length);
     }
     if let Some(t) = ty {
         return dialect.column_type(t, f.max_length);
@@ -2393,6 +2417,65 @@ mod sql_type_tests {
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert_eq!(out.immediate.len(), 1);
         assert!(out.immediate[0].contains("ALTER COLUMN \"c\" TYPE"));
+    }
+
+    /// `t(id, email, name)`, `email` case-insensitive.
+    fn ci_snap() -> SchemaSnapshot {
+        let string = |name: &str, ci: bool| FieldSnapshot {
+            name: name.into(),
+            column: name.into(),
+            max_length: Some(100),
+            case_insensitive: ci,
+            nullable: true,
+            ..fs("string", false)
+        };
+        SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "t".into(),
+                fields: vec![
+                    FieldSnapshot {
+                        primary_key: true,
+                        ..fs("i64", true)
+                    },
+                    string("email", true),
+                    string("name", false),
+                ],
+                composite_fks: vec![],
+            }],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    fn add(column: &str) -> SchemaChange {
+        SchemaChange::AddColumn {
+            table: "t".into(),
+            column: column.into(),
+        }
+    }
+
+    /// The `citext` prelude comes once, before the first CITEXT column (#2240).
+    #[test]
+    fn citext_extension_precedes_the_first_citext_column() {
+        let render = |changes: &[SchemaChange], dialect: &dyn crate::sql::Dialect| {
+            render_changes_split_with_dialect(changes, &ci_snap(), dialect)
+                .unwrap()
+                .immediate
+        };
+        let prelude = "CREATE EXTENSION IF NOT EXISTS citext;";
+        let pg = render(
+            &[
+                add("name"),
+                SchemaChange::CreateTable("t".into()),
+                add("email"),
+            ],
+            &crate::sql::Postgres,
+        );
+        assert_eq!(pg.iter().filter(|s| *s == prelude).count(), 1, "{pg:?}");
+        assert_eq!(pg[1], prelude, "{pg:?}");
+        assert!(!render(&[add("name")], &crate::sql::Postgres).contains(&prelude.to_owned()));
+        #[cfg(feature = "sqlite")]
+        assert!(!render(&[add("email")], &crate::sql::Sqlite).contains(&prelude.to_owned()));
     }
 
     /// MySQL restates the whole column, NULLs filled first.

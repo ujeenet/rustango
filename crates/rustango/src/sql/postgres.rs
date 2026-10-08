@@ -143,10 +143,9 @@ impl Dialect for Postgres {
 
     // #344 — CITextField. Postgres ships the `citext` extension that
     // provides a case-insensitive text type; once the extension is
-    // installed, a `CITEXT` column compares case-insensitively. The
-    // companion `ci_text_extension_sql` emits the one-time
-    // `CREATE EXTENSION` prelude the migration runner threads in
-    // ahead of the first CITEXT CREATE TABLE.
+    // installed, a `CITEXT` column compares case-insensitively. File
+    // migrations run `ci_text_extension_sql` before the first change
+    // that writes a CITEXT column (#2240).
     fn ci_text_type(&self, _max_length: Option<u32>) -> String {
         // CITEXT has no length parameter; `max_length` is advisory.
         "CITEXT".to_owned()
