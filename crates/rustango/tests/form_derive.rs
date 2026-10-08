@@ -2,6 +2,8 @@
 //!
 //! No DB required — tests macro codegen + multi-error `FormErrors` collection.
 
+#![cfg(feature = "forms")]
+
 use std::collections::HashMap;
 
 use rustango::forms::Form;

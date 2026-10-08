@@ -1,4 +1,4 @@
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "forms"))]
 //! A schema-driven INSERT stamps `auto_now_add` / `auto_now` itself.
 //!
 //! The derive macro's own INSERT path was fixed for #1464, but the

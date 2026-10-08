@@ -7,7 +7,7 @@
 //! two child rows, GETs `/__admin/il_blog/<pk>`, and asserts the
 //! tabular panel renders both children.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

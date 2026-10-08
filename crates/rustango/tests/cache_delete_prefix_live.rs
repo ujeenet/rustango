@@ -18,7 +18,7 @@
 //! test skips silently when its variable is unset, so the suite stays
 //! green offline.
 
-#![cfg(any(feature = "postgres", feature = "mysql"))]
+#![cfg(all(any(feature = "postgres", feature = "mysql"), feature = "cache"))]
 
 use rustango::cache::{Cache, DatabaseCache};
 use rustango::sql::Pool;

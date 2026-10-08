@@ -7,7 +7,7 @@
 //! POST body) — the view layer fills it in via `.set(...)` between
 //! prepare + commit.
 
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "forms"))]
 
 use std::collections::HashMap;
 

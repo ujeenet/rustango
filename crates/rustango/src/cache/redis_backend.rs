@@ -62,9 +62,17 @@ impl RedisCache {
     /// In milliseconds, as `PX`/`PEXPIRE` take it: whole seconds cut a
     /// 1500 ms TTL to 1 s (#1677).
     fn effective_ttl_ms(&self, ttl: Option<Duration>) -> Option<u64> {
-        ttl.or(self.default_ttl)
-            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1))
+        ttl.or(self.default_ttl).map(ttl_ms)
     }
+}
+
+/// Redis adds now to the TTL and rejects a sum past `i64::MAX`, so cap well below it.
+const MAX_TTL_MS: u64 = i64::MAX as u64 / 2;
+
+fn ttl_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis())
+        .unwrap_or(u64::MAX)
+        .clamp(1, MAX_TTL_MS)
 }
 
 #[async_trait]
@@ -115,6 +123,29 @@ impl Cache for RedisCache {
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
         Ok(reply.is_some())
+    }
+
+    /// `PEXPIRE` / `PERSIST` never create a key, so a racing `delete` stays deleted (#2300).
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let mut conn = self.conn.clone();
+        let err = |e: redis::RedisError| CacheError::Connection(e.to_string());
+        match self.effective_ttl_ms(ttl) {
+            Some(ms) => redis::cmd("PEXPIRE")
+                .arg(key)
+                .arg(ms)
+                .query_async::<bool>(&mut conn)
+                .await
+                .map_err(err),
+            // PERSIST answers 0 for a key without a TTL too, so ask EXISTS.
+            None => {
+                redis::cmd("PERSIST")
+                    .arg(key)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(err)?;
+                conn.exists::<_, bool>(key).await.map_err(err)
+            }
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
@@ -218,5 +249,19 @@ impl Cache for RedisCache {
             .invoke_async(&mut conn)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A huge TTL must stay a valid `PX`/`PEXPIRE` argument.
+    #[test]
+    fn ttl_ms_is_clamped_to_a_valid_redis_expire() {
+        assert_eq!(ttl_ms(Duration::MAX), MAX_TTL_MS);
+        assert!(ttl_ms(Duration::MAX) <= i64::MAX as u64);
+        assert_eq!(ttl_ms(Duration::from_millis(1500)), 1500);
+        assert_eq!(ttl_ms(Duration::ZERO), 1);
     }
 }

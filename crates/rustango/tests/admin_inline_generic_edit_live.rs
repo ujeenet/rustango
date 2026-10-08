@@ -8,7 +8,7 @@
 //! UPDATE + DELETE + INSERT + blank-extra → verify via direct SQL
 //! that the writes landed.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use std::collections::HashMap;
 

@@ -105,6 +105,7 @@ fn postgres_null_cast_decimal_binary_time() {
 // ---------- Form parser ----------
 
 #[test]
+#[cfg(feature = "forms")]
 fn form_parser_decimal() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;
@@ -117,6 +118,7 @@ fn form_parser_decimal() {
 }
 
 #[test]
+#[cfg(feature = "forms")]
 fn form_parser_binary_hex() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;
@@ -131,6 +133,7 @@ fn form_parser_binary_hex() {
 }
 
 #[test]
+#[cfg(feature = "forms")]
 fn form_parser_time() {
     use rustango::core::FieldSchema;
     use rustango::forms::parse_form_value;

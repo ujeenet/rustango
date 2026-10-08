@@ -28,6 +28,32 @@ Each in-memory queue's handler holds its own mailer. Database queues share `rust
 
 Names carry the pid and are opened with `create_new`, moving to the next number on a clash. On unix the files are 0600 and a new directory 0700.
 
+### Fixed — test builds on a single backend pass `-D warnings` (#2313)
+
+`--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.
+
+### Fixed — example compose files publish the DB on loopback only (#2311)
+
+Postgres binds to `127.0.0.1:5432` as the scaffolder's does; the stale `migrate_framework` doc is corrected.
+
+### Fixed — scaffold compile tests on the pinned 1.88 toolchain (#2310)
+
+The harness resolves the generated project's deps MSRV-aware, so `uuid` 1.27 (rustc 1.89) no longer breaks them.
+
+### Fixed — `SessionStore::touch` cannot revive a session after logout (#2300)
+
+It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock. `RedisCache` caps a huge TTL so `PX`/`PEXPIRE` stay valid.
+
+### Fixed — MCP SSE stream ends when its JWT is revoked (#2303)
+
+### Fixed — MCP raw-key cache evicts its oldest entry, not all of them (#2301)
+
+### Fixed — `InMemoryCache::clear` resets the pinned budget (#2302)
+
+### Fixed — MCP `rate_limit_per_minute = 0` is unlimited again (#2299)
+
+It built a zero-capacity limiter that sent 429 with `Retry-After: u64::MAX` on every request; `check --deploy` now flags 0 like unset. Any zero-capacity `RateLimitLayer` now sends one refill period as `Retry-After`.
+
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 
 The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres. Its echoed command now includes `--rustango-path`.
