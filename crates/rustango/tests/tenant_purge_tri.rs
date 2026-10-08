@@ -274,3 +274,79 @@ async fn database_purge_refuses_the_registry_database() {
     );
     org.delete_pool(&pool).await.unwrap();
 }
+
+/// A schema another tenant shares, or a reserved one, is never dropped (#2290).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn schema_purge_refuses_a_shared_or_reserved_schema() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let shared = format!("purge_shared_{}", std::process::id());
+    rustango::sql::sqlx::raw_sql(&format!(
+        "CREATE SCHEMA IF NOT EXISTS \"{shared}\"; CREATE TABLE IF NOT EXISTS \"{shared}\".marker (id INT)"
+    ))
+    .execute(pg)
+    .await
+    .unwrap();
+    // A legacy pair: one by slug default, one by explicit name.
+    let mut owner = Org {
+        slug: shared.replace('_', "-"),
+        display_name: "owner".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some(shared.clone()),
+        ..rustango::testkit::org()
+    };
+    owner.save_pool(&pool).await.unwrap();
+    let mut legacy = Org {
+        slug: format!("{}-legacy", owner.slug),
+        display_name: "legacy".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some(shared.clone()),
+        ..rustango::testkit::org()
+    };
+    legacy.save_pool(&pool).await.unwrap();
+    let mut reserved = Org {
+        slug: format!("purge-public-{}", std::process::id()),
+        display_name: "public".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("public".into()),
+        ..rustango::testkit::org()
+    };
+    reserved.save_pool(&pool).await.unwrap();
+
+    let err = purge_on(&pool, &legacy.slug)
+        .await
+        .expect_err("shared schema");
+    assert!(err.to_string().contains("another tenant"), "{err}");
+    let err = purge_on(&pool, &reserved.slug).await.expect_err("public");
+    assert!(err.to_string().contains("public"), "{err}");
+    let left: i64 =
+        rustango::sql::sqlx::query_scalar(&format!("SELECT count(*) FROM \"{shared}\".marker"))
+            .fetch_one(pg)
+            .await
+            .expect("the shared schema survived");
+    assert_eq!(left, 0);
+    let rows: Vec<Org> = Org::objects().fetch(&pool).await.unwrap();
+    assert!(
+        rows.iter()
+            .filter(|o| [&legacy.slug, &reserved.slug].contains(&&o.slug))
+            .all(|o| o.active),
+        "a refused purge changed the org"
+    );
+
+    for org in [owner, legacy, reserved] {
+        org.delete_pool(&pool).await.unwrap();
+    }
+    rustango::sql::sqlx::query(&format!("DROP SCHEMA \"{shared}\" CASCADE"))
+        .execute(pg)
+        .await
+        .unwrap();
+}

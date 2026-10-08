@@ -154,6 +154,9 @@ where
         .get()
         .copied()
         .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+    if mode == StorageMode::Schema {
+        refuse_shared_schema(registry, org.effective_schema(), id).await?;
+    }
     // Out of service before anything is destroyed (#1930): if a later
     // step fails, the tenant is inactive and a retry finishes the job.
     Org::objects()
@@ -228,6 +231,26 @@ where
     }
     super::invalidate_org_cache();
     report.row_deleted = true;
+    Ok(())
+}
+
+/// Never `DROP SCHEMA … CASCADE` a reserved schema or one another tenant
+/// still uses: rows made before #2290 may share one.
+async fn refuse_shared_schema(
+    registry: &crate::sql::Pool,
+    schema: &str,
+    org_id: i64,
+) -> Result<(), TenancyError> {
+    if let Err(why) = super::provision::validate_schema_name(schema) {
+        return Err(TenancyError::Validation(format!(
+            "refusing to drop schema `{schema}`: {why}"
+        )));
+    }
+    if super::org_host::schema_claimed(registry, schema, Some(org_id)).await? {
+        return Err(TenancyError::Validation(format!(
+            "refusing to drop schema `{schema}` — another tenant uses it too"
+        )));
+    }
     Ok(())
 }
 

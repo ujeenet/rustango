@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — two tenants can no longer share one schema (#2290)
 
-Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both.
+Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both. A schema-mode purge now refuses a schema another tenant still uses, or a reserved one such as `public`.
 
 ### Fixed — a database-mode purge no longer fails on other pods' connections (#2291)
 
