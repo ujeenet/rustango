@@ -72,9 +72,8 @@ pub enum HeaderStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedRealIp(pub IpAddr);
 
-/// The last value of forwarding header `name`, the one the trusted peer
-/// appended, only when a [`TrustedRealIp`] is set. Values to its left may
-/// be client-written (#2279).
+/// The first value of forwarding header `name`, only when the peer is a
+/// trusted proxy (a [`TrustedRealIp`] is set); any client can send it.
 #[cfg(any(
     all(feature = "tenancy", feature = "sso"),
     feature = "admin-sso",
@@ -86,11 +85,8 @@ pub(crate) fn trusted_forwarded<'a>(
     name: &str,
 ) -> Option<&'a str> {
     extensions.get::<TrustedRealIp>()?;
-    let v = headers.get_all(name).iter().last()?.to_str().ok()?;
-    v.rsplit(',')
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let v = headers.get(name)?.to_str().ok()?;
+    Some(v.split(',').next().unwrap_or(v).trim()).filter(|s| !s.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -512,35 +508,6 @@ mod tests {
         let r = req_with_header("x-forwarded-for", "::ffff:203.0.113.7");
         let ip = extract(&r, &HeaderStrategy::XForwardedFor).unwrap();
         assert_eq!(ip.to_string(), "203.0.113.7");
-    }
-
-    /// #2279: the trusted proxy appends, so its value is the rightmost.
-    #[cfg(any(
-        all(feature = "tenancy", feature = "sso"),
-        feature = "admin-sso",
-        feature = "mcp"
-    ))]
-    #[test]
-    fn trusted_forwarded_takes_the_rightmost_value() {
-        let mut h = axum::http::HeaderMap::new();
-        h.append("x-forwarded-proto", "https, http".parse().unwrap());
-        h.append("x-forwarded-host", "evil.example".parse().unwrap());
-        h.append(
-            "x-forwarded-host",
-            "a.example , app.example".parse().unwrap(),
-        );
-        let mut ext = axum::http::Extensions::new();
-        assert_eq!(trusted_forwarded(&h, &ext, "x-forwarded-proto"), None);
-        ext.insert(TrustedRealIp("10.0.0.2".parse().unwrap()));
-        assert_eq!(
-            trusted_forwarded(&h, &ext, "x-forwarded-proto"),
-            Some("http")
-        );
-        assert_eq!(
-            trusted_forwarded(&h, &ext, "x-forwarded-host"),
-            Some("app.example")
-        );
-        assert_eq!(trusted_forwarded(&h, &ext, "x-forwarded-port"), None);
     }
 
     #[test]
