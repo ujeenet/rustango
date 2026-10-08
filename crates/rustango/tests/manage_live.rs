@@ -1283,3 +1283,63 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A schema is free when only a database-mode tenant has that slug, or a
+/// schema tenant has it as slug but lives elsewhere (#2290).
+#[tokio::test]
+async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("schema_free");
+    let pools = TenantPools::new(pool.clone());
+    let registry = rustango::sql::Pool::from(pool.clone());
+
+    let db_slug = unique("dbmode");
+    let mut db_org = Org {
+        slug: db_slug.clone(),
+        display_name: db_slug.clone(),
+        database_url: Some("postgres://example@db.example.com/x".into()),
+        ..rustango::testkit::org()
+    };
+    db_org.save_pool(&registry).await.unwrap();
+    let moved = unique("moved");
+    let elsewhere = unique("elsewhere");
+    let mut schema_org = Org {
+        slug: moved.clone(),
+        display_name: moved.clone(),
+        storage_mode: "schema".into(),
+        schema_name: Some(elsewhere.clone()),
+        ..rustango::testkit::org()
+    };
+    schema_org.save_pool(&registry).await.unwrap();
+
+    for taken_slug in [&db_slug, &moved] {
+        let fresh = unique("fresh");
+        drop_schema(&pool, taken_slug).await;
+        let (out, res) = run(
+            &pools,
+            &url,
+            &dir,
+            &[
+                "create-tenant",
+                &fresh,
+                "--mode",
+                "schema",
+                "--schema-name",
+                taken_slug,
+                "--no-migrate",
+            ],
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("schema `{taken_slug}` is free: {e} {out}"));
+        drop_schema(&pool, taken_slug).await;
+    }
+
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
