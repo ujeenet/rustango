@@ -599,7 +599,7 @@ La línea de estado `running: pg_dump …` va a **stderr**, así que se queda
 fuera de la redirección y fuera de una tubería. Hasta [#1404](https://github.com/ujeenet/rustango/issues/1404)
 iba a stdout, lo que la dejaba en la primera línea del archivo `.sql`.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Carga un archivo de dump de vuelta en tu base de datos — la contraparte de
 `db:dump`. Pasa el archivo por `psql` contra `DATABASE_URL` con
@@ -610,7 +610,7 @@ restauración aterrice en una base de datos vacía. Necesitas `psql` en tu `PATH
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---

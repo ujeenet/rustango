@@ -700,18 +700,20 @@ The `running: pg_dump …` status line goes to **stderr**, so it stays out
 of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
 it went to stdout, which put it on the first line of the `.sql` file.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Loads a dump file back into your database — the counterpart to
 `db:dump`. It runs the file through `psql` against `DATABASE_URL` with
-`ON_ERROR_STOP=1`, so it stops at the first error. Add `--clean` to wipe
-the existing schema first (it prepends
-`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) so the
-restore lands on an empty database. You need `psql` on your `PATH`.
+`ON_ERROR_STOP=1` in one transaction, so it stops at the first error and
+loads nothing. Add `--clean --yes` to wipe the existing schema first (it
+prepends `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) so
+the restore lands on an empty database; a failed load rolls the drop back.
+A missing or unreadable file is refused before anything runs. You need
+`psql` on your `PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---

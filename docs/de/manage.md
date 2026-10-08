@@ -608,7 +608,7 @@ Die Statuszeile `running: pg_dump …` geht auf **stderr** und bleibt damit
 aus der Umleitung und aus einer Pipe heraus. Bis [#1404](https://github.com/ujeenet/rustango/issues/1404)
 ging sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Lädt eine Dump-Datei zurück in Ihre Datenbank — das Gegenstück zu `db:dump`. Es
 lässt die Datei durch `psql` gegen `DATABASE_URL` mit `ON_ERROR_STOP=1` laufen,
@@ -620,7 +620,7 @@ Ihrem `PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---

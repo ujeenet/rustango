@@ -310,3 +310,48 @@ tri_dialect_test! {
         fail_fast_still_resets_sequences,
     ],
 }
+
+/// `db:restore --clean` leaves the database intact when the dump is missing
+/// or fails to load (#2283). Postgres only: it shells out to `psql`.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn restore_clean_keeps_the_database_on_a_bad_dump() {
+    use rustango::testkit::matrix::{live_lock, Backend};
+    let _guard = live_lock().lock().await;
+    let Some(pool) = Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    assert!(
+        std::process::Command::new("psql")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success()),
+        "db:restore needs `psql` on PATH"
+    );
+    rustango::testkit::matrix::fresh_table::<Row>(&pool).await;
+    insert(&pool, "kept").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.sql");
+    let bad = dir.path().join("bad.sql");
+    std::fs::write(
+        &bad,
+        "CREATE TABLE cli2283_half (id int);\nSELECT * FROM cli2283_no_such_table;\n",
+    )
+    .unwrap();
+
+    for (file, why) in [(&missing, "cannot read"), (&bad, "psql exited")] {
+        let res = manage(
+            &pool,
+            &["db:restore", "--clean", "--yes", file.to_str().unwrap()],
+        )
+        .await;
+        let left: Vec<Row> = Row::objects()
+            .fetch(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{why}: the restore dropped the schema: {e}"));
+        assert_eq!(left.len(), 1, "{why}");
+        let err = res.expect_err(why);
+        assert!(err.contains(why), "{err}");
+    }
+}

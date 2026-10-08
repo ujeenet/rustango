@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `db:restore --clean` checks the file, asks, and rolls back (#2283)
+
+It dropped `public` before reading the dump. Now a missing file is refused first, `--clean` needs `--yes` (or a typed `yes`), and psql runs in one transaction so a failed load keeps the old data.
+
 ### Fixed — tenancy `flush` no longer wipes the registry (#2284)
 
 It fell through to the single-tenant flush on the registry pool and deleted orgs, operators and hosts. Plain `flush` is refused now; `flush --tenant <slug>` clears that tenant's tables only.

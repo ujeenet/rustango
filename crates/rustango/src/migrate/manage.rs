@@ -485,16 +485,19 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      mirror pg_dump's flags. --no-owner skips OWNER lines.\n"
     )?;
-    writeln!(w, "  db:restore <file> [--clean]")?;
+    writeln!(w, "  db:restore <file> [--clean --yes]")?;
     writeln!(
         w,
-        "      Run psql against $DATABASE_URL with `\\i <file>`. With"
+        "      Run psql against $DATABASE_URL with `\\i <file>`, in one transaction. With"
     )?;
     writeln!(
         w,
         "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`"
     )?;
-    writeln!(w, "      so the restore lands on a clean database.\n")?;
+    writeln!(
+        w,
+        "      so the restore lands on a clean database; --yes confirms the drop.\n"
+    )?;
     writeln!(w, "  db:info")?;
     writeln!(
         w,
@@ -2991,14 +2994,17 @@ fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
 struct DbRestoreArgs {
     file: String,
     clean: bool,
+    yes: bool,
 }
 
 fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError> {
     let mut file: Option<String> = None;
     let mut clean = false;
+    let mut yes = false;
     for arg in args {
         match arg.as_str() {
             "--clean" => clean = true,
+            "--yes" => yes = true,
             other if other.starts_with('-') => {
                 return Err(MigrateError::Validation(format!("unknown flag: {other}")));
             }
@@ -3015,17 +3021,70 @@ fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError>
     let file = file.ok_or_else(|| {
         MigrateError::Validation("db:restore <file> requires a dump file path".into())
     })?;
-    Ok(DbRestoreArgs { file, clean })
+    Ok(DbRestoreArgs { file, clean, yes })
 }
 
-/// Build the psql argv given parsed args + URL. Pure function — easy
+/// A restore that may run: the dump is a readable file and any
+/// `--clean` was confirmed. Only [`RestorePlan::check`] builds one (#2283).
+#[derive(Debug)]
+struct RestorePlan {
+    file: String,
+    clean: bool,
+}
+
+impl RestorePlan {
+    /// `confirm` asks the user when `--clean` came without `--yes`.
+    fn check(
+        parsed: DbRestoreArgs,
+        confirm: impl FnOnce(&str) -> bool,
+    ) -> Result<Self, MigrateError> {
+        let readable = std::fs::File::open(&parsed.file)
+            .and_then(|f| f.metadata())
+            .map_err(|e| e.to_string())
+            .and_then(|m| m.is_file().then_some(()).ok_or_else(|| "not a file".into()));
+        if let Err(e) = readable {
+            return Err(MigrateError::Validation(format!(
+                "db:restore: cannot read `{}`: {e}",
+                parsed.file
+            )));
+        }
+        if parsed.clean && !parsed.yes && !confirm(&parsed.file) {
+            return Err(MigrateError::Validation(
+                "db:restore --clean drops schema `public` first: pass --yes to confirm".into(),
+            ));
+        }
+        Ok(Self {
+            file: parsed.file,
+            clean: parsed.clean,
+        })
+    }
+}
+
+/// Interactive yes for `--clean`; `false` off a terminal.
+fn confirm_clean_restore(file: &str) -> bool {
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    {
+        let prompt =
+            format!("db:restore --clean drops schema `public`, then loads {file}. Type `yes`: ");
+        matches!(crate::manage_interactive::ask(&prompt), Ok(Some(a)) if a == "yes")
+    }
+    #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+/// Build the psql argv given a checked plan + URL. Pure function — easy
 /// to test.
-fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
+fn build_psql_argv(parsed: &RestorePlan, database_url: &str) -> Vec<String> {
     let mut argv = vec![database_url.to_owned()];
     // -v ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL
     // error, instead of plowing through and "succeeding" with garbage.
     argv.push("-v".into());
     argv.push("ON_ERROR_STOP=1".into());
+    // One transaction around the DROP and the load: a failed load rolls the DROP back (#2283).
+    argv.push("--single-transaction".into());
     if parsed.clean {
         argv.push("-c".into());
         argv.push("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;".into());
@@ -3036,7 +3095,7 @@ fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
 }
 
 fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let parsed = parse_db_restore_args(args)?;
+    let parsed = RestorePlan::check(parse_db_restore_args(args)?, confirm_clean_restore)?;
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         MigrateError::Validation(
             "DATABASE_URL must be set for db:restore (e.g. \
@@ -7272,11 +7331,48 @@ mod db_cmd_tests {
         assert!(r.is_err());
     }
 
+    // -------- RestorePlan::check (#2283)
+
+    fn restore_args(file: &str, clean: bool, yes: bool) -> DbRestoreArgs {
+        DbRestoreArgs {
+            file: file.into(),
+            clean,
+            yes,
+        }
+    }
+
+    #[test]
+    fn restore_refuses_a_missing_file_before_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.sql");
+        let missing = missing.to_str().unwrap();
+        let err = RestorePlan::check(restore_args(missing, true, false), |_| {
+            panic!("asked to confirm a file that does not exist")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot read"), "{err}");
+        let dir_path = dir.path().to_str().unwrap();
+        assert!(RestorePlan::check(restore_args(dir_path, true, true), |_| true).is_err());
+    }
+
+    #[test]
+    fn restore_clean_needs_yes_or_a_confirm() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let err = RestorePlan::check(restore_args(path, true, false), |_| false).unwrap_err();
+        assert!(err.to_string().contains("--yes"), "{err}");
+        assert!(RestorePlan::check(restore_args(path, true, false), |_| true).is_ok());
+        assert!(RestorePlan::check(restore_args(path, true, true), |_| false).is_ok());
+        assert!(RestorePlan::check(restore_args(path, false, false), |_| false).is_ok());
+        let p = parse_db_restore_args(&args(&["--clean", "--yes", path])).unwrap();
+        assert!(p.clean && p.yes);
+    }
+
     // -------- build_psql_argv
 
     #[test]
     fn restore_argv_includes_on_error_stop() {
-        let parsed = DbRestoreArgs {
+        let parsed = RestorePlan {
             file: "/tmp/x.sql".into(),
             clean: false,
         };
@@ -7284,6 +7380,7 @@ mod db_cmd_tests {
         // ON_ERROR_STOP=1 prevents psql from continuing past errors
         // and silently "succeeding" with a half-restored DB.
         assert!(argv.contains(&"ON_ERROR_STOP=1".to_owned()));
+        assert!(argv.contains(&"--single-transaction".to_owned()));
         assert!(argv.contains(&"-f".to_owned()));
         assert!(argv.contains(&"/tmp/x.sql".to_owned()));
         assert!(!argv.iter().any(|a| a.contains("DROP SCHEMA")));
@@ -7291,7 +7388,7 @@ mod db_cmd_tests {
 
     #[test]
     fn restore_argv_with_clean_drops_schema() {
-        let parsed = DbRestoreArgs {
+        let parsed = RestorePlan {
             file: "/tmp/x.sql".into(),
             clean: true,
         };

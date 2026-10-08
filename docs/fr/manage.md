@@ -623,7 +623,7 @@ La ligne d'état `running: pg_dump …` part sur **stderr** : elle reste donc
 hors de la redirection et hors d'un tube. Jusqu'à [#1404](https://github.com/ujeenet/rustango/issues/1404)
 elle partait sur stdout et se retrouvait en première ligne du fichier `.sql`.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Recharge un fichier de sauvegarde dans votre base de données — l'inverse
 de `db:dump`. Elle exécute le fichier via `psql` contre `DATABASE_URL`
@@ -635,7 +635,7 @@ la restauration se fasse sur une base de données vide. Vous devez avoir
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---

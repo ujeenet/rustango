@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `db:restore --clean` needs `--yes`
+
+Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).
+
 ### Tenancy `flush` needs `--tenant <slug>`
 
 In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
