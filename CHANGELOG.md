@@ -22,6 +22,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
 
+### Fixed — stale admin comment and source reference in docs
+
+The fullstack `urls.rs` comment names `nest_with`, as `main.rs` does; manage.md names `provision_tenant` instead of a line number.
+
+### Fixed — de/fr/es scaffolding, migrations, manage and getting-started match English (#2015)
+
+They now cover the committed `system/migrations/`, the scaffolded login-gated `admin_router` and `with_session_auth`. de/es `create-tenant` no longer says it is safe to re-run.
+
+### Fixed — README links work on crates.io (#1405)
+
+crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
 ### Fixed — admin search skips secret fields (#2228)
 
 `?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.

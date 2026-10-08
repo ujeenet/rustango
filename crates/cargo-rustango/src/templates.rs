@@ -811,7 +811,7 @@ pub fn api() -> Router<()> {
 /// `cargo run -- create-admin <username>`.
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
-        .admin_prefix(\"/admin\") // must match the `.nest(\"/admin\", …)` in main.rs
+        .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
         .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }
