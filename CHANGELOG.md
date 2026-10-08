@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `JwtBackend` ends a login token with its session (#2247)
+
+A revoked refresh family, a password change or a logout-all now refuse the access token there too, as on `require_bearer`.
+
+### Fixed — a password change ends every older reset link (#2248)
+
+Reset links sign their issue time; `confirm_password_reset_pool` / `_single_use` refuse a link older than `password_changed_at`.
+
+### Fixed — admin SSO asks for the TOTP code (#2249)
+
+A user with a confirmed device gets the code step before the admin session is minted, as on the password login.
+
+### Fixed — API-key and agent-key prefixes may collide (#2250)
+
+Authentication tries every row with the prefix, not only the first.
+
+### Added — `member_auth::logout_at` (#2251)
+
+It clears the member cookie at the tenant's path prefix, where SSO minted it; `logout` clears `Path=/` only.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
