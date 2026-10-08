@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### `IpFilterLayer` sees the client behind a trusted proxy
+### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
-With a `RealIpLayer::trust_proxies` layer outside it, the filter now gates the trusted client IP, not the proxy. List client networks, not proxy ones (#2278).
+The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).
 
 ### `Cli` behind a reverse proxy
 

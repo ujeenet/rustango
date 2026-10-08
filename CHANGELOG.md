@@ -16,9 +16,9 @@ The `rustango_users` UPDATE was raw SQL in that build; both builds now share one
 
 `--tests` on `postgres`, `mysql` or `sqlite` with `admin,testkit` hit unreachable or irrefutable `Pool` patterns; the suites use the typed accessors now.
 
-### Fixed — `IpFilterLayer` gates the trusted client IP (#2278)
+### Added — `IpFilterLayer::behind_trusted_proxy` (#2278)
 
-Behind a `RealIpLayer` with `trust_proxies` it read the socket peer, so an allow- or block-list saw only the proxy.
+Opt in to gate the trusted client IP a `RealIpLayer` resolved; behind a proxy the default still checks the socket peer, so an allow- or block-list sees only the proxy.
 
 ### Added — `Cli::with_trusted_proxies` (#2255)
 
