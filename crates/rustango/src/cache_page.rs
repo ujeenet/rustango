@@ -51,6 +51,10 @@
 //!   the cache, since its response probably depends on the caller.
 //!   Only [`CachePageLayer::cache_authenticated`] changes that, and
 //!   only for a route you know is public.
+//! - **The response's own `Vary` is honoured.** A response whose
+//!   `Vary` is `*` or names a request header outside the key (such as
+//!   `Accept-Encoding` from compression) is not cached; add that header
+//!   with [`CachePageLayer::vary_on`] to cache it per value.
 //! - **The body is buffered.** A response loses its streaming
 //!   behaviour under this layer. Use [`never_cache`] on streaming
 //!   handlers, or leave the layer off those routes.
@@ -69,6 +73,7 @@
 //! [`CachePageLayer::cache_query`]: crate::cache_page::CachePageLayer::cache_query
 //! [`CachePageLayer::cache_authenticated`]: crate::cache_page::CachePageLayer::cache_authenticated
 //! [`CachePageLayer::tenant_agnostic`]: crate::cache_page::CachePageLayer::tenant_agnostic
+//! [`CachePageLayer::vary_on`]: crate::cache_page::CachePageLayer::vary_on
 //! [`CacheControl`]: crate::cache_page::CacheControl
 //! [`never_cache`]: crate::cache_page::never_cache
 //! [`vary_on`]: crate::cache_page::vary_on
@@ -155,7 +160,8 @@ impl CachePageLayer {
     }
 
     /// Add header names whose values go into the cache key. Names are
-    /// lowercased. Calling this again appends.
+    /// lowercased. Calling this again appends. A response that `Vary`s
+    /// on a header not listed here is not cached.
     ///
     /// # Panics
     /// Panics on a name that is not a valid header name. That is a
@@ -383,7 +389,11 @@ where
                         .unwrap_or(false)
                 });
 
-            if status != StatusCode::OK || sets_cookie || cache_control_opt_out {
+            if status != StatusCode::OK
+                || sets_cookie
+                || cache_control_opt_out
+                || !vary_is_keyed(resp.headers(), &vary, cache_authenticated)
+            {
                 return Ok(resp);
             }
 
@@ -596,6 +606,25 @@ fn payload_too_large() -> Response<Body> {
     resp.headers_mut()
         .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
     resp
+}
+
+/// Whether every request header the response `Vary` names is in the key (#2219).
+/// `Cookie` and `Authorization` count unless `cache_authenticated`: such
+/// requests skip this cache, so every entry was made without them.
+fn vary_is_keyed(headers: &HeaderMap, vary_on: &[HeaderName], cache_authenticated: bool) -> bool {
+    headers
+        .get_all(axum::http::header::VARY)
+        .iter()
+        .flat_map(|v| v.to_str().unwrap_or("*").split(','))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .all(|t| {
+            t.eq_ignore_ascii_case("host")
+                || vary_on.iter().any(|n| t.eq_ignore_ascii_case(n.as_str()))
+                || (!cache_authenticated
+                    && (t.eq_ignore_ascii_case("cookie")
+                        || t.eq_ignore_ascii_case("authorization")))
+        })
 }
 
 /// Append `<len>:<bytes>|` so parts can be joined without ambiguity.

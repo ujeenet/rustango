@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `CachePageLayer` skips responses whose `Vary` is not in the key
+
+Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
