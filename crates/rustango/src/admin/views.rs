@@ -16,14 +16,15 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
-    is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
-    render_secret_cell, resolve_model, resolve_model_and_pk, url_filterable, FormLayout, ListQuery,
+    admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, primary_key_or_internal,
+    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    search_columns, url_filterable, FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{AppState, CREATE_SEGMENT};
+use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -403,17 +404,7 @@ pub(crate) async fn table_view(
         ));
     }
 
-    // Build the search clause. `admin.search_fields` wins when set.
-    // Otherwise use every field whose `searchable` flag is true.
-    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
-        model.searchable_fields().map(|f| f.column).collect()
-    } else {
-        admin_cfg
-            .search_fields
-            .iter()
-            .filter_map(|name| model.field(name).map(|f| f.column))
-            .collect()
-    };
+    let search_columns = search_columns(model, &admin_cfg);
     let search = q.as_ref().and_then(|qstr| {
         if search_columns.is_empty() {
             None
@@ -490,8 +481,13 @@ pub(crate) async fn table_view(
     } else {
         false
     };
+    // The detail page's "view" hook hides a row here too (#2231). It runs
+    // in Rust after the page is read, so the total still counts denied rows.
+    rows.retain(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    });
 
-    let fk_map = fk_map_from_joined_rows_json(&state, model, &rows);
+    let fk_map = fk_map_for_rows(&state, &parts, model, &rows).await?;
 
     let last_page = if count_skipped {
         // No total means no last page. The pager renders "Page N"
@@ -918,7 +914,11 @@ async fn compute_facets(
     }
     let mut out = Vec::with_capacity(admin_cfg.list_filter.len());
     for filter_name in admin_cfg.list_filter {
-        let Some(field) = model.field(filter_name) else {
+        // A secret's facet would list its values.
+        let Some(field) = model
+            .field(filter_name)
+            .filter(|f| !is_secret_field(admin_cfg, f.name))
+        else {
             continue;
         };
         let lookup_keys = FieldLookup::keys(field.name);
@@ -1094,6 +1094,41 @@ async fn fetch_facet_counts(
         .collect())
 }
 
+/// FK cell names for `rows`: joined ones, plus the names of targets with a
+/// "view" hook, read through it so a denied row keeps its raw key (#2267).
+async fn fk_map_for_rows(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    rows: &[serde_json::Value],
+) -> Result<super::helpers::FkMap, AdminError> {
+    let mut map = fk_map_from_joined_rows_json(state, model, rows);
+    for t in fk_display_targets(state, model) {
+        if !crate::admin::object_permissions::has_hook(t.target.table, "view") {
+            continue;
+        }
+        let Some(on_field) = t.target.field_by_column(t.on) else {
+            continue;
+        };
+        let mut raws: Vec<String> = rows
+            .iter()
+            .filter_map(|row| render::read_value_as_string_json(row, t.field))
+            .collect();
+        raws.sort();
+        raws.dedup();
+        let keys: Vec<SqlValue> = raws
+            .iter()
+            .filter_map(|raw| forms::parse_pk_string(on_field, raw).ok())
+            .collect();
+        let names =
+            fk_display_names(state, parts, t.target, on_field, t.display_field, keys).await?;
+        for (raw, name) in names {
+            map.insert((t.to.to_owned(), raw), render::escape(&name));
+        }
+    }
+    Ok(map)
+}
+
 /// `on value -> display value` for an FK facet's keys, inside the
 /// target's queryset hooks (#2029) and in bind-capped chunks (#2049).
 async fn fk_display_names(
@@ -1105,15 +1140,27 @@ async fn fk_display_names(
     keys: Vec<SqlValue>,
 ) -> Result<HashMap<String, String>, AdminError> {
     let scope = RowScope::of(target, parts);
+    // A target row its "view" hook denies keeps its raw key (#2231);
+    // the hook needs the whole row, not just the two columns.
+    let view_hooked = crate::admin::object_permissions::has_hook(target.table, "view");
+    let columns: Vec<&'static FieldSchema> = if view_hooked {
+        target.scalar_fields().collect()
+    } else {
+        vec![on_field, display_field]
+    };
     let mut names = HashMap::new();
     for chunk in keys.chunks(MAX_IN_KEYS) {
         let rows = crate::sql::select_rows_as_json(
             &state.pool,
             &scope.by_pk_in(target, on_field.column, chunk.to_vec()),
-            &[on_field, display_field],
+            &columns,
         )
         .await?;
         names.extend(rows.iter().filter_map(|row| {
+            if !crate::admin::object_permissions::is_allowed(target.table, "view", parts, Some(row))
+            {
+                return None;
+            }
             Some((
                 render::read_value_as_string_json(row, on_field)?,
                 render::read_value_as_string_json(row, display_field)?,
@@ -1466,6 +1513,10 @@ fn push_date(q: &mut ListQuery, year: Option<i32>, month: Option<u32>, day: Opti
 // one route serves every form that points at it. A target with no
 // searchable columns returns an empty list rather than every row.
 
+/// Pages autocomplete reads to fill `limit` when the "view" hook denies
+/// rows; past them it returns fewer.
+const AUTOCOMPLETE_MAX_PAGES: i64 = 5;
+
 pub(crate) async fn autocomplete_view(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
@@ -1497,16 +1548,7 @@ pub(crate) async fn autocomplete_view(
     };
     let display_field = model.display_field().unwrap_or(pk_field);
 
-    // `admin.search_fields` when set, else the auto-searchable set.
-    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
-        model.searchable_fields().map(|f| f.column).collect()
-    } else {
-        admin_cfg
-            .search_fields
-            .iter()
-            .filter_map(|name| model.field(name).map(|f| f.column))
-            .collect()
-    };
+    let search_columns = search_columns(model, &admin_cfg);
     let search = if q.is_empty() || search_columns.is_empty() {
         None
     } else {
@@ -1516,32 +1558,53 @@ pub(crate) async fn autocomplete_view(
         })
     };
 
+    // The "view" hook runs after the read (#2231), so read up to
+    // `AUTOCOMPLETE_MAX_PAGES` pages to fill `limit` past denied rows.
     let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery {
-            where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
-            search,
-            order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
-            limit: Some(limit),
-            offset: Some(0),
-            ..SelectQuery::new(model)
-        },
-        &scalar_fields,
-    )
-    .await?;
-
-    let results: Vec<serde_json::Value> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let id = row.get(pk_field.column)?.clone();
-            let text = row
-                .get(display_field.column)
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| id.to_string());
-            Some(serde_json::json!({ "id": id, "text": text }))
-        })
-        .collect();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for page in 0..AUTOCOMPLETE_MAX_PAGES {
+        let rows = crate::sql::select_rows_as_json(
+            &state.pool,
+            &SelectQuery {
+                where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
+                search: search.clone(),
+                // The pk breaks ties, so pages do not overlap.
+                order_by: vec![
+                    crate::core::OrderItem::column(display_field.column, false),
+                    crate::core::OrderItem::column(pk_field.column, false),
+                ],
+                limit: Some(limit),
+                offset: Some(page * limit),
+                ..SelectQuery::new(model)
+            },
+            &scalar_fields,
+        )
+        .await?;
+        let last = (rows.len() as i64) < limit;
+        results.extend(
+            rows.into_iter()
+                .filter(|row| {
+                    crate::admin::object_permissions::is_allowed(
+                        model.table,
+                        "view",
+                        &parts,
+                        Some(row),
+                    )
+                })
+                .filter_map(|row| {
+                    let id = row.get(pk_field.column)?.clone();
+                    let text = row
+                        .get(display_field.column)
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| id.to_string());
+                    Some(serde_json::json!({ "id": id, "text": text }))
+                }),
+        );
+        if last || results.len() as i64 >= limit {
+            break;
+        }
+    }
+    results.truncate(limit as usize);
 
     Ok(axum::Json(serde_json::json!({ "results": results })))
 }
@@ -1587,8 +1650,7 @@ pub(crate) async fn detail_view(
         });
     }
 
-    // Read joined FK display values from the same row — no extra queries.
-    let fk_map = fk_map_from_joined_rows_json(&state, model, std::slice::from_ref(&row));
+    let fk_map = fk_map_for_rows(&state, &parts, model, std::slice::from_ref(&row)).await?;
 
     let detail_cfg = admin_config_or_default(model);
     let mut cells_ctx: Vec<serde_json::Value> = model
@@ -2476,7 +2538,7 @@ pub(crate) async fn action_submit(
 
     // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action, as Django's `delete_selected` does.
-    let (perm, named) = row_perms(&action);
+    let (perm, named) = row_perms(&write, &action);
     let allowed = |row: &serde_json::Value| {
         let is_allowed = |p: &str| {
             crate::admin::object_permissions::is_allowed(model.table, p, &parts, Some(row))
@@ -2533,8 +2595,8 @@ pub(crate) async fn action_submit(
         BulkWrite::Restore(col) => Some(mark(col, None).await?),
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        BulkWrite::Custom(handler) => {
-            handler(&state.pool, &pk_values).await?;
+        BulkWrite::Custom(a) => {
+            (a.handler)(&state.pool, &pk_values).await?;
             None
         }
     };
@@ -2601,7 +2663,7 @@ enum BulkWrite {
     Delete,
     /// `restore_selected`: clear this soft-delete column.
     Restore(&'static str),
-    Custom(super::urls::AdminActionFn),
+    Custom(super::urls::RegisteredAction),
 }
 
 impl BulkWrite {
@@ -2620,7 +2682,10 @@ impl BulkWrite {
             _ if state.is_read_only(model.table) => Err(read_only()),
             "restore_selected" => Ok(model.soft_delete_column.map(Self::Restore)),
             _ => match state.action_handler(model.table, action) {
-                Some(handler) => Ok(Some(Self::Custom(handler))),
+                Some(a) if a.perm == ActionPerm::Delete && !state.can_delete(model.table) => {
+                    Err(read_only())
+                }
+                Some(a) => Ok(Some(Self::Custom(a))),
                 None => Err(AdminError::Internal(format!(
                     "action `{action}` is in `admin.actions` but no handler is registered \
                      on the admin builder; register it via \
@@ -2662,12 +2727,15 @@ async fn send_row_signals(table: &'static str, pks: &[String], is_delete: bool, 
 }
 
 /// The object-permission hooks a bulk action must pass on every row. A custom
-/// action writes like an edit, so it needs `change` plus a hook named after it.
-fn row_perms(action: &str) -> (&'static str, Option<&str>) {
-    match action {
-        "delete_selected" => ("delete", None),
-        "restore_selected" => ("change", None),
-        custom => ("change", Some(custom)),
+/// action needs its declared permission plus a hook named after it.
+fn row_perms<'a>(write: &BulkWrite, action: &'a str) -> (&'static str, Option<&'a str>) {
+    match write {
+        BulkWrite::Delete => ("delete", None),
+        BulkWrite::Restore(_) => ("change", None),
+        BulkWrite::Custom(a) => match a.perm {
+            ActionPerm::Delete => ("delete", Some(action)),
+            ActionPerm::Change => ("change", Some(action)),
+        },
     }
 }
 

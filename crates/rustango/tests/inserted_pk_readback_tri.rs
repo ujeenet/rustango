@@ -237,13 +237,8 @@ async fn db_default_integer_pk_is_read_or_refused(pool: &Pool) {
             .iter()
             .map(|t| t.id)
             .collect();
-        // SQLite's INTEGER PRIMARY KEY is the rowid, which skips the default.
-        let want = if pool.dialect().name() == "sqlite" {
-            1
-        } else {
-            7
-        };
-        assert_eq!(ids, [want]);
+        // #2137: SQLite's `INTEGER PRIMARY KEY` rowid skipped the default.
+        assert_eq!(ids, [7]);
     }
 }
 

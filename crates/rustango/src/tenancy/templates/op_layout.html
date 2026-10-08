@@ -13,6 +13,23 @@
     function consoleUrl(path) {
       return document.querySelector('meta[name="console-prefix"]').content + path;
     }
+    // Shows a connection probe's JSON as text nodes, never as HTML (#2144).
+    async function showProbe(out, res) {
+      const p = await res.json().catch(() => null);
+      const el = document.createElement("p");
+      el.className = "probe " + (p && p.status === "ok" ? "probe-ok" : "probe-bad");
+      if (!p) {
+        el.textContent = "unexpected response: HTTP " + res.status;
+      } else {
+        if (p.endpoint) {
+          const code = document.createElement("code");
+          code.textContent = p.endpoint;
+          el.append("Reached ", code, ". ");
+        }
+        el.append(String(p.message || ""));
+      }
+      out.replaceChildren(el);
+    }
 // Delegated handlers: a strict CSP blocks inline on* attributes (#1703).
 document.addEventListener('submit',function(e){var m=e.target.getAttribute('data-confirm');if(m&&!confirm(m))e.preventDefault();});
 document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-confirm]');if(b&&!confirm(b.getAttribute('data-confirm')))e.preventDefault();});

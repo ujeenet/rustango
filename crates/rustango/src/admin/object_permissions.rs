@@ -8,6 +8,12 @@
 //! create, detail, edit, update and delete handlers all consult it and
 //! return 403 when a hook for that action denies.
 //!
+//! A `"view"` hook also drops denied rows from the list, autocomplete,
+//! FK facet names and FK cell names. It runs after the page is read, so a
+//! page may show fewer rows, and it does not hide denied rows from the
+//! totals, facet values and counts, date buckets or the "has next" link.
+//! A `register_admin_queryset!` filter hides them everywhere.
+//!
 //! `row` is `None` for a collection-level check, such as "may this
 //! user reach the add form?", and `Some(&json)` for a row check.
 //!
@@ -44,7 +50,8 @@
 //! as `"approve"` needs no change here. The built-in handlers use
 //! `"add"`, `"change"`, `"delete"` and `"view"`. A custom view can
 //! call [`is_allowed`] with any name of its own. A bulk action registered
-//! with `register_action` runs `"change"` and a hook named after the action.
+//! with `register_action` runs `"change"` (or the `ActionPerm` it declares)
+//! and a hook named after the action.
 
 use axum::http::request::Parts;
 use serde_json::Value;
@@ -87,6 +94,14 @@ pub fn is_allowed(table: &str, action: &str, parts: &Parts, row: Option<&Value>)
         }
     }
     true
+}
+
+/// `true` when any hook is registered for `(table, action)`.
+#[must_use]
+pub(crate) fn has_hook(table: &str, action: &str) -> bool {
+    inventory::iter::<AdminObjectPermission>
+        .into_iter()
+        .any(|e| e.table == table && e.action == action)
 }
 
 /// Register a permission predicate for one model.

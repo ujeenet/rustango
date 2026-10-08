@@ -408,6 +408,12 @@ un en-tête `traceparent` du W3C, `trace_id`, `parent_span_id` et `trace_flags`
 sont également enregistrés — c'est ce qu'une couche `tracing-opentelemetry`
 récupère pour rejoindre la trace.
 
+Le statut, la taille du corps et la durée sont enregistrés au retour de la
+réponse, quand les événements de la requête sont déjà écrits. Le subscriber
+`fmt` n'affiche les champs du span que sur les événements : il ne montre donc
+jamais ces trois-là. Lisez-les sur la ligne du journal d'accès, ou via une
+couche OpenTelemetry, qui lit le span à sa fermeture.
+
 Cette couche vaut d'être installée ne serait-ce que pour le champ locataire :
 comme les champs sont portés par le *span*, chaque événement émis pendant la
 requête — y compris ceux de l'ORM — les porte dans son contexte de span, sans

@@ -312,6 +312,30 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
         .any(|(f, w)| *f == name && *w == "password")
 }
 
+/// Columns `?q=` searches, for the list and autocomplete alike:
+/// `search_fields` when set, else the searchable fields. Never a secret (#2228).
+/// "Secret" means the `password` widget: a `token` field without it stays searchable.
+#[must_use]
+pub(crate) fn search_columns(
+    model: &'static ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+) -> Vec<&'static str> {
+    let fields: Vec<&'static FieldSchema> = if admin_cfg.search_fields.is_empty() {
+        model.searchable_fields().collect()
+    } else {
+        admin_cfg
+            .search_fields
+            .iter()
+            .filter_map(|name| model.field(name))
+            .collect()
+    };
+    fields
+        .into_iter()
+        .filter(|f| !is_secret_field(admin_cfg, f.name))
+        .map(|f| f.column)
+        .collect()
+}
+
 /// `true` when the list may filter on `field` from the URL: a
 /// `list_filter`, displayed or FK column, or an inline's parent pin.
 /// Never a secret, so a URL cannot probe its value (#2031).
@@ -398,80 +422,89 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
     Some(entry.schema)
 }
 
-/// Build one [`Join`] per FK / O2O column on `model` whose target is
-/// visible and has a display field. The join's `project` carries only
-/// the target's display column — that's all the admin renders.
+/// An FK / O2O column whose cell shows the target's display name.
+pub(crate) struct FkDisplay {
+    pub(crate) field: &'static FieldSchema,
+    /// The relation's `to`, the key [`FkMap`] uses.
+    pub(crate) to: &'static str,
+    pub(crate) target: &'static ModelSchema,
+    pub(crate) on: &'static str,
+    pub(crate) display_field: &'static FieldSchema,
+}
+
+/// The FK columns of `model` that show a name: the target is visible,
+/// has a display field, and `list_select_related` lets it join.
+pub(crate) fn fk_display_targets(state: &AppState, model: &'static ModelSchema) -> Vec<FkDisplay> {
+    let admin_cfg = admin_config_or_default(model);
+    let whitelist: Option<&'static [&'static str]> = match admin_cfg.list_select_related {
+        crate::core::ListSelectRelated::None => return Vec::new(),
+        crate::core::ListSelectRelated::Only(names) => Some(names),
+        _ => None,
+    };
+    model
+        .scalar_fields()
+        .filter(|f| whitelist.map_or(true, |allowed| allowed.contains(&f.name)))
+        .filter_map(|field| {
+            let (to, on) = match field.relation? {
+                Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
+            };
+            let target = lookup_model(state, to)?;
+            Some(FkDisplay {
+                field,
+                to,
+                target,
+                on,
+                display_field: target.display_field()?,
+            })
+        })
+        .collect()
+}
+
+/// Build one [`Join`] per [`fk_display_targets`] entry. The join's
+/// `project` carries only the target's display column.
 ///
 /// `list_select_related` lets operators opt out of specific FK
 /// joins (`ListSelectRelated::None` for "no joins";
-/// `ListSelectRelated::Only(&[...])` for a whitelist). The default
-/// `ListSelectRelated::All` preserves rustango's join-everything
-/// behavior.
+/// `ListSelectRelated::Only(&[...])` for a whitelist).
 ///
 /// A target row outside its own queryset hooks joins nothing, so its
-/// display name stays hidden (#2080).
+/// display name stays hidden (#2080). A target with a "view" hook is not
+/// joined: its names go through the hook instead (#2267).
 pub(crate) fn build_fk_joins(
     state: &AppState,
     model: &'static ModelSchema,
     parts: &axum::http::request::Parts,
 ) -> Vec<Join> {
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
-    if matches!(
-        admin_cfg.list_select_related,
-        crate::core::ListSelectRelated::None
-    ) {
-        return Vec::new();
-    }
-    let whitelist: Option<&'static [&'static str]> = match admin_cfg.list_select_related {
-        crate::core::ListSelectRelated::Only(names) => Some(names),
-        _ => None,
-    };
-    let mut joins = Vec::new();
-    for field in model.scalar_fields() {
-        if let Some(allowed) = whitelist {
-            if !allowed.contains(&field.name) {
-                continue;
-            }
-        }
-        let Some(rel) = field.relation else { continue };
-        let (to, on) = match rel {
-            Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
-        };
-        let Some(target) = lookup_model(state, to) else {
-            continue;
-        };
-        let Some(display_field) = target.display_field() else {
-            continue;
-        };
-        let alias = field.name;
-        joins.push(Join {
-            target,
+    fk_display_targets(state, model)
+        .into_iter()
+        .filter(|t| !super::object_permissions::has_hook(t.target.table, "view"))
+        .map(|t| {
             // `field.name` is a valid SQL identifier and unique within
             // the model (it's a Rust struct field), so it makes a
             // clean alias.
-            alias,
-            kind: crate::core::JoinKind::Left,
-            // `<main>.<fk_col> = <alias>.<target_pk>` expressed as a
-            // WhereExpr now that Join's `on_local`/`on_remote` shape
-            // was generalized in issue #80.
-            // Bare scope columns in the ON resolve to the joined alias.
-            on: super::queryset_hooks::RowScope::of(target, parts).constrain(
-                crate::core::WhereExpr::ExprCompare {
-                    lhs: crate::core::Expr::AliasedColumn {
-                        alias: model.table,
-                        column: field.column,
+            let alias = t.field.name;
+            Join {
+                target: t.target,
+                alias,
+                kind: crate::core::JoinKind::Left,
+                // Bare scope columns in the ON resolve to the joined alias.
+                on: super::queryset_hooks::RowScope::of(t.target, parts).constrain(
+                    crate::core::WhereExpr::ExprCompare {
+                        lhs: crate::core::Expr::AliasedColumn {
+                            alias: model.table,
+                            column: t.field.column,
+                        },
+                        op: crate::core::Op::Eq,
+                        rhs: crate::core::Expr::AliasedColumn {
+                            alias,
+                            column: t.on,
+                        },
                     },
-                    op: crate::core::Op::Eq,
-                    rhs: crate::core::Expr::AliasedColumn { alias, column: on },
-                },
-            ),
-            project: vec![display_field.column],
-        });
-    }
-    joins
+                ),
+                project: vec![t.display_field.column],
+            }
+        })
+        .collect()
 }
 
 /// A list page's URL: its base path plus the filter state as query
@@ -803,7 +836,8 @@ fn render_form_with_inlines_and_pickers(
                         r#"  var url='{prefix}/{target}/__autocomplete';"#,
                         r#"  function refresh(){{"#,
                         r#"    fetch(url+'?q='+encodeURIComponent(inp.value)).then(function(r){{return r.json();}}).then(function(j){{"#,
-                        r#"      dl.innerHTML=(j.results||[]).map(function(o){{return '<option value=\"'+o.id+'\">'+(o.text||o.id)+'</option>';}}).join('');"#,
+                        // Text nodes, never innerHTML: `text` is row data (#2144).
+                        r#"      dl.replaceChildren.apply(dl,(j.results||[]).map(function(o){{var op=document.createElement('option');op.value=o.id;op.textContent=o.text||o.id;return op;}}));"#,
                         r#"    }}).catch(function(){{}});"#,
                         r#"  }}"#,
                         r#"  inp.addEventListener('input',refresh);"#,

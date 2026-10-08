@@ -209,7 +209,7 @@ fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
         // the cleartext credential right beside the redacted copy.
         // `redact` is the caller's configured list, not the defaults.
         let redacted = crate::access_log::redact_query(query, redact);
-        span.record("url.query", redacted.as_str());
+        span.record("url.query", redacted.as_ref());
     }
     if let Some(tp) = parse_traceparent(req.headers()) {
         span.record("trace_id", tp.trace_id);

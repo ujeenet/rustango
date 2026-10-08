@@ -790,9 +790,7 @@ async fn mysql_deadlock_aborts_the_block() {
         put_pool(&pool, id).await;
     }
     let p = one_conn(&pool).await;
-    let Pool::Mysql(other) = one_conn(&pool).await else {
-        unreachable!()
-    };
+    let other = one_conn(&pool).await.as_mysql().expect("mysql").clone();
     let (a_locked, b_locked) = (
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),

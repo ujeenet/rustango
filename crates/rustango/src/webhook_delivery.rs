@@ -90,7 +90,7 @@ pub static USER_AGENT: &str = concat!("rustango-webhook/", env!("CARGO_PKG_VERSI
 /// retries and finally delivers or dead-letters.
 ///
 /// [`WebhookSubscription::dispatch`] builds these for you.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
     pub id: String,
     pub event: String,
@@ -107,6 +107,32 @@ pub struct WebhookEvent {
     /// Allow loopback, private and link-local targets. Off by default.
     #[serde(default)]
     pub allow_private_targets: bool,
+}
+
+/// Only the URL's origin and the header names: both can carry secrets (#2161).
+impl std::fmt::Debug for WebhookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookEvent")
+            .field("id", &self.id)
+            .field("event", &self.event)
+            .field("target_url", &url_origin(&self.target_url))
+            .field("body", &self.body)
+            .field("signature", &self.signature)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("timeout_secs", &self.timeout_secs)
+            .field("retry_status_codes", &self.retry_status_codes)
+            .field("allow_private_targets", &self.allow_private_targets)
+            .finish()
+    }
+}
+
+/// `scheme://host:port` of a target URL: its userinfo, path and query
+/// can be the receiver's secret (#1852).
+fn url_origin(url: &str) -> String {
+    reqwest::Url::parse(url).map_or_else(
+        |_| "<invalid url>".to_owned(),
+        |u| u.origin().ascii_serialization(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -206,11 +232,11 @@ pub struct WebhookSubscription {
     bad_header: Option<String>,
 }
 
-/// The secret and header values are redacted: headers often carry auth (#2116).
+/// The secret, header values and URL path are redacted (#2116, #2161).
 impl std::fmt::Debug for WebhookSubscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookSubscription")
-            .field("target_url", &self.target_url)
+            .field("target_url", &url_origin(&self.target_url))
             .field("secret", &"<redacted>")
             .field("signature_format", &self.signature_format)
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
@@ -643,7 +669,23 @@ mod tests {
         let dbg = format!("{sub:?}");
         assert!(!dbg.contains("the-signing-secret"), "{dbg}");
         assert!(!dbg.contains("the-header-token"), "{dbg}");
-        assert!(dbg.contains("https://example.com/hook") && dbg.contains("Authorization"));
+        assert!(dbg.contains("https://example.com") && dbg.contains("Authorization"));
+    }
+
+    /// #2161 — neither Debug prints the URL path or a header value.
+    #[test]
+    fn debug_redacts_the_url_path_and_event_header_values() {
+        let url = "https://u:pw@hooks.example.com/services/PATHSECRET?token=QSECRET";
+        let sub = WebhookSubscription::new(url, "s");
+        let mut ev = event(url.to_owned(), false);
+        ev.headers
+            .insert("Authorization".into(), "Bearer HEADERSECRET".into());
+        for dbg in [format!("{sub:?}"), format!("{ev:?}")] {
+            for secret in ["PATHSECRET", "QSECRET", "pw@", "HEADERSECRET"] {
+                assert!(!dbg.contains(secret), "{secret} in {dbg}");
+            }
+            assert!(dbg.contains("https://hooks.example.com"), "{dbg}");
+        }
     }
 
     /// #1852 — a transport error does not quote the URL; its path can be a secret.
