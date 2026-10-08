@@ -34,6 +34,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 /// let api = rustango::server::catch_panics(routes).layer(my_headers);
 /// ```
 ///
+/// It takes a stateless `Router`, so call `.with_state` first.
 /// A panic inside a streaming body, after the headers are sent, is not caught.
 #[cfg(any(feature = "manage", feature = "tenancy", feature = "runserver"))]
 #[must_use]

@@ -154,9 +154,9 @@ untouched.
 
 Additive: `catch_panics(routes).layer(your_layer)` lets your layers see a panic 500 (#2168).
 
-### `#[rustango::main]` loads `.env`
+### `#[rustango::main]` reads `RUST_LOG` from `./.env`
 
-With default logging the macro now calls `dotenvy::dotenv()` before `main` runs; your own call stays harmless (#2204).
+With default logging it uses that value when the real `RUST_LOG` is unset. It sets no env vars; a bad `.env` is ignored (#2204).
 
 ## 0.60.1
 

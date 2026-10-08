@@ -268,8 +268,8 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// `#[rustango::main]` — the runserver entrypoint. Wraps
 /// `#[tokio::main]` and a default `tracing_subscriber` initialisation
 /// (env-filter, falling back to `info,sqlx=warn`) so user `main`
-/// functions are zero-boilerplate. `.env` is loaded first, so its
-/// `RUST_LOG` applies; real environment variables still win:
+/// functions are zero-boilerplate. `RUST_LOG` comes from the real
+/// environment, else from `./.env` (only that key is read):
 ///
 /// ```ignore
 /// #[rustango::main]
@@ -353,10 +353,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `[logging]` settings actually take effect (#1465).
     let logging_prologue = if parse_logging(&args) {
         quote! {
-            // `.env` first, so `RUST_LOG` set only there reaches the filter
-            // (#2204). It never overrides the real environment.
-            let _ = #root::__private_runtime::dotenvy::dotenv();
-            use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
+            use #root::__private_runtime::tracing_subscriber;
             // Colour only when stdout is a terminal, and never under
             // `NO_COLOR` — `Color::Auto`'s rule, called rather than
             // copied.
@@ -382,10 +379,8 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
             // `try_init` so duplicate installers (e.g. tests already
             // holding a subscriber) don't panic.
             let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
-                )
+                // Also reads `RUST_LOG` from `./.env`, without loading it (#2204).
+                .with_env_filter(#root::__private_runtime::main_env_filter())
                 .with_ansi(__ansi)
                 .try_init();
         }

@@ -1269,11 +1269,49 @@ pub use rustango_macros::main;
 #[doc(hidden)]
 #[cfg(feature = "runtime")]
 pub mod __private_runtime {
-    pub use dotenvy;
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
     pub use tracing_subscriber;
+
+    /// The filter `#[rustango::main]` installs: real `RUST_LOG`, then
+    /// `RUST_LOG` from `./.env`, then `info,sqlx=warn` (#2204).
+    /// Sets no env vars and searches no parent directories.
+    pub fn main_env_filter() -> tracing_subscriber::EnvFilter {
+        use tracing_subscriber::EnvFilter;
+        const DEFAULT: &str = "info,sqlx=warn";
+        if std::env::var_os("RUST_LOG").is_some() {
+            return EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT));
+        }
+        dotenv_rust_log()
+            .and_then(|v| EnvFilter::try_new(v).ok())
+            .unwrap_or_else(|| EnvFilter::new(DEFAULT))
+    }
+
+    /// First `RUST_LOG` in `./.env`; none if the file is missing or has a
+    /// bad line, so a broken `.env` never stops startup.
+    fn dotenv_rust_log() -> Option<String> {
+        let iter = match dotenvy::from_path_iter(".env") {
+            Ok(iter) => iter,
+            Err(e) if e.not_found() => return None,
+            Err(e) => {
+                eprintln!("rustango: ignoring RUST_LOG in .env: {e}");
+                return None;
+            }
+        };
+        let mut found = None;
+        for item in iter {
+            match item {
+                Ok((key, value)) if key == "RUST_LOG" && found.is_none() => found = Some(value),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("rustango: ignoring RUST_LOG in .env: {e}");
+                    return None;
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Proc-macros crate, re-exported. End users normally reach

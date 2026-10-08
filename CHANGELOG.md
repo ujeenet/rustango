@@ -10,7 +10,7 @@ Wrap your routes in it before your own layers so they see a handler panic's 500;
 
 ### Fixed — `#[rustango::main]` reads `RUST_LOG` from `.env` (#2204)
 
-The macro loads `.env` before installing its subscriber; real environment variables still win.
+The default filter is the real `RUST_LOG`, else `RUST_LOG` from `./.env`, else `info,sqlx=warn`. Only that key is read; no env var is set and parent directories are not searched.
 
 ## [0.60.1] — 2026-10-07
 
