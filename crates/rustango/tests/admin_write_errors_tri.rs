@@ -2,7 +2,7 @@
 //! a refused write shows a plain message, never the driver's text (#2345);
 //! deleting a referenced row is a 409 naming a visible referrer (#2340); a bad
 //! inline row re-renders the form and saves no inline row (#2339);
-//! `admin_post_save` fires only after the edit commits.
+//! `admin_post_save` and the audit row follow the commit, never a rollback.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -12,7 +12,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use rustango::sql::{Auto, FetcherPool as _, Pool};
+use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
 
@@ -62,12 +62,55 @@ rustango::register_admin_inline!(
     extra = 2,
 );
 
+/// An `audit(...)` parent: its entry is written inside the edit's tx.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "wrerr_aparent", audit(track = "name"))]
+#[allow(dead_code)]
+pub struct AParent {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "wrerr_achild")]
+#[allow(dead_code)]
+pub struct AChild {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "wrerr_aparent", on = "id")]
+    pub parent_id: i64,
+    pub qty: i32,
+    #[rustango(max_length = 32, unique)]
+    pub note: String,
+}
+
+rustango::register_admin_inline!(
+    parent = "wrerr_aparent",
+    child = "wrerr_achild",
+    fk = "parent_id",
+    fields = &["qty", "note"],
+    extra = 2,
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "wrerr_child").await;
+    drop_table(pool, "wrerr_achild").await;
     fresh_table::<Parent>(pool).await;
     fresh_table::<Child>(pool).await;
     fresh_table::<Coded>(pool).await;
+    fresh_table::<AParent>(pool).await;
+    fresh_table::<AChild>(pool).await;
+    rustango::audit::ensure_table_pool(pool)
+        .await
+        .expect("audit table");
+    for t in ["wrerr_parent", "wrerr_aparent"] {
+        rustango::audit::AuditLog::delete_where("entity_table", t, pool)
+            .await
+            .expect("clear audit rows");
+    }
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -223,14 +266,16 @@ async fn notes(pool: &Pool) -> Vec<String> {
 }
 
 fn inline_form(rows: &[(&str, &str)]) -> String {
+    inline_form_for("wrerr_child", rows)
+}
+
+fn inline_form_for(child: &str, rows: &[(&str, &str)]) -> String {
     let mut form = format!(
-        "name=renamed&wrerr_child-TOTAL_FORMS={}&wrerr_child-INITIAL_FORMS=0",
+        "name=renamed&{child}-TOTAL_FORMS={}&{child}-INITIAL_FORMS=0",
         rows.len()
     );
     for (i, (qty, note)) in rows.iter().enumerate() {
-        form.push_str(&format!(
-            "&wrerr_child-{i}-qty={qty}&wrerr_child-{i}-note={note}"
-        ));
+        form.push_str(&format!("&{child}-{i}-qty={qty}&{child}-{i}-note={note}"));
     }
     form
 }
@@ -325,6 +370,55 @@ async fn refused_inline_write_rolls_back(pool: &Pool) {
     assert!(body.contains("already exists"), "{body}");
 }
 
+async fn audit_rows(pool: &Pool, table: &str) -> i64 {
+    rustango::audit::AuditLog::objects()
+        .filter("entity_table", table)
+        .count(pool)
+        .await
+        .expect("count audit rows")
+}
+
+/// A rolled-back edit leaves no audit row, on both the after-commit
+/// (plain) and in-tx (`audit(...)`) paths; a good edit leaves one.
+async fn rolled_back_edit_leaves_no_audit_row(pool: &Pool) {
+    let p = seed_parent(pool, "p").await;
+    seed_child(pool, p, "taken").await;
+    let mut a = AParent {
+        id: Auto::default(),
+        name: "p".into(),
+    };
+    a.insert_pool(pool).await.expect("insert aparent");
+    let a = *a.id.get().expect("pk");
+    let mut c = AChild {
+        id: Auto::default(),
+        parent_id: a,
+        qty: 1,
+        note: "taken".into(),
+    };
+    c.insert_pool(pool).await.expect("insert achild");
+    for (parent, child, pk) in [
+        ("wrerr_aparent", "wrerr_achild", a),
+        ("wrerr_parent", "wrerr_child", p),
+    ] {
+        let before = audit_rows(pool, parent).await;
+        let refused = inline_form_for(child, &[("1", "fresh"), ("2", "taken")]);
+        let (status, body) = post(pool, &format!("/{parent}/{pk}"), &refused).await;
+        assert!(
+            body.contains("Nothing was saved"),
+            "{parent}: {status} {body}"
+        );
+        assert_eq!(
+            audit_rows(pool, parent).await,
+            before,
+            "{parent}: audit row kept"
+        );
+        let good = inline_form_for(child, &[("1", "fresh")]);
+        let (status, body) = post(pool, &format!("/{parent}/{pk}"), &good).await;
+        assert!(status.is_redirection(), "{parent}: {status} {body}");
+        assert_eq!(audit_rows(pool, parent).await, before + 1, "{parent}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -336,5 +430,6 @@ tri_dialect_test! {
         bad_inline_value_rerenders_the_form,
         refused_inline_write_rolls_back,
         post_save_sees_the_committed_edit,
+        rolled_back_edit_leaves_no_audit_row,
     ],
 }
