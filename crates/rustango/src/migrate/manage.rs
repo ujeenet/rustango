@@ -4309,6 +4309,19 @@ pub(crate) enum FlushScope<'a> {
     Tenant { schema: Option<&'a str> },
 }
 
+/// The DETAIL line of a Postgres error, if there is one.
+fn pg_error_detail(e: &crate::sql::ExecError) -> Option<String> {
+    #[cfg(feature = "postgres")]
+    if let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e {
+        return db
+            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .and_then(|pg| pg.detail())
+            .map(str::to_owned);
+    }
+    let _ = e;
+    None
+}
+
 /// `flush` may touch this model: managed, not a view (#2285), in scope (#2284).
 fn flush_eligible(s: &crate::core::ModelSchema, scope: FlushScope<'_>) -> bool {
     s.managed
@@ -4593,7 +4606,14 @@ pub(crate) async fn flush_cmd<W: Write>(
         let sql = format!("TRUNCATE TABLE {} RESTART IDENTITY", quoted.join(", "));
         match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
             Ok(_) => cleared = quoted.len(),
-            Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
+            // PG's DETAIL names the blocking table; the message alone does not.
+            Err(e) => failures.push((
+                "TRUNCATE".to_owned(),
+                match pg_error_detail(&e) {
+                    Some(detail) => format!("{e} ({detail})"),
+                    None => format!("{e} (tables: {})", quoted.join(", ")),
+                },
+            )),
         }
     } else {
         // MySQL / SQLite: one transaction, junctions then children before
@@ -4611,9 +4631,11 @@ pub(crate) async fn flush_cmd<W: Write>(
             writeln!(w, "  - {t}: {e}")?;
         }
         // Surface as an error so the caller's exit code reflects partial failure.
+        let what: Vec<String> = failures.iter().map(|(t, e)| format!("{t}: {e}")).collect();
         return Err(MigrateError::Validation(format!(
-            "flush completed with {} failure(s)",
-            failures.len()
+            "flush completed with {} failure(s): {}",
+            failures.len(),
+            what.join("; ")
         )));
     }
     Ok(())

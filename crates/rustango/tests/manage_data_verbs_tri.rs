@@ -374,7 +374,14 @@ async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) 
         1,
         "the refused flush still cleared the target"
     );
-    assert!(out.is_err(), "flush must fail: {out:?}");
+    let err = out.expect_err("flush must fail");
+    // SQLite reports a deferred FK failure at COMMIT, with no table name.
+    if pool.dialect().name() != "sqlite" {
+        assert!(
+            err.contains("cli2315_ref"),
+            "name the blocking table: {err}"
+        );
+    }
 }
 
 /// Parents with children and a self-FK tree all clear, children first.
