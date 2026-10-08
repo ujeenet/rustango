@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `[mail]` docs name the env override that works (#2257)
+
+It is `RUSTANGO__MAIL__SMTP_PASSWORD`. Loading config now warns about a `RUSTANGO_` var with `__` later, which is never read; a guard test keeps docs and comments on the double underscore.
+
 ### Fixed — MCP 401 has a JSON-RPC body (#2259)
 
 A missing, invalid or revoked token gets `application/json` with error code `-32001`; status and `WWW-Authenticate` are unchanged.

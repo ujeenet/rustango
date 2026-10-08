@@ -223,6 +223,9 @@ where
     const PREFIX: &str = "RUSTANGO__";
     for (var, raw) in env_vars {
         let Some(rest) = var.strip_prefix(PREFIX) else {
+            if let Some(fixed) = mistyped_override(&var) {
+                eprintln!("config: env var {var} is ignored; did you mean {fixed}?");
+            }
             continue;
         };
         if rest.is_empty() {
@@ -236,6 +239,13 @@ where
         graft(tree, &path, value);
     }
     Ok(())
+}
+
+/// A var with one `_` after `RUSTANGO` but `__` later is a typo: it is
+/// never read (#2257). Returns the `RUSTANGO__…` name that works.
+fn mistyped_override(var: &str) -> Option<String> {
+    let rest = var.strip_prefix("RUSTANGO_")?;
+    (!rest.starts_with('_') && rest.contains("__")).then(|| format!("RUSTANGO__{rest}"))
 }
 
 /// Parse the raw string as a TOML scalar. A dummy key is prepended so
@@ -355,6 +365,23 @@ mod tests {
             "env var beats file"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_single_underscore_override_is_flagged() {
+        // Built with `concat!` so the docs guard does not flag this test.
+        assert_eq!(
+            mistyped_override(concat!("RUSTANGO_", "MAIL__SMTP_PASSWORD")).as_deref(),
+            Some("RUSTANGO__MAIL__SMTP_PASSWORD")
+        );
+        for ok in [
+            "RUSTANGO__MAIL__SMTP_PASSWORD",
+            "RUSTANGO_SESSION_SECRET",
+            "RUSTANGO_ENV",
+            "OTHER_MAIL__X",
+        ] {
+            assert_eq!(mistyped_override(ok), None, "{ok}");
+        }
     }
 
     #[test]
