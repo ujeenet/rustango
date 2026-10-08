@@ -251,12 +251,58 @@ async fn drop_database_at(tenant_url: &str) -> Result<(), TenancyError> {
     // `DROP DATABASE` cannot run from inside the database being
     // dropped, so this connects to `postgres` on the same server.
     let mut admin = opts.clone().database("postgres").connect().await?;
+    let version: i32 =
+        crate::sql::sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&mut admin)
+            .await?;
+    drop_database_on(&mut admin, &dbname, DropMode::for_server(version)).await
+}
+
+/// How to clear other pods' idle connections off the database first (#2291).
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropMode {
+    /// PG 13+: `DROP DATABASE … WITH (FORCE)`.
+    Force,
+    /// Older servers: `pg_terminate_backend` every session, then drop.
+    Terminate,
+}
+
+#[cfg(feature = "postgres")]
+impl DropMode {
+    fn for_server(version_num: i32) -> Self {
+        if version_num >= 130_000 {
+            Self::Force
+        } else {
+            Self::Terminate
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn drop_database_on(
+    admin: &mut crate::sql::sqlx::PgConnection,
+    dbname: &str,
+    mode: DropMode,
+) -> Result<(), TenancyError> {
     // Postgres by construction — the caller checks `backend_kind`.
-    let sql = format!(
+    let mut sql = format!(
         "DROP DATABASE IF EXISTS \"{}\"",
         dbname.replace('"', "\"\"")
     );
-    crate::sql::sqlx::query(&sql).execute(&mut admin).await?;
+    match mode {
+        DropMode::Force => sql.push_str(" WITH (FORCE)"),
+        DropMode::Terminate => {
+            crate::sql::sqlx::query(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE datname = $1 AND pid <> pg_backend_pid()",
+            )
+            .bind(dbname)
+            .execute(&mut *admin)
+            .await?;
+        }
+    }
+    crate::sql::sqlx::query(&sql).execute(&mut *admin).await?;
     Ok(())
 }
 
@@ -282,5 +328,45 @@ mod tests {
                 purge_database: false
             }
         );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn force_needs_postgres_13() {
+        assert_eq!(DropMode::for_server(120_022), DropMode::Terminate);
+        assert_eq!(DropMode::for_server(130_000), DropMode::Force);
+    }
+
+    /// The pre-13 path drops a database another session holds open (#2291).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn terminate_mode_drops_a_database_in_use() {
+        use crate::sql::sqlx::{Connection as _, PgConnection};
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let mut admin = PgConnection::connect(&url).await.unwrap();
+        let db = format!("rustango_term_{}", std::process::id());
+        let _ = crate::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
+            .execute(&mut admin)
+            .await;
+        crate::sql::sqlx::query(&format!("CREATE DATABASE \"{db}\""))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let (base, _) = url.rsplit_once('/').unwrap();
+        let _held = PgConnection::connect(&format!("{base}/{db}"))
+            .await
+            .unwrap();
+        drop_database_on(&mut admin, &db, DropMode::Terminate)
+            .await
+            .expect("drop with a session open");
+        let left: i64 =
+            crate::sql::sqlx::query_scalar("SELECT count(*) FROM pg_database WHERE datname = $1")
+                .bind(&db)
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
     }
 }

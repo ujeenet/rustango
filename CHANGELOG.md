@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both.
 
+### Fixed — a database-mode purge no longer fails on other pods' connections (#2291)
+
+`DROP DATABASE … WITH (FORCE)` on PG 13+; older servers terminate the sessions first.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

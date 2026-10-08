@@ -123,3 +123,50 @@ async fn schema_purge_evicts_the_scoped_pool() {
         "scoped pool kept after purge"
     );
 }
+
+/// Another pod's idle connection does not block a database-mode purge (#2291).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_drops_a_database_another_pod_holds_open() {
+    use rustango::sql::sqlx::{Connection as _, PgConnection};
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let slug = format!("purge-db-{}", std::process::id());
+    let db = format!("rustango_purge_db_{}", std::process::id());
+    let _ = rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await;
+    rustango::sql::sqlx::query(&format!("CREATE DATABASE \"{db}\""))
+        .execute(pg)
+        .await
+        .unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let tenant_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "postgres".into(),
+        database_url: Some(tenant_url.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&pool).await.expect("insert org");
+    let _other_pod = PgConnection::connect(&tenant_url).await.unwrap();
+
+    let report = purge_on(&pool, &slug).await.expect("purge");
+    assert!(report.database_dropped.is_some());
+    let left: i64 =
+        rustango::sql::sqlx::query_scalar("SELECT count(*) FROM pg_database WHERE datname = $1")
+            .bind(&db)
+            .fetch_one(pg)
+            .await
+            .unwrap();
+    assert_eq!(left, 0, "the tenant database survived the purge");
+}
