@@ -150,6 +150,9 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// What `new` picks when `--backend` is absent.
+    const DEFAULT: Self = Self::Postgres;
+
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
@@ -237,6 +240,9 @@ enum Template {
 }
 
 impl Template {
+    /// What `new` picks when `--template` is absent.
+    const DEFAULT: Self = Self::Fullstack;
+
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "api" => Ok(Self::Api),
@@ -375,8 +381,31 @@ struct NewArgs {
     /// `--rustango-path <dir>`: emit a path dependency instead of the crates.io
     /// version. For in-repo examples and for testing the working tree (#1211).
     rustango_path: Option<String>,
+}
+
+/// `new`'s command line before defaults. `None` = the flag was absent, so the
+/// wizard asks rather than overriding a given flag (#2286).
+#[derive(Debug)]
+struct NewFlags {
+    name: String,
+    template: Option<Template>,
+    backend: Option<Backend>,
+    features: Vec<String>,
+    rustango_path: Option<String>,
     /// `-i` / `--interactive`, or a bare `new` on a terminal: ask the rest.
     interactive: bool,
+}
+
+impl NewFlags {
+    fn resolve(self) -> NewArgs {
+        NewArgs {
+            name: self.name,
+            template: self.template.unwrap_or(Template::DEFAULT),
+            backend: self.backend.unwrap_or(Backend::DEFAULT),
+            features: self.features,
+            rustango_path: self.rustango_path,
+        }
+    }
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
@@ -385,11 +414,13 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     // a prompt nobody can answer.
     let asked = args.iter().any(|a| a == "-i" || a == "--interactive");
     let bare = args.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin());
-    let mut parsed = parse_new_args(args, asked || bare)?;
-    if parsed.interactive {
-        let named = !parsed.name.is_empty();
-        parsed = wizard::run(parsed, named)?;
-    }
+    let flags = parse_new_flags(args, asked || bare)?;
+    let parsed = if flags.interactive {
+        let named = !flags.name.is_empty();
+        wizard::run(flags, named)?
+    } else {
+        flags.resolve()
+    };
     validate_name(&parsed.name)?;
 
     let root = PathBuf::from(&parsed.name);
@@ -428,15 +459,20 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String> {
+    parse_new_flags(args, interactive).map(NewFlags::resolve)
+}
+
 /// Parse `new`'s arguments.
 ///
 /// `interactive` relaxes the one requirement the flags impose — a project
 /// name — because the wizard asks for it. Everything else already has a
 /// default, so a bare `cargo rustango new` is a complete request.
-fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String> {
+fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, String> {
     let mut name: Option<String> = None;
-    let mut template = Template::Fullstack;
-    let mut backend = Backend::Postgres;
+    let mut template: Option<Template> = None;
+    let mut backend: Option<Backend> = None;
     let mut features: Vec<String> = Vec::new();
     let mut rustango_path: Option<String> = None;
     let mut iter = args.iter();
@@ -446,13 +482,13 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
                 let v = iter
                     .next()
                     .ok_or_else(|| "--backend requires a value".to_owned())?;
-                backend = Backend::parse(v)?;
+                backend = Some(Backend::parse(v)?);
             }
             _ if arg.starts_with("--backend=") => {
-                backend = Backend::parse(&arg["--backend=".len()..])?;
+                backend = Some(Backend::parse(&arg["--backend=".len()..])?);
             }
             _ if arg.starts_with("-b=") => {
-                backend = Backend::parse(&arg["-b=".len()..])?;
+                backend = Some(Backend::parse(&arg["-b=".len()..])?);
             }
             // Repeatable and comma-separated both work, matching cargo's own
             // `--features` so muscle memory carries over.
@@ -472,15 +508,15 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
                 let v = iter
                     .next()
                     .ok_or_else(|| "--template requires a value".to_owned())?;
-                template = Template::parse(v)?;
+                template = Some(Template::parse(v)?);
             }
             // #1211 — the equals form is universal CLI convention (cargo's own
             // flags take it) and used to be rejected as an unknown flag.
             _ if arg.starts_with("--template=") => {
-                template = Template::parse(&arg["--template=".len()..])?;
+                template = Some(Template::parse(&arg["--template=".len()..])?);
             }
             _ if arg.starts_with("-t=") => {
-                template = Template::parse(&arg["-t=".len()..])?;
+                template = Some(Template::parse(&arg["-t=".len()..])?);
             }
             // #1211 — generate against a local checkout instead of crates.io.
             // Every in-repo example has to hand-rewrite the dependency line
@@ -532,8 +568,8 @@ fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String>
         seen.push(f.clone());
         fresh
     });
-    validate_features(&features, template)?;
-    Ok(NewArgs {
+    validate_features(&features, template.unwrap_or(Template::DEFAULT))?;
+    Ok(NewFlags {
         name,
         template,
         backend,
