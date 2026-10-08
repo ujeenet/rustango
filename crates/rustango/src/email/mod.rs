@@ -621,7 +621,12 @@ fn serialize_eml(email: &Email) -> String {
 impl Mailer for FileMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
         email.validate()?;
-        std::fs::create_dir_all(&self.dir)
+        // Owner-only: the files hold reset links and other tokens.
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+        dir.create(&self.dir)
             .map_err(|e| MailError::Transport(format!("create_dir_all: {e}")))?;
         let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
         let pid = std::process::id();
@@ -630,10 +635,11 @@ impl Mailer for FileMailer {
         loop {
             let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = self.dir.join(format!("{stamp}-{pid}-{seq:04}.eml"));
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path);
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let file = opts.open(&path);
             match file {
                 Ok(mut f) => {
                     use std::io::Write as _;
@@ -910,6 +916,26 @@ mod tests {
             b.send(&e).await.unwrap();
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 10);
+    }
+
+    /// Mail files hold reset tokens: owner-only dir and files.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_mailer_writes_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mail");
+        let e = Email::new().to("a@x.com").subject("s").body("b");
+        FileMailer::new(&dir).send(&e).await.unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(mode(&file), 0o600);
     }
 
     #[tokio::test]
