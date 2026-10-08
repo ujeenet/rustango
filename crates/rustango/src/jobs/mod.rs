@@ -261,6 +261,8 @@ type HandlerFn = Arc<
 #[derive(Clone)]
 struct Registered {
     handler: HandlerFn,
+    /// `JobDeadLetter` needs the static name; only the DB queue reads it.
+    #[cfg_attr(not(feature = "jobs-postgres"), allow(dead_code))]
     name: &'static str,
     retry_backoff: fn(u32) -> Duration,
 }
