@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Tenant schemas are no longer shared
+
+`create-tenant`, the console, the webhook and `migrate-tenant-storage` refuse a schema another tenant uses (#2290). Rows that already share one are not touched: find them before a purge.
+
+### A provisioning retry only resumes a never-activated tenant
+
+Once an operator activates or deactivates a tenant, a webhook replay for its failed run fails as "slug already exists" (#2292).
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).

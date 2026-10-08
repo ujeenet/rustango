@@ -12,6 +12,10 @@ Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, b
 
 `DROP DATABASE … WITH (FORCE)` on PG 13+; older servers terminate the sessions first.
 
+### Fixed — a provisioning retry no longer revives a suspended tenant (#2292)
+
+Activating a tenant by edit, or deactivating it, unlinks the failed run that made it, so a webhook replay stops resuming it.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

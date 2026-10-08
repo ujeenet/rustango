@@ -769,3 +769,64 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
     let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
     assert!(!orgs[0].active, "a purged tenant's run resumed a new one");
 }
+
+/// Replay a failed run's delivery and wait for its run.
+async fn replay(b: &Booted, slug: &str, key: &str) -> store::ProvisioningRun {
+    let body = body_for(slug, key, chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    await_run(b, run_id).await
+}
+
+/// Fixed and activated through the console's edit path, then suspended
+/// there: a replayed delivery leaves it suspended (#2292).
+#[tokio::test]
+async fn a_retry_does_not_revive_a_tenant_the_console_suspended() {
+    use rustango::tenancy::org_edit::{apply, OrgPatch};
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("suspended");
+    let _ = half_made(&b, &holder, &slug, "evt-suspended", true).await;
+    let registry = b.pools.registry_pool();
+    for active in [true, false] {
+        let patch = OrgPatch {
+            active: Some(active),
+            ..OrgPatch::default()
+        };
+        apply(&registry, &slug, &patch).await.expect("console edit");
+    }
+
+    let run = replay(&b, &slug, "evt-suspended").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a replay revived a suspended tenant");
+}
+
+/// Activated by hand, then deactivated: a replay leaves it suspended (#2292).
+#[tokio::test]
+async fn a_retry_does_not_revive_a_deactivated_tenant() {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    use rustango::tenancy::decommission::{decommission, Action};
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("deactivated");
+    let org_id = half_made(&b, &holder, &slug, "evt-deactivated", true).await;
+    let registry = b.pools.registry_pool();
+    Org::objects()
+        .where_(Org::id.eq(org_id))
+        .update()
+        .set("active", true)
+        .execute_pool(&registry)
+        .await
+        .unwrap();
+    decommission(b.pools.as_ref(), &slug, Action::Deactivate)
+        .await
+        .expect("deactivate");
+
+    let run = replay(&b, &slug, "evt-deactivated").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a replay revived a deactivated tenant");
+}

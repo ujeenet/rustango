@@ -98,6 +98,9 @@ where
                 .get()
                 .copied()
                 .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+            // It was active, so no provisioning retry may revive it (#2292).
+            let forget = super::provision_store::forget_failed_runs(id)?;
+            crate::sql::update_pool(&registry, &forget).await?;
             let updated = Org::objects()
                 .where_(Org::id.eq(id))
                 .update()
