@@ -1384,6 +1384,22 @@ impl Chain {
     }
 
     /// Delete the newest migration file, one that failed to apply.
+    /// Write a hand-built migration of `forward` ops ending at `current`.
+    fn write_hand(&self, current: Value, forward: Vec<Operation>) {
+        let prev = self.head();
+        let n: u32 = prev.name[..4].parse().expect("a numbered migration");
+        self.write(&Migration {
+            name: format!("{:04}_hand", n + 1),
+            created_at: prev.created_at.clone(),
+            prev: Some(prev.name.clone()),
+            atomic: true,
+            scope: prev.scope,
+            replaces: Vec::new(),
+            snapshot: snap(current),
+            forward,
+        });
+    }
+
     fn discard_head(&self) {
         let path = self.dir.path().join(format!("{}.json", self.head().name));
         std::fs::remove_file(path).unwrap();
@@ -2667,50 +2683,194 @@ async fn db_comment_change_applies(pool: &Pool) {
 /// both with 1553 (#2244).
 async fn fk_index_drops(pool: &Pool) {
     let (a, b) = ("mad_fi_author", "mad_fi_book");
-    let chain = fk_index_chain(pool, "fi", a, b).await;
-    let book = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    let chain = fk_index_chain(pool, "fi", a, b, false).await;
+    let dropped = chain
+        .step(pool, json!({"tables": [table(a, vec![id()]), book(a, b)]}))
+        .await
+        .expect("the FK's index drops");
+    orphan_refused(pool, b, "author_id").await;
+    chain.undo(pool, &dropped).await.expect("unapply");
+
     // A failed run left the FK dropped; the step still brings it back.
+    let (a, b) = ("mad_fk_author", "mad_fk_book");
+    let chain = fk_index_chain(pool, "fk", a, b, false).await;
     if pool.dialect().name() == "mysql" {
         let fk_name = rustango::migrate::ddl::fk_constraint_name(b, "author_id");
         exec(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk_name])
             .await
             .unwrap();
     }
-    let dropped = chain
-        .step(pool, json!({"tables": [table(a, vec![id()]), book]}))
+    chain
+        .step(pool, json!({"tables": [table(a, vec![id()]), book(a, b)]}))
         .await
-        .expect("the FK's index drops");
-    assert!(
-        exec(
-            pool,
-            "INSERT INTO {} ({}, {}) VALUES (1, 99)",
-            &[b, "id", "author_id"]
-        )
-        .await
-        .is_err(),
-        "the FK is back on {}",
-        pool.dialect().name()
-    );
-    chain.undo(pool, &dropped).await.expect("unapply");
+        .expect("the index drops");
+    orphan_refused(pool, b, "author_id").await;
 
     let (a, b) = ("mad_fj_author", "mad_fj_book");
-    let chain = fk_index_chain(pool, "fj", a, b).await;
+    let chain = fk_index_chain(pool, "fj", a, b, false).await;
     chain
         .step(pool, json!({"tables": [table(a, vec![id()])]}))
         .await
         .expect("the table drops with its FK's index");
 }
 
-/// `b` with an FK to `a` and an index on it, applied.
-async fn fk_index_chain(pool: &Pool, tag: &str, a: &str, b: &str) -> Chain {
-    let chain = Chain::new(pool, tag, &[b, a]).await;
-    let book = table(b, vec![id(), col("author_id", "i64", fk(a))]);
-    let idx = json!([{"name": format!("{b}_author_idx"), "table": b,
-                      "columns": ["author_id"], "unique": false}]);
+/// Another index serves the FK, so a plain DROP INDEX is enough: no FK
+/// drop and table-copy re-add, which an orphan row would now fail (#2244).
+async fn fk_index_drop_keeps_a_served_fk(pool: &Pool) {
+    let (a, b) = ("mad_fo_author", "mad_fo_book");
+    let chain = fk_index_chain(pool, "fo", a, b, true).await;
+    if let Some(my) = pool.as_mysql() {
+        let mut conn = my.acquire().await.unwrap();
+        for sql in [
+            "SET foreign_key_checks = 0".to_owned(),
+            q(
+                pool,
+                "INSERT INTO {} ({}, {}) VALUES (7, 99)",
+                &[b, "id", "author_id"],
+            ),
+            "SET foreign_key_checks = 1".to_owned(),
+        ] {
+            rustango::sql::sqlx::query(&sql)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+    }
+    let n_idx = json!([{"name": format!("{b}_author_n_idx"), "table": b,
+                        "columns": ["author_id", "n"], "unique": false}]);
     chain
         .step(
             pool,
-            json!({"tables": [table(a, vec![id()]), book], "indexes": idx}),
+            json!({"tables": [table(a, vec![id()]), book(a, b)], "indexes": n_idx}),
+        )
+        .await
+        .expect("a plain DROP INDEX, the FK untouched");
+}
+
+/// DropIndex, then an alter of the FK column in the same migration: the FK
+/// came back twice on MySQL (1826) (#2244).
+async fn fk_index_drop_then_alter(pool: &Pool) {
+    let (a, b) = ("mad_fa_author", "mad_fa_book");
+    let chain = fk_index_chain(pool, "fa", a, b, false).await;
+    let alter = SchemaChange::AlterColumnType {
+        table: b.into(),
+        column: "author_id".into(),
+        from: "i64".into(),
+        to: "i64".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), book(a, b)]}),
+        vec![drop_index(b), Operation::Schema(alter)],
+    );
+    chain.migrate(pool).await.expect("the FK comes back once");
+    orphan_refused(pool, b, "author_id").await;
+}
+
+/// DropIndex, then a rename of the FK column in the same migration: the
+/// re-add named the old column on MySQL (1072) (#2244).
+async fn fk_index_drop_then_rename(pool: &Pool) {
+    let (a, b) = ("mad_fz_author", "mad_fz_book");
+    let chain = fk_index_chain(pool, "fz", a, b, false).await;
+    let renamed = table(
+        b,
+        vec![
+            id(),
+            col("writer_id", "i64", fk(a)),
+            col("n", "i32", json!({})),
+        ],
+    );
+    let rename = SchemaChange::RenameColumn {
+        table: b.into(),
+        old_column: "author_id".into(),
+        new_column: "writer_id".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), renamed]}),
+        vec![drop_index(b), Operation::Schema(rename)],
+    );
+    chain
+        .migrate(pool)
+        .await
+        .expect("the FK comes back on writer_id");
+    orphan_refused(pool, b, "writer_id").await;
+}
+
+/// A shape the runner cannot rebuild at the DropIndex is an error, not a
+/// reason to drop the FK for good (#2244).
+async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return; // Only MySQL takes FKs off for an index drop.
+    }
+    let (a, b) = ("mad_fu_author", "mad_fu_book");
+    let chain = fk_index_chain(pool, "fu", a, b, false).await;
+    // `n` is altered, then dropped: its shape at the DropIndex is unknown.
+    let ops = vec![
+        drop_index(b),
+        Operation::Schema(SchemaChange::AlterColumnNullable {
+            table: b.into(),
+            column: "n".into(),
+            nullable: false,
+        }),
+        Operation::Schema(SchemaChange::DropColumn {
+            table: b.into(),
+            column: "n".into(),
+        }),
+    ];
+    let without_n = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    chain.write_hand(json!({"tables": [table(a, vec![id()]), without_n]}), ops);
+    assert!(chain.migrate(pool).await.is_err(), "refused");
+    orphan_refused(pool, b, "author_id").await;
+}
+
+/// `b`: an FK to `a`, and `n`.
+fn book(a: &str, b: &str) -> Value {
+    table(
+        b,
+        vec![
+            id(),
+            col("author_id", "i64", fk(a)),
+            col("n", "i32", json!({})),
+        ],
+    )
+}
+
+fn drop_index(b: &str) -> Operation {
+    Operation::Schema(SchemaChange::DropIndex {
+        name: format!("{b}_author_idx"),
+        table: b.into(),
+    })
+}
+
+/// An orphan in `t.column` fails on its FK, not on anything else.
+async fn orphan_refused(pool: &Pool, t: &str, column: &str) {
+    let got = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 99)",
+        &[t, "id", column],
+    )
+    .await;
+    let err = got.expect_err("an orphan row");
+    assert!(
+        err.to_lowercase().contains("foreign key"),
+        "{}: {err}",
+        pool.dialect().name()
+    );
+}
+
+/// [`book`] with an index on `author_id`, and one on `(author_id, n)` if
+/// `served`, applied.
+async fn fk_index_chain(pool: &Pool, tag: &str, a: &str, b: &str, served: bool) -> Chain {
+    let chain = Chain::new(pool, tag, &[b, a]).await;
+    let mut idx = vec![json!({"name": format!("{b}_author_idx"), "table": b,
+                              "columns": ["author_id"], "unique": false})];
+    if served {
+        idx.push(json!({"name": format!("{b}_author_n_idx"), "table": b,
+                        "columns": ["author_id", "n"], "unique": false}));
+    }
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), book(a, b)], "indexes": idx}),
         )
         .await
         .expect("initial");
@@ -2957,6 +3117,10 @@ tri_dialect_test!(
         db_comment_change_applies,
         db_comment_on_create_and_add_column,
         fk_index_drops,
+        fk_index_drop_keeps_a_served_fk,
+        fk_index_drop_then_alter,
+        fk_index_drop_then_rename,
+        fk_index_drop_refuses_an_unknown_shape,
         auto_pk_widens_its_sequence,
         fk_name_collision_is_refused,
         m2m_column_rename_keeps_rows,

@@ -368,9 +368,10 @@ pub trait Dialect: Send + Sync {
         None
     }
 
-    /// Query for an index's first column, binding `(table, index)`, where
-    /// an FK refuses to lose the index it uses (MySQL, 1553; #2244).
-    fn index_leading_column_sql(&self) -> Option<&'static str> {
+    /// Query for an index's first column when no other index starts with it,
+    /// binding `(table, index)`, where an FK refuses to lose the only index
+    /// it can use (MySQL, 1553; #2244).
+    fn sole_leading_column_sql(&self) -> Option<&'static str> {
         None
     }
 
