@@ -340,7 +340,8 @@ impl Dialect for MySql {
              SELECT 1 FROM information_schema.STATISTICS o \
              WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
              AND o.COLUMN_NAME = s.COLUMN_NAME AND o.SEQ_IN_INDEX = 1 \
-             AND o.INDEX_NAME <> s.INDEX_NAME)",
+             AND o.INDEX_NAME <> s.INDEX_NAME \
+             AND o.SUB_PART IS NULL AND o.INDEX_TYPE = 'BTREE')",
         )
     }
 
