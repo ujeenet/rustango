@@ -1977,6 +1977,10 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
     if super::errors::missing_table(e).is_some_and(|t| t == crate::audit::AUDIT_TABLE) {
         return "audit table missing — run `manage migrate`".to_owned();
     }
+    // Checked before any SQL ran (max_length, min/max, validators): no driver text.
+    if let crate::sql::ExecError::Query(q) = e {
+        return q.to_string();
+    }
     let id = super::errors::log_with_id("admin write refused", e);
     let msg = match Refusal::of(e) {
         Some(Refusal::Unique) => {
