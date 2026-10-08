@@ -1981,8 +1981,9 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
     if let crate::sql::ExecError::Query(q) = e {
         return q.to_string();
     }
-    let id = super::errors::log_with_id("admin write refused", e);
-    let msg = match e.refusal() {
+    let refusal = e.refusal();
+    let id = super::errors::log_with_id("admin write refused", e, refusal.is_some());
+    let msg = match refusal {
         Some(Refusal::Unique) => {
             let unique: Vec<&str> = model
                 .scalar_fields()
@@ -2499,7 +2500,11 @@ fn refused_delete(
     let mut tables: Vec<String> = e
         .fk_referencing_table()
         .map_or_else(|| blocking_referrers(model.table), |t| vec![t.to_owned()]);
-    let id = super::errors::log_with_id(&format!("admin delete refused; referrers {tables:?}"), &e);
+    let id = super::errors::log_with_id(
+        &format!("admin delete refused; referrers {tables:?}"),
+        &e,
+        true,
+    );
     // Name only tables this user may open in the admin.
     tables.retain(|t| lookup_model(state, t).is_some());
     let by = if tables.is_empty() {
