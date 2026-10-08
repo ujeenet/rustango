@@ -16,10 +16,10 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
-    is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
-    render_secret_cell, resolve_model, resolve_model_and_pk, search_columns, url_filterable,
-    FormLayout, ListQuery,
+    admin_config_or_default, build_fk_joins, chrome_context, fk_display_targets,
+    fk_map_from_joined_rows_json, is_secret_field, lookup_model, primary_key_or_internal,
+    render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
+    search_columns, url_filterable, FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -487,7 +487,7 @@ pub(crate) async fn table_view(
         crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
     });
 
-    let fk_map = fk_map_from_joined_rows_json(&state, model, &rows);
+    let fk_map = fk_map_for_rows(&state, &parts, model, &rows).await?;
 
     let last_page = if count_skipped {
         // No total means no last page. The pager renders "Page N"
@@ -1090,6 +1090,41 @@ async fn fetch_facet_counts(
         .collect())
 }
 
+/// FK cell names for `rows`: joined ones, plus the names of targets with a
+/// "view" hook, read through it so a denied row keeps its raw key (#2267).
+async fn fk_map_for_rows(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    rows: &[serde_json::Value],
+) -> Result<super::helpers::FkMap, AdminError> {
+    let mut map = fk_map_from_joined_rows_json(state, model, rows);
+    for t in fk_display_targets(state, model) {
+        if !crate::admin::object_permissions::has_hook(t.target.table, "view") {
+            continue;
+        }
+        let Some(on_field) = t.target.field_by_column(t.on) else {
+            continue;
+        };
+        let mut raws: Vec<String> = rows
+            .iter()
+            .filter_map(|row| render::read_value_as_string_json(row, t.field))
+            .collect();
+        raws.sort();
+        raws.dedup();
+        let keys: Vec<SqlValue> = raws
+            .iter()
+            .filter_map(|raw| forms::parse_pk_string(on_field, raw).ok())
+            .collect();
+        let names =
+            fk_display_names(state, parts, t.target, on_field, t.display_field, keys).await?;
+        for (raw, name) in names {
+            map.insert((t.to.to_owned(), raw), render::escape(&name));
+        }
+    }
+    Ok(map)
+}
+
 /// `on value -> display value` for an FK facet's keys, inside the
 /// target's queryset hooks (#2029) and in bind-capped chunks (#2049).
 async fn fk_display_names(
@@ -1590,8 +1625,7 @@ pub(crate) async fn detail_view(
         });
     }
 
-    // Read joined FK display values from the same row — no extra queries.
-    let fk_map = fk_map_from_joined_rows_json(&state, model, std::slice::from_ref(&row));
+    let fk_map = fk_map_for_rows(&state, &parts, model, std::slice::from_ref(&row)).await?;
 
     let detail_cfg = admin_config_or_default(model);
     let mut cells_ctx: Vec<serde_json::Value> = model

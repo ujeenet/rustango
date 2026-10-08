@@ -291,6 +291,17 @@ pub struct OpNote {
     pub post_id: i64,
 }
 
+/// FK cells show the post's name (#2267).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_cite")]
+#[allow(dead_code)]
+pub struct OpCite {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(fk = "op_post", on = "id")]
+    pub post_id: i64,
+}
+
 /// Post 1 belongs to owner 7 (denied), post 2 to owner 42; one note on each.
 async fn view_pool() -> Pool {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
@@ -299,6 +310,8 @@ async fn view_pool() -> Pool {
         "CREATE TABLE op_note (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
         "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'theirs-row', 7), (2, 'mine-row', 42)",
         "INSERT INTO op_note (id, post_id) VALUES (1, 1), (2, 2)",
+        "CREATE TABLE op_cite (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
+        "INSERT INTO op_cite (id, post_id) VALUES (1, 1), (2, 2)",
     ] {
         rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
             .await
@@ -410,3 +423,21 @@ async fn a_delete_action_runs_the_delete_hook_and_perm() {
     );
     assert_eq!(PURGED.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn view_hook_hides_fk_cell_names() {
+    let list = get_body("/op_cite").await;
+    assert!(list.contains("mine-row"), "control: an allowed name shows");
+    assert!(!list.contains("theirs-row"), "the list shows a denied name");
+    let allowed = get_body("/op_cite/2").await;
+    assert!(
+        allowed.contains("mine-row"),
+        "control: detail shows the name"
+    );
+    let denied = get_body("/op_cite/1").await;
+    assert!(
+        !denied.contains("theirs-row"),
+        "the detail shows a denied name"
+    );
+}
+

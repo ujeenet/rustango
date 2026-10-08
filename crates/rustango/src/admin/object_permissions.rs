@@ -8,8 +8,8 @@
 //! create, detail, edit, update and delete handlers all consult it and
 //! return 403 when a hook for that action denies.
 //!
-//! A `"view"` hook also drops denied rows from the list, autocomplete
-//! and FK facet names. It runs after the page is read, so a page may
+//! A `"view"` hook also drops denied rows from the list, autocomplete,
+//! FK facet names and FK cell names. It runs after the page is read, so a page may
 //! show fewer rows and the totals still count denied ones; a
 //! `register_admin_queryset!` filter hides rows from the counts too.
 //!
