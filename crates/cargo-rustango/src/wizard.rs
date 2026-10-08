@@ -126,7 +126,22 @@ fn equivalent_command(args: &NewArgs) -> String {
     if !args.features.is_empty() {
         cmd.push_str(&format!(" --features {}", args.features.join(",")));
     }
+    if let Some(path) = &args.rustango_path {
+        cmd.push_str(&format!(" --rustango-path {}", shell_quote(path)));
+    }
     cmd
+}
+
+/// `s` as one POSIX shell word; plain paths stay unquoted.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if plain {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 fn ask_name(prompt: &mut Prompt<'_>) -> Result<String, String> {
@@ -337,6 +352,30 @@ mod tests {
         assert_eq!(args.template.name(), Template::DEFAULT.name());
         assert_eq!(args.backend, Backend::DEFAULT);
         assert_eq!(asked, 4);
+    }
+
+    /// A local checkout picked with `--rustango-path` is echoed too, quoted
+    /// when the shell would split it.
+    #[test]
+    fn the_echoed_command_keeps_rustango_path() {
+        let mut args = NewArgs {
+            name: "probe".to_owned(),
+            template: Template::Api,
+            backend: Backend::Sqlite,
+            features: vec![],
+            rustango_path: Some("../rustango/crates/rustango".to_owned()),
+        };
+        let cmd = equivalent_command(&args);
+        let argv: Vec<String> = cmd.split_whitespace().skip(3).map(str::to_owned).collect();
+        let back = crate::parse_new_args(&argv, false).expect("parses");
+        assert_eq!(back.rustango_path, args.rustango_path, "{cmd}");
+
+        args.rustango_path = Some("my dir/it's".to_owned());
+        assert!(
+            equivalent_command(&args).ends_with(r"--rustango-path 'my dir/it'\''s'"),
+            "{}",
+            equivalent_command(&args)
+        );
     }
 
     /// Every menu entry must map onto a value the flags accept, so a wizard

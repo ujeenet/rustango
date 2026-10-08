@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 
-The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres.
+The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres. Its echoed command now includes `--rustango-path`.
 
 ### Fixed — `cargo rustango new`: escaped path, dependency names, loopback DB port (#2287)
 
