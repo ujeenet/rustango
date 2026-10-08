@@ -2781,8 +2781,9 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
-    /// A MySQL index drop, which its FK refuses (1553; #2244).
-    index_fks: Option<IndexFks>,
+    /// A MySQL index drop, which its FK refuses (1553; #2244). Boxed: `Step`
+    /// sits in every migrate future, near a debug test thread's 2 MiB stack.
+    index_fks: Option<Box<IndexFks>>,
 }
 
 /// The FKs a MySQL index drop must take off first, by the index's first
@@ -2808,6 +2809,37 @@ enum FkFate<'a> {
 }
 
 impl IndexFks {
+    /// For dropping `index` on `table`, one of `later`'s predecessors.
+    fn at(
+        table: &str,
+        index: &str,
+        later: &[Operation],
+        after: &SchemaSnapshot,
+        dialect: &dyn crate::sql::Dialect,
+        schema: Option<&str>,
+    ) -> Result<Self, MigrateError> {
+        // The shape at this op; none when a later op drops the table.
+        let at = if later.iter().any(|op| touches_table(op, table)) {
+            super::rebuild::snapshot_at(table, later, after)
+                .ok()
+                .map(|(s, renamed)| (std::borrow::Cow::Owned(s), renamed))
+        } else {
+            Some((std::borrow::Cow::Borrowed(after), false))
+        };
+        let columns = at
+            .as_ref()
+            .and_then(|(s, _)| s.table(table))
+            .map(|t| super::diff::column_fks(t, dialect, schema))
+            .transpose()
+            .map_err(MigrateError::Validation)?;
+        Ok(Self {
+            table: table.to_owned(),
+            index: index.to_owned(),
+            columns,
+            now: at.is_some_and(|(_, renamed)| renamed),
+        })
+    }
+
     fn fate(&self, column: &str) -> FkFate<'_> {
         let found = self
             .columns
@@ -2974,28 +3006,9 @@ fn render_step(
         _ => None,
     };
     let index_fks = match change {
-        SC::DropIndex { name, table } if dialect.index_leading_column_sql().is_some() => {
-            // The shape at this op; none when a later op drops the table.
-            let at = if later.iter().any(|op| touches_table(op, table)) {
-                super::rebuild::snapshot_at(table, later, after)
-                    .ok()
-                    .map(|(s, renamed)| (std::borrow::Cow::Owned(s), renamed))
-            } else {
-                Some((std::borrow::Cow::Borrowed(after), false))
-            };
-            let columns = at
-                .as_ref()
-                .and_then(|(s, _)| s.table(table))
-                .map(|t| super::diff::column_fks(t, dialect, schema))
-                .transpose()
-                .map_err(MigrateError::Validation)?;
-            Some(IndexFks {
-                table: table.clone(),
-                index: name.clone(),
-                columns,
-                now: at.is_some_and(|(_, renamed)| renamed),
-            })
-        }
+        SC::DropIndex { name, table } if dialect.index_leading_column_sql().is_some() => Some(
+            Box::new(IndexFks::at(table, name, later, after, dialect, schema)?),
+        ),
         _ => None,
     };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
@@ -3117,43 +3130,58 @@ macro_rules! step_statements {
     }};
 }
 
+/// `step`'s statements on MySQL, and an FK to re-add with the deferred ones.
 #[cfg(feature = "mysql")]
 async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
-    step: &mut Step,
-) -> Result<Vec<String>, sqlx::Error> {
+    step: &Step,
+) -> Result<(Vec<String>, Option<String>), sqlx::Error> {
+    let mut out = Vec::new();
+    let readd = match &step.index_fks {
+        Some(ix) => Box::pin(mysql_index_fks(conn, ix, &mut out)).await?,
+        None => None,
+    };
+    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
+    out.extend(rest?);
+    Ok(match readd {
+        Some((sql, true)) => {
+            out.push(sql);
+            (out, None)
+        }
+        other => (out, other.map(|(sql, _)| sql)),
+    })
+}
+
+/// Push the drops of the live FKs on `ix`'s index; its re-add, as
+/// [`IndexFks::plan`]. Boxed by the caller to keep its future small.
+#[cfg(feature = "mysql")]
+async fn mysql_index_fks(
+    conn: &mut sqlx::MySqlConnection,
+    ix: &IndexFks,
+    out: &mut Vec<String>,
+) -> Result<Option<(String, bool)>, sqlx::Error> {
     use crate::sql::Dialect as _;
     let dialect = crate::sql::MySql;
-    let (mut out, mut readd) = (Vec::new(), None);
-    let queries = (
+    let (Some(lead_sql), Some(names_sql)) = (
         dialect.index_leading_column_sql(),
         dialect.foreign_key_names_sql(),
-    );
-    if let (Some(ix), (Some(lead_sql), Some(names_sql))) = (&step.index_fks, queries) {
-        let lead: Option<String> = sqlx::query_scalar(lead_sql)
-            .bind(&ix.table)
-            .bind(&ix.index)
-            .fetch_optional(&mut *conn)
-            .await?;
-        if let Some(column) = lead {
-            let names: Vec<String> = sqlx::query_scalar(names_sql)
-                .bind(&ix.table)
-                .bind(&column)
-                .fetch_all(&mut *conn)
-                .await?;
-            readd = ix.plan(&column, &names, &dialect, &mut out);
-        }
-    }
-    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, &*step, dialect);
-    out.extend(rest?);
-    if let Some((sql, now)) = readd {
-        if now {
-            out.push(sql);
-        } else {
-            step.batch.deferred_fks.push(sql);
-        }
-    }
-    Ok(out)
+    ) else {
+        return Ok(None);
+    };
+    let lead: Option<String> = sqlx::query_scalar(lead_sql)
+        .bind(&ix.table)
+        .bind(&ix.index)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(column) = lead else {
+        return Ok(None);
+    };
+    let names: Vec<String> = sqlx::query_scalar(names_sql)
+        .bind(&ix.table)
+        .bind(&column)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(ix.plan(&column, &names, &dialect, out))
 }
 
 #[cfg(feature = "postgres")]
@@ -3214,10 +3242,11 @@ async fn atomic_mysql(
     for op in ops {
         match op {
             Operation::Schema(change) => {
-                let mut step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
-                let stmts = mysql_statements(&mut tx, &mut step)
+                let step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
+                let (stmts, readd) = mysql_statements(&mut tx, &step)
                     .await
                     .map_err(|e| stuck!(e))?;
+                deferred_fks.extend(readd);
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -3361,11 +3390,11 @@ async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut conn = my.acquire().await?;
-            let mut step = step;
-            for stmt in mysql_statements(&mut conn, &mut step).await? {
+            let (stmts, readd) = mysql_statements(&mut conn, &step).await?;
+            for stmt in stmts {
                 sqlx::query(&stmt).execute(&mut *conn).await?;
             }
-            Ok(step.batch.deferred_fks)
+            Ok(step.batch.deferred_fks.into_iter().chain(readd).collect())
         }
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
