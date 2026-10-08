@@ -534,8 +534,8 @@ pub trait Dialect: Send + Sync {
         "TEXT".to_owned()
     }
 
-    /// DDL a file migration runs before it writes a case-insensitive
-    /// column, such as `CREATE EXTENSION IF NOT EXISTS citext` on
+    /// DDL a migration runs before it writes a case-insensitive column,
+    /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
     /// Postgres. `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
         None

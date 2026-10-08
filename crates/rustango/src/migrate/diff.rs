@@ -2559,7 +2559,7 @@ mod sql_type_tests {
                 .unwrap()
                 .immediate
         };
-        let prelude = "CREATE EXTENSION IF NOT EXISTS citext;";
+        let prelude = "CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;";
         let pg = render(
             &[
                 add("name"),

@@ -145,6 +145,9 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     for model in models {
         ddl::check_on_delete(dialect, model).map_err(MigrateError::Validation)?;
     }
+    if let Some(sql) = ddl::ci_text_extension_sql(dialect, models) {
+        crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await?;
+    }
     for model in models {
         let sql = ddl::create_table_if_not_exists_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;

@@ -99,7 +99,7 @@ pub struct FieldSchema {
     pub blank: bool,
     /// Case-insensitive text. When `true`, the DDL writer emits
     /// a case-insensitive column type: `CITEXT` on Postgres, where a
-    /// file migration first runs `CREATE EXTENSION IF NOT EXISTS citext;`,
+    /// migration first runs `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;`,
     /// `TEXT COLLATE NOCASE` on SQLite, and a
     /// `COLLATE utf8mb4_general_ci` column on MySQL. So
     /// `WHERE col = 'foo'` also matches `'FOO'` with no `LOWER(…)`
