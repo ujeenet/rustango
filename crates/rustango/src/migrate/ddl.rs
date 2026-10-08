@@ -511,11 +511,28 @@ fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
             return ty.to_owned();
         }
     }
-    // Case-insensitive text only means something for `String`.
-    if field.case_insensitive && matches!(field.ty, FieldType::String) {
+    if is_ci_text(field) {
         return dialect.ci_text_type(field.max_length);
     }
     dialect.column_type(field.ty, field.max_length)
+}
+
+/// Case-insensitive text only means something for `String`.
+fn is_ci_text(field: &FieldSchema) -> bool {
+    field.case_insensitive && matches!(field.ty, FieldType::String)
+}
+
+/// The extension `models` need before their CITEXT columns, if any (#2271).
+pub(crate) fn ci_text_extension_sql(
+    dialect: &dyn Dialect,
+    models: &[&ModelSchema],
+) -> Option<&'static str> {
+    models
+        .iter()
+        .flat_map(|m| m.fields)
+        .any(is_ci_text)
+        .then(|| dialect.ci_text_extension_sql())
+        .flatten()
 }
 
 #[cfg(test)]

@@ -12,6 +12,92 @@ Wrap your routes in it before your own layers so they see a handler panic's 500;
 
 The default filter is the real `RUST_LOG`, else `RUST_LOG` from `./.env`, else `info,sqlx=warn`. Only that key is read; no env var is set and parent directories are not searched.
 
+### Fixed — PG type change on a column with a DEFAULT (#2242)
+
+`AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically". A type change no longer writes a separate `AlterColumnDefault`, so it undoes on PG too.
+
+### Fixed — a migration that drops an EXCLUDE constraint unapplies (#2241)
+
+The inverse `AddExclusionConstraint` is rebuilt from the predecessor snapshot; it always errored.
+
+### Fixed — makemigrations sees `case_insensitive`, `db_comment` and `generated_as` changes (#2239)
+
+A `case_insensitive` change is an `AlterColumnType`, a comment change the new `AlterColumnComment` op, and a `generated_as` change is refused like a primary-key change.
+
+### Fixed — PG length and type changes keep a column CITEXT (#2238)
+
+`AlterColumnMaxLength` and `AlterColumnType` on a case-insensitive field write `CITEXT`, not `VARCHAR`/`TEXT`, so it keeps ignoring case.
+
+### Fixed — PG file migrations create the `citext` extension (#2240)
+
+`CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`. `apply_all_pool` and testkit table creation run it too (#2271), and `public` keeps it shared by every schema-mode tenant (#2269).
+
+### Fixed — live tests drop the databases they create (#2222)
+
+A per-test database is now a guard that drops it at the end, also when the test fails.
+
+### Fixed — `migrate-tenant-storage` restore tests no longer drop shared extensions (#2223)
+
+They run against a private registry database, so other suites' `citext` / `hstore` columns survive.
+
+### Fixed — ViewSet warns about a nullable cursor column (#2230)
+
+`cursor_pagination` on a nullable field logs an error at build time, and a NULL at a page end is a clear 500. 0.61.0 refuses the field (#2265).
+
+### Fixed — a bad ViewSet filter is a 400, not a dropped filter (#2227)
+
+An unparsable value or unknown lookup returned every row; it is now a `400` naming the param. With a filter backend, an unknown lookup is left to the backend; a LIKE lookup on a non-string field is a `400`. `iexact`, `range` and the date parts (`year`, `date__gte`, ...) are accepted, and a plain date on a datetime `__gte`/`__lte` covers the whole UTC day.
+
+### Fixed — an empty ViewSet filter value is no filter (#2226)
+
+`?category_id=` on a nullable field compared to NULL and returned no rows; empty values are now skipped, as in the admin.
+
+### Fixed — tenant resolver state is per registry (#2077)
+
+The org/host caches, fingerprint polls and breakers are keyed by registry pool, so two registries in one process no longer share them.
+
+### Fixed — `FileCache` no longer blocks the async runtime (#1530)
+
+All its file I/O now runs on tokio's blocking pool.
+
+### Fixed — role, operator and user verbs refuse extra arguments (#1952)
+
+`assign-role`, `revoke-role`, `list-roles`, `create-role`, `set-operator-active`, `set-superuser`, `reset-password`, `list-operators` and `prewarm-pools` reject stray arguments and take flags anywhere. `set-superuser --on --off` is refused.
+
+### Fixed — `set-superuser` and `reset-password` write through the ORM (#1952)
+
+### Fixed — `startapp` refuses Rust keywords as app names (#1952)
+
+### Fixed — `make:serializer` docs show `Auto<i64>`, as the template writes (#1952)
+
+### Fixed — `[tenancy] apex_domain` is read (#1379)
+
+`Cli::with_settings` applies it; `RUSTANGO_APEX_DOMAIN` still wins.
+
+### Changed — settings that do nothing are documented and warned about (#1379)
+
+`[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
+
+### Fixed — stale admin comment and source reference in docs
+
+The fullstack `urls.rs` comment names `nest_with`, as `main.rs` does; manage.md names `provision_tenant` instead of a line number.
+
+### Fixed — de/fr/es scaffolding, migrations, manage and getting-started match English (#2015)
+
+They now cover the committed `system/migrations/`, the scaffolded login-gated `admin_router` and `with_session_auth`. de/es `create-tenant` no longer says it is safe to re-run.
+
+### Fixed — README links work on crates.io (#1405)
+
+crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+
+### Fixed — admin search skips secret fields (#2228)
+
+`?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
+
+### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
+
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267). Autocomplete reads up to 5 pages to fill its limit past denied rows. A password-widget field in `list_filter` gets no facet.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
@@ -2118,6 +2204,7 @@ literal outside the crate. Use `X::new(..)` and the builders
 `.projection`). Fields stay `pub`, so a new field is no longer a break.
 `Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
 struct fails if the marker is dropped. See UPGRADING.
+
 ### Fixed — two HTML escapers skipped `'` (#1663)
 
 The operator console's provisioning page and the admin's error page
@@ -2125,12 +2212,14 @@ escaped `& < > "` but not `'`. Twelve private escapers (and the
 cookbook example's) now import `text::html_escape` or the shared XML
 one, so `'` is `&#x27;` everywhere, `csrf_input_html` included (was
 `&#39;`). The `one_html_escaper` guard fails on a new copy.
+
 ### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
 
 **Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
 now gain a variant without a breaking release, and
 `clippy::exhaustive_enums` is denied in `core` so a new one cannot
 slip in exhaustive.
+
 ### Changed — one error envelope across the framework (#1193)
 
 **Breaking** for clients parsing error bodies. See UPGRADING.

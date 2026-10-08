@@ -17,6 +17,10 @@ use rustango::Model;
 use serde_json::json;
 use tokio::sync::Mutex;
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 // Compiles only when `audit(track = ...)` parses + validates against
 // the declared scalar fields.
 #[derive(Model, Debug, Clone)]
@@ -754,27 +758,13 @@ async fn repeat_ensures_send_nothing_the_server_rejects() {
     };
     let _g = lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    let db = format!("rustango_1642_{}", std::process::id());
-    let (scheme, rest) = url.split_once("://").unwrap();
-    let (authority, _) = rest.rsplit_once('/').unwrap();
-    let db_url = format!("{scheme}://{authority}/{db}");
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    let db = ScratchDb::create(&url, "rustango_1642").await;
 
-    ensure_round(&db_url, 1).await;
-    let before = settled_rollbacks(&admin, &db).await;
-    ensure_round(&db_url, 2).await;
-    let after = settled_rollbacks(&admin, &db).await;
+    ensure_round(db.url(), 1).await;
+    let before = settled_rollbacks(&admin, db.name()).await;
+    ensure_round(db.url(), 2).await;
+    let after = settled_rollbacks(&admin, db.name()).await;
 
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await;
     assert_eq!(
         after - before,
         0,

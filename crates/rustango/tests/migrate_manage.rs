@@ -17,6 +17,10 @@ use rustango::migrate::{
 };
 use rustango::sql::sqlx::{self, PgPool, Row};
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 use tokio::sync::Mutex;
@@ -844,23 +848,12 @@ async fn help_lists_new_commands() {
 #[cfg(feature = "tenancy")]
 #[tokio::test]
 async fn migrate_from_a_dir_without_system_restores_the_schema() {
-    let Some(admin) = pool().await else {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
     };
     let _g = live_lock().lock().await;
-    let admin = admin.as_postgres().unwrap().clone();
-    let url = std::env::var("DATABASE_URL").unwrap();
-    let db = format!("rustango_1988_{}", std::process::id());
-    let (base, _) = url.rsplit_once('/').unwrap();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let pg = PgPool::connect(&format!("{base}/{db}")).await.unwrap();
+    let db = ScratchDb::create(&url, "rustango_1988").await;
+    let pg = PgPool::connect(db.url()).await.unwrap();
     let pool: rustango::sql::Pool = pg.clone().into();
 
     let first = fresh_dir("1988a").join("migrations");
@@ -920,9 +913,6 @@ async fn migrate_from_a_dir_without_system_restores_the_schema() {
         .await
         .unwrap();
     pg.close().await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
-        .execute(&admin)
-        .await;
     result.expect("a second dir migrates the same database");
     assert_eq!(present, (1, 1), "the dropped table or column was skipped");
     assert_eq!(indexed, 1, "index {index} was not restored");
