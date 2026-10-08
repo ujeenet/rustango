@@ -54,20 +54,43 @@ pub struct Settings {
     pub logging: LoggingSettings,
 
     /// `[i18n]`: default language, supported languages and locale
-    /// paths. Builds a [`crate::i18n::Translator`] from TOML; see
-    /// [`crate::i18n::Translator::from_settings`].
+    /// paths. User-wired: only [`crate::i18n::Translator::from_settings`]
+    /// reads it, and the framework never calls that.
     pub i18n: I18nSettings,
 
     /// `[mcp]`: Model Context Protocol server. Does nothing unless
     /// the `mcp` feature is compiled in.
     pub mcp: McpSettings,
-    /// `[sso]`: admin SSO for an app with no tenants. Does nothing
-    /// unless the `admin-sso` feature is compiled in. Multi-tenant
-    /// apps set SSO per `Org` instead.
+    /// `[sso]`: **has no effect yet** — nothing reads it (#1379).
+    /// Configure admin SSO in the admin UI instead.
     pub sso: SsoSettings,
 }
 
 impl Settings {
+    /// Keys that are set but that nothing reads yet (#1379), so boot can
+    /// say so instead of failing silently.
+    #[cfg(any(test, feature = "manage"))]
+    pub(crate) fn inert_keys(&self) -> Vec<&'static str> {
+        let checks = [
+            (self.sso != SsoSettings::default(), "[sso]"),
+            (self.auth.jwt.issuer.is_some(), "[auth.jwt] issuer"),
+            (self.auth.jwt.audience.is_some(), "[auth.jwt] audience"),
+            (self.admin.primary_color.is_some(), "[admin] primary_color"),
+            (
+                self.admin.csrf_cookie_secure.is_some(),
+                "[admin] csrf_cookie_secure",
+            ),
+            (
+                self.admin.session_timeout_minutes.is_some(),
+                "[admin] session_timeout_minutes",
+            ),
+        ];
+        checks
+            .into_iter()
+            .filter_map(|(set, key)| set.then_some(key))
+            .collect()
+    }
+
     /// The cargo features compiled into this build. Handy on version
     /// pages and in deploy audits, for example to spot that a prod
     /// binary lacks `oauth2` before the login button 500s. The list
@@ -127,7 +150,8 @@ impl Settings {
 }
 
 /// `[mcp]`: Model Context Protocol server. Every field is optional;
-/// the accessors below supply the defaults.
+/// the accessors below supply the defaults. User-wired: read by
+/// `mcp::secure_tenant_router_from_settings`, which you call.
 ///
 /// Example `config/default.toml`, showing each key at its default:
 ///
@@ -183,11 +207,10 @@ impl McpSettings {
     }
 }
 
-/// SSO for the admin login on an app with no tenants (`admin-sso`
-/// feature). The admin `Builder` reads it at boot. The email the
-/// provider returns must already belong to an admin user: SSO signs
-/// people in but never creates accounts. Multi-tenant apps configure
-/// SSO per `Org` instead.
+/// **Has no effect yet: nothing in the framework reads this section**
+/// (#1379). Admin SSO providers are rows of the `SsoProvider` model,
+/// set up in the admin UI; multi-tenant apps configure SSO per `Org`.
+/// Do not put a client secret here expecting it to be used.
 ///
 /// ```toml
 /// [sso]
@@ -198,7 +221,7 @@ impl McpSettings {
 /// # client_secret = ""       # prefer the RUSTANGO__SSO__CLIENT_SECRET env overlay
 /// # redirect_uri = ""        # must match the mounted /login/sso/{provider}/callback
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SsoSettings {
     /// Shows the "Sign in with …" button on the admin login page.
@@ -234,14 +257,13 @@ impl SsoSettings {
 }
 
 /// Connection URL + pool sizing for the primary database.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatabaseSettings {
-    /// Connection URL. Needed at runtime, but the loader does not
-    /// require it here, so a config can leave it to
-    /// `RUSTANGO__DATABASE__URL`. Schemes: `postgres://`, `mysql://`,
-    /// `sqlite:`. [`crate::sql::Pool::connect`] picks the driver from
-    /// the scheme.
+    /// Connection URL. **Not used to connect yet** (#1379): every pool
+    /// the framework opens reads the `DATABASE_URL` env var.
+    /// `RUSTANGO__DATABASE__URL` only sets this field, so it does not
+    /// work either. [`DatabaseSettings::resolved_backend`] reads it.
     pub url: Option<String>,
     /// Which backend this deploy expects: `"postgres"`, `"mysql"` or
     /// `"sqlite"`. Optional. When unset,
@@ -354,9 +376,9 @@ pub struct AdminSettings {
     /// Logo URL next to the title. Falls back to
     /// `Settings.brand.logo_url`, then the built-in asset.
     pub logo_url: Option<String>,
-    /// Accent color in hex, such as `"#2c6fb0"`. Falls back to
-    /// `Settings.brand.primary_color`. `manage check --deploy`
-    /// checks the format.
+    /// Accent color in hex, such as `"#2c6fb0"`. **No effect yet**
+    /// (#1379): `Builder::from_settings` does not apply it; only
+    /// `manage check --deploy` checks the format.
     pub primary_color: Option<String>,
     /// `"auto"` (default), `"light"` or `"dark"`. Falls back to
     /// `Settings.brand.theme_mode`.
@@ -367,13 +389,13 @@ pub struct AdminSettings {
     pub url_prefix: Option<String>,
 
     // ---- deploy and session ----------------------------------
-    /// `true` marks the CSRF cookie `Secure`, so it is sent over
-    /// HTTPS only. `false` is for dev; `manage check --deploy`
-    /// reports it as an error in prod.
+    /// Meant to mark the CSRF cookie `Secure`. **No effect yet**
+    /// (#1379): only `manage check --deploy` reads it. The cookie
+    /// follows `[security] secure_cookies`.
     pub csrf_cookie_secure: Option<bool>,
-    /// Idle timeout for an admin session, in minutes. `None` uses
-    /// the default of 60. `0` means no idle timeout, so the session
-    /// lasts as long as the browser keeps it.
+    /// Meant as the admin session idle timeout, in minutes. **No
+    /// effect yet** (#1379): the admin has no idle timeout, and only
+    /// `manage check --deploy` reads this.
     pub session_timeout_minutes: Option<u32>,
 }
 
@@ -382,14 +404,15 @@ pub struct AdminSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TenancySettings {
-    /// Apex domain for subdomain-based tenant resolution. Mirrors the
-    /// `RUSTANGO_APEX_DOMAIN` env var, which still works as a
-    /// fallback.
+    /// Apex domain for subdomain-based tenant resolution. Applied by
+    /// `Cli::with_settings`; the `RUSTANGO_APEX_DOMAIN` env var wins
+    /// over it, as `RUSTANGO_BIND` does over `[server] bind`.
     pub apex_domain: Option<String>,
 }
 
-/// Which cache backend to build.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+/// Which cache backend to build. User-wired: the framework builds no
+/// cache from it; pass it to [`crate::cache::from_settings_async`].
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CacheSettings {
     /// One of `"memory"` (the default), `"null"` / `"none"`,
@@ -410,7 +433,8 @@ pub struct CacheSettings {
     pub file_cache_dir: Option<std::path::PathBuf>,
 }
 
-/// Background job runner.
+/// Background job runner. User-wired: the framework never reads it;
+/// pass it to `jobs::inmemory_from_settings` yourself.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct JobsSettings {
@@ -423,8 +447,9 @@ pub struct JobsSettings {
     pub concurrency: Option<u32>,
 }
 
-/// Mailer.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+/// Mailer. User-wired: read by `email::from_settings`, which you call,
+/// and by the `sendtestemail` verb. No framework mail path builds one.
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MailSettings {
     /// `"smtp"`, `"console"` (the dev default) or `"memory"` (tests).
@@ -519,9 +544,8 @@ impl ServerSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AuthSettings {
-    /// JWT lifetimes. The field names match
-    /// `rustango::tenancy::auth_routes::Config`, so this section can
-    /// go straight to `auth_routes::JwtAuth::new(...)`.
+    /// JWT lifetimes. User-wired: only
+    /// `auth_routes::Config::with_jwt_settings` reads it, which you call.
     pub jwt: JwtSettings,
     /// Argon2id memory cost in KiB. Default `19456`, about 19 MiB,
     /// which is the OWASP floor. Less memory means faster logins and
@@ -563,9 +587,10 @@ pub struct JwtSettings {
     pub access_ttl_secs: Option<u64>,
     /// Refresh-token TTL in seconds. Default `604800` (7 days).
     pub refresh_ttl_secs: Option<u64>,
-    /// JWT issuer claim (`iss`). Defaults to the framework's name.
+    /// JWT issuer claim (`iss`). **No effect yet** (#1379): nothing
+    /// threads it into the tokens.
     pub issuer: Option<String>,
-    /// JWT audience claim (`aud`).
+    /// JWT audience claim (`aud`). **No effect yet** (#1379).
     pub audience: Option<String>,
 }
 
@@ -681,9 +706,9 @@ pub struct RoutesSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AuditSettings {
-    /// Retention in days. `None` keeps rows forever; you can still
-    /// run `audit-cleanup --days <N>` from cron. Most deployments
-    /// set 90 to 365, depending on their rules.
+    /// Retention in days. **Nothing prunes on it yet** (#1379); only
+    /// `check --deploy` reads it. Schedule `audit-cleanup --days <N>`
+    /// from cron to actually delete rows.
     pub retention_days: Option<u32>,
     /// More query-parameter names to redact in access logs. The
     /// built-in list already covers `password`, `token`, `secret`,
@@ -760,9 +785,8 @@ pub struct LoggingSettings {
 }
 
 /// `[i18n]`: the default language, the supported languages and the
-/// locale paths. [`crate::i18n::Translator::from_settings`] builds
-/// a `Translator` from them, so locale wiring stays out of
-/// `src/main.rs`.
+/// locale paths. User-wired: the framework never reads this section;
+/// call [`crate::i18n::Translator::from_settings`] yourself.
 ///
 /// Example `config/default.toml`:
 ///
@@ -803,9 +827,100 @@ pub struct I18nSettings {
     pub fallback_chain: Vec<String>,
 }
 
+/// `Some("<redacted>")` for a set secret: `{:?}` of the settings must not print it.
+fn redacted(v: &Option<String>) -> Option<&'static str> {
+    v.as_ref().map(|_| "<redacted>")
+}
+
+/// A URL with its password masked.
+fn redacted_url(v: &Option<String>) -> Option<String> {
+    v.as_deref().map(crate::sql::connect_diagnosis::redact)
+}
+
+impl std::fmt::Debug for SsoSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoSettings")
+            .field("enabled", &self.enabled)
+            .field("provider", &self.provider)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &redacted(&self.client_secret))
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DatabaseSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseSettings")
+            .field("url", &redacted_url(&self.url))
+            .field("backend", &self.backend)
+            .field("pool_max_size", &self.pool_max_size)
+            .field("pool_min_size", &self.pool_min_size)
+            .field("pool_acquire_timeout_secs", &self.pool_acquire_timeout_secs)
+            .field("pool_idle_timeout_secs", &self.pool_idle_timeout_secs)
+            .field("pool_max_lifetime_secs", &self.pool_max_lifetime_secs)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for CacheSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheSettings")
+            .field("backend", &self.backend)
+            .field("redis_url", &redacted_url(&self.redis_url))
+            .field("file_cache_dir", &self.file_cache_dir)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MailSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailSettings")
+            .field("backend", &self.backend)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &redacted(&self.smtp_password))
+            .field("smtp_tls", &self.smtp_tls)
+            .field("smtp_timeout_secs", &self.smtp_timeout_secs)
+            .field("from_address", &self.from_address)
+            .field("server_email", &self.server_email)
+            .field("email_subject_prefix", &self.email_subject_prefix)
+            .field("admins", &self.admins)
+            .field("managers", &self.managers)
+            .field("file_email_dir", &self.file_email_dir)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `{:?}` of the whole settings prints no secret.
+    #[test]
+    fn settings_debug_redacts_every_secret() {
+        let mut s = Settings::default();
+        s.database.url = Some("postgres://app:DBSECRET@db/app?password=QSECRET".into());
+        s.sso.client_secret = Some("SSOSECRET".into());
+        s.cache.redis_url = Some("redis://:REDISSECRET@cache:6379/0".into());
+        s.mail.smtp_password = Some("SMTPSECRET".into());
+        let dbg = format!("{s:?} {s:#?}");
+        for secret in [
+            "DBSECRET",
+            "QSECRET",
+            "SSOSECRET",
+            "REDISSECRET",
+            "SMTPSECRET",
+        ] {
+            assert!(!dbg.contains(secret), "{secret} in {dbg}");
+        }
+        assert!(
+            dbg.contains("db/app") && dbg.contains("cache:6379"),
+            "{dbg}"
+        );
+    }
 
     #[test]
     fn resolved_backend_uses_explicit_value() {
@@ -852,6 +967,20 @@ mod tests {
     fn resolved_backend_none_when_neither_set() {
         let s = DatabaseSettings::default();
         assert_eq!(s.resolved_backend(), None);
+    }
+
+    /// Every key nothing reads is reported once it is set (#1379).
+    #[test]
+    fn inert_keys_lists_the_settings_nothing_reads() {
+        let mut s = Settings::default();
+        assert!(s.inert_keys().is_empty());
+        s.sso.client_secret = Some("x".into());
+        s.auth.jwt.issuer = Some("x".into());
+        s.auth.jwt.audience = Some("x".into());
+        s.admin.primary_color = Some("#fff".into());
+        s.admin.csrf_cookie_secure = Some(true);
+        s.admin.session_timeout_minutes = Some(30);
+        assert_eq!(s.inert_keys().len(), 6, "{:?}", s.inert_keys());
     }
 
     // The optional AdminSettings fields default to None, so an

@@ -576,6 +576,8 @@ impl Cli {
     ///   env var still wins (deploy-time overrides need to beat
     ///   committed config), and any subsequent explicit
     ///   [`Cli::bind`] call wins over both.
+    /// - `Settings.tenancy.apex_domain` → the tenancy apex host.
+    ///   `RUSTANGO_APEX_DOMAIN` still wins.
     ///
     /// Future fields land here as the wiring catches up — the method
     /// is forward-compatible because every Settings field is
@@ -603,6 +605,13 @@ impl Cli {
             if let Some(bind) = s.server.bind.as_deref() {
                 self.bind = bind.to_owned();
             }
+        }
+
+        // `[tenancy] apex_domain` was parsed and dropped (#1379).
+        // Process-wide like the cookie policy below; env still wins.
+        #[cfg(feature = "tenancy")]
+        if let Some(apex) = s.tenancy.apex_domain.as_deref() {
+            crate::tenancy::server::set_apex_domain_setting(apex);
         }
 
         // Pool sizing + timeouts, applied by every pool this process
@@ -755,6 +764,11 @@ impl Cli {
         } else {
             None
         };
+        // After logging is installed, so the warning is not lost (#2225).
+        #[cfg(feature = "config")]
+        if let Some(s) = self.settings_for_layers.as_ref() {
+            warn_unread_settings(&s.inert_keys());
+        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         let verb = args.first().map_or("", String::as_str);
 
@@ -1433,7 +1447,7 @@ impl Cli {
         let outer = None;
         // Not `mount_observability` — see the dispatch path above. The
         // builder applies these to the outermost router.
-        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let apex = crate::tenancy::server::apex_domain();
         let registry_url =
             std::env::var("DATABASE_URL")
                 .ok()
@@ -1613,6 +1627,21 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
         inert.push("security.cors_allowed_origins");
     }
     inert
+}
+
+/// Say which set keys nothing reads yet (#1379). Falls back to stderr
+/// when no tracing subscriber is installed, so the warning is never lost.
+#[cfg(feature = "config")]
+fn warn_unread_settings(keys: &[&str]) {
+    if keys.is_empty() {
+        return;
+    }
+    let keys = keys.join(", ");
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(target: "rustango::manage", keys = %keys, "these settings have no effect yet; see the config docs");
+    } else {
+        eprintln!("warning: these settings have no effect yet: {keys}");
+    }
 }
 
 /// Emit a `WARN` naming every layer-driving setting that is configured in the
@@ -2013,6 +2042,32 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s);
         assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// `[tenancy] apex_domain` reaches the apex the server uses (#1379).
+    #[cfg(all(feature = "config", feature = "tenancy"))]
+    #[test]
+    fn with_settings_sets_the_tenancy_apex() {
+        use crate::tenancy::server as srv;
+        let _g = srv::APEX_TEST_LOCK.blocking_lock();
+        srv::reset_apex_domain_setting();
+        let mut s = crate::config::Settings::default();
+        s.tenancy.apex_domain = Some("apex.example.com".into());
+        let _cli = Cli::new().with_settings(&s);
+        // Checked on the recorded value, so a set RUSTANGO_APEX_DOMAIN cannot hide it.
+        assert_eq!(
+            srv::apex_domain_setting().as_deref(),
+            Some("apex.example.com")
+        );
+        if std::env::var("RUSTANGO_APEX_DOMAIN").is_err() {
+            assert_eq!(
+                srv::ServerConfig::from_env().apex_domain,
+                "apex.example.com"
+            );
+        } else {
+            eprintln!("RUSTANGO_APEX_DOMAIN is set: skipping the from_env half");
+        }
+        srv::reset_apex_domain_setting();
     }
 
     /// Settings.server.bind = None doesn't clobber the existing

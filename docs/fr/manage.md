@@ -389,7 +389,7 @@ cargo rustango new shop --template tenant          # multi-tenancy
   config/default.toml                       (shared knobs)
   config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
-  system/migrations/                        (tenant template — framework tables, generated)
+  system/migrations/                        (framework tables, generated — commit them)
   src/{lib,main,models,views,urls}.rs
 ```
 
@@ -402,7 +402,7 @@ portent le réglage du pool `[database]`, `[admin]`, `[mcp]` et la politique
 [`check --deploy`](#check---deploy). Le contenu par niveau est détaillé dans
 [Scaffolding](scaffolding.md).
 
-Le modèle tenant fournit un dossier `system/migrations/` **vide**. Les
+Chaque template fournit un dossier `system/migrations/` **vide**. Les
 propres tables du framework (`rustango_orgs`, `rustango_users`,
 rôles/permissions, …) sont générées dans ce dossier à partir des modèles
 compilés lors du premier `cargo run -- migrate` — il n'y a pas de JSON
@@ -444,7 +444,11 @@ Ceux-ci créent des fichiers de démarrage pour des briques courantes —
 `make:model`, …). Chaque générateur écrit dans `src/<snake_name>.rs`
 (ou `tests/<snake_name>.rs` pour `make:test`) et :
 
-- Vérifie que le nom est valide (PascalCase, lettres/chiffres/underscore).
+- Vérifie que le nom est valide (PascalCase, lettres/chiffres/underscore) —
+  ces générateurs émettent un **type**, le nom est donc un nom de type.
+  `make:test` fait exception : il émet un fichier de fonctions de test, il
+  accepte donc n'importe quel identifiant Rust et `make:test post_smoke`
+  fonctionne comme montré plus bas.
 - Le convertit en snake_case pour le nom de fichier (`PostViewSet` →
   `post_view_set.rs`).
 - Ne remplace pas un fichier existant.
@@ -520,8 +524,11 @@ mettez en file depuis un handler et qu'un worker exécute ensuite.
 de requête. Portez dans ses champs tout ce dont la tâche a besoin.
 
 ```bash
-cargo run -- make:job EmailDigestJob
+cargo run -- make:job SendReceipt
 ```
+
+Pour un travail qui tourne sur une minuterie plutôt que depuis une file, voir
+`make:scheduled`.
 
 ### `make:scheduled <Name>`
 
@@ -641,7 +648,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.1
+rustango 0.60.2
 ```
 
 ### `about`
@@ -654,7 +661,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.1
+  version:        0.60.2
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -846,7 +853,7 @@ Met en place un nouveau tenant (client/organisation) et applique les
 migrations tenant à celui-ci. Le `<slug>` est son identifiant court.
 **Pas** sûr à réexécuter : l'appeler à nouveau sur un slug existant est refusé
 d'emblée avec ``tenant slug `<slug>` already exists``
-(tenancy/provision.rs:599), avant toute autre opération. Ce qui ne
+(`tenancy::provision::provision_tenant`), avant toute autre opération. Ce qui ne
 duplique rien.
 
 ```bash

@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.60.1"
+version = "0.60.2"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1760,6 +1760,7 @@ dependencies = [
  "rustango-macros",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_urlencoded",
  "sha2",
  "sqlx",
@@ -1780,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.60.1"
+version = "0.60.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

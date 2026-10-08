@@ -724,7 +724,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.1
+rustango 0.60.2
 ```
 
 ### `about`
@@ -736,7 +736,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.1
+  version:        0.60.2
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -914,7 +914,7 @@ next boot, and a webhook retry with the same `event_id` runs again.
 Sets up a new tenant (customer/org) and applies the tenant migrations to
 it. The `<slug>` is its short identifier. **Not** safe to re-run: calling it
 again on an existing slug is refused up front with ``tenant slug `<slug>`
-already exists`` (tenancy/provision.rs:599), before anything else happens.
+already exists`` (`tenancy::provision::provision_tenant`), before anything else happens.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
