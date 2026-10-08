@@ -98,20 +98,23 @@ where
                 .get()
                 .copied()
                 .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
-            // It was active, so no provisioning retry may revive it (#2292).
-            let forget = super::provision_store::forget_failed_runs(id)?;
-            crate::sql::update_pool(&registry, &forget).await?;
-            let updated = Org::objects()
+            let deactivate = Org::objects()
                 .where_(Org::id.eq(id))
                 .update()
                 .set("active", false)
-                .execute_pool(&registry)
-                .await?;
+                .compile()
+                .map_err(crate::sql::ExecError::from)?;
+            let mut tx = crate::sql::write_transaction_pool(&registry).await?;
+            let updated = crate::sql::update_tx(&mut tx, &deactivate).await?;
             if updated == 0 {
                 return Err(TenancyError::Validation(format!(
                     "no row updated for id {id} — race condition?"
                 )));
             }
+            // It was active, so no provisioning retry may revive it (#2292).
+            let forget = super::provision_store::forget_failed_runs(id)?;
+            crate::sql::update_tx(&mut tx, &forget).await?;
+            tx.commit().await?;
             super::invalidate_org_cache();
             report.deactivated = true;
         }
