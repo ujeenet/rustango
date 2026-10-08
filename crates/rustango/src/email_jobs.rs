@@ -78,9 +78,13 @@ pub struct EmailJob {
 #[async_trait::async_trait]
 impl Job for EmailJob {
     const NAME: &'static str = "rustango.send_email";
-    /// 5 attempts at the queue's `1s · 2^attempt` backoff, about a
-    /// minute in all.
-    const MAX_ATTEMPTS: u32 = 5;
+    /// 8 runs, 5s doubling between them: about ten minutes, enough to
+    /// ride out a relay restart.
+    const MAX_ATTEMPTS: u32 = 8;
+
+    fn retry_backoff(failed_attempt: u32) -> std::time::Duration {
+        crate::jobs::exponential_backoff(std::time::Duration::from_secs(5), failed_attempt)
+    }
 
     async fn run(&self) -> Result<(), JobError> {
         let mailer = mailer_registry()
@@ -243,6 +247,19 @@ mod tests {
         assert_eq!(m2.count(), 1, "new mailer should receive");
 
         q.shutdown().await;
+    }
+
+    /// Retries span minutes, so a short relay outage does not dead-letter
+    /// the mail (#2332).
+    #[test]
+    fn email_retries_span_several_minutes() {
+        let total: Duration = (0..EmailJob::MAX_ATTEMPTS - 1)
+            .map(EmailJob::retry_backoff)
+            .sum();
+        assert!(
+            total >= Duration::from_secs(300),
+            "gives up after {total:?}"
+        );
     }
 
     /// Rejects every message and counts the calls.

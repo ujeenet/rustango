@@ -44,6 +44,7 @@
 //! A job that returns `Err(JobError::Retryable(_))` is retried with
 //! growing backoff (1s, 2s, 4s, 8s, … up to 1024s). `max_attempts` counts **all**
 //! runs, so the default of 5 means one run plus four retries.
+//! A job can set its own wait with `Job::retry_backoff`.
 //! `Err(JobError::Fatal(_))` goes straight to the dead-letter handler.
 //!
 //! [`InMemoryJobQueue`]: crate::jobs::InMemoryJobQueue
@@ -93,6 +94,12 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Cap on **total** runs, not extra retries. The default of 5 is
     /// one run plus four retries; 3 gives two retries. 0 counts as 1.
     const MAX_ATTEMPTS: u32 = 5;
+
+    /// Wait before the retry after run `failed_attempt` (0 is the first
+    /// run). The default is 1s doubling; override it to ride out longer outages.
+    fn retry_backoff(failed_attempt: u32) -> Duration {
+        exponential_backoff(Duration::from_secs(1), failed_attempt)
+    }
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter at once.
@@ -229,9 +236,25 @@ type HandlerFn = Arc<
         + Sync,
 >;
 
+/// One registered job type, as the workers need it.
+#[derive(Clone)]
+struct Registered {
+    handler: HandlerFn,
+    name: &'static str,
+    retry_backoff: fn(u32) -> Duration,
+}
+
+impl Registered {
+    /// The job's backoff, capped at a year so a runaway hook cannot
+    /// overflow a deadline.
+    fn backoff(&self, failed_attempt: u32) -> Duration {
+        (self.retry_backoff)(failed_attempt).min(Duration::from_secs(365 * 86_400))
+    }
+}
+
 #[derive(Default)]
 struct HandlerRegistry {
-    handlers: HashMap<&'static str, (HandlerFn, u32)>, // (handler, max_attempts)
+    handlers: HashMap<&'static str, Registered>,
 }
 
 impl HandlerRegistry {
@@ -249,11 +272,15 @@ impl HandlerRegistry {
                     })
             })
         });
-        self.handlers
-            .insert(T::NAME, (handler, max_attempts::<T>()));
+        let entry = Registered {
+            handler,
+            name: T::NAME,
+            retry_backoff: T::retry_backoff,
+        };
+        self.handlers.insert(T::NAME, entry);
     }
 
-    fn lookup(&self, name: &str) -> Option<(HandlerFn, u32)> {
+    fn lookup(&self, name: &str) -> Option<Registered> {
         self.handlers.get(name).cloned()
     }
 }
@@ -286,14 +313,11 @@ pub(crate) fn max_attempts<T: Job>() -> u32 {
     T::MAX_ATTEMPTS.max(1)
 }
 
-/// Milliseconds to wait before the retry that follows `failed_attempt`:
-/// 1s, 2s, 4s, 8s, … capped at 2^10 s.
-///
-/// `failed_attempt` is **0-based** — the index of the run that just
-/// failed — so the first retry waits 1s. Shared by both backends so
-/// they cannot drift apart.
-pub(crate) fn retry_backoff_ms(failed_attempt: u32) -> u64 {
-    1000u64.saturating_mul(1u64 << failed_attempt.min(10))
+/// `base`, doubled for each earlier failure and capped at `base · 2^10`.
+/// `failed_attempt` is 0-based, so the first retry waits `base`.
+#[must_use]
+pub fn exponential_backoff(base: Duration, failed_attempt: u32) -> Duration {
+    base.saturating_mul(1u32 << failed_attempt.min(10))
 }
 
 // ------------------------------------------------------------------ InMemoryJobQueue
@@ -547,7 +571,7 @@ async fn worker_loop(w: InMemoryWorker) {
             reg.lookup(envelope.name)
         };
 
-        let Some((handler, _max_attempts)) = handler else {
+        let Some(entry) = handler else {
             current.lock().unwrap().take();
             tracing::error!(job = envelope.name, "no handler registered");
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -558,7 +582,11 @@ async fn worker_loop(w: InMemoryWorker) {
         // Run the handler inside the context the caller had at
         // `dispatch`. Without this the job sees none of it — an audit
         // row written here would record `system` and lose the actor.
-        let result = envelope.context.clone().install(handler(payload)).await;
+        let result = envelope
+            .context
+            .clone()
+            .install((entry.handler)(payload))
+            .await;
         current.lock().unwrap().take();
 
         match result {
@@ -572,7 +600,7 @@ async fn worker_loop(w: InMemoryWorker) {
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     dead_letter_job(&dead_letter, envelope, next_attempt, msg).await;
                 } else {
-                    let backoff = Duration::from_millis(retry_backoff_ms(envelope.attempt));
+                    let backoff = entry.backoff(envelope.attempt);
                     let mut retry = envelope;
                     retry.attempt = next_attempt;
                     // Still counted in `pending` while parked.
@@ -642,25 +670,51 @@ mod tests {
     #[test]
     fn retry_backoff_starts_at_one_second_and_doubles() {
         // `failed_attempt` is 0-based: the run that just failed.
-        assert_eq!(
-            retry_backoff_ms(0),
-            1_000,
-            "the first retry waits 1s, not 2s"
-        );
-        assert_eq!(retry_backoff_ms(1), 2_000);
-        assert_eq!(retry_backoff_ms(2), 4_000);
-        assert_eq!(retry_backoff_ms(3), 8_000);
+        let ms = |n| Increment::retry_backoff(n).as_millis();
+        assert_eq!(ms(0), 1_000, "the first retry waits 1s, not 2s");
+        assert_eq!(ms(1), 2_000);
+        assert_eq!(ms(2), 4_000);
+        assert_eq!(ms(3), 8_000);
     }
 
     /// The cap, and that it cannot overflow the shift.
     #[test]
     fn retry_backoff_caps_rather_than_overflowing() {
-        assert_eq!(retry_backoff_ms(10), 1_024_000);
+        let ms = |n| Increment::retry_backoff(n).as_millis();
+        assert_eq!(ms(10), 1_024_000);
         assert_eq!(
-            retry_backoff_ms(u32::MAX),
+            ms(u32::MAX),
             1_024_000,
             "a runaway attempt count must clamp, not shift past 63 and panic"
         );
+    }
+
+    /// A job's own `retry_backoff` sets the wait before its retry (#2332).
+    #[tokio::test]
+    async fn a_jobs_backoff_hook_sets_the_retry_delay() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Serialize, Deserialize)]
+        struct Quick;
+        #[async_trait::async_trait]
+        impl Job for Quick {
+            const NAME: &'static str = "test:quick_backoff";
+            const MAX_ATTEMPTS: u32 = 3;
+            fn retry_backoff(_: u32) -> Duration {
+                Duration::from_millis(10)
+            }
+            async fn run(&self) -> Result<(), JobError> {
+                RUNS.fetch_add(1, Ordering::SeqCst);
+                Err(JobError::Retryable("again".into()))
+            }
+        }
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<Quick>().await;
+        q.start().await;
+        q.dispatch(&Quick).await.unwrap();
+        // The default 1s + 2s would take 3s.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        q.shutdown().await;
+        assert_eq!(RUNS.load(Ordering::SeqCst), 3);
     }
 
     #[derive(Serialize, Deserialize, Debug)]

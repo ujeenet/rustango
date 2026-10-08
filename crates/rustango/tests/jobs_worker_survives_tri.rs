@@ -166,6 +166,24 @@ impl Job for NoAttempts {
     }
 }
 
+/// Waits an hour before its retry (#2332).
+#[derive(Serialize, Deserialize)]
+struct SlowRetry {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for SlowRetry {
+    const NAME: &'static str = "tri2332:slow_retry";
+    fn retry_backoff(_: u32) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("later".into()))
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -175,7 +193,32 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<Slow>().await;
     q.register::<FailFirst>().await;
     q.register::<NoAttempts>().await;
+    q.register::<SlowRetry>().await;
     q
+}
+
+async fn a_jobs_backoff_hook_sets_its_retry_time(pool: &Pool) {
+    let tok = token(pool, "slow_retry");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.dispatch(&SlowRetry { token: tok.clone() }).await.unwrap();
+    q.start().await;
+    wait_for("the first run", || counts(&tok).0 == 1).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while the_row(pool).await.1 {
+        assert!(Instant::now() < deadline, "retry never scheduled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    q.shutdown().await;
+    let sql = format!(
+        "SELECT COUNT(*) FROM rustango_jobs WHERE run_at > {}",
+        pool.dialect().placeholder(1)
+    );
+    let later = chrono::Utc::now() + chrono::Duration::minutes(50);
+    let rows: Vec<(i64,)> =
+        rustango::sql::raw_query_pool(&sql, vec![SqlValue::DateTime(later)], pool)
+            .await
+            .expect("run_at");
+    assert_eq!(rows[0].0, 1, "retry not an hour out");
 }
 
 async fn zero_max_attempts_runs_once(pool: &Pool) {
@@ -728,5 +771,6 @@ tri_dialect_test! {
         start_after_shutdown_runs_jobs,
         a_dropped_queue_stops_its_workers,
         zero_max_attempts_runs_once,
+        a_jobs_backoff_hook_sets_its_retry_time,
     ],
 }
