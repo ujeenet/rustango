@@ -35,10 +35,11 @@
 //!     rebuild_index().await;
 //! }).await;
 //!
-//! // From a scheduler: once per day across every pod. `with_lock`
-//! // would let a pod started later run it again the same day.
+//! // From a scheduler: once per UTC day across every pod. Tick often;
+//! // the first tick of each day runs it. `every(day)` alone can miss a
+//! // day across a deploy, and `with_lock` runs it once per pod.
 //! let day = Duration::from_secs(86_400);
-//! scheduler.every("daily_report", day, move || {
+//! scheduler.every("daily_report", Duration::from_secs(60), move || {
 //!     let lock = lock.clone();
 //!     async move {
 //!         lock.once_per_period("daily_report", day, || run_daily_report()).await;

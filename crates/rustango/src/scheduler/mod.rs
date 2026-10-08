@@ -43,10 +43,11 @@
 //! ## Production note
 //!
 //! For multi-process deployments where the same job must run on exactly one
-//! node (not per-replica), wrap the job body in
-//! [`DistributedLock::once_per_period`] with the same period, or use an
+//! node (not per-replica), tick often (say every 60s) and wrap the body in
+//! [`DistributedLock::once_per_period`] with the real period, or use an
 //! external scheduler (Kubernetes CronJob, GitHub Actions). `with_lock`
-//! is not enough: each pod ticks from its own start time.
+//! is not enough, and neither is ticking once per period: each pod ticks
+//! from its own start time.
 //!
 //! [`DistributedLock::once_per_period`]: crate::distributed_lock::DistributedLock::once_per_period
 
@@ -452,41 +453,49 @@ mod tests {
         handle.shutdown().await;
     }
 
-    /// Two pods started apart share one lock: the job runs once per
-    /// period, not once per pod (#2330).
+    /// The documented pattern across a rolling deploy: pod B boots after
+    /// pod A stops. Every window runs exactly once, none is skipped (#2330).
     #[cfg(feature = "cache")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn staggered_pods_run_a_locked_job_once_per_period() {
+    async fn staggered_pods_run_a_locked_job_once_per_window() {
         use crate::cache::{BoxedCache, InMemoryCache};
         use crate::distributed_lock::DistributedLock;
-        let period = Duration::from_millis(100);
+        const PERIOD: Duration = Duration::from_millis(100);
+        // Ticks well inside the window; ticking once per period skips windows.
+        const TICK: Duration = Duration::from_millis(10);
+        let window = || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            now.as_millis() / PERIOD.as_millis()
+        };
         let cache: BoxedCache = Arc::new(InMemoryCache::new());
-        let runs = Arc::new(AtomicUsize::new(0));
-        let pod = |cache: BoxedCache| {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let pod = || {
             let s = Scheduler::new();
-            let lock = DistributedLock::new(cache);
-            let runs = runs.clone();
-            s.every("daily_report", period, move || {
-                let (lock, runs) = (lock.clone(), runs.clone());
+            let lock = DistributedLock::new(cache.clone());
+            let ran = ran.clone();
+            s.every("daily_report", TICK, move || {
+                let (lock, ran) = (lock.clone(), ran.clone());
                 async move {
-                    lock.once_per_period("daily_report", period, || async {
-                        runs.fetch_add(1, Ordering::SeqCst);
+                    lock.once_per_period("daily_report", PERIOD, || async {
+                        ran.lock().unwrap().push(window());
                     })
                     .await;
                 }
             });
             s.start()
         };
-        let started = std::time::Instant::now();
-        let a = pod(cache.clone());
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let b = pod(cache);
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let a = pod();
+        tokio::time::sleep(Duration::from_millis(470)).await;
         a.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b = pod();
+        tokio::time::sleep(Duration::from_millis(600)).await;
         b.shutdown().await;
-        let windows = started.elapsed().as_millis() / period.as_millis() + 1;
-        let runs = runs.load(Ordering::SeqCst) as u128;
-        assert!(runs >= 1, "the job never ran");
-        assert!(runs <= windows, "{runs} runs in {windows} periods");
+        let ran = ran.lock().unwrap().clone();
+        assert!(ran.len() >= 8, "too few runs: {ran:?}");
+        let expected: Vec<u128> = (ran[0]..=ran[ran.len() - 1]).collect();
+        assert_eq!(ran, expected, "a window ran twice or not at all");
     }
 }

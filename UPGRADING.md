@@ -152,7 +152,7 @@ untouched.
 
 ### Scheduled jobs under a lock: use `once_per_period`
 
-`with_lock` inside `Scheduler::every` still runs once per pod per period. Switch to `lock.once_per_period(name, period, body)` (#2330).
+`with_lock` inside `Scheduler::every` still runs once per pod per period. Tick often and wrap the body: `scheduler.every(name, Duration::from_secs(60), …)` calling `lock.once_per_period(name, day, body)` (#2330).
 
 ### Job retries
 
