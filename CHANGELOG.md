@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The `rustango_users` UPDATE was raw SQL in that build; both builds now share one ORM update.
 
+### Fixed — `IpFilterLayer` gates the trusted client IP (#2278)
+
+Behind a `RealIpLayer` with `trust_proxies` it read the socket peer, so an allow- or block-list saw only the proxy.
+
 ### Added — `Cli::with_trusted_proxies` (#2255)
 
 A `Cli` app behind a reverse proxy names its proxies, and the access log and per-IP limits, login throttling included, see the client. `X-Forwarded-For` from other peers is still ignored.

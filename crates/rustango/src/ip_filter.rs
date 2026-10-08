@@ -25,18 +25,16 @@
 //! Without it there is no address at all, and every request takes the
 //! `allow_no_ip` path.
 //!
-//! Behind a proxy the peer is the proxy, not the client, so this
-//! filter gates the proxy's address. A forwarded header is only a
-//! claim that any client can forge; believe one only when a proxy you
-//! trust sets it. This filter never reads such a header — the
-//! `real_ip` middleware does, and it publishes the result in the
-//! request extensions rather than in `ConnectInfo`.
+//! Behind a proxy the peer is the proxy, not the client. Install a
+//! `RealIpLayer` with `trust_proxies` outside this filter and it gates
+//! the trusted client IP instead. This filter never reads a forwarded
+//! header itself: any client can forge one.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::Request;
 use axum::http::{Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
@@ -138,10 +136,8 @@ impl<S: Clone + Send + Sync + 'static> IpFilterRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<IpFilterLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let ip = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.ip());
+    // The trusted client behind a named proxy, else the socket peer (#2278).
+    let ip = crate::rate_limit::client_ip(req.extensions(), req.headers());
     if cfg.allow(ip) {
         next.run(req).await
     } else {
@@ -296,5 +292,55 @@ mod tests {
         let l = IpFilterLayer::block(vec!["::/0"]).unwrap();
         assert!(!l.allow(Some(ip6("::ffff:203.0.113.7"))));
         assert!(l.allow(Some(ip4("203.0.113.7"))));
+    }
+
+    /// Status for a request from `peer` claiming `xff`, through `app`.
+    async fn status(app: Router, peer: &str, xff: &str) -> StatusCode {
+        use tower::ServiceExt;
+        let mut req = Request::builder()
+            .uri("/")
+            .header("x-forwarded-for", xff)
+            .body(Body::empty())
+            .unwrap();
+        let addr: std::net::SocketAddr = format!("{peer}:4000").parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    fn admin_only() -> Router {
+        Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .ip_filter(IpFilterLayer::allow_only(vec!["203.0.113.7"]).unwrap())
+    }
+
+    /// #2278: behind a trusted proxy the filter gates the client, not the proxy.
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_the_client_ip_is_filtered() {
+        use crate::real_ip::{RealIpLayer, RealIpRouterExt as _};
+        let proxied = || {
+            admin_only().real_ip(
+                RealIpLayer::default()
+                    .trust_proxies(["10.0.0.0/8"])
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            status(proxied(), "10.0.0.2", "203.0.113.7").await,
+            StatusCode::OK
+        );
+        let denied = status(proxied(), "10.0.0.2", "198.51.100.1").await;
+        assert_eq!(denied, StatusCode::FORBIDDEN);
+        // A peer that is not a named proxy cannot claim the address.
+        let forged = status(proxied(), "198.51.100.1", "203.0.113.7").await;
+        assert_eq!(forged, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn without_a_trusted_proxy_the_peer_is_filtered() {
+        let forged = status(admin_only(), "10.0.0.2", "203.0.113.7").await;
+        assert_eq!(forged, StatusCode::FORBIDDEN);
+        let direct = status(admin_only(), "203.0.113.7", "198.51.100.1").await;
+        assert_eq!(direct, StatusCode::OK);
     }
 }
