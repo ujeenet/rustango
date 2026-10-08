@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — example compose files publish the DB on loopback only (#2311)
+
+Postgres binds to `127.0.0.1:5432` as the scaffolder's does; the stale `migrate_framework` doc is corrected.
+
 ### Fixed — scaffold compile tests on the pinned 1.88 toolchain (#2310)
 
 The harness resolves the generated project's deps MSRV-aware, so `uuid` 1.27 (rustc 1.89) no longer breaks them.

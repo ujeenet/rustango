@@ -176,16 +176,10 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     emit_indexes(pool, models, None).await
 }
 
-/// Generate the framework's system-app migrations from the current
-/// models and apply the **whole** set (registry + tenant scope) to
-/// `pool` — the complete framework schema (tables, FK constraints AND
-/// the composite-unique indexes that `create_framework_tables` /
-/// `apply_all_pool` don't emit), built exactly the way provisioning
-/// builds it.
+/// Apply every framework (`rustango_*`) table, registry + tenant scope,
+/// to `pool` from one snapshot: tables, indexes, then FK constraints.
 ///
-/// Use this in tests that need the full framework schema — e.g. the
-/// permission engine, which relies on the `(role_id, codename)` /
-/// `(user_id, codename)` unique indexes.
+/// Use this in tests that need the full framework schema in one call.
 ///
 /// # Errors
 /// Any generation or apply failure ([`MigrateError`]).
