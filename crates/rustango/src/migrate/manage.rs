@@ -3120,7 +3120,16 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 .into(),
         )
     })?;
-    let argv = build_psql_argv(&parsed, &url);
+    run_psql_restore(&parsed, &url, w)
+}
+
+/// Split from [`db_restore_cmd`] so a test can aim it at a private database.
+fn run_psql_restore<W: Write>(
+    parsed: &RestorePlan,
+    url: &str,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let argv = build_psql_argv(parsed, url);
     writeln!(w, "running: psql {}", redact(&argv).join(" "))?;
     let status = std::process::Command::new("psql")
         .args(&argv)
@@ -7501,6 +7510,56 @@ mod db_cmd_tests {
             assert!(!answered_yes(no));
         }
         assert!(!answered_yes(Err(std::io::Error::other("tty"))));
+    }
+
+    /// `--clean` with a failing dump rolls the DROP back. Runs on a database
+    /// it creates and drops, never the shared one (#2283).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn restore_clean_rolls_back_a_bad_dump_on_a_private_database() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set — skipping");
+            return;
+        };
+        assert!(
+            std::process::Command::new("psql")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success()),
+            "db:restore needs `psql` on PATH"
+        );
+        let db = format!("rustango_restore_{}", std::process::id());
+        let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
+        let private = format!("{base}/{db}");
+        let admin = sqlx::PgPool::connect(&url).await.expect("connect");
+        let drop_db = format!(r#"DROP DATABASE IF EXISTS "{db}" WITH (FORCE)"#);
+        sqlx::query(&drop_db).execute(&admin).await.unwrap();
+        sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let p = sqlx::PgPool::connect(&private).await.expect("private db");
+        for sql in ["CREATE TABLE keep (id int)", "INSERT INTO keep VALUES (1)"] {
+            sqlx::query(sql).execute(&p).await.unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.sql");
+        std::fs::write(
+            &bad,
+            "CREATE TABLE half (id int);\nSELECT * FROM no_such_table;\n",
+        )
+        .unwrap();
+
+        let plan = RestorePlan::check(restore_args(bad.to_str().unwrap(), true, true), |_| true)
+            .expect("plan");
+        let res = run_psql_restore(&plan, &private, &mut Vec::new());
+        let kept: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM keep")
+            .fetch_one(&p)
+            .await;
+        p.close().await;
+        sqlx::query(&drop_db).execute(&admin).await.unwrap();
+        assert_eq!(kept.ok(), Some(1), "the bad dump left the DROP committed");
+        assert!(res.unwrap_err().to_string().contains("psql exited"));
     }
 
     // -------- build_psql_argv

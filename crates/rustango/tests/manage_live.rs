@@ -1063,16 +1063,14 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     assert!(!is_super, "set-superuser --off did not land");
     assert!(rustango::tenancy::password::verify("hunter3", &hash).unwrap());
 
-    // 6c. flush --tenant clears the tenant schema; the org stays (#2284).
-    let (out, res) = run(
-        &pools,
-        &url,
-        &dir,
-        &["flush", "--tenant", &slug, "--yes", "--model", "User"],
-    )
-    .await;
-    res.unwrap();
-    assert!(out.contains("cleared"), "{out}");
+    // 6c. flush --tenant with no filter clears the tenant schema (#2284).
+    let (out, res) = run(&pools, &url, &dir, &["flush", "--tenant", &slug, "--yes"]).await;
+    res.unwrap_or_else(|e| {
+        panic!(
+            "whole-tenant flush: {e}
+{out}"
+        )
+    });
     let user_count: i64 = sqlx::query_as::<_, (i64,)>(&format!(
         r#"SELECT COUNT(*)::bigint FROM "{slug}"."rustango_users""#,
     ))
@@ -1114,8 +1112,10 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     .await;
     res.unwrap();
     for sql in [
+        // A copy with no referrers, so only the schema decides what TRUNCATE hits.
         "DROP TABLE IF EXISTS public.rustango_users CASCADE".to_owned(),
-        format!(r#"ALTER TABLE "{slug}"."rustango_users" SET SCHEMA public"#),
+        format!(r#"CREATE TABLE public.rustango_users AS SELECT * FROM "{slug}"."rustango_users""#),
+        format!(r#"DROP TABLE "{slug}"."rustango_users" CASCADE"#),
     ] {
         sqlx::query(&sql).execute(&pool).await.unwrap();
     }
