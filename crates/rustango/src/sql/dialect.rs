@@ -67,6 +67,12 @@ pub trait Dialect: Send + Sync {
         format!("\"{escaped}\"")
     }
 
+    /// Quote text as an inline string literal, for the few spots
+    /// that take no bind. The default doubles `'`; MySQL also escapes `\`.
+    fn quote_literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
     /// Render the placeholder for the `n`-th bind, counting from 1.
     ///
     /// **`n` is advisory.** Only PostgreSQL uses it, as `$n`. SQLite
@@ -534,9 +540,9 @@ pub trait Dialect: Send + Sync {
         "TEXT".to_owned()
     }
 
-    /// DDL to run once before any case-insensitive column is created,
-    /// such as `CREATE EXTENSION IF NOT EXISTS citext` on Postgres.
-    /// `None` when nothing is needed.
+    /// DDL a migration runs before it writes a case-insensitive column,
+    /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
+    /// Postgres. `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
         None
     }
@@ -567,6 +573,21 @@ pub trait Dialect: Send + Sync {
         sql.push_str(qualified_col);
         sql.push_str(if negated { " NOT ILIKE " } else { " ILIKE " });
         sql.push_str(placeholder);
+    }
+
+    /// [`Self::write_ilike`] on a column whose field type is known
+    /// (`None` when it is not). Postgres overrides it to cast a
+    /// non-text column, which has no `ILIKE` operator (#2229).
+    fn write_ilike_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        let _ = ty;
+        self.write_ilike(sql, qualified_col, placeholder, negated);
     }
 
     /// POSIX regex match, for the `__regex` and `__iregex` lookups.

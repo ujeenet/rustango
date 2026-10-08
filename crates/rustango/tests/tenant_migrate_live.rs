@@ -24,6 +24,10 @@ use rustango::migrate as rmig;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{migrate_registry, migrate_tenants, Org, StorageMode, TenantPools};
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
 fn unique(prefix: &str) -> String {
@@ -436,17 +440,11 @@ async fn tenant_migrate_skips_inactive_orgs() {
 #[tokio::test]
 async fn tenants_after_the_registry_restore_the_schema() {
     let _g = live_lock().lock().await;
-    let Some(admin) = pool().await else {
+    let Ok(base_url) = std::env::var("DATABASE_URL") else {
         return;
     };
-    let base_url = std::env::var("DATABASE_URL").unwrap();
-    let db = unique("rustango_1988_tenants");
-    let (base, _) = base_url.rsplit_once('/').unwrap();
-    let url = format!("{base}/{db}");
-    sqlx::query(&format!("CREATE DATABASE {db}"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    let db = ScratchDb::create(&base_url, "rustango_1988_tenants").await;
+    let url = db.url().to_owned();
     let pg = sqlx::PgPool::connect(&url).await.unwrap();
     let pools = TenantPools::new(pg.clone());
     let boot = fresh_dir("1988_boot");
@@ -493,9 +491,96 @@ async fn tenants_after_the_registry_restore_the_schema() {
     .await
     .unwrap();
     pg.close().await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-        .execute(&admin)
-        .await;
     assert!(table, "the 2nd tenant's dropped table was skipped");
     assert!(column, "the 2nd tenant's dropped column was skipped");
+}
+
+/// Two schema-mode tenants with a CITEXT column on a database without
+/// `citext`: the second tenant could not find the type, and dropping the
+/// first tenant's schema took the extension with it (#2269).
+#[tokio::test]
+async fn schema_mode_tenants_share_citext() {
+    let _g = live_lock().lock().await;
+    let Some(admin) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let db = unique("rustango_tm_citext");
+    sqlx::query(&format!("CREATE DATABASE {db}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let fresh_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
+    let pool = sqlx::PgPool::connect(&fresh_url).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    let schemas = [unique("ci_a"), unique("ci_b")];
+    for schema in &schemas {
+        let mut org = Org {
+            id: Auto::default(),
+            slug: unique("ci"),
+            display_name: "CI".into(),
+            storage_mode: StorageMode::Schema.as_str().into(),
+            backend_kind: "postgres".to_owned(),
+            database_url: None,
+            schema_name: Some(schema.clone()),
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            ..rustango::testkit::org()
+        };
+        org.insert(&pool).await.unwrap();
+    }
+    let dir = fresh_dir("tenant_citext");
+    let table: rmig::TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "ci_users", "model": "T", "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "email", "column": "email", "ty": "string", "nullable": false,
+             "primary_key": false, "max_length": 100, "case_insensitive": true, "unique": true}
+        ]
+    }))
+    .unwrap();
+    write_migration(
+        &dir,
+        &rmig::Migration {
+            name: unique("0001_ci_users"),
+            created_at: "2026-10-08T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope: rmig::MigrationScope::Tenant,
+            replaces: Vec::new(),
+            snapshot: rmig::SchemaSnapshot {
+                tables: vec![table],
+                ..Default::default()
+            },
+            forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
+                "ci_users".into(),
+            ))],
+        },
+    );
+
+    let pools = TenantPools::new(pool.clone());
+    let report = migrate_tenants(&pools, &dir, &fresh_url).await.unwrap();
+    assert!(report.all_ok(), "both tenants migrate: {report:?}");
+    drop_schema(&pool, &schemas[0]).await;
+    let b = &schemas[1];
+    sqlx::query(&format!(
+        r#"INSERT INTO "{b}".ci_users (id, email) VALUES (1, 'A@x.com')"#
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dup = sqlx::query(&format!(
+        r#"INSERT INTO "{b}".ci_users (id, email) VALUES (2, 'a@X.COM')"#
+    ))
+    .execute(&pool)
+    .await;
+    assert!(dup.is_err(), "citext outlives the first tenant's schema");
+
+    pool.close().await;
+    drop(pools);
+    let _ = sqlx::query(&format!("DROP DATABASE {db} WITH (FORCE)"))
+        .execute(&admin)
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

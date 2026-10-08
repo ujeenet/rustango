@@ -322,10 +322,16 @@ fn validate_app_name(name: &str) -> Result<(), MigrateError> {
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    if !valid {
+    if !valid || name == "_" {
         return Err(MigrateError::Validation(format!(
             "app name `{name}` is not a valid Rust identifier — \
              must match [A-Za-z_][A-Za-z0-9_]*"
+        )));
+    }
+    // `startapp type` once wrote `mod type;`, which does not compile (#1952).
+    if name == "Self" || super::manage::is_reserved_module_name(name) {
+        return Err(MigrateError::Validation(format!(
+            "app name `{name}` is a Rust keyword or shadows a built-in crate — pick another name"
         )));
     }
     Ok(())
@@ -759,6 +765,15 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, MigrateError::Validation(_)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `mod type;` does not compile, so `startapp type` must refuse (#1952).
+    #[test]
+    fn keyword_app_names_are_rejected() {
+        for name in ["type", "match", "async", "Self", "std", "_"] {
+            assert!(validate_app_name(name).is_err(), "{name} accepted");
+        }
+        assert!(validate_app_name("types").is_ok());
     }
 
     #[test]

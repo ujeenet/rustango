@@ -1182,7 +1182,7 @@ fn write_aggregate_expr(
             match b.d.name() {
                 "mysql" => {
                     // `SEPARATOR` takes no bound parameter, so the
-                    // delimiter is inlined with its quotes doubled.
+                    // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
@@ -1190,9 +1190,9 @@ fn write_aggregate_expr(
                     }
                     b.write_ident(column);
                     b.sql.push_str(&order_sql);
-                    b.sql.push_str(" SEPARATOR '");
-                    b.sql.push_str(&delimiter.replace('\'', "''"));
-                    b.sql.push_str("')");
+                    b.sql.push_str(" SEPARATOR ");
+                    b.sql.push_str(&b.d.quote_literal(delimiter));
+                    b.sql.push(')');
                 }
                 "sqlite" => {
                     // A SQLite DISTINCT aggregate takes exactly one
@@ -3627,7 +3627,8 @@ pub(super) fn write_where_with_search(
                 qualified.push('.');
             }
             qualified.push_str(&b.d.quote_ident(col));
-            b.d.write_ilike(&mut b.sql, &qualified, &placeholder, false);
+            let ty = model.and_then(|m| m.field_by_column(col)).map(|f| f.ty);
+            b.d.write_ilike_typed(&mut b.sql, &qualified, ty, &placeholder, false);
             b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
         b.sql.push(')');
@@ -4111,9 +4112,13 @@ fn write_filter(
             )?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            b.d.write_ilike(
+            let ty = model
+                .and_then(|m| m.field_by_column(filter.column))
+                .map(|f| f.ty);
+            b.d.write_ilike_typed(
                 &mut b.sql,
                 &qualified_col,
+                ty,
                 &p,
                 matches!(filter.op, Op::NotILike),
             );

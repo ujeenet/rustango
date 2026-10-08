@@ -51,7 +51,8 @@ pub enum SchemaChange {
     /// The types are the neutral name strings from
     /// `FieldSnapshot.ty`, not the closed `FieldType` enum, so an
     /// existing migration file keeps loading when a new type is
-    /// added.
+    /// added. `string` to `string` restates the type for a
+    /// `case_insensitive` change.
     AlterColumnType {
         table: String,
         column: String,
@@ -81,6 +82,14 @@ pub enum SchemaChange {
         column: String,
         from: Option<u32>,
         to: Option<u32>,
+    },
+    /// Change a column's `db_comment`; `None` drops it. SQLite has no
+    /// comments, so it writes nothing there.
+    AlterColumnComment {
+        table: String,
+        column: String,
+        from: Option<String>,
+        to: Option<String>,
     },
     /// Rename a table. `detect_changes` never emits this: a snapshot
     /// diff cannot tell a rename from a drop plus an add. Write it by
@@ -235,6 +244,7 @@ impl SchemaChange {
             | Self::AlterColumnNullable { table: t, .. }
             | Self::AlterColumnDefault { table: t, .. }
             | Self::AlterColumnMaxLength { table: t, .. }
+            | Self::AlterColumnComment { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
             | Self::AlterFkOnDelete { table: t, .. }
@@ -488,7 +498,7 @@ fn add_check(c: &super::snapshot::CheckSnapshot) -> SchemaChange {
     }
 }
 
-fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
+pub(super) fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
     SchemaChange::AddExclusionConstraint {
         name: x.name.clone(),
         table: x.table.clone(),
@@ -571,8 +581,7 @@ fn push_alter_changes(
     cf: &FieldSnapshot,
     out: &mut Vec<SchemaChange>,
 ) {
-    // `AlterColumnType` to a string renders TEXT and a length change
-    // renders VARCHAR/TEXT, so the length change goes on the string side:
+    // A length change renders a string type, so it goes on the string side:
     // before the type when leaving a string, after it when entering one.
     // Run the other way it undid the type change (#1878).
     let max_length = (pf.max_length != cf.max_length).then(|| SchemaChange::AlterColumnMaxLength {
@@ -585,7 +594,9 @@ fn push_alter_changes(
     if leaving_string {
         out.extend(max_length.clone());
     }
-    if pf.ty != cf.ty {
+    // CITEXT, NOCASE or a `_ci` collation: a type change (#2239).
+    let ci_flip = cf.ty == "string" && pf.case_insensitive != cf.case_insensitive;
+    if pf.ty != cf.ty || ci_flip {
         out.push(SchemaChange::AlterColumnType {
             table: table.to_owned(),
             column: cf.column.clone(),
@@ -597,7 +608,9 @@ fn push_alter_changes(
         out.extend(max_length);
     }
     // The default first: a SQLite rebuild to NOT NULL fills NULLs with it.
-    if pf.default != cf.default {
+    // A type change writes the new default itself; a separate op undid
+    // into `SET DEFAULT <old>` on the new type.
+    if pf.default != cf.default && pf.ty == cf.ty {
         out.push(SchemaChange::AlterColumnDefault {
             table: table.to_owned(),
             column: cf.column.clone(),
@@ -617,6 +630,14 @@ fn push_alter_changes(
             table: table.to_owned(),
             column: cf.column.clone(),
             unique: cf.unique,
+        });
+    }
+    if pf.db_comment != cf.db_comment {
+        out.push(SchemaChange::AlterColumnComment {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            from: pf.db_comment.clone(),
+            to: cf.db_comment.clone(),
         });
     }
     // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
@@ -704,6 +725,13 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
         out.push(format!(
             "`{table}.{col}` auto changed: {} → {}",
             pf.auto, cf.auto
+        ));
+    }
+    // No backend alters a generated expression in place (#2239).
+    if pf.generated_as != cf.generated_as {
+        out.push(format!(
+            "`{table}.{col}` generated_as changed: {:?} → {:?}",
+            pf.generated_as, cf.generated_as
         ));
     }
     // `unique` changes are handled by `detect_changes` as
@@ -1028,7 +1056,12 @@ fn render_changes_split_inner(
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
+    // Once, before the first change that writes a CITEXT column (#2240).
+    let mut ci_extension = dialect.ci_text_extension_sql();
     for change in changes {
+        if writes_ci_text(change, current) {
+            out.immediate.extend(ci_extension.take().map(str::to_owned));
+        }
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
@@ -1168,11 +1201,17 @@ fn render_changes_split_inner(
             | SchemaChange::AlterColumnDefault { table, column, .. }
             | SchemaChange::AlterColumnMaxLength { table, column, .. }
             | SchemaChange::AlterColumnUnique { table, column, .. }
+            | SchemaChange::AlterColumnComment { table, column, .. }
                 if dialect.alters_by_rebuild() || dialect.modifies_whole_column() =>
             {
                 // VARCHAR(n) and TEXT are one affinity there, and n is never enforced (#1220).
+                // Nor has it column comments.
                 if dialect.alters_by_rebuild()
-                    && matches!(change, SchemaChange::AlterColumnMaxLength { .. })
+                    && matches!(
+                        change,
+                        SchemaChange::AlterColumnMaxLength { .. }
+                            | SchemaChange::AlterColumnComment { .. }
+                    )
                 {
                     continue;
                 }
@@ -1199,10 +1238,43 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
-                let pg_to = pg_type_for_ty_name(to);
-                out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
-                ));
+                let field = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .filter(|f| f.ty == *to);
+                // The old DEFAULT may not cast to the new type, so it goes
+                // first and the new one comes back after (#2242). A serial
+                // or generated column keeps its own.
+                let default = field.filter(|f| !f.auto && f.generated_as.is_none());
+                if default.is_some() {
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                    ));
+                }
+                // A string takes the field's whole type, so CITEXT (#2238) or
+                // VARCHAR(n) (#2239). No `USING`: the assignment cast refuses
+                // what `::VARCHAR(n)` would truncate.
+                let string = field.filter(|_| to == "string");
+                out.immediate.push(match string {
+                    Some(f) => format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {}"#,
+                        sql_type_with_dialect(f, dialect)
+                    ),
+                    None => {
+                        let pg_to = pg_type_for_ty_name(to);
+                        format!(
+                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                        )
+                    }
+                });
+                if let Some(f) = default {
+                    if let Some(expr) = &f.default {
+                        let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                        out.immediate.push(format!(
+                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
+                        ));
+                    }
+                }
             }
             SchemaChange::AlterColumnNullable {
                 table,
@@ -1248,7 +1320,12 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                let ci = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .is_some_and(is_ci_text);
                 let pg_to = match to {
+                    _ if ci => dialect.ci_text_type(*to),
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
                 };
@@ -1258,6 +1335,14 @@ fn render_changes_split_inner(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
+            // An empty comment drops it on PG.
+            SchemaChange::AlterColumnComment {
+                table, column, to, ..
+            } => out.immediate.extend(dialect.column_comment_statement(
+                table,
+                column,
+                to.as_deref().unwrap_or(""),
+            )),
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
@@ -1613,6 +1698,27 @@ fn render_changes_split_inner(
         }
     }
     Ok(out)
+}
+
+/// A case-insensitive string column, typed by `dialect.ci_text_type`.
+fn is_ci_text(f: &FieldSnapshot) -> bool {
+    f.case_insensitive && f.ty == "string"
+}
+
+/// Whether `change` gives a column its case-insensitive type.
+fn writes_ci_text(change: &SchemaChange, current: &SchemaSnapshot) -> bool {
+    let field = |t: &str, c: &str| current.table(t).and_then(|t| t.field(c));
+    match change {
+        SchemaChange::CreateTable(t) => current
+            .table(t)
+            .is_some_and(|t| t.fields.iter().any(is_ci_text)),
+        SchemaChange::AddColumn { table, column }
+        | SchemaChange::AlterColumnType { table, column, .. }
+        | SchemaChange::AlterColumnMaxLength { table, column, .. } => {
+            field(table, column).is_some_and(is_ci_text)
+        }
+        _ => false,
+    }
 }
 
 /// Map a `FieldSnapshot.ty` name (matches `FieldType::as_str` in
@@ -2051,10 +2157,8 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
     // #344 — case-insensitive String columns route through
     // `dialect.ci_text_type` (PG → CITEXT, SQLite → TEXT COLLATE
     // NOCASE, MySQL → LONGTEXT COLLATE utf8mb4_general_ci).
-    if f.case_insensitive {
-        if matches!(ty, Some(FieldType::String)) {
-            return dialect.ci_text_type(f.max_length);
-        }
+    if is_ci_text(f) {
+        return dialect.ci_text_type(f.max_length);
     }
     if let Some(t) = ty {
         return dialect.column_type(t, f.max_length);
@@ -2410,6 +2514,65 @@ mod sql_type_tests {
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert_eq!(out.immediate.len(), 1);
         assert!(out.immediate[0].contains("ALTER COLUMN \"c\" TYPE"));
+    }
+
+    /// `t(id, email, name)`, `email` case-insensitive.
+    fn ci_snap() -> SchemaSnapshot {
+        let string = |name: &str, ci: bool| FieldSnapshot {
+            name: name.into(),
+            column: name.into(),
+            max_length: Some(100),
+            case_insensitive: ci,
+            nullable: true,
+            ..fs("string", false)
+        };
+        SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "t".into(),
+                model: "t".into(),
+                fields: vec![
+                    FieldSnapshot {
+                        primary_key: true,
+                        ..fs("i64", true)
+                    },
+                    string("email", true),
+                    string("name", false),
+                ],
+                composite_fks: vec![],
+            }],
+            ..SchemaSnapshot::default()
+        }
+    }
+
+    fn add(column: &str) -> SchemaChange {
+        SchemaChange::AddColumn {
+            table: "t".into(),
+            column: column.into(),
+        }
+    }
+
+    /// The `citext` prelude comes once, before the first CITEXT column (#2240).
+    #[test]
+    fn citext_extension_precedes_the_first_citext_column() {
+        let render = |changes: &[SchemaChange], dialect: &dyn crate::sql::Dialect| {
+            render_changes_split_with_dialect(changes, &ci_snap(), dialect)
+                .unwrap()
+                .immediate
+        };
+        let prelude = "CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;";
+        let pg = render(
+            &[
+                add("name"),
+                SchemaChange::CreateTable("t".into()),
+                add("email"),
+            ],
+            &crate::sql::Postgres,
+        );
+        assert_eq!(pg.iter().filter(|s| *s == prelude).count(), 1, "{pg:?}");
+        assert_eq!(pg[1], prelude, "{pg:?}");
+        assert!(!render(&[add("name")], &crate::sql::Postgres).contains(&prelude.to_owned()));
+        #[cfg(feature = "sqlite")]
+        assert!(!render(&[add("email")], &crate::sql::Sqlite).contains(&prelude.to_owned()));
     }
 
     /// MySQL restates the whole column, NULLs filled first.

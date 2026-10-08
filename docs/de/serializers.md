@@ -492,6 +492,7 @@ Es schreibt ein Startmodul, das du ausfüllst:
 ```rust
 //! Auto-scaffolded by `manage make:serializer PostSerializer`.
 
+use rustango::sql::Auto;
 use rustango::Serializer;
 
 use crate::models::Post;
@@ -499,10 +500,13 @@ use crate::models::Post;
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Post)]
 pub struct PostSerializer {
-    pub id: i64,
+    // A serializer field must match its model field's type exactly.
+    // ...
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     // pub title: String,
-    // #[serializer(read_only)]
-    // pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serializer(source = "body")]   // publish under a different name
+    // pub content: String,
 }
 ```
 

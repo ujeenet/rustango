@@ -15,27 +15,19 @@ pub(super) fn next_value<'a, I: Iterator<Item = &'a String>>(
         .ok_or_else(|| TenancyError::Validation(format!("{flag} requires a value")))
 }
 
-/// Refuse arguments a verb does not take.
+/// Refuse every argument, for a verb that takes none.
 ///
 /// Silently ignoring them means a typo'd flag (`list-operators -active`) or a
-/// misremembered argument runs the bare verb and exits 0, so the caller thinks
-/// it did what they asked (#1356).
-pub(super) fn reject_extra_positionals(
-    args: &[String],
-    allowed: usize,
-    verb: &str,
-) -> Result<(), TenancyError> {
-    let extra: Vec<&String> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .skip(allowed)
-        .collect();
-    match extra.first() {
-        Some(a) => Err(TenancyError::Validation(format!(
-            "{verb} does not take `{a}`"
-        ))),
-        None => Ok(()),
-    }
+/// misremembered argument runs the bare verb and exits 0 (#1356, #1952).
+pub(super) fn no_args(args: &[String], verb: &str) -> Result<(), TenancyError> {
+    let spec = Spec {
+        verb,
+        usage: verb,
+        switches: &[],
+        valued: &[],
+        max_positionals: 0,
+    };
+    parse(args, &spec).map(|_| ())
 }
 
 /// What a verb accepts. Declared once so every verb refuses the same way:
@@ -63,8 +55,27 @@ impl Parsed {
         self.positionals.get(i)
     }
 
+    /// Positional `i`, or the usage as the error.
+    pub(super) fn required(&self, i: usize, usage: &str) -> Result<String, TenancyError> {
+        self.positional(i)
+            .cloned()
+            .ok_or_else(|| TenancyError::Validation(format!("usage: {usage}")))
+    }
+
     pub(super) fn has(&self, flag: &str) -> bool {
         self.switches.iter().any(|s| s == flag)
+    }
+
+    /// `--on` / `--off`, refusing both rather than guessing (#1355).
+    pub(super) fn on_off(&self) -> Result<Option<bool>, TenancyError> {
+        match (self.has("--on"), self.has("--off")) {
+            (true, true) => Err(TenancyError::Validation(
+                "--on and --off contradict each other — pass one".into(),
+            )),
+            (true, false) => Ok(Some(true)),
+            (false, true) => Ok(Some(false)),
+            (false, false) => Ok(None),
+        }
     }
 
     /// Every value given for `flag`, in order.
