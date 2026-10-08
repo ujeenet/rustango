@@ -725,6 +725,29 @@ mod tests {
         );
     }
 
+    /// A runaway hook is capped at a year, so no deadline overflows.
+    #[test]
+    fn a_runaway_backoff_hook_is_capped_at_a_year() {
+        #[derive(Serialize, Deserialize)]
+        struct Forever;
+        #[async_trait::async_trait]
+        impl Job for Forever {
+            const NAME: &'static str = "test:forever";
+            fn retry_backoff(_: u32) -> Duration {
+                Duration::MAX
+            }
+            async fn run(&self) -> Result<(), JobError> {
+                Ok(())
+            }
+        }
+        let mut reg = HandlerRegistry::default();
+        reg.register::<Forever>();
+        let wait = reg.lookup(Forever::NAME).unwrap().backoff(0);
+        assert_eq!(wait, Duration::from_secs(365 * 86_400));
+        let _ = tokio::time::Instant::now() + wait;
+        let _ = chrono::Utc::now() + chrono::Duration::from_std(wait).unwrap();
+    }
+
     /// A job's own `retry_backoff` sets the wait before its retry (#2332).
     #[tokio::test]
     async fn a_jobs_backoff_hook_sets_the_retry_delay() {

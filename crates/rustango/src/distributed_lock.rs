@@ -42,6 +42,7 @@
 //! scheduler.every("daily_report", Duration::from_secs(60), move || {
 //!     let lock = lock.clone();
 //!     async move {
+//!         // `run_daily_report` returns a `Result`; an `Err` retries next tick.
 //!         lock.once_per_period("daily_report", day, || run_daily_report()).await;
 //!     }
 //! });
@@ -179,42 +180,64 @@ impl DistributedLock {
     }
 
     /// Run `body` at most once per `period` across every caller sharing
-    /// the cache. Use this, not [`Self::with_lock`], for a scheduled job.
+    /// the cache. Use this, not [`Self::with_lock`], for a scheduled job,
+    /// and tick well inside the period (say every 60s).
     ///
-    /// Windows follow the wall clock from the Unix epoch, so pods started
-    /// minutes apart agree on them. The lock is kept until its TTL, so a
-    /// later pod in the same window skips even after `body` finished.
+    /// Windows count from the Unix epoch, so a daily period starts at
+    /// 00:00 UTC and pods booted apart agree on them. A finished run keeps
+    /// the window's lock, so later ticks in that window skip. A body that
+    /// returns `Err` or panics frees it, so a later tick retries.
     ///
     /// While `body` runs it also holds the plain `name` lock, so a run that
     /// outlasts its window is not overlapped by the next one.
-    pub async fn once_per_period<F, Fut, R>(
+    pub async fn once_per_period<F, Fut, T, E>(
         &self,
         name: &str,
         period: Duration,
         body: F,
-    ) -> Option<R>
+    ) -> Option<Result<T, E>>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = R>,
+        Fut: std::future::Future<Output = Result<T, E>>,
     {
         let period = period.max(Duration::from_millis(1));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let window = now.as_millis() / period.as_millis();
-        let guard = self
-            .try_acquire(&format!("{name}@{window}"), period)
-            .await?;
+        // Twice the period, so a pod whose clock lags still sees the key.
+        let ttl = period.saturating_mul(2);
+        let guard = self.try_acquire(&format!("{name}@{window}"), ttl).await?;
+        // The key two windows back is past any skew; drop it so a database
+        // cache does not keep one row per window forever.
+        if let Some(old) = window.checked_sub(2) {
+            let _ = self
+                .cache
+                .delete(&self.key_for(&format!("{name}@{old}")))
+                .await;
+        }
         // A run from the last window may still be going on another pod.
         // Free this window so a later tick retries once it ends.
-        let Some(running) = self.try_acquire(name, period.saturating_mul(2)).await else {
+        let Some(running) = self.try_acquire(name, ttl).await else {
             guard.release().await;
             return None;
         };
-        let result = body().await;
+        let result = crate::panic_guard::catch_unwind(body()).await;
         running.release().await;
-        guard.keep_until_ttl();
-        Some(result)
+        match result {
+            Ok(Ok(v)) => {
+                guard.keep_until_ttl();
+                Some(Ok(v))
+            }
+            Ok(Err(e)) => {
+                guard.release().await;
+                Some(Err(e))
+            }
+            Err(panic) => {
+                guard.release().await;
+                std::panic::resume_unwind(panic)
+            }
+        }
     }
 }
 
@@ -437,8 +460,74 @@ mod tests {
     async fn once_per_period_holds_the_window_after_the_body() {
         let l = lock();
         let day = Duration::from_secs(86_400);
-        assert_eq!(l.once_per_period("j", day, || async { 1 }).await, Some(1));
-        assert_eq!(l.once_per_period("j", day, || async { 2 }).await, None);
+        let ok = |n: i32| async move { Ok::<_, ()>(n) };
+        assert_eq!(l.once_per_period("j", day, || ok(1)).await, Some(Ok(1)));
+        assert_eq!(l.once_per_period("j", day, || ok(2)).await, None);
+    }
+
+    fn window_now(period: Duration) -> u128 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        now.as_millis() / period.as_millis()
+    }
+
+    /// An `Err` or a panic frees the window, so a later tick retries.
+    #[tokio::test]
+    async fn once_per_period_retries_after_err_or_panic() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let failed = l.once_per_period("j", day, || async { Err::<(), _>("x") });
+        assert_eq!(failed.await, Some(Err("x")));
+        let l2 = l.clone();
+        let panicked = tokio::spawn(async move {
+            l2.once_per_period("j", day, || async {
+                if day > Duration::ZERO {
+                    panic!("boom");
+                }
+                Ok::<(), ()>(())
+            })
+            .await
+        });
+        assert!(panicked.await.unwrap_err().is_panic());
+        let ok = l.once_per_period("j", day, || async { Ok::<_, ()>(1) });
+        assert_eq!(ok.await, Some(Ok(1)), "the window stayed taken");
+        // The plain name lock is free again too.
+        assert!(l.try_acquire("j", day).await.is_some());
+    }
+
+    /// The window key outlives the period (clock skew) and the key two
+    /// windows back is deleted.
+    #[tokio::test]
+    async fn once_per_period_keys_ttl_and_cleanup() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let l = DistributedLock::new(cache.clone());
+        let period = Duration::from_millis(100);
+        let w = loop {
+            let w = window_now(period);
+            cache
+                .set(&format!("lock:t@{}", w - 2), "old", None)
+                .await
+                .unwrap();
+            let r = l.once_per_period("t", period, || async { Ok::<_, ()>(()) });
+            assert!(r.await.is_some());
+            if window_now(period) == w {
+                break w;
+            }
+        };
+        assert!(!cache.exists(&format!("lock:t@{}", w - 2)).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            cache.exists(&format!("lock:t@{w}")).await.unwrap(),
+            "TTL too short"
+        );
+    }
+
+    /// A zero period is clamped, not a division by zero.
+    #[tokio::test]
+    async fn once_per_period_clamps_a_zero_period() {
+        let r = lock().once_per_period("z", Duration::ZERO, || async { Ok::<_, ()>(()) });
+        assert_eq!(r.await, Some(Ok(())));
     }
 
     /// A body longer than the period is not overlapped by the next
@@ -465,6 +554,7 @@ mod tests {
                             tokio::time::sleep(Duration::from_millis(150)).await;
                             now.fetch_sub(1, Ordering::SeqCst);
                             runs.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, ()>(())
                         })
                         .await;
                         tokio::time::sleep(Duration::from_millis(10)).await;

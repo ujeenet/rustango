@@ -480,6 +480,7 @@ mod tests {
                 async move {
                     lock.once_per_period("daily_report", PERIOD, || async {
                         ran.lock().unwrap().push(window());
+                        Ok::<_, ()>(())
                     })
                     .await;
                 }
