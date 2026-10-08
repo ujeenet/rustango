@@ -175,7 +175,7 @@ pub struct McpSettings {
     pub enable_sse: Option<bool>,
     /// CORS allow-list of origins for the MCP endpoint (empty = none).
     pub allowed_origins: Vec<String>,
-    /// Per-IP request cap per minute (`None` = unlimited).
+    /// Per-IP request cap per minute (`None` or `0` = unlimited; see [`Self::rate_limit`]).
     pub rate_limit_per_minute: Option<u32>,
     /// Max tools returned by `tools/list` (`None` = unlimited).
     pub max_tools_listed: Option<usize>,

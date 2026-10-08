@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `SessionStore::touch` cannot revive a session after logout (#2300)
 
-It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock.
+It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock. `RedisCache` caps a huge TTL so `PX`/`PEXPIRE` stay valid.
 
 ### Fixed — MCP SSE stream ends when its JWT is revoked (#2303)
 
@@ -16,7 +16,7 @@ It goes through `Cache::touch`, which every built-in backend now does in one ste
 
 ### Fixed — MCP `rate_limit_per_minute = 0` is unlimited again (#2299)
 
-It built a zero-capacity limiter that sent 429 with `Retry-After: u64::MAX` on every request; `check --deploy` now flags 0 like unset.
+It built a zero-capacity limiter that sent 429 with `Retry-After: u64::MAX` on every request; `check --deploy` now flags 0 like unset. Any zero-capacity `RateLimitLayer` now sends one refill period as `Retry-After`.
 
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
