@@ -1823,6 +1823,65 @@ pub type AuditedCreate = for<'a, 't> fn(
     Box<dyn std::future::Future<Output = Result<(), crate::sql::ExecError>> + Send + 'a>,
 >;
 
+/// Audited `update` recorder, through `Model::__rustango_audited_update_record`:
+/// re-reads the updated row by PK in the update's transaction (#2010).
+pub type AuditedUpdateRecord = for<'a, 't> fn(
+    &'a mut crate::sql::PoolTx<'t>,
+    crate::core::SqlValue,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), crate::sql::ExecError>> + Send + 'a>,
+>;
+
+/// A one-row update that can run inside a caller's transaction with its
+/// audit entry (#2010). Absent for a model whose audit runs only on a pool.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+#[derive(Clone, Copy)]
+pub(crate) struct TxUpdate(Option<AuditedUpdateRecord>);
+
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+impl TxUpdate {
+    /// `None` when `model` audits updates but has no in-transaction
+    /// recorder (a hand-written `ModelEntry`): its update must go through
+    /// [`update`], or its audit entry would be lost.
+    pub(crate) fn for_model(model: &crate::core::ModelSchema) -> Option<Self> {
+        Self::for_entry(crate::core::ModelEntry::for_schema(model))
+    }
+
+    fn for_entry(entry: Option<&crate::core::ModelEntry>) -> Option<Self> {
+        let Some(entry) = entry else {
+            return Some(Self(None));
+        };
+        match (entry.audited_update_record(), entry.audited_update()) {
+            (Some(record), _) => Some(Self(Some(record))),
+            (None, Some(_)) => None,
+            (None, None) => Some(Self(None)),
+        }
+    }
+
+    /// Run `query` in `tx`, then record the row `pk` re-read.
+    ///
+    /// # Errors
+    /// As [`crate::sql::update_tx`], plus the audit write.
+    pub(crate) async fn run(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        pool: &crate::sql::Pool,
+        query: &crate::core::UpdateQuery,
+        pk: crate::core::SqlValue,
+    ) -> Result<u64, crate::sql::ExecError> {
+        let n = crate::sql::update_tx(tx, query).await?;
+        if let (true, Some(record)) = (n > 0, self.0) {
+            writing_via(pool, record(tx, pk)).await.map_err(|e| {
+                crate::sql::ExecError::AuditWrite {
+                    table: query.model.table,
+                    source: Box::new(e),
+                }
+            })?;
+        }
+        Ok(n)
+    }
+}
+
 /// Emit a `Create` entry for the row with primary key `pk`, read in `tx`.
 ///
 /// # Errors
@@ -1843,11 +1902,70 @@ where
         + Send
         + Unpin,
 {
+    record_by_pk(
+        tx,
+        model,
+        pk,
+        entry,
+        "the created row was not found by its primary key",
+    )
+    .await
+}
+
+/// Emit an entry for the row with primary key `pk` after an update in
+/// `tx`, read in `tx` (#2010).
+///
+/// # Errors
+/// As the re-read SELECT and the emit.
+#[doc(hidden)]
+pub async fn record_update<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    pk: crate::core::SqlValue,
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    record_by_pk(
+        tx,
+        model,
+        pk,
+        entry,
+        "the updated row was not found by its primary key",
+    )
+    .await
+}
+
+async fn record_by_pk<M>(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    pk: crate::core::SqlValue,
+    entry: impl Fn(&M) -> PendingEntry,
+    missing: &'static str,
+) -> Result<(), crate::sql::ExecError>
+where
+    M: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
     let rows: Vec<M> = rows_in_tx(tx, model, pk_in(model, vec![pk])?, false).await?;
     if rows.len() != 1 {
         return Err(crate::sql::ExecError::AuditUnsupported {
             table: model.table,
-            reason: "the created row was not found by its primary key",
+            reason: missing,
         });
     }
     let entries: Vec<PendingEntry> = rows.iter().map(&entry).collect();
@@ -2382,4 +2500,32 @@ async fn finish_update_with_audit_diff(
         emit_one_tx(tx, via, &entry).await?;
     }
     Ok(_affected)
+}
+
+#[cfg(test)]
+mod tx_update_tests {
+    use super::*;
+
+    fn runner<'a>(
+        _: &'a crate::sql::Pool,
+        _: &'a crate::core::UpdateQuery,
+        _: AuditOp,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<u64, crate::sql::ExecError>> + Send + 'a>,
+    > {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// A hand-written entry with a pool runner but no recorder keeps its
+    /// audit: no in-transaction update for it (#2010 review).
+    #[test]
+    fn a_pool_only_audited_update_never_runs_in_a_transaction() {
+        use crate::core::{Model as _, ModelEntry};
+        let schema = crate::i18n::db::Translation::SCHEMA;
+        let audited =
+            ModelEntry::new(schema, "app").with_audited(|| Some(runner as AuditedUpdate), || None);
+        assert!(TxUpdate::for_entry(Some(&audited)).is_none());
+        assert!(TxUpdate::for_entry(Some(&ModelEntry::new(schema, "app"))).is_some());
+        assert!(TxUpdate::for_entry(None).is_some());
+    }
 }

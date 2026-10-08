@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.60.1"
+version = "0.60.2"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -18,9 +18,9 @@ categories = ["web-programming::http-server", "database", "asynchronous"]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros     = { version = "0.60.1", path = "crates/rustango-macros" }
-rustango-orm-macros = { version = "0.60.1", path = "crates/rustango-orm-macros" }
-rustango            = { version = "0.60.1", path = "crates/rustango" }
+rustango-macros     = { version = "0.60.2", path = "crates/rustango-macros" }
+rustango-orm-macros = { version = "0.60.2", path = "crates/rustango-orm-macros" }
+rustango            = { version = "0.60.2", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
@@ -51,6 +51,8 @@ rust_decimal = { version = "1.36", default-features = false, features = ["serde"
 # Layered config (slice 8.3). `toml` is parser-only; we hand-roll the
 # layering + env-var override pass so we don't pull figment in.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+# Names the key of a config shape error; already in the tree via axum.
+serde_path_to_error = "0.1"
 
 # Errors
 thiserror = "1"

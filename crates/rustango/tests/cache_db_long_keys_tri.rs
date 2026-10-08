@@ -12,12 +12,12 @@ use rustango::cache::{Cache, DatabaseCache};
 use rustango::sql::Pool;
 use rustango::tri_dialect_test;
 
-const TABLE: &str = "rustango_cache_long_tri";
-
 async fn noop(_: &Pool) {}
 
-async fn fresh(pool: &Pool) -> DatabaseCache {
-    let cache = DatabaseCache::new(pool.clone(), TABLE);
+/// A fresh cache on `table`. Each scenario names its own, so parallel
+/// runs on one live database never drop each other's table (#1945).
+async fn fresh(pool: &Pool, table: &str) -> DatabaseCache {
+    let cache = DatabaseCache::new(pool.clone(), table);
     let _ = cache.drop_table().await;
     cache.ensure_table().await.expect("ensure_table");
     cache
@@ -26,7 +26,7 @@ async fn fresh(pool: &Pool) -> DatabaseCache {
 /// A long key round-trips through add/get/delete/set/touch/incr, and a
 /// key sharing its first 255 bytes stays a different key.
 async fn long_keys_round_trip(pool: &Pool) {
-    let cache = fresh(pool).await;
+    let cache = fresh(pool, "rustango_cache_long_rt").await;
     let shared = "k".repeat(255);
     let a = format!("{shared}-alpha-{}", "a".repeat(40));
     let b = format!("{shared}-beta-{}", "b".repeat(40));
@@ -62,7 +62,7 @@ async fn long_keys_round_trip(pool: &Pool) {
 
 /// A prefix clear reaches long keys under that prefix, and only those.
 async fn prefix_delete_reaches_long_keys(pool: &Pool) {
-    let cache = fresh(pool).await;
+    let cache = fresh(pool, "rustango_cache_long_prefix").await;
     let long = "k".repeat(255);
     let acme = format!("tenant:acme:{long}");
     cache.set(&acme, "x", None).await.unwrap();
@@ -91,7 +91,7 @@ async fn prefix_delete_reaches_long_keys(pool: &Pool) {
 /// Keys compare byte for byte: case and accents are not folded, and a
 /// prefix delete stays inside its exact namespace (#1757).
 async fn keys_compare_exactly(pool: &Pool) {
-    let cache = fresh(pool).await;
+    let cache = fresh(pool, "rustango_cache_long_exact").await;
     cache.set("User:1", "upper", None).await.unwrap();
     assert_eq!(cache.get("user:1").await.unwrap(), None, "case folded");
     cache.set("user:1", "lower", None).await.unwrap();

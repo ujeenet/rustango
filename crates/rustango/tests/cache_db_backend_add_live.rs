@@ -17,9 +17,9 @@
 //!
 //! Each backend skips silently when its env var is unset.
 
-// The per-backend tests below carry their own gates; this one is for
-// the `rustango::cache` import they share.
-#![cfg(feature = "cache")]
+// The per-backend tests below carry their own gates; this one keeps the
+// shared helpers from going unused on a SQLite-only build.
+#![cfg(all(feature = "cache", any(feature = "postgres", feature = "mysql")))]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -26,6 +26,16 @@ use super::{PaginationStyle, ViewSet};
 use crate::core::{FieldType, WriteKind};
 use crate::forms::absent_is_missing;
 
+/// A write that hits a unique key answers 409 (`write_failure`, #2164).
+fn conflict() -> Response {
+    Response::new("conflicts with an existing row")
+}
+
+/// `update_inner` answers 204 when the committed row no longer matches the caller's scope.
+fn moved_out_of_scope() -> Response {
+    Response::new("updated; the row is now outside your scope")
+}
+
 /// Which write a request schema describes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Body {
@@ -87,9 +97,12 @@ impl ViewSet {
                 .request_body(RequestBody::json(self.request_schema(Body::Create)))
                 .response(
                     "201",
-                    Response::new("created").json_content(Schema::ref_(item_ref)),
+                    // `create_one` answers a bare 201 when the read-back is scoped out.
+                    Response::new("created; empty body when the new row is outside your scope")
+                        .json_content(Schema::ref_(item_ref)),
                 )
-                .response("400", Response::new("validation error"));
+                .response("400", Response::new("validation error"))
+                .response("409", conflict());
             p = p.post(create_op);
         }
 
@@ -175,7 +188,10 @@ impl ViewSet {
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
-                .response("404", Response::new("not found"));
+                .response("204", moved_out_of_scope())
+                .response("400", Response::new("validation error"))
+                .response("404", Response::new("not found"))
+                .response("409", conflict());
             p = p.put(update_op);
 
             let patch_op = Operation::new()
@@ -187,7 +203,10 @@ impl ViewSet {
                     "200",
                     Response::new("updated").json_content(Schema::ref_(item_ref)),
                 )
-                .response("404", Response::new("not found"));
+                .response("204", moved_out_of_scope())
+                .response("400", Response::new("validation error"))
+                .response("404", Response::new("not found"))
+                .response("409", conflict());
             p = p.patch(patch_op);
 
             let destroy_op = Operation::new()
@@ -726,6 +745,49 @@ mod tests {
             v["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/Post"
         );
+    }
+
+    /// #2164: create and update map a unique violation to 409.
+    #[test]
+    fn writes_list_the_conflict_response() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let item = &paths
+            .iter()
+            .find(|(p, _)| p == "/api/posts/{pk}")
+            .unwrap()
+            .1;
+        for (name, op) in [
+            ("POST", &coll.post),
+            ("PUT", &item.put),
+            ("PATCH", &item.patch),
+        ] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            assert!(v["responses"]["409"].is_object(), "{name}: {v}");
+        }
+        let v = serde_json::to_value(item.delete.as_ref().unwrap()).unwrap();
+        assert!(v["responses"]["409"].is_null(), "DELETE");
+    }
+
+    /// #2207: PUT/PATCH answer 400 and 204, and create a bare 201, as the handlers do.
+    #[test]
+    fn writes_list_every_status_the_handlers_return() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        let item = &paths
+            .iter()
+            .find(|(p, _)| p == "/api/posts/{pk}")
+            .unwrap()
+            .1;
+        for (name, op) in [("PUT", &item.put), ("PATCH", &item.patch)] {
+            let v = serde_json::to_value(op.as_ref().unwrap()).unwrap();
+            assert!(v["responses"]["400"].is_object(), "{name}: {v}");
+            assert!(v["responses"]["204"].is_object(), "{name}: {v}");
+            assert!(v["responses"]["204"]["content"].is_null(), "{name}: {v}");
+        }
+        let v = serde_json::to_value(coll.post.as_ref().unwrap()).unwrap();
+        let created = v["responses"]["201"]["description"].as_str().unwrap();
+        assert!(created.contains("empty body"), "{created}");
     }
 
     fn body_schema(op: Option<&crate::openapi::Operation>) -> serde_json::Value {

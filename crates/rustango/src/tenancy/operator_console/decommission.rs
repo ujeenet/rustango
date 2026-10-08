@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use super::super::auth;
 use super::super::decommission::Action;
-use super::{urlencoding_lite, ConsoleState};
+use super::{urlencoding_lite, withheld, ConsoleState};
 
 #[derive(Deserialize)]
 pub(super) struct PurgeForm {
@@ -50,7 +50,17 @@ pub(super) async fn deactivate(
             };
             back_to_orgs(Some(&msg), None)
         }
-        Err(e) => back_to_orgs(None, Some(&e.to_string())),
+        Err(e) => {
+            let msg = e.user_facing().unwrap_or_else(|| {
+                withheld(
+                    "operator_console::deactivate",
+                    &slug,
+                    "Could not deactivate",
+                    &e,
+                )
+            });
+            back_to_orgs(None, Some(&msg))
+        }
     }
 }
 
@@ -83,7 +93,13 @@ pub(super) async fn purge(
             if let Err(e) =
                 super::super::branding::delete_brand_assets(&slug, &state.brand_storage).await
             {
-                let _ = write!(msg, " — brand files left in place: {e}");
+                let kept = withheld(
+                    "operator_console::purge",
+                    &slug,
+                    "brand files left in place",
+                    &e,
+                );
+                let _ = write!(msg, " — {kept}");
             }
             if let Some(schema) = &report.schema_dropped {
                 let _ = write!(msg, " — dropped schema `{schema}`");
@@ -98,7 +114,12 @@ pub(super) async fn purge(
         }
         // Back to the tenant, not the list: it still exists, and the
         // reason usually names something to change.
-        Err(e) => back_to_tenant(&slug, &e.to_string()),
+        Err(e) => {
+            let msg = e.user_facing().unwrap_or_else(|| {
+                withheld("operator_console::purge", &slug, "Could not purge", &e)
+            });
+            back_to_tenant(&slug, &msg)
+        }
     }
 }
 

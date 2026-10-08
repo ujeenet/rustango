@@ -66,6 +66,7 @@ struct Answer {
     status: StatusCode,
     retry_after: Option<String>,
     session: bool,
+    #[cfg(feature = "totp")]
     cookie: Option<String>,
     body: Vec<u8>,
 }
@@ -108,6 +109,7 @@ async fn login_code(app: &axum::Router, ip: &str, user: &str, pass: &str, code: 
         status,
         retry_after,
         session,
+        #[cfg(feature = "totp")]
         cookie,
         body,
     }

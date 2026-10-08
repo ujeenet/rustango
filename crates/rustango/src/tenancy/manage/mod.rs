@@ -658,7 +658,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  migrate-tenant-storage <slug> --to schema|database [--database-url <s>] [--schema-name <s>] [--dry-run]"
+        "  migrate-tenant-storage <slug> --to schema|database [--database-url <s>] [--schema-name <s>] [--allow-extension <name>]... [--dry-run]"
     )?;
     writeln!(
         w,

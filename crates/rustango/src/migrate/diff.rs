@@ -2037,10 +2037,14 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
     // for integer types; field-mixin auto (auto_now_add etc.) on
     // non-integer types falls through to the regular column_type
     // mapping. Dialect-specific token is picked by `dialect.serial_type()`.
-    if f.auto {
-        if let Some(t) = ty {
-            if matches!(t, FieldType::I16 | FieldType::I32 | FieldType::I64) {
-                return dialect.serial_type(t).to_owned();
+    if let Some(t @ (FieldType::I16 | FieldType::I32 | FieldType::I64)) = ty {
+        if f.auto {
+            return dialect.serial_type(t).to_owned();
+        }
+        // As `ddl::sql_type`: a DB default the PK type would ignore (#2137).
+        if f.primary_key && f.default.is_some() {
+            if let Some(pk_ty) = dialect.defaulted_integer_pk_type() {
+                return pk_ty.to_owned();
             }
         }
     }
@@ -2142,6 +2146,18 @@ mod sql_type_tests {
     fn non_auto_passes_through_normally() {
         assert_eq!(sql_type(&fs("i64", false)), "BIGINT");
         assert_eq!(sql_type(&fs("datetime", false)), "TIMESTAMPTZ");
+    }
+
+    /// #2137: an `INTEGER` PK is SQLite's rowid, which skips the default.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_defaulted_integer_pk_is_not_the_rowid() {
+        let mut f = fs("i64", false);
+        f.primary_key = true;
+        f.default = Some("7".into());
+        assert_eq!(sql_type_with_dialect(&f, &crate::sql::Sqlite), "BIGINT");
+        f.default = None;
+        assert_eq!(sql_type_with_dialect(&f, &crate::sql::Sqlite), "INTEGER");
     }
 
     // #559 — DROP arms must be dialect-aware. `CASCADE` is Postgres-only
@@ -2372,6 +2388,7 @@ mod sql_type_tests {
         }
     }
 
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
     fn not_null() -> Vec<SchemaChange> {
         vec![SchemaChange::AlterColumnNullable {
             table: "t".into(),
