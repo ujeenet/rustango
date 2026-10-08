@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres.
 
+### Fixed — `cargo rustango new`: escaped path, dependency names, loopback DB port (#2287)
+
+`--rustango-path` is TOML-escaped (Windows paths work), names like `tokio` or `serde` are refused, and the compose DB port binds to 127.0.0.1.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

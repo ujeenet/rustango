@@ -300,7 +300,8 @@ impl Template {
         let feats = feature_list(self.base_features(), extras);
         match path {
             Some(p) => {
-                format!(r#"{{ path = "{p}", default-features = false, features = [{feats}] }}"#)
+                let p = templates::toml_string(p);
+                format!(r#"{{ path = {p}, default-features = false, features = [{feats}] }}"#)
             }
             // Track our own version, bumped in lockstep with rustango, so a
             // published scaffolder always pins a real, current release. It was
@@ -624,6 +625,13 @@ fn validate_name(name: &str) -> Result<(), String> {
         return Err(format!(
             "`{name}` cannot be a project name — `{ident}` is a Rust keyword or a \
              built-in crate name, so the generated code would not compile"
+        ));
+    }
+    // The library would share its name with a dependency (#2287).
+    if let Some(dep) = templates::dependency_names().find(|d| d.replace('-', "_") == ident) {
+        return Err(format!(
+            "`{name}` cannot be a project name — the generated project depends on \
+             `{dep}`, and a crate cannot share a name with its own dependency"
         ));
     }
     Ok(())
@@ -1262,6 +1270,61 @@ mod tests {
         ] {
             let err = validate_name(n).expect_err(n);
             assert!(err.contains("keyword"), "{n}: {err}");
+        }
+    }
+
+    /// `--rustango-path` is data, not TOML: backslashes and quotes must
+    /// survive into a manifest cargo can read (#2287).
+    #[test]
+    fn rustango_path_round_trips_through_cargo_toml() {
+        for path in [
+            r"..\a\b",
+            r"C:\Users\dev\rustango",
+            r#"dir "q"/x"#,
+            "tab\there",
+        ] {
+            let toml =
+                templates::cargo_toml("app", Template::Api, Backend::Sqlite, &[], Some(path));
+            let doc: toml::Table = toml::from_str(&toml)
+                .unwrap_or_else(|e| panic!("{path:?} broke Cargo.toml: {e}\n{toml}"));
+            assert_eq!(doc["dependencies"]["rustango"]["path"].as_str(), Some(path));
+        }
+    }
+
+    /// A project named like one of its own dependencies does not build, so
+    /// every name the generated manifest depends on is refused (#2287).
+    #[test]
+    fn names_of_template_dependencies_are_refused() {
+        let jobs = vec!["jobs".to_owned()];
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let toml = templates::cargo_toml("app", template, Backend::Postgres, &jobs, None);
+            let doc: toml::Table = toml::from_str(&toml).expect("Cargo.toml parses");
+            for table in ["dependencies", "dev-dependencies"] {
+                for dep in doc[table].as_table().expect(table).keys() {
+                    for n in [dep.clone(), dep.replace('-', "_")] {
+                        let err = validate_name(&n).expect_err(&n);
+                        assert!(err.contains("depends on"), "{n}: {err}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The compose DB uses a published password, so its port stays on
+    /// loopback (#2287).
+    #[test]
+    fn compose_binds_the_database_to_loopback() {
+        for (backend, port) in [(Backend::Postgres, "5432"), (Backend::Mysql, "3306")] {
+            let compose = templates::docker_compose("app", backend);
+            let published: Vec<&str> = compose
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("- \"") && l.ends_with(&format!(":{port}\"")))
+                .collect();
+            assert!(!published.is_empty(), "{backend:?}:\n{compose}");
+            for line in published {
+                assert!(line.starts_with("- \"127.0.0.1:"), "{backend:?}: {line}");
+            }
         }
     }
 
