@@ -1131,11 +1131,14 @@ pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S])
         if let Some(matched) = avail_lower.iter().find(|a| **a == lang_lower) {
             return Some(matched.clone());
         }
-        // Base-language match
+        // The bare base language beats a sibling region: `en-US` takes `en`
+        // over `en-GB` (#2289).
         let base = lang_lower.split('-').next().unwrap_or(&lang_lower);
+        let sibling = format!("{base}-");
         if let Some(matched) = avail_lower
             .iter()
-            .find(|a| **a == base || a.starts_with(&format!("{base}-")))
+            .find(|a| **a == base)
+            .or_else(|| avail_lower.iter().find(|a| a.starts_with(&sibling)))
         {
             return Some(matched.clone());
         }
@@ -1480,6 +1483,19 @@ mod tests {
         assert!(plural_category_is_explicit("pt-PT"));
         assert!(plural_category_is_explicit("pt_PT"));
         assert_eq!(cats("pt_BR", &[0, 1]), ["one", "one"]);
+    }
+
+    #[test]
+    fn negotiate_prefers_the_base_over_a_sibling_region() {
+        assert_eq!(
+            negotiate_language("en-US", &["en-GB", "en"]).as_deref(),
+            Some("en")
+        );
+        // With no bare base, a sibling region is still better than nothing.
+        assert_eq!(
+            negotiate_language("en-US", &["fr", "en-GB"]).as_deref(),
+            Some("en-gb")
+        );
     }
 
     #[test]

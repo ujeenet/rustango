@@ -16,6 +16,10 @@ The wizard skips a question a flag already answered; before, Enter reset it to f
 
 `Translator::from_settings` compares the allowlist and file stems as `Locale`s.
 
+### Fixed — `negotiate_language` prefers `en` over `en-GB` for `en-US` (#2289)
+
+The bare base language now beats a sibling region.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.
