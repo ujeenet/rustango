@@ -212,18 +212,21 @@ async fn seed_articles(pool: &Pool) {
     .insert_pool(pool)
     .await
     .expect("country");
-    Agency {
-        id: 1,
-        name: "Acme".into(),
+    for (id, name) in [(1, "Acme"), (2, "Beta")] {
+        Agency {
+            id,
+            name: name.into(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("agency");
     }
-    .insert_pool(pool)
-    .await
-    .expect("agency");
+    // Profile and editor point at different agencies, so the joins differ.
     Profile {
         id: 1,
         bio: "bio".into(),
         country: Some(ForeignKey::unloaded(1)),
-        agency: Some(ForeignKey::unloaded(1)),
+        agency: Some(ForeignKey::unloaded(2)),
     }
     .insert_pool(pool)
     .await
@@ -372,7 +375,7 @@ async fn sibling_chains_three_levels_both_load(pool: &Pool) {
     );
     assert_eq!(
         loaded(&profile.agency).map(|a| a.name.as_str()),
-        Some("Acme")
+        Some("Beta")
     );
     assert_eq!(
         loaded(&editor.agency).map(|a| a.name.as_str()),
@@ -575,20 +578,24 @@ async fn prefetch_past_the_bind_cap(pool: &Pool) {
 
 /// `prefetch_soft` splits its keys too.
 async fn prefetch_soft_past_the_bind_cap(pool: &Pool) {
-    seed_rows(pool, 0..10).await;
-    Child {
-        id: 1,
-        row: ForeignKey::unloaded(9),
+    // Hits in the first and the last batch.
+    seed_rows(pool, (0..10).chain([69_999])).await;
+    for (id, row) in [(1, 9), (2, 69_999)] {
+        Child {
+            id,
+            row: ForeignKey::unloaded(row),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("child");
     }
-    .insert_pool(pool)
-    .await
-    .expect("child");
     let keys: Vec<i64> = (0..70_000).collect();
     let grouped =
         rustango::contenttypes::prefetch_soft::<Child, _>(pool, &keys, "row", |c| c.row.pk())
             .await
             .expect("prefetch_soft batches its IN list");
     assert_eq!(grouped.get(&9).map(Vec::len), Some(1));
+    assert_eq!(grouped.get(&69_999).map(Vec::len), Some(1));
 }
 
 /// A failing later batch rolls back the earlier ones.
@@ -660,10 +667,18 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
         .unwrap()
         .expect("badge ct");
     let ct_id = *ct.id.get().expect("ct id");
+    // A badge past the 70k filler keys, so a hit lands in the last batch.
+    Badge {
+        id: Auto::from(200_000),
+        label: "last".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("last badge");
     // 70k pairs: past every backend's bind cap.
     let pairs: Vec<(i64, i64)> = (100_000..170_000)
         .map(|p| (ct_id, p))
-        .chain([(ct_id, pk)])
+        .chain([(ct_id, pk), (ct_id, 200_000)])
         .collect();
     let map = contenttypes::prefetch_generic::<Badge>(pool, &pairs)
         .await
@@ -671,6 +686,10 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
     assert_eq!(
         map.get(&(ct_id, pk)).map(|b| b.label.as_str()),
         Some("gold")
+    );
+    assert_eq!(
+        map.get(&(ct_id, 200_000)).map(|b| b.label.as_str()),
+        Some("last")
     );
 }
 
