@@ -557,12 +557,6 @@ async fn migrate_with_ledger_body(
     emit(observer, || MigrationEvent::Planned { total });
 
     let mut newly = Vec::with_capacity(total);
-    // Squash reconciliation applies on this legacy PgPool entry point
-    // too — route through the same dialect-agnostic decision used by
-    // `migrate_pool` so both runners agree. `fake_initial` stays off
-    // here: table-existence faking is opted into only by the
-    // framework's system-migration path.
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
     for (i, mig) in pending.into_iter().enumerate() {
         let index = i + 1;
         emit(observer, || MigrationEvent::Started {
@@ -572,26 +566,7 @@ async fn migrate_with_ledger_body(
         });
         let began = std::time::Instant::now();
 
-        let step = async {
-            Ok::<_, MigrateError>(match reconcile(&enum_pool, &mig, &applied, false).await? {
-                ReconcileAction::Fake => {
-                    fake_apply_pool(&enum_pool, &mig, ledger).await?;
-                    Outcome::Faked
-                }
-                // `fake_initial` is off on this path, so
-                // `RunPartial` is unreachable here; treat it as a
-                // plain run for totality.
-                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-                    apply_one(pool, &mig, ledger).await?;
-                    Outcome::Ran
-                }
-                ReconcileAction::RunOutside(existing) => {
-                    apply_one(pool, &outside_tables(&mig, &existing), ledger).await?;
-                    Outcome::RanPartial { skipped: existing }
-                }
-            })
-        }
-        .await;
+        let step = reconcile_and_apply_pg(pool, &mig, &applied, ledger).await;
 
         let outcome = match step {
             Ok(outcome) => outcome,
@@ -616,6 +591,48 @@ async fn migrate_with_ledger_body(
         newly.push(mig);
     }
     Ok(newly)
+}
+
+/// [`reconcile_and_apply`] for the legacy PgPool runner, which applies
+/// through [`apply_one`]. `fake_initial` stays off: only the system chain
+/// opts into table-existence faking.
+#[cfg(feature = "postgres")]
+async fn reconcile_and_apply_pg(
+    pool: &PgPool,
+    mig: &Migration,
+    applied: &HashSet<String>,
+    ledger: &str,
+) -> Result<Outcome, MigrateError> {
+    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
+    Ok(match reconcile(&enum_pool, mig, applied, false).await? {
+        ReconcileAction::Fake => {
+            fake_apply_pool(&enum_pool, mig, ledger).await?;
+            Outcome::Faked
+        }
+        // Unreachable with `fake_initial` off; a plain run for totality.
+        ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+            apply_one(pool, mig, ledger).await?;
+            Outcome::Ran
+        }
+        ReconcileAction::RunOutside(existing) => {
+            apply_one(pool, &outside_tables(mig, &existing), ledger).await?;
+            Outcome::RanPartial { skipped: existing }
+        }
+    })
+}
+
+/// What `migrate <target>` applies going forward: the pending files after
+/// `head` up to `target`, squashes included so they reconcile (#2243).
+fn forward_to(
+    all: &[Migration],
+    applied: &HashSet<String>,
+    head: Option<&str>,
+    target: &str,
+) -> Vec<Migration> {
+    pending_migrations(all, applied)
+        .into_iter()
+        .filter(|m| head.is_none_or(|h| m.name.as_str() > h) && m.name.as_str() <= target)
+        .collect()
 }
 
 /// Hold the migrate advisory lock for the duration of `body`, then
@@ -1070,8 +1087,8 @@ async fn migrate_to_with_ledger(
         match head {
             None => {
                 // Nothing applied — forward up to and including target.
-                for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one(pool, &mig, ledger).await?;
+                for mig in forward_to(&all, &applied, None, target) {
+                    reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
                     touched.push(mig);
                 }
             }
@@ -1080,12 +1097,8 @@ async fn migrate_to_with_ledger(
                 match target.cmp(h.as_str()) {
                     Ordering::Equal => {}
                     Ordering::Greater => {
-                        for mig in all.into_iter().filter(|m| {
-                            m.name.as_str() > h.as_str()
-                                && m.name.as_str() <= target
-                                && !applied.contains(&m.name)
-                        }) {
-                            apply_one(pool, &mig, ledger).await?;
+                        for mig in forward_to(&all, &applied, Some(&h), target) {
+                            reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
                             touched.push(mig);
                         }
                     }
@@ -3424,9 +3437,8 @@ pub async fn migrate_to_pool_with_ledger(
         let mut touched = Vec::new();
         match head {
             None => {
-                for mig in all.iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one_pool(pool, mig, ledger).await?;
-                    let mig = mig.clone();
+                for mig in forward_to(&all, &applied, None, target) {
+                    reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
                     touched.push(mig);
                 }
             }
@@ -3435,13 +3447,8 @@ pub async fn migrate_to_pool_with_ledger(
                 match target.cmp(h.as_str()) {
                     Ordering::Equal => {}
                     Ordering::Greater => {
-                        for mig in all.iter().filter(|m| {
-                            m.name.as_str() > h.as_str()
-                                && m.name.as_str() <= target
-                                && !applied.contains(&m.name)
-                        }) {
-                            apply_one_pool(pool, mig, ledger).await?;
-                            let mig = mig.clone();
+                        for mig in forward_to(&all, &applied, Some(&h), target) {
+                            reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
                             touched.push(mig);
                         }
                     }

@@ -143,3 +143,56 @@ async fn squash_reconciles_on_postgres_legacy_runner() {
     let _ = std::fs::remove_dir_all(&dir);
     println!("Postgres (legacy runner) squash reconcile OK");
 }
+
+/// The legacy runner's `migrate_to` must reconcile a squash too (#2243).
+#[tokio::test]
+async fn migrate_to_reconciles_a_squash_on_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping — set DATABASE_URL");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect postgres");
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let (t_a, t_b) = (
+        format!("rect_pg_a_{pid}_{n}"),
+        format!("rect_pg_b_{pid}_{n}"),
+    );
+    let (m1, m2, sq) = (
+        format!("1{n:03}_a_{pid}"),
+        format!("2{n:03}_b_{pid}"),
+        format!("3{n:03}_squashed_{pid}"),
+    );
+    let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
+    let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
+    migrate::migrate(&pool, &write_dir(&[&a, &b]))
+        .await
+        .unwrap();
+
+    // `migrate --squash` removed the replaced files.
+    let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
+    let dir = write_dir(&[&squash]);
+    let touched = migrate::migrate_to(&pool, &dir, &sq)
+        .await
+        .expect("migrate_to must reconcile the squash, not hit 42P07");
+    assert_eq!(touched.len(), 1);
+    let left: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {LEDGER} WHERE name = ANY($1)"
+    ))
+    .bind(vec![m1.clone(), m2.clone(), sq.clone()])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 1, "only the squash should remain");
+
+    for t in [&t_a, &t_b] {
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS \"{t}\""))
+            .execute(&pool)
+            .await;
+    }
+    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = $1"))
+        .bind(&sq)
+        .execute(&pool)
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

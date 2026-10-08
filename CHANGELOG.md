@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `migrate <target>` reconciles a squash (#2243)
+
+Going forward it applies the same pending set as `migrate`, so a squash whose replaced files were applied is faked, not re-created.
+
 ### Added — `Cli::with_trusted_proxies` (#2255)
 
 A `Cli` app behind a reverse proxy names its proxies, and the access log and per-IP limits, login throttling included, see the client. `X-Forwarded-For` from other peers is still ignored.
