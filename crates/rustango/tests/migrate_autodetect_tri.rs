@@ -2663,6 +2663,53 @@ async fn db_comment_change_applies(pool: &Pool) {
     assert_eq!(column_comment(pool, t, "c").await, expect(""));
 }
 
+/// Dropping the index an FK uses, then its whole table; MySQL refused
+/// both with 1553 (#2244).
+async fn fk_index_drops(pool: &Pool) {
+    let (a, b) = ("mad_fi_author", "mad_fi_book");
+    let chain = fk_index_chain(pool, "fi", a, b).await;
+    let book = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    let dropped = chain
+        .step(pool, json!({"tables": [table(a, vec![id()]), book]}))
+        .await
+        .expect("the FK's index drops");
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (1, 99)",
+            &[b, "id", "author_id"]
+        )
+        .await
+        .is_err(),
+        "the FK is back on {}",
+        pool.dialect().name()
+    );
+    chain.undo(pool, &dropped).await.expect("unapply");
+
+    let (a, b) = ("mad_fj_author", "mad_fj_book");
+    let chain = fk_index_chain(pool, "fj", a, b).await;
+    chain
+        .step(pool, json!({"tables": [table(a, vec![id()])]}))
+        .await
+        .expect("the table drops with its FK's index");
+}
+
+/// `b` with an FK to `a` and an index on it, applied.
+async fn fk_index_chain(pool: &Pool, tag: &str, a: &str, b: &str) -> Chain {
+    let chain = Chain::new(pool, tag, &[b, a]).await;
+    let book = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    let idx = json!([{"name": format!("{b}_author_idx"), "table": b,
+                      "columns": ["author_id"], "unique": false}]);
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), book], "indexes": idx}),
+        )
+        .await
+        .expect("initial");
+    chain
+}
+
 /// A `db_comment` lands with CreateTable and AddColumn too (#2270).
 async fn db_comment_on_create_and_add_column(pool: &Pool) {
     let t = "mad_cc_item";
@@ -2785,6 +2832,7 @@ tri_dialect_test!(
         case_insensitive_change_applies,
         db_comment_change_applies,
         db_comment_on_create_and_add_column,
+        fk_index_drops,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,

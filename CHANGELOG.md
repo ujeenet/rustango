@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL drops the index an FK uses (#2244)
+
+DropIndex takes the FK on the index's first column off first and re-adds it after (none if its table or column goes); MySQL refused with 1553.
+
 ### Fixed — file migrations keep `db_comment` on new tables and columns (#2270)
 
 PG writes `COMMENT ON COLUMN` after CreateTable and AddColumn; MySQL's AddColumn inlines `COMMENT` as CREATE TABLE does.

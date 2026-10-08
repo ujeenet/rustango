@@ -1917,6 +1917,24 @@ fn constraints_sql_from_snapshot(
     Ok(out)
 }
 
+/// Each column of `t` with its `ADD CONSTRAINT … FOREIGN KEY`, if it has one.
+pub(crate) fn column_fks(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    t.fields
+        .iter()
+        .map(|f| {
+            let fk = f.fk.as_ref();
+            let sql = fk
+                .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
+                .transpose()?;
+            Ok((f.column.clone(), sql))
+        })
+        .collect()
+}
+
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
 fn inline_references(rel: &RelationSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
     let mut s = format!(

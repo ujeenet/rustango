@@ -943,6 +943,22 @@ fn preview_schema_op(
         let name = ddl::unique_constraint_name(&u.table, &u.column);
         statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
     }
+    // An index's FK, as apply finds it by the index's first column.
+    let readd = step.index_fks.as_ref().and_then(|ix| {
+        let column = before
+            .indexes
+            .iter()
+            .find(|i| i.name == ix.index)?
+            .columns
+            .first()?;
+        let has_fk = before
+            .table(&ix.table)
+            .and_then(|t| t.field(column))
+            .is_some_and(|f| f.fk.is_some());
+        let names = [ddl::fk_constraint_name(&ix.table, column)];
+        let names = if has_fk { &names[..] } else { &[] };
+        ix.plan(column, names, dialect, statements)
+    });
     statements.extend(step.batch.immediate);
     if let Some(rebuild) = &step.batch.rebuild {
         statements.extend(rebuild.statements(dialect));
@@ -951,7 +967,13 @@ fn preview_schema_op(
             rebuild.table()
         ));
     }
-    Ok(step.batch.deferred_fks)
+    let mut deferred = step.batch.deferred_fks;
+    match readd {
+        Some((sql, true)) => statements.push(sql),
+        Some((sql, false)) => deferred.push(sql),
+        None => {}
+    }
+    Ok(deferred)
 }
 
 /// The DDL that moves `before` to `after` by `changes` on `dialect`, as
@@ -2759,6 +2781,68 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
+    /// A MySQL index drop, which its FK refuses (1553; #2244).
+    index_fks: Option<IndexFks>,
+}
+
+/// The FKs a MySQL index drop must take off first, by the index's first
+/// column, which only the catalog knows.
+struct IndexFks {
+    table: String,
+    index: String,
+    /// The table's columns at the op, with their FK to re-add. A column
+    /// missing here goes away later, so its FK just drops; `None` if the
+    /// whole table does.
+    columns: Option<Vec<(String, Option<String>)>>,
+    /// Re-add at the op, not at the end: a later rename changes the names.
+    now: bool,
+}
+
+/// What happens to the FK on an index's first column.
+enum FkFate<'a> {
+    /// No FK in the schema: leave a live one alone.
+    Keep,
+    /// Its column or table goes away later.
+    Drop,
+    Readd(&'a str),
+}
+
+impl IndexFks {
+    fn fate(&self, column: &str) -> FkFate<'_> {
+        let found = self
+            .columns
+            .as_ref()
+            .and_then(|cs| cs.iter().find(|(c, _)| c == column));
+        match found {
+            None => FkFate::Drop,
+            Some((_, None)) => FkFate::Keep,
+            Some((_, Some(sql))) => FkFate::Readd(sql),
+        }
+    }
+
+    /// Push the drops of the live FKs `names` on `column`; its re-add, and
+    /// whether it runs at the op.
+    fn plan(
+        &self,
+        column: &str,
+        names: &[String],
+        dialect: &dyn crate::sql::Dialect,
+        drops: &mut Vec<String>,
+    ) -> Option<(String, bool)> {
+        let fate = self.fate(column);
+        if names.is_empty() || matches!(fate, FkFate::Keep) {
+            return None;
+        }
+        drops.extend(
+            names
+                .iter()
+                .filter_map(|n| dialect.drop_foreign_key_sql(&self.table, n)),
+        );
+        match fate {
+            FkFate::Readd(sql) => Some((sql.to_owned(), self.now)),
+            _ => None,
+        }
+    }
 }
 
 /// A column whose FKs or UNIQUE the runner finds by name in the catalog:
@@ -2889,6 +2973,31 @@ fn render_step(
         } => Some(at_column(table, column)),
         _ => None,
     };
+    let index_fks = match change {
+        SC::DropIndex { name, table } if dialect.index_leading_column_sql().is_some() => {
+            // The shape at this op; none when a later op drops the table.
+            let at = if later.iter().any(|op| touches_table(op, table)) {
+                super::rebuild::snapshot_at(table, later, after)
+                    .ok()
+                    .map(|(s, renamed)| (std::borrow::Cow::Owned(s), renamed))
+            } else {
+                Some((std::borrow::Cow::Borrowed(after), false))
+            };
+            let columns = at
+                .as_ref()
+                .and_then(|(s, _)| s.table(table))
+                .map(|t| super::diff::column_fks(t, dialect, schema))
+                .transpose()
+                .map_err(MigrateError::Validation)?;
+            Some(IndexFks {
+                table: table.clone(),
+                index: name.clone(),
+                columns,
+                now: at.is_some_and(|(_, renamed)| renamed),
+            })
+        }
+        _ => None,
+    };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
     // Its FKs carry the names at this op, which a later rename changes.
     if renamed {
@@ -2915,6 +3024,7 @@ fn render_step(
         retry,
         drop_fks,
         drop_unique,
+        index_fks,
     })
 }
 
@@ -3010,9 +3120,40 @@ macro_rules! step_statements {
 #[cfg(feature = "mysql")]
 async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
-    step: &Step,
+    step: &mut Step,
 ) -> Result<Vec<String>, sqlx::Error> {
-    step_statements!(conn, step, crate::sql::MySql)
+    use crate::sql::Dialect as _;
+    let dialect = crate::sql::MySql;
+    let (mut out, mut readd) = (Vec::new(), None);
+    let queries = (
+        dialect.index_leading_column_sql(),
+        dialect.foreign_key_names_sql(),
+    );
+    if let (Some(ix), (Some(lead_sql), Some(names_sql))) = (&step.index_fks, queries) {
+        let lead: Option<String> = sqlx::query_scalar(lead_sql)
+            .bind(&ix.table)
+            .bind(&ix.index)
+            .fetch_optional(&mut *conn)
+            .await?;
+        if let Some(column) = lead {
+            let names: Vec<String> = sqlx::query_scalar(names_sql)
+                .bind(&ix.table)
+                .bind(&column)
+                .fetch_all(&mut *conn)
+                .await?;
+            readd = ix.plan(&column, &names, &dialect, &mut out);
+        }
+    }
+    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, &*step, dialect);
+    out.extend(rest?);
+    if let Some((sql, now)) = readd {
+        if now {
+            out.push(sql);
+        } else {
+            step.batch.deferred_fks.push(sql);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(feature = "postgres")]
@@ -3073,8 +3214,8 @@ async fn atomic_mysql(
     for op in ops {
         match op {
             Operation::Schema(change) => {
-                let step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
-                let stmts = mysql_statements(&mut tx, &step)
+                let mut step = render_step(change, ops, after, &crate::sql::MySql, schema)?;
+                let stmts = mysql_statements(&mut tx, &mut step)
                     .await
                     .map_err(|e| stuck!(e))?;
                 // Counted per *statement*, not per operation:
@@ -3220,7 +3361,8 @@ async fn run_step_pool(pool: &crate::sql::Pool, step: Step) -> Result<Vec<String
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut conn = my.acquire().await?;
-            for stmt in mysql_statements(&mut conn, &step).await? {
+            let mut step = step;
+            for stmt in mysql_statements(&mut conn, &mut step).await? {
                 sqlx::query(&stmt).execute(&mut *conn).await?;
             }
             Ok(step.batch.deferred_fks)
@@ -3935,5 +4077,42 @@ mod tests {
                 .unwrap();
         assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
         assert!(out[1].contains("DROP COLUMN `p_id`"), "{out:?}");
+    }
+
+    /// #2244 — the index an FK uses drops after the FK, which comes back.
+    #[test]
+    fn render_between_drops_the_fk_around_its_index() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |indexed: bool| -> SchemaSnapshot {
+            let indexes = if indexed {
+                serde_json::json!([{ "name": "child_p_idx", "table": "child",
+                    "columns": ["p_id"], "unique": false }])
+            } else {
+                serde_json::json!([])
+            };
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "p", "column": "p_id", "ty": "i64",
+                      "nullable": true, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }],
+                "indexes": indexes }))
+            .unwrap()
+        };
+        let drop = [SchemaChange::DropIndex {
+            name: "child_p_idx".into(),
+            table: "child".into(),
+        }];
+        let out =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
+                .unwrap();
+        assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
+        assert!(out[2].contains("ADD CONSTRAINT"), "{out:?}");
+        let pg =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::Postgres)
+                .unwrap();
+        assert_eq!(pg.len(), 1, "PG needs no index under an FK: {pg:?}");
     }
 }

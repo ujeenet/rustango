@@ -332,6 +332,14 @@ impl Dialect for MySql {
         )
     }
 
+    fn index_leading_column_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? \
+             AND SEQ_IN_INDEX = 1",
+        )
+    }
+
     fn modifies_whole_column(&self) -> bool {
         true
     }
