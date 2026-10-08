@@ -478,8 +478,10 @@ mod tests {
             s.every("daily_report", TICK, move || {
                 let (lock, ran) = (lock.clone(), ran.clone());
                 async move {
-                    lock.once_per_period("daily_report", PERIOD, || async {
-                        ran.lock().unwrap().push(window());
+                    // What `once_per_period` does, with the window kept for the record.
+                    let w = window();
+                    lock.once_in_window("daily_report", PERIOD, w, || async {
+                        ran.lock().unwrap().push(w);
                         Ok::<_, ()>(())
                     })
                     .await;
