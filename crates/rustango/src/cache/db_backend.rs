@@ -559,6 +559,31 @@ impl Cache for DatabaseCache {
             .map_err(|_| CacheError::Connection(format!("incr: non-integer result {value:?}")))
     }
 
+    /// One `UPDATE` of a live row, so a racing `delete` stays deleted (#2300).
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let (p1, p2, p3) = (
+            dialect.placeholder(1),
+            dialect.placeholder(2),
+            dialect.placeholder(3),
+        );
+        let sql = format!(
+            "UPDATE {table} SET expires = {p1} \
+             WHERE cache_key = {p2} AND (expires = 0 OR expires >= {p3})"
+        );
+        // Binds in text order: MySQL and SQLite are positional.
+        let binds = vec![
+            SqlValue::I64(Self::expires_for(ttl)),
+            StoredKey::new(key).into_value(),
+            SqlValue::I64(Self::now_unix_ms()),
+        ];
+        let n = raw_execute_pool(&self.pool, &sql, binds)
+            .await
+            .map_err(|e| CacheError::Connection(format!("touch: {e}")))?;
+        Ok(n == 1)
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
