@@ -184,6 +184,9 @@ impl DistributedLock {
     /// Windows follow the wall clock from the Unix epoch, so pods started
     /// minutes apart agree on them. The lock is kept until its TTL, so a
     /// later pod in the same window skips even after `body` finished.
+    ///
+    /// While `body` runs it also holds the plain `name` lock, so a run that
+    /// outlasts its window is not overlapped by the next one.
     pub async fn once_per_period<F, Fut, R>(
         &self,
         name: &str,
@@ -202,7 +205,14 @@ impl DistributedLock {
         let guard = self
             .try_acquire(&format!("{name}@{window}"), period)
             .await?;
+        // A run from the last window may still be going on another pod.
+        // Free this window so a later tick retries once it ends.
+        let Some(running) = self.try_acquire(name, period.saturating_mul(2)).await else {
+            guard.release().await;
+            return None;
+        };
         let result = body().await;
+        running.release().await;
         guard.keep_until_ttl();
         Some(result)
     }
@@ -429,6 +439,44 @@ mod tests {
         let day = Duration::from_secs(86_400);
         assert_eq!(l.once_per_period("j", day, || async { 1 }).await, Some(1));
         assert_eq!(l.once_per_period("j", day, || async { 2 }).await, None);
+    }
+
+    /// A body longer than the period is not overlapped by the next
+    /// window's run on another pod.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn once_per_period_does_not_overlap_a_long_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let (now, max, runs) = (
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(AtomicUsize::new(0)),
+        );
+        let pods: Vec<_> = (0..2)
+            .map(|_| {
+                let lock = DistributedLock::new(cache.clone());
+                let (now, max, runs) = (now.clone(), max.clone(), runs.clone());
+                tokio::spawn(async move {
+                    let end = std::time::Instant::now() + Duration::from_millis(800);
+                    while std::time::Instant::now() < end {
+                        lock.once_per_period("long", Duration::from_millis(100), || async {
+                            let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                            max.fetch_max(n, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            now.fetch_sub(1, Ordering::SeqCst);
+                            runs.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+            })
+            .collect();
+        for p in pods {
+            p.await.unwrap();
+        }
+        assert!(runs.load(Ordering::SeqCst) >= 3);
+        assert_eq!(max.load(Ordering::SeqCst), 1, "two runs overlapped");
     }
 
     /// Unscoped, two tenants share one lock name and the second is
