@@ -4305,6 +4305,7 @@ pub(crate) enum FlushScope<'a> {
     All,
     /// Tenant-scoped models only (#2284). `schema` names a schema-mode
     /// tenant; PG names are qualified so `search_path` never falls through to `public`.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Tenant { schema: Option<&'a str> },
 }
 
