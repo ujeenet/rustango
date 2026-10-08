@@ -573,7 +573,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `pk_param(name)` | Rename the path parameter used for detail routes. |
 | `read_only()` | GET-only. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered column: integer, timestamp, date, uuid or string. |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered NOT NULL column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
@@ -599,9 +599,15 @@ richer lookups via a `__suffix`:
 ?body__isnull=false
 ```
 
-Supported lookups: `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `contains`,
-`icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `isnull`
-(no suffix = exact). Fields not in `filter_fields` are ignored.
+Supported lookups: `iexact`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`,
+`range` (`lo,hi`), `contains`, `icontains`, `startswith`, `istartswith`,
+`endswith`, `iendswith`, `isnull`, and the date parts `year`, `month`, `day`,
+`hour`, `minute`, `second`, `quarter`, `week`, `week_day`, `date`, optionally
+followed by a comparison (`created_at__date__gte=2026-01-01`). No suffix = exact.
+A plain date on a datetime `__gte` / `__lte` covers that whole UTC day.
+
+An empty value is no filter. An unknown lookup or a value that does not parse
+is a `400` naming the param. Fields not in `filter_fields` are ignored.
 
 **Search** — `?search=term` matches `search_fields` with a case-insensitive OR.
 
