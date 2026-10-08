@@ -238,7 +238,7 @@ impl M2MManager {
 
 /// The junction as a schema the emitters compile against (#2136): the
 /// registered through model, else one naming just the manager's columns.
-fn junction(through: &'static str, cols: &[&'static str]) -> &'static ModelSchema {
+pub(crate) fn junction(through: &'static str, cols: &[&'static str]) -> &'static ModelSchema {
     type Key = (&'static str, Vec<&'static str>);
     // Keys are `&'static` names from `m2m(...)` declarations, so this stays small.
     static CACHE: OnceLock<Mutex<HashMap<Key, &'static ModelSchema>>> = OnceLock::new();

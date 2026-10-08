@@ -151,6 +151,32 @@ pub struct Bystander {
     pub n: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cli2317_post",
+    app = "cli2317",
+    m2m(
+        name = "tags",
+        to = "cli2317_tag",
+        through = "cli2317_post_tags",
+        src = "post_id",
+        dst = "tag_id"
+    )
+)]
+pub struct M2mPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2317_tag", app = "cli2317")]
+pub struct M2mTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
 async fn fresh_parent_child(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Child::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Parent>(pool).await;
@@ -385,6 +411,53 @@ async fn flush_clears_children_before_parents(pool: &Pool) {
     assert_eq!(left, [0; 5], "rows left behind");
 }
 
+/// An auto-created M2M junction with rows does not block the flush; it clears too.
+async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "cli2317_post_tags").await;
+    fresh_table::<M2mPost>(pool).await;
+    fresh_table::<M2mTag>(pool).await;
+    // The junction as migrations build it, FKs included.
+    let create = SchemaChange::CreateM2MTable {
+        through: "cli2317_post_tags".into(),
+        src_table: M2mPost::SCHEMA.table.into(),
+        src_col: "post_id".into(),
+        dst_table: M2mTag::SCHEMA.table.into(),
+        dst_col: "tag_id".into(),
+    };
+    let snap = SchemaSnapshot::from_models(&[M2mPost::SCHEMA, M2mTag::SCHEMA]);
+    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
+    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
+        raw_execute_pool(pool, sql, vec![])
+            .await
+            .expect("junction ddl");
+    }
+    let mut post = M2mPost {
+        id: Auto::default(),
+        n: 1,
+    };
+    post.insert_pool(pool).await.expect("post");
+    let mut tag = M2mTag {
+        id: Auto::default(),
+        n: 1,
+    };
+    tag.insert_pool(pool).await.expect("tag");
+    let tag_id = tag.id.get().copied().expect("pk");
+    post.tags_m2m().add(tag_id, pool).await.expect("link");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2317"]).await;
+    let links = post.tags_m2m().all(pool).await.expect("links");
+    let left = [
+        M2mPost::objects().count(pool).await.expect("posts"),
+        M2mTag::objects().count(pool).await.expect("tags"),
+    ];
+    drop_table(pool, "cli2317_post_tags").await;
+    let out = out.expect("flush --app cli2317");
+    assert!(out.contains("cleared 3 table(s)"), "{out}");
+    assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -468,6 +541,7 @@ tri_dialect_test! {
         flush_skips_unmanaged_tables_and_views,
         flush_refuses_when_an_unmanaged_table_references_a_target,
         flush_clears_children_before_parents,
+        flush_clears_auto_m2m_junctions,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,

@@ -4309,6 +4309,41 @@ pub(crate) enum FlushScope<'a> {
     Tenant { schema: Option<&'a str> },
 }
 
+/// `flush` may touch this model: managed, not a view (#2285), in scope (#2284).
+fn flush_eligible(s: &crate::core::ModelSchema, scope: FlushScope<'_>) -> bool {
+    s.managed
+        && !s.is_view
+        && (matches!(scope, FlushScope::All) || s.scope == crate::core::ModelScope::Tenant)
+}
+
+/// Auto-created M2M junctions whose source or destination is a target.
+fn flush_junctions(
+    targets: &[&'static crate::core::ModelSchema],
+    scope: FlushScope<'_>,
+) -> Vec<&'static crate::core::ModelSchema> {
+    let is_target = |t: &str| targets.iter().any(|s| s.table == t);
+    let mut out: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    for entry in inventory::iter::<crate::core::ModelEntry>() {
+        let s = entry.schema;
+        if !flush_eligible(s, scope) {
+            continue;
+        }
+        for m in s.m2m {
+            if m.auto_create
+                && (is_target(s.table) || is_target(m.to))
+                && !is_target(m.through)
+                && !out.iter().any(|j| j.table == m.through)
+            {
+                out.push(crate::sql::m2m::junction(
+                    m.through,
+                    &[m.src_col, m.dst_col],
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Tables this one references through an FK or one-to-one, itself included.
 fn referenced_tables(s: &crate::core::ModelSchema) -> impl Iterator<Item = &'static str> + '_ {
     use crate::core::Relation;
@@ -4453,13 +4488,7 @@ pub(crate) async fn flush_cmd<W: Write>(
     let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
-        // The operator owns unmanaged tables and views; a view also fails PG's TRUNCATE (#2285).
-        if !schema.managed || schema.is_view {
-            continue;
-        }
-        if matches!(scope, FlushScope::Tenant { .. })
-            && schema.scope != crate::core::ModelScope::Tenant
-        {
+        if !flush_eligible(schema, scope) {
             continue;
         }
         let app = entry.resolved_app_label().unwrap_or("");
@@ -4485,14 +4514,16 @@ pub(crate) async fn flush_cmd<W: Write>(
         writeln!(w, "flush: no tables match the filter (nothing to do)")?;
         return Ok(());
     }
+    // PG will not truncate a table an auto-created junction still references.
+    let junctions = flush_junctions(&targets, scope);
 
     if !parsed.yes {
         writeln!(
             w,
             "flush: would clear {} table(s) (run with --yes to execute):",
-            targets.len()
+            junctions.len() + targets.len()
         )?;
-        for t in &targets {
+        for t in junctions.iter().chain(&targets) {
             writeln!(w, "  - {}", t.table)?;
         }
         return Ok(());
@@ -4509,21 +4540,27 @@ pub(crate) async fn flush_cmd<W: Write>(
             FlushScope::Tenant { schema: Some(s) } => format!("{}.", d.quote_ident(s)),
             _ => String::new(),
         };
-        let quoted: Vec<String> = targets
+        let quoted: Vec<String> = junctions
             .iter()
+            .chain(&targets)
             .map(|t| format!("{prefix}{}", d.quote_ident(t.table)))
             .collect();
         // No CASCADE: a table outside the targets that references one makes PG refuse.
         let sql = format!("TRUNCATE TABLE {} RESTART IDENTITY", quoted.join(", "));
         match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
-            Ok(_) => cleared = targets.len(),
+            Ok(_) => cleared = quoted.len(),
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
         }
     } else {
-        // MySQL / SQLite: one transaction, children before parents, so a
-        // failure leaves every table as it was (#2285).
-        match delete_all_in_tx(pool, &flush_delete_order(&targets)).await {
-            Ok(()) => cleared = targets.len(),
+        // MySQL / SQLite: one transaction, junctions then children before
+        // parents, so a failure leaves every table as it was (#2285).
+        let order: Vec<_> = junctions
+            .iter()
+            .copied()
+            .chain(flush_delete_order(&targets))
+            .collect();
+        match delete_all_in_tx(pool, &order).await {
+            Ok(()) => cleared = order.len(),
             Err((table, e)) => failures.push((table.to_owned(), e.to_string())),
         }
     }
