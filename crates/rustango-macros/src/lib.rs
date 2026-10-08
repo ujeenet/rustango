@@ -268,7 +268,8 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// `#[rustango::main]` — the runserver entrypoint. Wraps
 /// `#[tokio::main]` and a default `tracing_subscriber` initialisation
 /// (env-filter, falling back to `info,sqlx=warn`) so user `main`
-/// functions are zero-boilerplate:
+/// functions are zero-boilerplate. `.env` is loaded first, so its
+/// `RUST_LOG` applies; real environment variables still win:
 ///
 /// ```ignore
 /// #[rustango::main]
@@ -352,6 +353,9 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `[logging]` settings actually take effect (#1465).
     let logging_prologue = if parse_logging(&args) {
         quote! {
+            // `.env` first, so `RUST_LOG` set only there reaches the filter
+            // (#2204). It never overrides the real environment.
+            let _ = #root::__private_runtime::dotenvy::dotenv();
             use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
             // Colour only when stdout is a terminal, and never under
             // `NO_COLOR` — `Color::Auto`'s rule, called rather than

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `#[rustango::main]` loads `.env`
+
+With default logging the macro now calls `dotenvy::dotenv()` before `main` runs; your own call stays harmless (#2204).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

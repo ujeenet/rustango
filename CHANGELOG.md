@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `#[rustango::main]` reads `RUST_LOG` from `.env` (#2204)
+
+The macro loads `.env` before installing its subscriber; real environment variables still win.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

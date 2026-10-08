@@ -1269,6 +1269,7 @@ pub use rustango_macros::main;
 #[doc(hidden)]
 #[cfg(feature = "runtime")]
 pub mod __private_runtime {
+    pub use dotenvy;
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
