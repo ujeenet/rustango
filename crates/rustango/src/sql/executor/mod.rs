@@ -91,6 +91,29 @@ pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
+/// True when a `select_related` LEFT JOIN under `alias` matched no row:
+/// the target's PK cell is NULL, so the FK stays unloaded (#2293).
+///
+/// # Errors
+/// `sqlx::Error` if the aliased PK column is missing from the row.
+#[doc(hidden)]
+pub fn __rustango_join_missed<R>(
+    row: &R,
+    target: &crate::core::ModelSchema,
+    alias: &str,
+) -> Result<bool, sqlx::Error>
+where
+    R: sqlx::Row,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+{
+    let Some(pk) = target.primary_key() else {
+        return Ok(false);
+    };
+    let col = format!("{alias}__{}", pk.column);
+    let raw = row.try_get_raw(col.as_str())?;
+    Ok(sqlx::ValueRef::is_null(&raw))
+}
+
 #[cfg(feature = "postgres")]
 impl<T> QuerySet<T>
 where

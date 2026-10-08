@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — select_related on a NULL foreign key (#2293)
+
+A NULL or dangling FK now leaves the relation unloaded instead of failing the whole fetch, on every backend.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

@@ -1009,6 +1009,12 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         };
         quote! {
             #fk_col => {
+                // A NULL or dangling FK leaves the LEFT JOIN cells NULL (#2293).
+                if #root::sql::__rustango_join_missed(
+                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
+                )? {
+                    return ::core::result::Result::Ok(false);
+                }
                 let mut _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
                 // Audit #451 — multi-hop `select_related("a__b__c")`:
                 // stitch the deeper relation onto this parent first,
@@ -1117,6 +1123,11 @@ fn load_related_impl_my_tokens(
         // and let the macro_rules rebind it to the receiver.
         quote! {
             #fk_col => {
+                if #root::sql::__rustango_join_missed(
+                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
+                )? {
+                    return ::core::result::Result::Ok(false);
+                }
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
@@ -1182,6 +1193,11 @@ fn load_related_impl_sqlite_tokens(
         };
         quote! {
             #fk_col => {
+                if #root::sql::__rustango_join_missed(
+                    row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
+                )? {
+                    return ::core::result::Result::Ok(false);
+                }
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
