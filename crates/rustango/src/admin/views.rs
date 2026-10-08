@@ -2457,7 +2457,7 @@ pub(crate) async fn action_submit(
     // collapse the duplicate `_selected` keys into one, so read the
     // raw body into a `Vec` of pairs instead.
     let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
-        .map_err(|e| AdminError::Internal(format!("parse action form: {e}")))?;
+        .map_err(|e| bad_action_form("body", "form", String::new(), e.to_string()))?;
 
     // The bottom action bar posts `action_bottom` so it does not
     // clash with the top bar's empty default. The first non-empty
@@ -2499,10 +2499,13 @@ pub(crate) async fn action_submit(
 
     let admin_cfg = admin_config_or_default(model);
     if !admin_cfg.actions.iter().any(|a| *a == action) {
-        return Err(AdminError::Internal(format!(
-            "action `{action}` not registered for `{}`",
-            model.name
-        )));
+        // A client error (#2346): the allowlist is the model's own.
+        return Err(bad_action_form(
+            "action",
+            "action",
+            action,
+            format!("not an action of `{}`", model.name),
+        ));
     }
     // Pick and permission-check the write before any row signal (#1928).
     let Some(write) = BulkWrite::plan(&state, model, &action)? else {
@@ -2654,6 +2657,16 @@ pub(crate) async fn action_submit(
     send_row_signals(model.table, &row_pks, is_delete, false).await;
 
     back()
+}
+
+/// A malformed action POST: a 400, not a 500 (#2346).
+fn bad_action_form(field: &str, ty: &'static str, value: String, detail: String) -> AdminError {
+    AdminError::Form(forms::FormError::Parse {
+        field: field.to_owned(),
+        ty,
+        value,
+        detail,
+    })
 }
 
 /// The write a bulk action makes, chosen and permission-checked before
