@@ -200,3 +200,39 @@ async fn search_skips_secret_fields() {
         "autocomplete matched the secret: {ac}"
     );
 }
+
+/// A secret in `list_filter` gets no facet.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ffo_vault",
+    admin(
+        list_display = "id",
+        list_filter = "kind, pin",
+        formfield_overrides = "pin:password"
+    )
+)]
+#[allow(dead_code)]
+pub struct Vault {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 30)]
+    pub kind: String,
+    #[rustango(max_length = 30)]
+    pub pin: String,
+}
+
+#[tokio::test]
+async fn secret_list_filter_gets_no_facet() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE ffo_vault (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, pin TEXT NOT NULL)",
+        "INSERT INTO ffo_vault (id, kind, pin) VALUES (1, 'kind-x', 'pin-s3cr3t')",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let body = get_text(pool, "/ffo_vault").await;
+    assert!(body.contains("kind-x"), "control: a normal facet shows");
+    assert!(!body.contains("pin-s3cr3t"), "the secret's facet shows it");
+}

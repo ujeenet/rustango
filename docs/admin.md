@@ -383,8 +383,9 @@ Three more registration macros hook into a model's admin pages:
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
   handlers consult the `add`, `change`, `delete` and `view` actions; multiple
   hooks AND together. A `view` hook also hides rows from the list, autocomplete,
-  FK facet names and FK cell names, but runs after the page is read: pages may come up short
-  and totals still count hidden rows. Use a queryset hook to scope counts too.
+  FK facet names and FK cell names, but runs after the page is read: pages may come up short,
+  and totals, facet values and counts, date buckets and "has next" still see
+  hidden rows. Use a queryset hook to hide them everywhere.
 
 For coarser, codename-based access control, `Builder::with_user_perms([...])`
 gates each table on `{table}.view` / `.add` / `.change` / `.delete`: missing

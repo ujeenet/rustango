@@ -156,7 +156,7 @@ A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomp
 
 ### A "view" object-permission hook now filters the admin list
 
-Denied rows vanish from the list, autocomplete, FK facet names and FK cell names (#2267); pages may come up short and totals still count them. Use `register_admin_queryset!` to scope counts too (#2231).
+Denied rows vanish from the list, autocomplete, FK facet names and FK cell names (#2267); pages may come up short, and totals, facet values and counts, date buckets and "has next" still see them. Use `register_admin_queryset!` to hide them everywhere (#2231). A password-widget field in `list_filter` gets no facet.
 
 ## 0.60.2
 

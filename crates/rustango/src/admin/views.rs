@@ -914,7 +914,11 @@ async fn compute_facets(
     }
     let mut out = Vec::with_capacity(admin_cfg.list_filter.len());
     for filter_name in admin_cfg.list_filter {
-        let Some(field) = model.field(filter_name) else {
+        // A secret's facet would list its values.
+        let Some(field) = model
+            .field(filter_name)
+            .filter(|f| !is_secret_field(admin_cfg, f.name))
+        else {
             continue;
         };
         let lookup_keys = FieldLookup::keys(field.name);
