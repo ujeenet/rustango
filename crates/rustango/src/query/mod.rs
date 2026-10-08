@@ -2628,6 +2628,12 @@ fn lower_select_related(
                 prev_alias_owned = format!("{prev_alias_owned}__{hop}");
                 intern_join_alias(&prev_alias_owned)?
             };
+            // A hop shared with an earlier name is already joined (#2294).
+            if out.iter().any(|j| j.alias == alias) {
+                current = target;
+                prev_alias = alias;
+                continue;
+            }
             let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
             out.push(Join {
                 target,

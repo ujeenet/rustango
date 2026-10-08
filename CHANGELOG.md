@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — select_related chains sharing a hop (#2294)
+
+`.select_related("a").select_related("a__b")` joins `a` once; it emitted a duplicate alias every backend rejects.
+
 ### Fixed — select_related on a NULL foreign key (#2293)
 
 A NULL or dangling FK now leaves the relation unloaded instead of failing the whole fetch, on every backend.

@@ -118,11 +118,24 @@ async fn null_fk_order_by_relation(pool: &Pool) {
     assert_eq!(rows.len(), 2);
 }
 
+async fn shared_first_hop_joins_once(pool: &Pool) {
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .select_related("editor")
+        .select_related("editor__profile")
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("a hop shared by two select_related names");
+    assert_eq!(editor_name(&rows[1]), Some("Ada"));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         null_fk_select_related_skips_the_row,
         null_fk_multihop_select_related,
         null_fk_order_by_relation,
+        shared_first_hop_joins_once,
     ],
 }
