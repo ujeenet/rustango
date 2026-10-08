@@ -1001,6 +1001,31 @@ fn join_guard_tokens(rel: &FkRelation, receiver: &TokenStream2) -> TokenStream2 
     }
 }
 
+/// A target an earlier chain already loaded (`a__b` before `a__c`) is
+/// reused, and the deeper chain stitched into it; re-decoding it would
+/// drop what that chain loaded.
+fn loaded_reuse_tokens(
+    rel: &FkRelation,
+    receiver: &TokenStream2,
+    load: &TokenStream2,
+) -> TokenStream2 {
+    let root = rustango_root();
+    let field_ident = &rel.field_ident;
+    let pattern = if rel.nullable {
+        quote!(::core::option::Option::Some(#root::sql::ForeignKey::Loaded { value: __loaded, .. }))
+    } else {
+        quote!(#root::sql::ForeignKey::Loaded { value: __loaded, .. })
+    };
+    quote! {
+        if let #pattern = &mut #receiver.#field_ident {
+            if let ::core::option::Option::Some(__r) = __rest {
+                let _ = #load(&mut **__loaded, row, __r, &__next_alias)?;
+            }
+            return ::core::result::Result::Ok(true);
+        }
+    }
+}
+
 /// Emit `impl LoadRelated for #StructName` — slice 9.0d. Pattern-
 /// matches `field_name` against the model's FK fields and, for a
 /// match, decodes the FK target via the parent's macro-generated
@@ -1020,6 +1045,11 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(self),
+            &quote!(#root::sql::LoadRelated::__rustango_load_related),
+        );
         let assign = if rel.nullable {
             quote! {
                 self.#field_ident = ::core::option::Option::Some(
@@ -1034,6 +1064,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         quote! {
             #fk_col => {
                 #guard
+                #reuse
                 let mut _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
                 // Audit #451 — multi-hop `select_related("a__b__c")`:
                 // stitch the deeper relation onto this parent first,
@@ -1126,6 +1157,11 @@ fn load_related_impl_my_tokens(
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(__self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(__self),
+            &quote!(#root::sql::LoadRelatedMy::__rustango_load_related_my),
+        );
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1144,6 +1180,7 @@ fn load_related_impl_my_tokens(
         quote! {
             #fk_col => {
                 #guard
+                #reuse
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
@@ -1197,6 +1234,11 @@ fn load_related_impl_sqlite_tokens(
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
         let guard = join_guard_tokens(rel, &quote!(__self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(__self),
+            &quote!(#root::sql::LoadRelatedSqlite::__rustango_load_related_sqlite),
+        );
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1211,6 +1253,7 @@ fn load_related_impl_sqlite_tokens(
         quote! {
             #fk_col => {
                 #guard
+                #reuse
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
