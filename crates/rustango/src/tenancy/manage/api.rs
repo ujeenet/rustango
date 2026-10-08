@@ -189,7 +189,7 @@ where
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&pools.registry_pool()).await?;
+    crate::tenancy::org_host::insert_org(&pools.registry_pool(), &mut org).await?;
 
     if !opts.no_migrate {
         for dir in resolve_migration_dirs(migrations_dir) {

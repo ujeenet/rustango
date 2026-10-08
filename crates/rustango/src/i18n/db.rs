@@ -230,6 +230,35 @@ pub async fn delete_key_pool(pool: &Pool, key: &str) -> Result<u64, ExecError> {
     .await
 }
 
+/// Delete one locale's override for `key`, so that locale falls back to
+/// the file catalog (#2091). Returns the rows removed (0 or 1).
+///
+/// # Errors
+/// As the ORM delete path ([`ExecError`]).
+pub async fn delete_override(pool: &Pool, locale: &str, key: &str) -> Result<u64, ExecError> {
+    use crate::core::Model as _;
+    use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
+    crate::sql::delete_pool(
+        pool,
+        &DeleteQuery {
+            model: Translation::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "locale",
+                    op: Op::Eq,
+                    value: SqlValue::from(locale),
+                },
+                Filter {
+                    column: "key",
+                    op: Op::Eq,
+                    value: SqlValue::from(key),
+                },
+            ]),
+        },
+    )
+    .await
+}
+
 /// Reload `translator`'s override layer from the DB so subsequent
 /// `translate(...)` calls reflect persisted edits — call after seeding,
 /// on boot, and after each admin save. Returns the row count loaded.

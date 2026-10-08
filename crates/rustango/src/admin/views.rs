@@ -24,7 +24,7 @@ use super::helpers::{
 use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{AppState, CREATE_SEGMENT};
+use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -2479,7 +2479,7 @@ pub(crate) async fn action_submit(
 
     // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action, as Django's `delete_selected` does.
-    let (perm, named) = row_perms(&action);
+    let (perm, named) = row_perms(&write, &action);
     let allowed = |row: &serde_json::Value| {
         let is_allowed = |p: &str| {
             crate::admin::object_permissions::is_allowed(model.table, p, &parts, Some(row))
@@ -2536,8 +2536,8 @@ pub(crate) async fn action_submit(
         BulkWrite::Restore(col) => Some(mark(col, None).await?),
         // Handlers get the `Pool` enum, so a user action can match
         // on the backend if it needs to.
-        BulkWrite::Custom(handler) => {
-            handler(&state.pool, &pk_values).await?;
+        BulkWrite::Custom(a) => {
+            (a.handler)(&state.pool, &pk_values).await?;
             None
         }
     };
@@ -2604,7 +2604,7 @@ enum BulkWrite {
     Delete,
     /// `restore_selected`: clear this soft-delete column.
     Restore(&'static str),
-    Custom(super::urls::AdminActionFn),
+    Custom(super::urls::RegisteredAction),
 }
 
 impl BulkWrite {
@@ -2623,7 +2623,10 @@ impl BulkWrite {
             _ if state.is_read_only(model.table) => Err(read_only()),
             "restore_selected" => Ok(model.soft_delete_column.map(Self::Restore)),
             _ => match state.action_handler(model.table, action) {
-                Some(handler) => Ok(Some(Self::Custom(handler))),
+                Some(a) if a.perm == ActionPerm::Delete && !state.can_delete(model.table) => {
+                    Err(read_only())
+                }
+                Some(a) => Ok(Some(Self::Custom(a))),
                 None => Err(AdminError::Internal(format!(
                     "action `{action}` is in `admin.actions` but no handler is registered \
                      on the admin builder; register it via \
@@ -2665,12 +2668,15 @@ async fn send_row_signals(table: &'static str, pks: &[String], is_delete: bool, 
 }
 
 /// The object-permission hooks a bulk action must pass on every row. A custom
-/// action writes like an edit, so it needs `change` plus a hook named after it.
-fn row_perms(action: &str) -> (&'static str, Option<&str>) {
-    match action {
-        "delete_selected" => ("delete", None),
-        "restore_selected" => ("change", None),
-        custom => ("change", Some(custom)),
+/// action needs its declared permission plus a hook named after it.
+fn row_perms<'a>(write: &BulkWrite, action: &'a str) -> (&'static str, Option<&'a str>) {
+    match write {
+        BulkWrite::Delete => ("delete", None),
+        BulkWrite::Restore(_) => ("change", None),
+        BulkWrite::Custom(a) => match a.perm {
+            ActionPerm::Delete => ("delete", Some(action)),
+            ActionPerm::Change => ("change", Some(action)),
+        },
     }
 }
 

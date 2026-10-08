@@ -826,7 +826,8 @@ fn render_form_with_inlines_and_pickers(
                         r#"  var url='{prefix}/{target}/__autocomplete';"#,
                         r#"  function refresh(){{"#,
                         r#"    fetch(url+'?q='+encodeURIComponent(inp.value)).then(function(r){{return r.json();}}).then(function(j){{"#,
-                        r#"      dl.innerHTML=(j.results||[]).map(function(o){{return '<option value=\"'+o.id+'\">'+(o.text||o.id)+'</option>';}}).join('');"#,
+                        // Text nodes, never innerHTML: `text` is row data (#2144).
+                        r#"      dl.replaceChildren.apply(dl,(j.results||[]).map(function(o){{var op=document.createElement('option');op.value=o.id;op.textContent=o.text||o.id;return op;}}));"#,
                         r#"    }}).catch(function(){{}});"#,
                         r#"  }}"#,
                         r#"  inp.addEventListener('input',refresh);"#,

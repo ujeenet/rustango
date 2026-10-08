@@ -113,6 +113,7 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
 struct PendingAction {
     table: &'static str,
     name: &'static str,
+    perm: crate::admin::ActionPerm,
     handler: crate::admin::AdminActionFn,
 }
 
@@ -475,9 +476,36 @@ impl<DB: Database> Builder<DB> {
     /// difference is the handler receives the tenant-scoped pool.
     #[must_use]
     pub fn admin_register_action<F>(
+        self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(
+                &'a crate::sql::Pool,
+                &'a [crate::core::SqlValue],
+            ) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.admin_register_action_with_perm(
+            model_table,
+            action_name,
+            crate::admin::ActionPerm::Change,
+            handler,
+        )
+    }
+
+    /// [`Self::admin_register_action`] checked against `perm` (#1818).
+    /// See [`crate::admin::Builder::register_action_with_perm`].
+    #[must_use]
+    pub fn admin_register_action_with_perm<F>(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
+        perm: crate::admin::ActionPerm,
         handler: F,
     ) -> Self
     where
@@ -492,6 +520,7 @@ impl<DB: Database> Builder<DB> {
         self.admin_actions.push(PendingAction {
             table: model_table,
             name: action_name,
+            perm,
             handler: std::sync::Arc::new(handler),
         });
         self
@@ -688,9 +717,10 @@ impl<DB: Database> Builder<DB> {
         }
         for action in self.admin_actions {
             let handler = action.handler;
-            tenant_admin_builder = tenant_admin_builder.register_action(
+            tenant_admin_builder = tenant_admin_builder.register_action_with_perm(
                 action.table,
                 action.name,
+                action.perm,
                 move |pool, pks| handler(pool, pks),
             );
         }

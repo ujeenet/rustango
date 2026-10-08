@@ -152,6 +152,24 @@ impl CacheRateLimitLayer {
         self.window.as_secs().max(1)
     }
 
+    /// `(now, window_start)` in unix seconds.
+    fn window_now(&self) -> (u64, u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        (now, (now / self.window_secs()) * self.window_secs())
+    }
+
+    fn cache_key(&self, key: &str, window_start: u64) -> String {
+        format!("{}:{}:{window_start}", self.key_prefix.as_str(), key)
+    }
+
+    fn retry_after(&self, now: u64, window_start: u64) -> u64 {
+        (window_start + self.window_secs())
+            .saturating_sub(now)
+            .max(1)
+    }
+
     /// Take one slot from the bucket for `key`. On success returns
     /// `(current_count, reset_at_unix_secs)`.
     ///
@@ -161,34 +179,83 @@ impl CacheRateLimitLayer {
     /// returned, so a short cache outage does not block all traffic.
     /// Call `cache.incr(...)` yourself if you need fail-closed.
     pub async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
-        let window_secs = self.window_secs();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let window_start = (now / window_secs) * window_secs;
-        let cache_key = format!("{}:{}:{window_start}", self.key_prefix.as_str(), key,);
-
-        let count = match self
-            .cache
-            .incr(&cache_key, 1, Some(Duration::from_secs(window_secs)))
-            .await
-        {
-            Ok(n) => n,
-            Err(_e) => {
+        match self.try_take(key).await {
+            Ok(r) => r.map(|(count, window_start)| (count, window_start + self.window_secs())),
+            Err(e) => {
                 // Fail-open: cache outage shouldn't deny all traffic.
-                tracing::warn!(cache_key, "rate-limit cache incr failed; allowing request");
-                return Ok((0, 0));
+                tracing::warn!(error = %e, "rate-limit cache incr failed; allowing request");
+                Ok((0, 0))
             }
-        };
+        }
+    }
 
-        let reset_at = window_start + window_secs;
-        if count > i64::from(self.capacity) {
-            let retry = reset_at.saturating_sub(now).max(1);
-            Err(retry)
+    /// [`Self::take`] that reports a cache error: `Ok((count, window_start))`.
+    pub(crate) async fn try_take(
+        &self,
+        key: &str,
+    ) -> Result<Result<(u32, u64), u64>, crate::cache::CacheError> {
+        let (now, window_start) = self.window_now();
+        let count = self
+            .cache
+            .incr(
+                &self.cache_key(key, window_start),
+                1,
+                Some(Duration::from_secs(self.window_secs())),
+            )
+            .await?;
+        Ok(if count > i64::from(self.capacity) {
+            Err(self.retry_after(now, window_start))
         } else {
             // Fits in u32: capacity is u32 and the check above passed.
-            Ok((u32::try_from(count).unwrap_or(u32::MAX), reset_at))
+            Ok((u32::try_from(count).unwrap_or(u32::MAX), window_start))
+        })
+    }
+
+    /// [`Self::try_take`] without counting: `Err(retry_after_secs)` when full.
+    pub(crate) async fn try_peek(
+        &self,
+        key: &str,
+    ) -> Result<Result<(), u64>, crate::cache::CacheError> {
+        let (now, window_start) = self.window_now();
+        let count = self
+            .cache
+            .get(&self.cache_key(key, window_start))
+            .await?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(if count >= i64::from(self.capacity) {
+            Err(self.retry_after(now, window_start))
+        } else {
+            Ok(())
+        })
+    }
+
+    /// Refund a slot [`Self::try_take`] counted in `window_start`. A past
+    /// window has expired, and a counter is never taken below 0: an
+    /// evicted key would otherwise hand out an extra slot.
+    pub(crate) async fn give_back_at(&self, key: &str, window_start: u64) {
+        if self.window_now().1 != window_start {
+            return;
         }
+        let ttl = Some(Duration::from_secs(self.window_secs()));
+        let cache_key = self.cache_key(key, window_start);
+        let current = self.cache.get(&cache_key).await;
+        if !matches!(&current, Ok(Some(v)) if v.parse::<i64>().is_ok_and(|n| n > 0)) {
+            return;
+        }
+        match self.cache.decr(&cache_key, 1, ttl).await {
+            // Evicted between the read and the decr: undo it.
+            Ok(n) if n < 0 => {
+                let _ = self.cache.incr(&cache_key, 1, ttl).await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(cache_key, error = %e, "rate-limit cache refund failed"),
+        }
+    }
+
+    /// The cache the counters live in.
+    pub(crate) fn cache(&self) -> &BoxedCache {
+        &self.cache
     }
 }
 
@@ -336,6 +403,37 @@ mod tests {
         // reset_at must be in the future and within one window-length.
         assert!(reset_at > now);
         assert!(reset_at <= now + 60);
+    }
+
+    /// A refund to an evicted counter does not make it negative.
+    #[tokio::test]
+    async fn refund_never_goes_below_zero() {
+        let l = layer(1, 3600);
+        let (_, window) = l.try_take("k").await.unwrap().unwrap();
+        let key = l.cache_key("k", window);
+        l.cache.delete(&key).await.unwrap();
+        l.give_back_at("k", window).await;
+        let v = l.cache.get(&key).await.unwrap();
+        assert!(
+            v.as_deref().is_none_or(|v| v == "0"),
+            "counter went to {v:?}"
+        );
+        assert!(l.try_take("k").await.unwrap().is_ok());
+        assert!(l.try_take("k").await.unwrap().is_err(), "an extra slot");
+    }
+
+    /// A refund for a past window touches neither that window nor this one.
+    #[tokio::test]
+    async fn refund_after_the_window_changed_is_dropped() {
+        let l = layer(1, 3600);
+        let (_, window) = l.try_take("k").await.unwrap().unwrap();
+        let past = window - 3600;
+        l.give_back_at("k", past).await;
+        assert_eq!(l.cache.get(&l.cache_key("k", past)).await.unwrap(), None);
+        assert!(
+            l.try_peek("k").await.unwrap().is_err(),
+            "this window refunded"
+        );
     }
 
     #[tokio::test]

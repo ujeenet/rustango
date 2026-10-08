@@ -49,7 +49,8 @@
 //! as `"approve"` needs no change here. The built-in handlers use
 //! `"add"`, `"change"`, `"delete"` and `"view"`. A custom view can
 //! call [`is_allowed`] with any name of its own. A bulk action registered
-//! with `register_action` runs `"change"` and a hook named after the action.
+//! with `register_action` runs `"change"` (or the `ActionPerm` it declares)
+//! and a hook named after the action.
 
 use axum::http::request::Parts;
 use serde_json::Value;

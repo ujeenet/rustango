@@ -302,6 +302,36 @@ tri_dialect_test! {
     ],
 }
 
+/// A serializer PATCH writes in its validation transaction (#2010).
+#[cfg(feature = "serializer")]
+mod serialized {
+    use super::*;
+
+    #[derive(rustango::Serializer, serde::Deserialize, Default)]
+    #[serializer(model = Doc)]
+    struct DocSerializer {
+        #[serializer(read_only)]
+        pub id: Auto<i64>,
+        pub title: String,
+    }
+
+    async fn serializer_patch_is_audited(pool: &Pool) {
+        let pks = seed(pool).await;
+        let app = rustango::viewset::ViewSet::for_model(Doc::SCHEMA)
+            .serializer::<DocSerializer>()
+            .router_pool("/docs", pool.clone());
+        let uri = format!("/docs/{}", pks[0]);
+        let status = send(app, Method::PATCH, &uri, r#"{"title":"x"}"#.into(), false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ops(pool, "update").await, 1);
+    }
+
+    tri_dialect_test! {
+        setup: setup,
+        scenarios: [serializer_patch_is_audited],
+    }
+}
+
 /// `bulk_actions` needs `tenancy`.
 #[cfg(feature = "tenancy")]
 mod bulk {
