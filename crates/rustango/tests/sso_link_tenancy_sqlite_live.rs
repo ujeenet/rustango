@@ -912,6 +912,11 @@ async fn bare_admin() -> (Router, Pool, Idp) {
         .await
         .unwrap();
     rustango::sso::link::ensure_table(&pool).await.unwrap();
+    // The sign-in reads the TOTP device table when `totp` is on (#2249).
+    #[cfg(feature = "totp")]
+    rustango::admin::totp_store::ensure_table(&pool)
+        .await
+        .unwrap();
     let idp = Idp::start().await;
     provider_row(&idp.issuer, "corp", true)
         .insert_pool(&pool)
@@ -1016,6 +1021,74 @@ async fn a_bare_admin_sso_login_lands_after_the_logout_cutoff() {
     )
     .await;
     assert_eq!(home.status(), StatusCode::OK, "the SSO session must work");
+}
+
+/// #2249 — SSO for a user with a confirmed TOTP device asks for the code first.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_bare_admin_sso_login_owes_the_totp_code() {
+    use rustango::admin::{totp_store, AdminUser};
+    let _g = SUITE.lock().await;
+    let (app, pool, idp) = bare_admin().await;
+    let root = AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let uid = root.id.get().copied().unwrap();
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", uid)
+        .await
+        .unwrap();
+    let device = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &device)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, uid).await.unwrap();
+
+    idp.assert("sub-root", "root@example.com");
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    assert!(!signed_in(&resp), "SSO alone must not mint the session");
+    let pending = set_cookies(&resp)
+        .into_iter()
+        .find(|c| c.starts_with("rustango_admin_sso_totp="))
+        .expect("pending cookie");
+
+    let submit = |code: String, pending: String| {
+        let app = app.clone();
+        async move {
+            send(
+                &app,
+                Request::builder()
+                    .method("POST")
+                    .uri("/login/sso-totp")
+                    .header(header::HOST, "admin.test")
+                    .header(header::COOKIE, format!("rustango_csrf=t; {pending}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("_csrf=t&totp_code={code}")))
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    assert!(
+        !signed_in(&submit("000000".into(), pending.clone()).await),
+        "wrong code"
+    );
+    assert!(
+        !signed_in(&submit(String::new(), "rustango_admin_sso_totp=forged.x".into()).await),
+        "forged pending cookie"
+    );
+    let code = rustango::totp::generate(&device, 30, 6);
+    assert!(
+        signed_in(&submit(code, pending).await),
+        "right code signs in"
+    );
 }
 
 #[tokio::test]
