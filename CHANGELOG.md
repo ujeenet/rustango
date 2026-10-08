@@ -20,6 +20,22 @@ PG writes `COMMENT ON COLUMN` after CreateTable and AddColumn; MySQL's AddColumn
 
 Going forward it applies the same pending set as `migrate`, so a squash whose replaced files were applied is faked, not re-created.
 
+### Fixed — PG `LIKE` on a non-text column (#2263)
+
+`__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.
+
+### Fixed — password reset writes through the ORM without `tenancy` (#2273)
+
+The `rustango_users` UPDATE was raw SQL in that build; both builds now share one ORM update.
+
+### Fixed — single-backend test builds pass `-D warnings` (#2274)
+
+`--tests` on `postgres`, `mysql` or `sqlite` with `admin,testkit` hit unreachable or irrefutable `Pool` patterns; the suites use the typed accessors now.
+
+### Added — `IpFilterLayer::behind_trusted_proxy` (#2278)
+
+Opt in to gate the trusted client IP a `RealIpLayer` resolved; behind a proxy the default still checks the socket peer, so an allow- or block-list sees only the proxy.
+
 ### Added — `CachePageLayer::invalidate` (#2252)
 
 Purge a cached page through the layer, which builds the key with its own function. Only the exact query and vary values passed are purged. Any hand-built key mirror (e.g. a CMS purge) must switch to it: 0.60 added the tenant to the key, and old mirrors delete nothing.

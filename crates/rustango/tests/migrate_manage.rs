@@ -17,8 +17,10 @@ use rustango::migrate::{
 };
 use rustango::sql::sqlx::{self, PgPool, Row};
 
+#[cfg(feature = "tenancy")]
 #[path = "support/scratch_db.rs"]
 mod scratch_db;
+#[cfg(feature = "tenancy")]
 use scratch_db::ScratchDb;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);

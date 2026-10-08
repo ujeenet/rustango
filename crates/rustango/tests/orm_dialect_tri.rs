@@ -628,6 +628,34 @@ async fn ilike_on_int_and_uuid_columns(pool: &Pool) {
     }
 }
 
+/// #2263: case-sensitive LIKE, and any LIKE through a relation, on an
+/// int or UUID column failed on PG.
+async fn like_on_int_and_uuid_columns(pool: &Pool) {
+    seed_meas(pool, 14, "2024-01-06T10:00:00Z").await;
+    seed_meas(pool, 20, "2024-01-06T11:00:00Z").await;
+    let n = Meas::objects()
+        .where_(rustango::query::Q::like("n", "%4%"))
+        .count(pool)
+        .await;
+    assert_eq!(n.expect("Q::like"), 1);
+    for key in ["meas__n__contains", "meas__n__icontains"] {
+        let n = Reading::objects().filter(key, "4").count(pool).await;
+        assert_eq!(n.expect(key), 1, "{key}");
+    }
+
+    let tok = uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89");
+    let mut b = Blob {
+        id: Auto::default(),
+        token: tok,
+        data: vec![],
+    };
+    b.insert_pool(pool).await.expect("seed");
+    let mut q = Blob::objects().compile().expect("compile");
+    q.where_clause = WhereExpr::Predicate(Filter::new("token", Op::Like, "%2a4e-9b7d%"));
+    let rows: Result<Vec<Blob>, _> = rustango::sql::select_rows_pool(pool, &q).await;
+    assert_eq!(rows.expect("like uuid").len(), 1);
+}
+
 /// #2232: MySQL inlined the delimiter with only `'` doubled, so a `\`
 /// broke the statement.
 async fn string_agg_delimiter_with_backslash(pool: &Pool) {
@@ -750,6 +778,7 @@ tri_dialect_test! {
         paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
         ilike_on_int_and_uuid_columns,
+        like_on_int_and_uuid_columns,
         string_agg_delimiter_with_backslash,
         comment_with_backslash,
         values_decode_dates_and_timestamps,

@@ -429,61 +429,52 @@ async fn write_password_hash(
     Ok(user_id)
 }
 
+/// The `rustango_users` columns a reset writes. Built by hand so the
+/// UPDATE goes through the ORM in builds without `tenancy`'s `User` (#2273).
+#[cfg(feature = "passwords")]
+static RESET_USERS: crate::core::ModelSchema = {
+    use crate::core::{FieldSchema, FieldType};
+    const FIELDS: &[FieldSchema] = &[
+        {
+            let mut f = FieldSchema::new("id", "id", FieldType::I64);
+            f.primary_key = true;
+            f
+        },
+        FieldSchema::new("password_hash", "password_hash", FieldType::String),
+        {
+            let mut f = FieldSchema::new(Rotation::COLUMN, Rotation::COLUMN, FieldType::DateTime);
+            f.nullable = true;
+            f
+        },
+    ];
+    let mut s = crate::core::ModelSchema::new("User", "rustango_users");
+    s.fields = FIELDS;
+    s
+};
+
 /// Store `hash` and stamp the rotation, only while the password is
 /// unchanged since the link. Rows written.
-#[cfg(all(feature = "passwords", feature = "tenancy"))]
+#[cfg(feature = "passwords")]
 async fn rotate_user_password(
     pool: &crate::sql::Pool,
     user_id: i64,
     hash: String,
     rotation: &Rotation,
 ) -> Result<u64, AuthFlowError> {
-    use crate::core::Column as _;
+    use crate::core::{Assignment, SqlValue, UpdateQuery};
     use crate::query::Q;
-    use crate::sql::UpdaterPool as _;
-    use crate::tenancy::User;
     let since = rotation.issued()?;
-    User::objects()
-        .where_(User::id.eq(user_id))
-        .where_(Q::is_null(Rotation::COLUMN) | Q::lt(Rotation::COLUMN, since))
-        .update()
-        .set_typed(User::password_hash.set(hash))
-        .set_typed(User::password_changed_at.set(Some(chrono::Utc::now())))
-        .execute_pool(pool)
-        .await
-        .map_err(|e| AuthFlowError::Database(e.to_string()))
-}
-
-/// [`rotate_user_password`] without `tenancy`. Raw: `rustango_users` has
-/// no model in that build (#2273).
-#[cfg(all(feature = "passwords", not(feature = "tenancy")))]
-async fn rotate_user_password(
-    pool: &crate::sql::Pool,
-    user_id: i64,
-    hash: String,
-    rotation: &Rotation,
-) -> Result<u64, AuthFlowError> {
-    use crate::core::SqlValue;
-    let d = pool.dialect();
-    let rot = d.quote_ident(Rotation::COLUMN);
-    // Binds follow text order: MySQL and SQLite placeholders are positional.
-    let sql = format!(
-        "UPDATE {} SET {} = {}, {rot} = {} WHERE {} = {} AND ({rot} IS NULL OR {rot} < {})",
-        d.quote_ident("rustango_users"),
-        d.quote_ident("password_hash"),
-        d.placeholder(1),
-        d.placeholder(2),
-        d.quote_ident("id"),
-        d.placeholder(3),
-        d.placeholder(4),
-    );
-    let args = vec![
-        SqlValue::String(hash),
-        SqlValue::DateTime(chrono::Utc::now()),
-        SqlValue::I64(user_id),
-        SqlValue::DateTime(rotation.issued()?),
-    ];
-    crate::sql::raw_execute_pool(pool, &sql, args)
+    let query = UpdateQuery {
+        model: &RESET_USERS,
+        set: vec![
+            Assignment::new("password_hash", SqlValue::String(hash)),
+            Assignment::new(Rotation::COLUMN, SqlValue::DateTime(chrono::Utc::now())),
+        ],
+        where_clause: (Q::eq("id", user_id)
+            & (Q::is_null(Rotation::COLUMN) | Q::lt(Rotation::COLUMN, since)))
+        .into(),
+    };
+    crate::sql::update_pool(pool, &query)
         .await
         .map_err(|e| AuthFlowError::Database(e.to_string()))
 }
@@ -687,6 +678,19 @@ mod tests {
     use super::*;
 
     const SECRET: &[u8] = b"my-test-secret";
+
+    /// The hand-built schema must match the `User` model it stands in for.
+    #[cfg(all(feature = "passwords", feature = "tenancy"))]
+    #[test]
+    fn reset_users_schema_matches_the_user_model() {
+        use crate::core::Model as _;
+        let user = crate::tenancy::User::SCHEMA;
+        assert_eq!(RESET_USERS.table, user.table);
+        for f in RESET_USERS.fields {
+            let u = user.field_by_column(f.column).expect(f.column);
+            assert_eq!((f.ty, f.nullable), (u.ty, u.nullable), "{}", f.column);
+        }
+    }
 
     // -------------------------------- Password reset
 

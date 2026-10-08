@@ -5,7 +5,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rustango::sql::{on_commit, on_commit_pending, sqlx, ExecError, Pool, PoolTx};
+use rustango::core::SqlValue;
+use rustango::sql::{on_commit, on_commit_pending, raw_execute_tx, sqlx, ExecError, Pool, PoolTx};
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Suite-wide mutex — every test in this file shares the `oc_widget`
@@ -43,10 +44,13 @@ async fn fresh_pool() -> Option<(Pool, MutexGuard<'static, ()>)> {
     Some((Pool::Postgres(pg), guard))
 }
 
+async fn insert_widget(tx: &mut PoolTx<'_>, label: &str) -> Result<u64, ExecError> {
+    let sql = "INSERT INTO oc_widget(label) VALUES ($1)";
+    raw_execute_tx(tx, sql, vec![SqlValue::String(label.into())]).await
+}
+
 async fn count_widgets(pool: &Pool) -> i64 {
-    let Pool::Postgres(pg) = pool else {
-        unreachable!("postgres-only test");
-    };
+    let pg = pool.as_postgres().expect("postgres-only test");
     sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oc_widget")
         .fetch_one(pg)
         .await
@@ -62,13 +66,7 @@ async fn callback_fires_after_commit() {
     let counter_clone = Arc::clone(&counter);
 
     rustango::atomic!(&pool, |tx| {
-        if let PoolTx::Postgres(t) = &mut *tx.lock().await? {
-            sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
-                .bind("alpha")
-                .execute(&mut **t)
-                .await
-                .map_err(ExecError::from)?;
-        }
+        insert_widget(&mut *tx.lock().await?, "alpha").await?;
         on_commit(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
@@ -94,13 +92,7 @@ async fn callback_does_not_fire_after_rollback() {
     let counter_clone = Arc::clone(&counter);
 
     let result: Result<(), ExecError> = rustango::atomic!(&pool, |tx| {
-        if let PoolTx::Postgres(t) = &mut *tx.lock().await? {
-            sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
-                .bind("beta")
-                .execute(&mut **t)
-                .await
-                .map_err(ExecError::from)?;
-        }
+        insert_widget(&mut *tx.lock().await?, "beta").await?;
         on_commit(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });

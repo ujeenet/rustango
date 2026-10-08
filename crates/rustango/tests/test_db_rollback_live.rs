@@ -13,7 +13,7 @@
 
 #![cfg(feature = "postgres")]
 
-use rustango::sql::{ExecError, Pool};
+use rustango::sql::{raw_execute_tx, raw_query_tx, ExecError, Pool};
 use rustango::test_db::with_rollback;
 use sqlx::Row as _;
 use std::sync::OnceLock;
@@ -37,9 +37,7 @@ async fn pool() -> Option<Pool> {
 
 async fn ensure_table(pool: &Pool) {
     // Idempotent — re-runs are no-ops.
-    let Pool::Postgres(pg) = pool else {
-        return;
-    };
+    let pg = pool.as_postgres().expect("pg pool");
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS "trb_rollback_check" (
             "id" BIGSERIAL PRIMARY KEY,
@@ -56,9 +54,7 @@ async fn ensure_table(pool: &Pool) {
 }
 
 async fn row_count(pool: &Pool) -> i64 {
-    let Pool::Postgres(pg) = pool else {
-        return -1;
-    };
+    let pg = pool.as_postgres().expect("pg pool");
     sqlx::query(r#"SELECT COUNT(*) AS n FROM "trb_rollback_check""#)
         .fetch_one(pg)
         .await
@@ -78,19 +74,20 @@ async fn rollback_discards_inserts_on_ok_return() {
 
     let inner: Result<i64, ExecError> = with_rollback(&pool, |tx| {
         Box::pin(async move {
-            // Use sqlx directly through the PoolTx to insert rows.
-            // The PoolTx variants expose the inner sqlx Transaction.
             let mut guard = tx.lock().await?;
-            let rustango::sql::PoolTx::Postgres(t) = &mut *guard else {
-                panic!("PG pool variant expected");
-            };
-            sqlx::query(r#"INSERT INTO "trb_rollback_check" (label) VALUES ('a'), ('b')"#)
-                .execute(&mut **t)
-                .await?;
-            let n: i64 = sqlx::query(r#"SELECT COUNT(*) AS n FROM "trb_rollback_check""#)
-                .fetch_one(&mut **t)
-                .await?
-                .get("n");
+            raw_execute_tx(
+                &mut guard,
+                r#"INSERT INTO "trb_rollback_check" (label) VALUES ('a'), ('b')"#,
+                vec![],
+            )
+            .await?;
+            let rows: Vec<(i64,)> = raw_query_tx(
+                &mut guard,
+                r#"SELECT COUNT(*) FROM "trb_rollback_check""#,
+                vec![],
+            )
+            .await?;
+            let n = rows[0].0;
             assert_eq!(n, 2, "rows visible inside closure");
             Ok::<i64, ExecError>(n)
         })
@@ -115,12 +112,12 @@ async fn rollback_fires_on_closure_err_too() {
     let r: Result<(), ExecError> = with_rollback(&pool, |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
-            let rustango::sql::PoolTx::Postgres(t) = &mut *guard else {
-                panic!("PG pool variant expected");
-            };
-            sqlx::query(r#"INSERT INTO "trb_rollback_check" (label) VALUES ('c')"#)
-                .execute(&mut **t)
-                .await?;
+            raw_execute_tx(
+                &mut guard,
+                r#"INSERT INTO "trb_rollback_check" (label) VALUES ('c')"#,
+                vec![],
+            )
+            .await?;
             // Synthesize an error — should still roll back the insert.
             Err::<(), _>(ExecError::EmptyReturning)
         })
