@@ -585,6 +585,18 @@ async fn facet_reads_only_the_values_it_shows(pool: &Pool) {
     assert!(body.contains("+5 more"), "{body}");
 }
 
+/// The capped facet counts NULL as one more value (#2344).
+async fn capped_facet_counts_null_as_a_value(pool: &Pool) {
+    for i in 0..20 {
+        seed_slug(pool, &format!("r{i:02}"), "k", Some(i)).await;
+    }
+    seed_slug(pool, "n1", "k", None).await;
+    seed_slug(pool, "n2", "k", None).await;
+    // 21 values, 15 shown.
+    let body = get(pool, "/adminls_slug").await;
+    assert!(body.contains("+6 more"), "{body}");
+}
+
 /// A bulk action past the bind-safe key cap is a 400 and writes nothing (#2049).
 async fn bulk_action_selection_is_capped(pool: &Pool) {
     let id = seed(pool, "kept-row", false).await;
@@ -617,6 +629,7 @@ tri_dialect_test! {
         null_facet_lists_the_null_rows,
         empty_facet_lists_the_empty_rows,
         facet_reads_only_the_values_it_shows,
+        capped_facet_counts_null_as_a_value,
         bulk_action_selection_is_capped,
     ],
 }
