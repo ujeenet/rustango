@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A per-test database is now a guard that drops it at the end, also when the test fails.
 
+### Fixed — `migrate-tenant-storage` restore tests no longer drop shared extensions (#2223)
+
+They run against a private registry database, so other suites' `citext` / `hstore` columns survive.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
