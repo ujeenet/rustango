@@ -1082,6 +1082,41 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     .0;
     assert_eq!(user_count, 0, "flush --tenant left the tenant's users");
 
+    // 6e. A table missing from the tenant schema never falls through to `public`.
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["create-user", &slug, "bob", "--password", "hunter2"],
+    )
+    .await;
+    res.unwrap();
+    for sql in [
+        "DROP TABLE IF EXISTS public.rustango_users CASCADE".to_owned(),
+        format!(r#"ALTER TABLE "{slug}"."rustango_users" SET SCHEMA public"#),
+    ] {
+        sqlx::query(&sql).execute(&pool).await.unwrap();
+    }
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "User"],
+    )
+    .await;
+    let public_users: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM public.rustango_users")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    sqlx::query("DROP TABLE public.rustango_users CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(public_users, 1, "flush --tenant truncated public's table");
+    assert!(res.is_err(), "the tenant has no rustango_users table");
+
     // 7. Org row landed.
     let org_count: i64 =
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")

@@ -174,7 +174,7 @@ pub async fn run_with_writer<W: Write + Send>(
         // to the unknown-subcommand error.
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
-        "flush" => flush_cmd(pool, &args[1..], None, writer).await,
+        "flush" => flush_cmd(pool, &args[1..], FlushScope::All, writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
         // Purges expired entries from a DatabaseCache-backed
@@ -4272,6 +4272,16 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
     Ok(out)
 }
 
+/// Which models `flush` may touch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FlushScope<'a> {
+    /// Every managed model: single-tenant `manage flush`.
+    All,
+    /// Tenant-scoped models only (#2284). `schema` names a schema-mode
+    /// tenant; PG names are qualified so `search_path` never falls through to `public`.
+    Tenant { schema: Option<&'a str> },
+}
+
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
 /// all rows from registered model tables.
 /// Without `--yes`, prints what would happen and exits without
@@ -4288,13 +4298,10 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
 ///
 /// `--app <label>` / `--model <name>` filters narrow the wipe.
 /// Pass either flag multiple times to limit to a set.
-///
-/// `scope = Some(s)` keeps only models of that scope: tenancy's
-/// `flush --tenant` passes `Tenant` with the tenant's pool (#2284).
 pub(crate) async fn flush_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
-    scope: Option<crate::core::ModelScope>,
+    scope: FlushScope<'_>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_flush_args(args)?;
@@ -4338,7 +4345,9 @@ pub(crate) async fn flush_cmd<W: Write>(
         if !schema.managed || schema.is_view {
             continue;
         }
-        if scope.is_some_and(|s| schema.scope != s) {
+        if matches!(scope, FlushScope::Tenant { .. })
+            && schema.scope != crate::core::ModelScope::Tenant
+        {
             continue;
         }
         let app = entry.resolved_app_label().unwrap_or("");
@@ -4383,9 +4392,14 @@ pub(crate) async fn flush_cmd<W: Write>(
     let mut failures: Vec<(String, String)> = Vec::new();
     if dialect == "postgres" {
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
+        let d = pool.dialect();
+        let prefix = match scope {
+            FlushScope::Tenant { schema: Some(s) } => format!("{}.", d.quote_ident(s)),
+            _ => String::new(),
+        };
         let quoted: Vec<String> = targets
             .iter()
-            .map(|t| pool.dialect().quote_ident(t.table))
+            .map(|t| format!("{prefix}{}", d.quote_ident(t.table)))
             .collect();
         let sql = format!(
             "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
