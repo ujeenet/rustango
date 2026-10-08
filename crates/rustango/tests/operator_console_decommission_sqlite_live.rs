@@ -385,13 +385,13 @@ async fn an_existing_tenant_can_have_its_connection_tested() {
 
     let html = body_of(b.post(&format!("/orgs/{slug}/test-connection"), "").await).await;
     assert!(
-        html.contains("probe-ok"),
+        html.contains(r#""status":"ok""#),
         "a live tenant should pass: {html}"
     );
 
     let missing = body_of(b.post("/orgs/ghost/test-connection", "").await).await;
     assert!(
-        missing.contains("probe-bad") && missing.contains("ghost"),
+        missing.contains(r#""status":"bad""#) && missing.contains("ghost"),
         "an unknown tenant should say so: {missing}"
     );
 }

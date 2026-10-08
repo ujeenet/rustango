@@ -291,7 +291,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cargo-rustango"
-version = "0.60.1"
+version = "0.60.2"
 
 [[package]]
 name = "cc"
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.60.1"
+version = "0.60.2"
 dependencies = [
  "argon2",
  "async-stream",
@@ -2263,6 +2263,7 @@ dependencies = [
  "rustango-macros",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_urlencoded",
  "sha1",
  "sha2",
@@ -2286,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.60.1"
+version = "0.60.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2297,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-orm-macros"
-version = "0.60.1"
+version = "0.60.2"
 dependencies = [
  "rustango",
  "rustango-macros",

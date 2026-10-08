@@ -199,9 +199,39 @@ async fn put_validates_every_field(pool: &Pool) {
     assert!(v["details"]["note"].is_array(), "{v}");
 }
 
+/// #2010: the check read the row outside the UPDATE's transaction, so a
+/// write committed in between went unseen.
+async fn patch_checks_the_row_it_overwrites(pool: &Pool) {
+    use rustango::core::{Assignment, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    let id = seed(pool, 1, 1, 10).await;
+    // A concurrent writer holds the row: lo 1 -> 8, not committed yet.
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    let write = UpdateQuery::new(
+        Span::SCHEMA,
+        vec![Assignment::new("lo", SqlValue::I64(8))],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(id))),
+    );
+    rustango::sql::update_tx(&mut tx, &write)
+        .await
+        .expect("concurrent write");
+    let app = plain(pool);
+    let uri = format!("/spans/{id}");
+    let patch =
+        tokio::spawn(async move { send(&app, Method::PATCH, &uri, r#"{"hi":5}"#, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.expect("commit");
+    // hi 5 passes over the old lo 1, not over the committed lo 8.
+    let (status, v) = patch.await.expect("join");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(stored(pool, id).await, (1, 8, 10));
+}
+
+// A file database: in-memory SQLite blocks the stale read #2010 needs.
 tri_dialect_test! {
     setup: setup,
+    sqlite: file,
     scenarios: [
+        patch_checks_the_row_it_overwrites,
         patch_checks_the_stored_value_of_an_unwritten_field,
         patch_ignores_a_sent_pinned_field,
         patch_out_of_scope_row_is_404,

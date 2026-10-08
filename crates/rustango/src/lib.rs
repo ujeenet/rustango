@@ -1272,7 +1272,6 @@ pub mod __private_runtime {
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
-    pub use tracing_subscriber;
 }
 
 /// Proc-macros crate, re-exported. End users normally reach

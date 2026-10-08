@@ -233,14 +233,34 @@ async fn wide_subtree_is_chunked(pool: &Pool) {
     );
     bulk_insert_pool(pool, &q).await.expect("seed a wide level");
     mgr.delete_collection(root).await.expect("chunked delete");
-    let live = mgr.list_collections().await.expect("list");
+    let live = mgr.list_collections_paged(1000, 0).await.expect("list");
     assert!(live.is_empty(), "{} live after the delete", live.len());
+}
+
+/// #2182 — parallel creates, some over a tombstone, never deadlock: MySQL
+/// gap-locked the slug index on the tombstone DELETE.
+async fn parallel_creates_do_not_deadlock(pool: &Pool) {
+    let mgr = manager(pool);
+    for round in 0..10 {
+        for i in 0..2 {
+            let id = create(&mgr, &format!("pc{round}-{i}"), None).await;
+            mgr.delete_collection(id).await.expect("delete");
+        }
+        let creates: Vec<_> = (0..5)
+            .map(|i| {
+                let mgr = mgr.clone();
+                let slug = format!("pc{round}-{i}");
+                tokio::spawn(async move { mgr.create_collection(&slug, &slug, None, "").await })
+            })
+            .collect();
+        for c in creates {
+            c.await.unwrap().expect("parallel create");
+        }
+    }
 }
 
 /// A delete and a create at once, at every depth: no live child is left
 /// under a deleted parent, and a deadlock is a clear error, never a hang.
-/// One create per round: two creates can deadlock each other on MySQL's
-/// slug-index gap lock, which is not what this tests.
 async fn concurrent_writes_stay_consistent(pool: &Pool) {
     let mgr = manager(pool);
     let mut deadlocks = 0;
@@ -281,7 +301,7 @@ async fn concurrent_writes_stay_consistent(pool: &Pool) {
             }
             Err(e) => panic!("delete: {e}"),
         }
-        let live = mgr.list_collections().await.expect("list");
+        let live = mgr.list_collections_paged(1000, 0).await.expect("list");
         let ids: std::collections::HashSet<_> = live
             .iter()
             .filter_map(|c| match c.id {
@@ -308,6 +328,7 @@ tri_dialect_test!(
         writers_wait_their_turn,
         wide_subtree_is_chunked,
         concurrent_writes_stay_consistent,
+        parallel_creates_do_not_deadlock,
         dead_parent_is_refused,
         delete_takes_a_child_created_meanwhile,
         create_waits_and_sees_the_deleted_parent,
