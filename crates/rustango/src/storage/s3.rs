@@ -80,7 +80,7 @@ pub struct S3Config {
 /// Storage backed by an S3-compatible bucket.
 pub struct S3Storage {
     cfg: S3Config,
-    http: reqwest::Client,
+    http: Http,
     /// The SigV4 key for one date stamp. It depends only on the secret,
     /// date, region and service, so a page of presigns derives it once (#1570).
     signing_key: std::sync::Mutex<Option<(String, Arc<[u8]>)>>,
@@ -92,6 +92,63 @@ pub struct S3Storage {
 const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Waiting for a reply or the next body chunk; a total cap would fail big objects.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The slowest upload rate the default PUT timeout allows, in bytes per second.
+const MIN_UPLOAD_RATE: u64 = 256 * 1024;
+
+/// The HTTP clients. Only the defaults get a size-based upload timeout.
+enum Http {
+    /// reqwest's read timeout runs through an upload, so PUT uses a client without one.
+    Default {
+        http: reqwest::Client,
+        upload: reqwest::Client,
+        read_timeout: std::time::Duration,
+    },
+    /// From [`S3Storage::with_http`]: its own timeouts apply to every request.
+    Custom(reqwest::Client),
+}
+
+impl Http {
+    fn defaults() -> Self {
+        Self::with_read_timeout(DEFAULT_READ_TIMEOUT)
+    }
+
+    fn with_read_timeout(read_timeout: std::time::Duration) -> Self {
+        // A redirect could take signed requests to a host the config never named (#1780).
+        let base = || {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        };
+        // A stalled endpoint must fail, not hang the request holding it (#2220).
+        Self::Default {
+            http: base()
+                .read_timeout(read_timeout)
+                .build()
+                .expect("reqwest client builds"),
+            upload: base().build().expect("reqwest client builds"),
+            read_timeout,
+        }
+    }
+
+    fn request(&self, method: reqwest::Method, url: &str, len: usize) -> reqwest::RequestBuilder {
+        match self {
+            Self::Default {
+                upload,
+                read_timeout,
+                ..
+            } if method == reqwest::Method::PUT => upload
+                .request(method, url)
+                .timeout(upload_timeout(*read_timeout, len)),
+            Self::Default { http, .. } | Self::Custom(http) => http.request(method, url),
+        }
+    }
+}
+
+/// The read timeout plus the time to send `len` bytes at [`MIN_UPLOAD_RATE`].
+fn upload_timeout(read_timeout: std::time::Duration, len: usize) -> std::time::Duration {
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    read_timeout + std::time::Duration::from_millis(len.saturating_mul(1000) / MIN_UPLOAD_RATE)
+}
 
 /// The endpoint without its `http(s)://` scheme.
 fn strip_scheme(endpoint: &str) -> &str {
@@ -104,17 +161,9 @@ fn strip_scheme(endpoint: &str) -> &str {
 impl S3Storage {
     #[must_use]
     pub fn new(cfg: S3Config) -> Self {
-        // A redirect could take signed requests to a host the config never named (#1780).
-        // A stalled endpoint must fail, not hang the request holding it (#2220).
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-            .read_timeout(DEFAULT_READ_TIMEOUT)
-            .build()
-            .expect("reqwest client builds");
         Self {
             cfg,
-            http,
+            http: Http::defaults(),
             signing_key: std::sync::Mutex::new(None),
             #[cfg(test)]
             derivations: std::sync::atomic::AtomicUsize::new(0),
@@ -148,12 +197,14 @@ impl S3Storage {
 
     /// Use your own reqwest client, for custom timeouts, proxies or
     /// TLS roots. Turn its redirects off, as the default client does.
-    /// The default gives up after 10 s to connect, or 60 s without a
-    /// response or a body chunk. reqwest 0.12 counts an upload in those
-    /// 60 s, so pass a client with a longer `read_timeout` for slow uploads.
+    ///
+    /// The default gives up after 10 s to connect, and on GET, HEAD and
+    /// DELETE after 60 s without a response or a body chunk. An upload
+    /// gets 60 s + size / 256 KiB/s in total. Your client's own timeouts
+    /// replace all of these.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Http::Custom(http);
         self
     }
 
@@ -279,6 +330,7 @@ impl S3Storage {
                 reqwest::Method::from_bytes(method.as_bytes())
                     .map_err(|e| StorageError::Io(format!("method: {e}")))?,
                 &url,
+                body.len(),
             )
             .header("host", &host)
             .header("x-amz-content-sha256", &payload_hash)
@@ -1153,6 +1205,81 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    /// 1 MiB gets 1 s + 4 s to upload under a 1 s read timeout.
+    const UPLOAD_LEN: usize = 1 << 20;
+    const SHORT_READ: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn short_timeout_storage(listener: &tokio::net::TcpListener) -> S3Storage {
+        let mut s = mock_storage(format!("http://{}", listener.local_addr().unwrap()));
+        s.http = Http::with_read_timeout(SHORT_READ);
+        s
+    }
+
+    /// Read a request over `ms` milliseconds for the whole body, then answer 200.
+    async fn slow_reader(listener: tokio::net::TcpListener, ms: u64) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut head = Vec::new();
+        let mut seen = loop {
+            let n = sock.read(&mut buf).await.unwrap();
+            head.extend_from_slice(&buf[..n]);
+            if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break head.len() - end - 4;
+            }
+        };
+        while seen < UPLOAD_LEN {
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0, "upload cut short");
+            seen += n;
+            let pause = ms * n as u64 / UPLOAD_LEN as u64;
+            tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+        }
+        sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    }
+
+    /// An upload slower than the read timeout but inside its size budget succeeds.
+    #[tokio::test]
+    async fn slow_upload_outlives_the_read_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let storage = short_timeout_storage(&listener);
+        let server = tokio::spawn(slow_reader(listener, 2500));
+        let start = std::time::Instant::now();
+        storage
+            .save("big.bin", &vec![0u8; UPLOAD_LEN])
+            .await
+            .expect("slow upload");
+        assert!(start.elapsed() > 2 * SHORT_READ, "{:?}", start.elapsed());
+        server.await.unwrap();
+    }
+
+    /// An upload the endpoint never answers fails at its size budget.
+    #[tokio::test]
+    async fn stalled_upload_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let storage = short_timeout_storage(&listener);
+        let held = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let data = vec![0u8; UPLOAD_LEN];
+        let budget = upload_timeout(SHORT_READ, UPLOAD_LEN);
+        let start = std::time::Instant::now();
+        let call = tokio::time::timeout(budget * 2, storage.save("big.bin", &data));
+        assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
+        assert!(held.is_finished());
+        assert!(start.elapsed() >= budget, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn upload_timeout_grows_with_size() {
+        assert_eq!(
+            upload_timeout(DEFAULT_READ_TIMEOUT, 0),
+            DEFAULT_READ_TIMEOUT
+        );
+        let mib_16 = upload_timeout(DEFAULT_READ_TIMEOUT, 16 << 20);
+        assert_eq!(mib_16.as_secs(), 124);
     }
 
     #[test]
