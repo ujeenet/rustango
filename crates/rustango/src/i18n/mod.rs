@@ -747,10 +747,15 @@ impl Translator {
 
         for raw_path in &settings.locale_paths {
             let path = std::path::Path::new(raw_path);
-            let entries = std::fs::read_dir(path)
-                .map_err(|e| I18nError::Io(format!("{}: {e}", path.display())))?;
-            for entry in entries.flatten() {
-                let p = entry.path();
+            // Sorted, so which of `pt_BR.json` / `pt-BR.json` wins is stable.
+            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(path)
+                .map_err(|e| I18nError::Io(format!("{}: {e}", path.display())))?
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            files.sort();
+            let mut seen = std::collections::HashSet::new();
+            for p in files {
                 if p.extension().and_then(|s| s.to_str()) != Some("json") {
                     continue;
                 }
@@ -762,6 +767,14 @@ impl Translator {
                     if !allow.contains(&locale) {
                         continue;
                     }
+                }
+                if !seen.insert(locale.clone()) {
+                    tracing::warn!(
+                        file = %p.display(),
+                        locale = locale.as_str(),
+                        "i18n: duplicate catalog for one locale in the same directory, ignored"
+                    );
+                    continue;
                 }
                 let raw = std::fs::read_to_string(&p).map_err(|e| I18nError::Io(e.to_string()))?;
                 let catalog: HashMap<String, String> =

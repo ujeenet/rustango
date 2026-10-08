@@ -14,7 +14,7 @@ The wizard skips a question a flag already answered; before, Enter reset it to f
 
 ### Fixed — i18n `languages = ["pt-BR"]` loads `pt_BR.json` (#2288)
 
-`Translator::from_settings` compares the allowlist and file stems as `Locale`s.
+`Translator::from_settings` compares the allowlist and file stems as `Locale`s. Two spellings of one locale in a directory: the first by name wins, with a warning.
 
 ### Fixed — `negotiate_language` prefers `en` over `en-GB` for `en-US` (#2289)
 

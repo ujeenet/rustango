@@ -147,3 +147,24 @@ fn from_settings_allowlist_matches_normalised_locales() {
     assert!(!t.has_locale("ja"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `pt-BR.json` and `pt_BR.json` are one locale: the first by name wins,
+/// whatever order the directory lists them in.
+#[test]
+fn from_settings_keeps_the_first_of_two_spellings() {
+    let dir = tempdir();
+    // The winner is written first, so "last listed wins" would pick the other.
+    write_catalog(&dir, "pt-BR.json", r#"{"hi": "hyphen"}"#);
+    write_catalog(&dir, "pt_BR.json", r#"{"hi": "underscore"}"#);
+
+    let settings = I18nSettings {
+        default_locale: Some("en".into()),
+        languages: vec![],
+        locale_paths: vec![dir.to_string_lossy().to_string()],
+        fallback_chain: vec![],
+    };
+    let t = Translator::from_settings(&settings).expect("load ok");
+    // `-` (0x2D) sorts before `_` (0x5F).
+    assert_eq!(t.translate("pt-BR", "hi", &[]), "hyphen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
