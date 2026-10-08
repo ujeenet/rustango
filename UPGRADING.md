@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Purge pages with `CachePageLayer::invalidate`
+
+Replace hand-built page-cache keys with `layer.invalidate([&PageKey::new(path, host).tenant(slug)])`; since 0.60 they miss the tenant and delete nothing (#2252).
+
 ### `Cli` behind a reverse proxy
 
 Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).

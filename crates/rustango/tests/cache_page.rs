@@ -1041,3 +1041,56 @@ async fn vary_star_is_not_cached() {
     let resp = app.oneshot(get_req("/s", &[])).await.unwrap();
     assert_eq!(cache_status(&resp), Some("BYPASS"));
 }
+
+/// `invalidate` deletes exactly the key the layer wrote (#2252).
+#[tokio::test]
+async fn invalidate_purges_the_cached_page() {
+    use rustango::cache_page::PageKey;
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()))
+        .tenant_agnostic(true)
+        .key_prefix("pages")
+        .vary_on(["accept-language"]);
+    let app: Router = Router::new()
+        .route(
+            "/p",
+            get(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        )
+        .layer(layer.clone());
+    let status = |app: Router| async move {
+        let req = Request::get("/p?x=1")
+            .header(header::HOST, "a.test")
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()["x-cache-status"]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(status(app.clone()).await, "MISS");
+    assert_eq!(status(app.clone()).await, "HIT");
+
+    let page = PageKey::new("/p", "a.test").query("x=1");
+    layer
+        .invalidate([&page.clone().vary("Accept-Language", "fr")])
+        .await
+        .unwrap();
+    assert_eq!(
+        status(app.clone()).await,
+        "HIT",
+        "purged another vary value"
+    );
+
+    layer
+        .invalidate([&page.vary("Accept-Language", "en")])
+        .await
+        .unwrap();
+    assert_eq!(status(app.clone()).await, "MISS", "page still cached");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `CachePageLayer::invalidate` and `key_for` (#2252)
+
+Purge a cached page through the layer, which builds keys with the same function. Any hand-built key mirror (e.g. a CMS purge) must switch to it: 0.60 added the tenant to the key, and old mirrors delete nothing.
+
 ### Added — `Cli::with_trusted_proxies` (#2255)
 
 A `Cli` app behind a reverse proxy names its proxies, and the access log and per-IP limits, login throttling included, see the client. `X-Forwarded-For` from other peers is still ignored.
