@@ -158,6 +158,10 @@ Behind compression or `LocaleMiddleware`, pages stop being cached until you add 
 
 An object that takes longer to move now fails; pass a client with a longer timeout to `with_http` (#2220).
 
+### `m2m_changed` skips no-op `add` / `remove`
+
+A receiver that counted on a signal for a duplicate `add` or a missing `remove` no longer gets one (#2221).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

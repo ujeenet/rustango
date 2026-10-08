@@ -16,6 +16,10 @@ A response that varies on `*` or on a request header outside the key (compressio
 
 10 s to connect and 60 s per request, so a stalled endpoint errors instead of hanging; `with_http` still overrides.
 
+### Fixed — m2m `add` / `remove` fire `m2m_changed` only on a change (#2221)
+
+A duplicate `add` or a `remove` of a missing link no longer fires the signal; `GenericM2MManager` too.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
