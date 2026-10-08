@@ -327,37 +327,25 @@ impl AuthBackend for ApiKeyBackend {
             return Ok(None);
         }
 
-        // v0.38 — replaced the hand-rolled JOIN with two ORM round-
-        // trips because tri-dialect sqlx doesn't expose a portable
-        // raw-row decode path (PgRow/MySqlRow/SqliteRow are distinct
-        // types). One round-trip per ApiKey lookup + one per user
-        // resolve; both indexed (key_prefix UNIQUE + id PK) so the
-        // total latency on the hot path is two index seeks.
+        // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
             .await?;
-        let Some(key) = keys.into_iter().next() else {
-            // Audit N4 — equalize timing on the unknown-prefix path so it
-            // doesn't reveal whether a key prefix exists.
-            password::verify_dummy_async_in(HashLane::Credential, secret)
-                .await
-                .map_err(AuthError::from_hash)?;
+        // The prefix is random, not unique: try every row (#2250). An unknown
+        // prefix still spends a verify (audit N4).
+        let key = password::first_verified(keys, secret, |k| &k.key_hash)
+            .await
+            .map_err(AuthError::from_hash)?;
+        let Some(key) = key else {
             attempt.failed().await;
             return Ok(None);
         };
 
         // Verify before judging expiry, so an expired prefix costs the
         // same as an unknown one (#1729).
-        let ok = password::verify_async_in(HashLane::Credential, secret, &key.key_hash)
-            .await
-            .map_err(AuthError::from_hash)?;
-        if !ok {
-            attempt.failed().await;
-            return Ok(None);
-        }
         if key.expires_at.is_some_and(|exp| chrono::Utc::now() > exp) {
             return Err(AuthError::InvalidToken);
         }

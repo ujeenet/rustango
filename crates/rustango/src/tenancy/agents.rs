@@ -13,7 +13,6 @@
 //! creation layer — the tables exist because migrations ran, exactly like
 //! the rest of the framework's own tables.
 
-use super::password::HashLane;
 use crate::sql::{Auto, ExecError, Pool};
 
 /// A tenant-scoped MCP agent. Authenticates with a `prefix.secret`
@@ -218,31 +217,20 @@ pub async fn authenticate_agent_pool(
     // hex, so the part after the last `.` is the secret).
     let secret_half = secret.rsplit('.').next().unwrap_or(secret);
 
-    let Some(agent) = Agent::objects()
+    let agents = Agent::objects()
         .where_(Agent::name.eq(name))
         .limit(1)
         .fetch(pool)
-        .await?
-        .into_iter()
-        .next()
-        .filter(|a| a.active)
-    else {
-        // Unknown / inactive agent: still spend an argon2 verification against a
-        // fixed dummy hash so the response time doesn't reveal whether the agent
-        // name exists (timing oracle → agent enumeration). #1099.
-        super::password::verify_dummy_async_in(HashLane::Credential, secret_half).await?;
-        return Ok(None);
-    };
-    check_agent_secret(agent, secret_half).await
+        .await?;
+    // Unknown / inactive agent: still spends a verify, so timing doesn't
+    // reveal whether the name exists (#1099).
+    check_agent_secret(agents, secret_half).await
 }
 
-/// `Some(agent)` when `secret` matches; hashing busy is an error.
-async fn check_agent_secret(agent: Agent, secret: &str) -> Result<Option<Agent>, AgentError> {
-    match super::password::verify_async_in(HashLane::Credential, secret, &agent.secret_hash).await {
-        Ok(true) => Ok(Some(agent)),
-        Err(super::TenancyError::Busy) => Err(super::TenancyError::Busy.into()),
-        _ => Ok(None),
-    }
+/// The active agent among `agents` whose secret matches; hashing busy is an error.
+async fn check_agent_secret(agents: Vec<Agent>, secret: &str) -> Result<Option<Agent>, AgentError> {
+    let active = agents.into_iter().filter(|a| a.active).collect();
+    Ok(super::password::first_verified(active, secret, |a| &a.secret_hash).await?)
 }
 
 /// Authenticate a full `prefix.secret` credential by its **secret prefix**
@@ -261,20 +249,12 @@ pub async fn authenticate_agent_by_prefix_pool(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    let Some(agent) = Agent::objects()
+    // The prefix is random, not unique: try every row (#2250).
+    let agents = Agent::objects()
         .where_(Agent::secret_prefix.eq(prefix))
-        .limit(1)
         .fetch(pool)
-        .await?
-        .into_iter()
-        .next()
-        .filter(|a| a.active)
-    else {
-        // Timing-neutral for unknown prefixes (#1099).
-        super::password::verify_dummy_async_in(HashLane::Credential, secret).await?;
-        return Ok(None);
-    };
-    check_agent_secret(agent, secret).await
+        .await?;
+    check_agent_secret(agents, secret).await
 }
 
 // ============================================================= skills (Slice 4)
