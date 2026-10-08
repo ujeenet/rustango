@@ -1272,20 +1272,13 @@ pub mod __private_runtime {
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
-    pub use tracing_subscriber;
 
-    /// The filter `#[rustango::main]` installs: real `RUST_LOG`, then
-    /// `RUST_LOG` from `./.env`, then `info,sqlx=warn` (#2204).
-    /// Sets no env vars and searches no parent directories.
-    pub fn main_env_filter() -> tracing_subscriber::EnvFilter {
-        use tracing_subscriber::EnvFilter;
-        const DEFAULT: &str = "info,sqlx=warn";
-        if std::env::var_os("RUST_LOG").is_some() {
-            return EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT));
-        }
+    /// `#[rustango::main]`'s default filter: `RUST_LOG` from `./.env`, else
+    /// `info,sqlx=warn` (#2204). Sets no env vars, searches no parent dirs.
+    pub fn main_default_filter() -> String {
         dotenv_rust_log()
-            .and_then(|v| EnvFilter::try_new(v).ok())
-            .unwrap_or_else(|| EnvFilter::new(DEFAULT))
+            .filter(|v| tracing_subscriber::EnvFilter::try_new(v).is_ok())
+            .unwrap_or_else(|| crate::logging::DEFAULT_FILTER.to_owned())
     }
 
     /// First `RUST_LOG` in `./.env`; none if the file is missing or has a

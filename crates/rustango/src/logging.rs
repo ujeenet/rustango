@@ -486,7 +486,7 @@ fn warn_if_already_installed<E: std::fmt::Display>(outcome: &Result<(), E>) -> b
     // The installed subscriber may filter this out, so also print to
     // stderr. The point is that it is not silent.
     let msg = format!(
-        "[logging] settings ignored: a tracing subscriber is already installed ({e}). \
+        "logging setup ignored: a tracing subscriber is already installed ({e}). \
          If this is `#[rustango::main]`, use `#[rustango::main(logging = false)]` \
          so your own setup installs first."
     );

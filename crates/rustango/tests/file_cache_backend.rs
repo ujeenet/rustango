@@ -297,15 +297,15 @@ fn concurrent_set_never_shows_a_torn_value() {
 /// saw the old entry must not delete the winner's fresh one.
 #[test]
 fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
-    let dir = unique_tmp_dir("add-exp");
+    let root = unique_tmp_dir("add-exp");
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     for round in 0..300 {
-        let key = format!("k{round}");
-        rt.block_on(FileCache::new(&dir).set(&key, "old", Some(Duration::from_millis(1))))
+        let (dir, key) = (root.join(round.to_string()), format!("k{round}"));
+        rt.block_on(FileCache::new(&dir).set(&key, "old", Some(Duration::from_secs(3600))))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(3));
+        backdate_only_entry(&dir);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
         let wins: usize = (0..12)
             .map(|n| {
@@ -329,7 +329,23 @@ fn concurrent_adds_over_expired_entry_have_exactly_one_winner() {
             .sum();
         assert_eq!(wins, 1, "round {round}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Expire `dir`'s one entry by setting its stored `expires_at` to epoch + 1 ms,
+/// so the test does not depend on a wall-clock TTL running out (#2165).
+fn backdate_only_entry(dir: &std::path::Path) {
+    let mut files = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "cache"));
+    let path = files.next().expect("one entry");
+    assert!(files.next().is_none(), "one entry only");
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(b"RCF1"), "format changed");
+    bytes[4..12].copy_from_slice(&1i64.to_be_bytes());
+    std::fs::write(&path, bytes).unwrap();
 }
 
 /// Racing `incr`s from many threads lose no count (a lockout counts with it).

@@ -37,7 +37,7 @@ mod builder;
 pub use crate::panic_guard::catch_panics;
 #[cfg(feature = "runserver")]
 pub use app::AppBuilder;
-#[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
+#[cfg(all(test, feature = "tenancy", feature = "sqlite", feature = "manage"))]
 pub(crate) use builder::resolver_tests;
 #[cfg(feature = "tenancy")]
 pub use builder::{ApiRouter, Builder};

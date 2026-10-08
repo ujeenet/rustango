@@ -175,6 +175,131 @@ async fn a_failed_branding_save_withholds_the_driver_text() {
     assert!(shown.contains("Could not save the branding"), "{shown}");
 }
 
+/// A form POST as the signed-in operator.
+async fn post_form(b: &Booted, uri: &str, form: &str) -> axum::response::Response {
+    b.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("x-csrf-token", "t")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("rustango_csrf=t; {}", b.cookie))
+                .body(Body::from(form.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// The decoded `Location` of a redirect.
+fn shown_location(resp: &axum::response::Response) -> String {
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("a redirect")
+        .to_str()
+        .unwrap();
+    rustango::url_codec::url_decode(location)
+}
+
+/// #2171 — every console redirect withholds the driver text.
+#[tokio::test]
+async fn failed_org_actions_withhold_the_driver_text() {
+    let mut wrong = Vec::new();
+    for (uri, form, what) in [
+        ("/orgs/acme/deactivate", "", "Could not deactivate"),
+        ("/orgs/acme/purge", "confirm=acme", "Could not purge"),
+        ("/orgs/prewarm", "", "Pre-warm failed"),
+        (
+            "/orgs/acme/edit",
+            "display_name=x&active=on",
+            "Could not save",
+        ),
+    ] {
+        let b = boot().await;
+        break_org_table(&b.raw).await;
+        let shown = shown_location(&post_form(&b, uri, form).await);
+        if shown.contains(DRIVER_TEXT) || !shown.contains(what) {
+            wrong.push(format!("{uri}: {shown}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// #2171 — a failed operator write withholds the driver text.
+#[tokio::test]
+async fn a_failed_operator_create_withholds_the_driver_text() {
+    let b = boot().await;
+    sqlx::query(
+        "CREATE TRIGGER no_new_ops BEFORE INSERT ON rustango_operators \
+         BEGIN SELECT RAISE(ABORT, 'TRIGGERSECRET'); END",
+    )
+    .execute(&b.raw)
+    .await
+    .expect("trigger");
+    let pw = "Kq7-violet-harbor-91";
+    let resp = post_form(
+        &b,
+        "/operators",
+        &format!("username=newop&password={pw}&confirm_password={pw}"),
+    )
+    .await;
+    let body =
+        String::from_utf8(to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+    assert!(
+        !body.contains("TRIGGERSECRET"),
+        "driver text leaked: {body}"
+    );
+    assert!(body.contains("Could not create the operator"), "{body}");
+}
+
+/// #2171 — a failed operator save (reset password, deactivate) withholds
+/// the driver text.
+#[tokio::test]
+async fn failed_operator_saves_withhold_the_driver_text() {
+    let b = boot().await;
+    let mut other = rustango::tenancy::Operator {
+        id: Auto::default(),
+        username: format!("other-{}", UNIQ.fetch_add(1, Ordering::SeqCst)),
+        password_hash: rustango::tenancy::password::hash("x").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    other
+        .insert_pool(&rustango::sql::Pool::from(b.raw.clone()))
+        .await
+        .expect("seed operator");
+    let id = *other.id.get().unwrap();
+    sqlx::query(
+        "CREATE TRIGGER no_op_updates BEFORE UPDATE ON rustango_operators \
+         BEGIN SELECT RAISE(ABORT, 'TRIGGERSECRET'); END",
+    )
+    .execute(&b.raw)
+    .await
+    .expect("trigger");
+    let pw = "Kq7-violet-harbor-91";
+    let mut wrong = Vec::new();
+    for (uri, form) in [
+        (
+            format!("/operators/{id}/reset-password"),
+            format!("password={pw}&confirm_password={pw}"),
+        ),
+        (format!("/operators/{id}/active"), String::new()),
+    ] {
+        let resp = post_form(&b, &uri, &form).await;
+        let body =
+            String::from_utf8(to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        if body.contains("TRIGGERSECRET") || !body.contains("Could not save") {
+            wrong.push(format!("{uri}: {body}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 #[tokio::test]
 async fn a_cut_off_upload_is_a_client_error() {
     let b = boot().await;

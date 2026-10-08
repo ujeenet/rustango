@@ -37,7 +37,8 @@ pub enum ConfigError {
     },
 
     /// The merged tree did not fit [`Settings`], usually a type
-    /// mismatch such as `[database].pool_max_size = "ten"`.
+    /// mismatch such as `[database].pool_max_size = "ten"`. The error
+    /// names the key and expected type, never the value (#2159).
     #[error("config: settings shape mismatch: {0}")]
     Shape(toml::de::Error),
 
@@ -166,8 +167,29 @@ where
     }
     apply_env_overrides(&mut tree, env_vars)?;
 
-    let settings: Settings = tree.try_into().map_err(ConfigError::Shape)?;
+    let settings: Settings = serde_path_to_error::deserialize(tree).map_err(shape_error)?;
     Ok(settings)
+}
+
+/// A shape error naming the key and the expected type, never the value:
+/// serde quotes the offending value, which can be a secret (#2159).
+fn shape_error(e: serde_path_to_error::Error<toml::de::Error>) -> ConfigError {
+    let path = e.path().to_string();
+    let message = e.inner().message();
+    let what = if message.starts_with("missing field `")
+        || message.starts_with("unknown field `")
+        || message.starts_with("invalid length ")
+    {
+        // Key names and counts only.
+        message.to_owned()
+    } else {
+        match message.rsplit_once(", expected ") {
+            Some((_, expected)) => format!("expected {expected}"),
+            None => "wrong type or value".to_owned(),
+        }
+    };
+    let safe = format!("`{path}`: {what}");
+    ConfigError::Shape(<toml::de::Error as serde::de::Error>::custom(safe))
 }
 
 /// Read a TOML file. With `required = true` a missing file is an
@@ -562,5 +584,34 @@ retention_days = 90
         assert!(err.to_string().contains("line 2"), "{err}");
         assert!(err.location().contains("line 2"), "{}", err.location());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2159 — a shape error names the key and type, never the value.
+    #[test]
+    fn shape_error_text_never_quotes_the_value() {
+        for (body, key) in [
+            (
+                "[database]\npool_max_size = \"s3cret\"\n",
+                "database.pool_max_size",
+            ),
+            (
+                "[security]\nsecure_ssl_redirect = \"s3cret\"\n",
+                "security.secure_ssl_redirect",
+            ),
+        ] {
+            let root = fresh_root("shape_error_secret");
+            write(&root, "default.toml", body);
+            let err = load_with_root(&root, "any").unwrap_err();
+            assert!(matches!(err, ConfigError::Shape(_)), "{err:?}");
+            let texts = [err.to_string(), format!("{err:?}"), format!("{err:#?}")];
+            for text in &texts {
+                assert!(!text.contains("s3cret"), "{text}");
+            }
+            assert!(
+                texts[0].contains(key) && texts[0].contains("expected"),
+                "{err}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }
