@@ -2170,13 +2170,7 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         sql.push(')');
     }
     // MySQL's comment; PG's comes after, as `COMMENT ON COLUMN` (#2270).
-    if let Some(inline) = f
-        .db_comment
-        .as_deref()
-        .and_then(|c| dialect.write_inline_column_comment(c))
-    {
-        sql.push_str(&inline);
-    }
+    sql.push_str(&inline_comment(f, dialect));
     // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
     if let Some(rel) = inline_fk_on_add_column(f, dialect) {
         sql.push_str(&inline_references(rel, dialect));
@@ -2212,12 +2206,21 @@ fn add_column_backfilled(
         add_column_sql(table, &bare, dialect),
         fill_nulls_sql(table, f, dialect),
         format!(
-            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}",
+            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}{}",
             dialect.quote_ident(table),
             dialect.quote_ident(&f.column),
-            sql_type_with_dialect(f, dialect)
+            sql_type_with_dialect(f, dialect),
+            inline_comment(f, dialect),
         ),
     ]
+}
+
+/// MySQL's inline ` COMMENT '…'` for `f`; a `MODIFY` without it drops the comment.
+fn inline_comment(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    f.db_comment
+        .as_deref()
+        .and_then(|c| dialect.write_inline_column_comment(c))
+        .unwrap_or_default()
 }
 
 /// `f` added nullable, then made NOT NULL by `MODIFY` (MySQL only).
@@ -2233,10 +2236,11 @@ fn add_column_then_not_null(
     vec![
         add_column_sql(table, &bare, dialect),
         format!(
-            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL{}",
             dialect.quote_ident(table),
             dialect.quote_ident(&f.column),
-            sql_type_with_dialect(f, dialect)
+            sql_type_with_dialect(f, dialect),
+            inline_comment(f, dialect),
         ),
     ]
 }
@@ -2838,6 +2842,33 @@ mod sql_type_tests {
         assert!(out.deferred_fks[0].contains(r#"REFERENCES "posts" ("id")"#));
         assert!(out.deferred_fks[1].contains(r#"ADD CONSTRAINT "post_tags_tag_id_fkey""#));
         assert!(out.deferred_fks[1].contains(r#"REFERENCES "tags" ("id")"#));
+    }
+
+    /// A MySQL `MODIFY` restates the whole column, so it keeps the comment.
+    #[test]
+    fn mysql_add_column_modify_keeps_the_comment() {
+        let snap: SchemaSnapshot = serde_json::from_value(serde_json::json!({ "tables": [{
+            "name": "t", "model": "T", "fields": [
+                { "name": "c", "column": "c", "ty": "i64", "nullable": false,
+                  "primary_key": false, "db_comment": "kept" },
+                { "name": "u", "column": "u", "ty": "uuid", "nullable": false,
+                  "primary_key": false, "default": "gen_random_uuid()",
+                  "db_comment": "kept" }] }] }))
+        .unwrap();
+        for column in ["c", "u"] {
+            let add = [SchemaChange::AddColumn {
+                table: "t".into(),
+                column: column.into(),
+            }];
+            let out =
+                render_changes_split_for_empty(&add, &snap, &crate::sql::MySql, None).unwrap();
+            let modify = out.immediate.iter().find(|s| s.contains("MODIFY COLUMN"));
+            assert!(
+                modify.is_some_and(|s| s.ends_with("COMMENT 'kept'")),
+                "{:?}",
+                out.immediate
+            );
+        }
     }
 
     #[cfg(feature = "mysql")]

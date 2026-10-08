@@ -2833,10 +2833,24 @@ async fn db_comment_on_create_and_add_column(pool: &Pool) {
         .expect("CreateTable");
     assert_eq!(column_comment(pool, t, "a").await, expect("on create"));
     chain
-        .step(pool, json!({"tables": [table(t, vec![id(), a, b])]}))
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), a.clone(), b.clone()])]}),
+        )
         .await
         .expect("AddColumn");
     assert_eq!(column_comment(pool, t, "b").await, expect("on add"));
+    // MySQL adds it nullable, then MODIFYs it, which kept no comment.
+    let d = col(
+        "d",
+        "uuid",
+        json!({"nullable": false, "default": "gen_random_uuid()", "db_comment": "uuid"}),
+    );
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), a, b, d])]}))
+        .await
+        .expect("NOT NULL UUID AddColumn");
+    assert_eq!(column_comment(pool, t, "d").await, expect("uuid"));
 }
 
 // ---------------------------------------------------------------- #2241
