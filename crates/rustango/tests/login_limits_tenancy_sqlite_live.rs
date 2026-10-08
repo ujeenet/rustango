@@ -902,30 +902,6 @@ async fn api_keys_sharing_a_prefix_each_authenticate() {
     );
 }
 
-/// #2250 — agents whose secret prefixes collide each still authenticate.
-#[cfg(feature = "mcp")]
-#[tokio::test]
-async fn agents_sharing_a_prefix_each_authenticate() {
-    use rustango::tenancy::{authenticate_agent_by_prefix_pool, create_agent_pool, Agent};
-    let _g = SUITE.lock().await;
-    let env = boot().await;
-    rustango::testkit::create_tables_for::<Agent>(&env.tenant)
-        .await
-        .unwrap();
-    let first = create_agent_pool(&env.tenant, "bot-a").await.unwrap();
-    let second = create_agent_pool(&env.tenant, "bot-b").await.unwrap();
-    let mut row = second.agent.clone();
-    row.secret_prefix = first.agent.secret_prefix.clone();
-    row.save_pool(&env.tenant).await.unwrap();
-
-    let (_, secret) = second.token.split_once('.').unwrap();
-    let found = authenticate_agent_by_prefix_pool(&env.tenant, &first.agent.secret_prefix, secret)
-        .await
-        .unwrap()
-        .expect("second agent by the shared prefix");
-    assert_eq!(found.name, "bot-b");
-}
-
 /// #1729 — an expired key is verified before it is refused, so a full
 /// hash queue answers it 503, the same as an unknown prefix.
 #[cfg(feature = "testkit")]

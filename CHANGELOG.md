@@ -16,7 +16,7 @@ Reset links sign their issue time; `confirm_password_reset_pool` / `_single_use`
 
 A user with a confirmed device gets the code step before the admin session is minted, as on the password login.
 
-### Fixed — API-key and agent-key prefixes may collide (#2250)
+### Fixed — API-key prefixes may collide (#2250)
 
 Authentication tries every row with the prefix, not only the first.
 
