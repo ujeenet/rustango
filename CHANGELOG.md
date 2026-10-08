@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
 
-A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267).
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267). Autocomplete reads up to 5 pages to fill its limit past denied rows.
 
 ## [0.60.2] — 2026-10-07
 

@@ -1509,6 +1509,10 @@ fn push_date(q: &mut ListQuery, year: Option<i32>, month: Option<u32>, day: Opti
 // one route serves every form that points at it. A target with no
 // searchable columns returns an empty list rather than every row.
 
+/// Pages autocomplete reads to fill `limit` when the "view" hook denies
+/// rows; past them it returns fewer.
+const AUTOCOMPLETE_MAX_PAGES: i64 = 5;
+
 pub(crate) async fn autocomplete_view(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
@@ -1550,36 +1554,53 @@ pub(crate) async fn autocomplete_view(
         })
     };
 
+    // The "view" hook runs after the read (#2231), so read up to
+    // `AUTOCOMPLETE_MAX_PAGES` pages to fill `limit` past denied rows.
     let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery {
-            where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
-            search,
-            order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
-            limit: Some(limit),
-            offset: Some(0),
-            ..SelectQuery::new(model)
-        },
-        &scalar_fields,
-    )
-    .await?;
-
-    // A row the "view" hook denies is not offered (#2231).
-    let results: Vec<serde_json::Value> = rows
-        .into_iter()
-        .filter(|row| {
-            crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
-        })
-        .filter_map(|row| {
-            let id = row.get(pk_field.column)?.clone();
-            let text = row
-                .get(display_field.column)
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| id.to_string());
-            Some(serde_json::json!({ "id": id, "text": text }))
-        })
-        .collect();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for page in 0..AUTOCOMPLETE_MAX_PAGES {
+        let rows = crate::sql::select_rows_as_json(
+            &state.pool,
+            &SelectQuery {
+                where_clause: RowScope::of(model, &parts).constrain(WhereExpr::And(Vec::new())),
+                search: search.clone(),
+                // The pk breaks ties, so pages do not overlap.
+                order_by: vec![
+                    crate::core::OrderItem::column(display_field.column, false),
+                    crate::core::OrderItem::column(pk_field.column, false),
+                ],
+                limit: Some(limit),
+                offset: Some(page * limit),
+                ..SelectQuery::new(model)
+            },
+            &scalar_fields,
+        )
+        .await?;
+        let last = (rows.len() as i64) < limit;
+        results.extend(
+            rows.into_iter()
+                .filter(|row| {
+                    crate::admin::object_permissions::is_allowed(
+                        model.table,
+                        "view",
+                        &parts,
+                        Some(row),
+                    )
+                })
+                .filter_map(|row| {
+                    let id = row.get(pk_field.column)?.clone();
+                    let text = row
+                        .get(display_field.column)
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| id.to_string());
+                    Some(serde_json::json!({ "id": id, "text": text }))
+                }),
+        );
+        if last || results.len() as i64 >= limit {
+            break;
+        }
+    }
+    results.truncate(limit as usize);
 
     Ok(axum::Json(serde_json::json!({ "results": results })))
 }

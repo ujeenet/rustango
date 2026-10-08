@@ -309,6 +309,8 @@ async fn view_pool() -> Pool {
         "CREATE TABLE op_post (id INTEGER PRIMARY KEY, title TEXT NOT NULL, owner_id INTEGER NOT NULL)",
         "CREATE TABLE op_note (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
         "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'theirs-row', 7), (2, 'mine-row', 42)",
+        // Denied rows that sort before every allowed one.
+        "INSERT INTO op_post (id, title, owner_id) VALUES (3, 'aaa-1', 7), (4, 'aaa-2', 7), (5, 'aaa-3', 7)",
         "INSERT INTO op_note (id, post_id) VALUES (1, 1), (2, 2)",
         "CREATE TABLE op_cite (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
         "INSERT INTO op_cite (id, post_id) VALUES (1, 1), (2, 2)",
@@ -441,3 +443,10 @@ async fn view_hook_hides_fk_cell_names() {
     );
 }
 
+// Autocomplete reads past a first page the hook fully denies.
+#[tokio::test]
+async fn autocomplete_fills_past_denied_rows() {
+    let body = get_body("/op_post/__autocomplete?q=&limit=2").await;
+    assert!(body.contains("mine-row"), "allowed row not reached: {body}");
+    assert!(!body.contains("aaa-"), "a denied row is offered: {body}");
+}
