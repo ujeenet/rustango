@@ -1119,7 +1119,6 @@ impl Cli {
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
         }
-        #[cfg(feature = "admin")]
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
         }
@@ -2303,6 +2302,66 @@ mod tests {
         assert!(r.headers().contains_key("x-frame-options"));
         let r = send("acme.localhost", "/app", false).await.unwrap();
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
+    /// #2255 — `with_trusted_proxies` reaches the tenancy builder: the
+    /// access log names the client behind the proxy, not the proxy.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[test]
+    fn tenancy_builder_hands_over_the_trusted_proxies() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = super::tracing_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_iso, app) = rt.block_on(async {
+            let iso = crate::tenancy::isolated_resolver().await;
+            let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+            let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+            let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+            let app = Cli::new()
+                .with_trusted_proxies(["10.0.0.0/8"])
+                .expect("valid CIDR")
+                .tenancy_builder(builder, None)
+                .into_router()
+                .await
+                .expect("assemble");
+            (iso, app)
+        });
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut req = Request::builder()
+                .uri("/whoami")
+                .header("host", "localhost")
+                .header("x-forwarded-for", "203.0.113.9")
+                .body(Body::empty())
+                .unwrap();
+            let peer: std::net::SocketAddr = "10.0.0.5:4000".parse().unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            rt.block_on(app.oneshot(req)).expect("request");
+        });
+        let out = buf.contents();
+        let line = out
+            .lines()
+            .find(|l| l.contains("rustango::access_log") && l.contains("/whoami"));
+        assert!(
+            line.is_some_and(|l| l.contains("203.0.113.9") && !l.contains("10.0.0.5")),
+            "access log does not name the client: {out}"
+        );
     }
 
     #[cfg(feature = "config")]
