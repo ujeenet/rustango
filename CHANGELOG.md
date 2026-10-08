@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MCP 401 has a JSON-RPC body (#2259)
+
+A missing, invalid or revoked token gets `application/json` with error code `-32001`; status and `WWW-Authenticate` are unchanged.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

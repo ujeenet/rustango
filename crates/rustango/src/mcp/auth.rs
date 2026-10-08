@@ -651,7 +651,8 @@ pub(crate) fn mount_base(
 /// A `401` whose `WWW-Authenticate` header carries a
 /// `resource_metadata` URL, so a standards-compliant client can find
 /// the authorization server. The URL follows the real mount prefix,
-/// not the origin root.
+/// not the origin root. The body is a JSON-RPC error, which MCP
+/// clients parse and show.
 pub(crate) fn unauthorized(
     headers: &HeaderMap,
     extensions: &axum::http::Extensions,
@@ -660,10 +661,17 @@ pub(crate) fn unauthorized(
     let base = mount_base(headers, extensions, original, "");
     let challenge =
         format!(r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource""#);
+    let body = super::types::JsonRpcResponse::failure(
+        serde_json::Value::Null,
+        super::types::JsonRpcError::new(
+            super::types::codes::UNAUTHORIZED,
+            "missing or invalid agent token",
+        ),
+    );
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, challenge)],
-        "missing or invalid agent token",
+        Json(body),
     )
         .into_response()
 }
