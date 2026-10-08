@@ -4238,7 +4238,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             w,
             "  Wipe all rows from registered model tables. Schema + migrations ledger"
         )?;
-        writeln!(w, "  stay intact.")?;
+        writeln!(w, "  stay intact. Unmanaged models and views are skipped.")?;
         writeln!(w)?;
         writeln!(
             w,
@@ -4267,6 +4267,10 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
     let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
+        // The operator owns unmanaged tables and views; a view also fails PG's TRUNCATE (#2285).
+        if !schema.managed || schema.is_view {
+            continue;
+        }
         let app = entry.resolved_app_label().unwrap_or("");
         let dotted = if app.is_empty() {
             schema.name.to_owned()

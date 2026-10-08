@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `flush` skips unmanaged models and views (#2285)
+
+It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

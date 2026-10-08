@@ -1,9 +1,9 @@
-//! `flush`, `dumpdata` and `loaddata` on every backend (#1911, #1912).
+//! `flush`, `dumpdata` and `loaddata` on every backend (#1911, #1912, #2285).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::Model as _;
-use rustango::sql::{Array, Auto, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{raw_execute_pool, Array, Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -50,6 +50,33 @@ pub struct Tagged {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub tags: Array<String>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_owned", app = "cli2285")]
+pub struct Owned {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_legacy", app = "cli2285", managed = false)]
+pub struct Legacy {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_view", app = "cli2285", view)]
+pub struct OwnedView {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub name: String,
 }
 
 async fn fresh_parent_child(pool: &Pool) {
@@ -155,6 +182,47 @@ async fn flush_yes_clears_the_table(pool: &Pool) {
     assert!(left.is_empty(), "flush left {} row(s)", left.len());
 }
 
+/// `flush` leaves unmanaged tables and views alone (#2285).
+async fn flush_skips_unmanaged_tables_and_views(pool: &Pool) {
+    let _ = raw_execute_pool(pool, "DROP VIEW IF EXISTS cli2285_view", vec![]).await;
+    rustango::testkit::matrix::fresh_table::<Owned>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Legacy>(pool).await;
+    raw_execute_pool(
+        pool,
+        "CREATE VIEW cli2285_view AS SELECT id, name FROM cli2285_owned",
+        vec![],
+    )
+    .await
+    .expect("create view");
+    for name in ["a", "b"] {
+        let mut o = Owned {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        o.insert_pool(pool).await.expect("owned");
+        let mut l = Legacy {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        l.insert_pool(pool).await.expect("legacy");
+    }
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2285"]).await;
+    let owned: Vec<Owned> = Owned::objects().fetch(pool).await.expect("owned");
+    let legacy: Vec<Legacy> = Legacy::objects().fetch(pool).await.expect("legacy");
+    raw_execute_pool(pool, "DROP VIEW cli2285_view", vec![])
+        .await
+        .expect("drop view");
+    let out = out.expect("flush --app cli2285");
+    assert!(out.contains("cleared 1 table(s)"), "{out}");
+    assert!(
+        owned.is_empty(),
+        "the managed table kept {} row(s)",
+        owned.len()
+    );
+    assert_eq!(legacy.len(), 2, "flush wiped the unmanaged table");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -235,6 +303,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         flush_yes_clears_the_table,
+        flush_skips_unmanaged_tables_and_views,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
