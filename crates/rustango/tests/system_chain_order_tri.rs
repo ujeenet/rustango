@@ -20,33 +20,39 @@ enum Backend {
     Sqlite,
 }
 
-/// A fresh, empty database and its URL; `None` when the backend's URL is unset.
-async fn fresh(backend: Backend, tmp: &Path, tag: &str) -> Option<(Pool, String)> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db = format!("rustango_syschain_{tag}_{}_{nanos}", std::process::id());
-    let url = match backend {
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+
+/// The server database's guard; dropping it drops the database (#2222).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+type DbGuard = Option<scratch_db::ScratchDb>;
+#[cfg(not(any(feature = "postgres", feature = "mysql")))]
+type DbGuard = Option<()>;
+
+/// A fresh, empty database, its URL and its guard; `None` when the backend's
+/// URL is unset. Keep the guard bound for the whole test.
+async fn fresh(backend: Backend, tmp: &Path, tag: &str) -> Option<(Pool, String, DbGuard)> {
+    let prefix = format!("rustango_syschain_{tag}");
+    let (url, guard): (String, DbGuard) = match backend {
         #[cfg(feature = "sqlite")]
-        Backend::Sqlite => format!("sqlite:{}?mode=rwc", tmp.join(format!("{db}.db")).display()),
+        Backend::Sqlite => {
+            let db = tmp.join(format!("{prefix}.db"));
+            (format!("sqlite:{}?mode=rwc", db.display()), None)
+        }
         #[cfg(feature = "postgres")]
-        Backend::Postgres => create_db(&std::env::var("DATABASE_URL").ok()?, &db).await,
+        Backend::Postgres => scratch(&std::env::var("DATABASE_URL").ok()?, &prefix).await,
         #[cfg(feature = "mysql")]
-        Backend::Mysql => create_db(&std::env::var("MYSQL_TEST_URL").ok()?, &db).await,
+        Backend::Mysql => scratch(&std::env::var("MYSQL_TEST_URL").ok()?, &prefix).await,
     };
     let _ = tmp;
-    Some((Pool::connect(&url).await.expect("connect"), url))
+    Some((Pool::connect(&url).await.expect("connect"), url, guard))
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
-async fn create_db(admin_url: &str, db: &str) -> String {
-    let admin = Pool::connect(admin_url).await.expect("connect admin");
-    rustango::sql::raw_execute_pool(&admin, &format!("CREATE DATABASE {db}"), Vec::new())
-        .await
-        .expect("create database");
-    let (base, _) = admin_url.rsplit_once('/').unwrap();
-    format!("{base}/{db}")
+async fn scratch(admin_url: &str, prefix: &str) -> (String, DbGuard) {
+    let db = scratch_db::ScratchDb::create(admin_url, prefix).await;
+    (db.url().to_owned(), Some(db))
 }
 
 async fn has_column(pool: &Pool, table: &str, column: &str) -> bool {
@@ -216,7 +222,7 @@ fn system_chain(root: &Path) {
 /// also has runs before the framework converges the table.
 async fn pending_project_add_column(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "addcol").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "addcol").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -244,7 +250,7 @@ async fn pending_project_add_column(backend: Backend) {
 /// N+1 alters it; the alter must find the column.
 async fn alter_after_add_on_owned(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "alter").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "alter").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -338,7 +344,7 @@ fn age_tenant_chain(root: &Path, tables: &[String], index: Option<&str>) -> Stri
 /// A later system step's index on a project-owned table is created.
 async fn later_index_on_owned(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "index").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "index").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -407,7 +413,7 @@ async fn drop_a_system_index(
 /// #2016 — a second dir's regenerated system chain restores a dropped index.
 async fn dropped_index_is_restored(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((_, url)) = fresh(backend, tmp.path(), "idxgone").await else {
+    let Some((_, url, _db)) = fresh(backend, tmp.path(), "idxgone").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -431,7 +437,7 @@ async fn dropped_index_is_restored(backend: Backend) {
 /// #2016 — a converged index whose name is taken by one on other columns is reported.
 async fn clashing_index_is_reported(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((_, url)) = fresh(backend, tmp.path(), "idxclash").await else {
+    let Some((_, url, _db)) = fresh(backend, tmp.path(), "idxclash").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -461,7 +467,7 @@ async fn clashing_index_is_reported(backend: Backend) {
 /// adding that table's unrelated columns; `finish` reports what it can't add.
 async fn fk_only_step_adds_only_targets(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "fkonly").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "fkonly").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -567,7 +573,7 @@ fn a_leaf_table(first: &Value, not: &str) -> (String, Value) {
 /// check FK targets at `CREATE TABLE`.
 async fn project_fk_to_waiting_system_table(backend: Backend, same_step: bool) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "fkwait").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "fkwait").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -671,7 +677,7 @@ async fn fk_to_a_waiting_system_step(backend: Backend) {
 /// #2094 — a later system step drops an index the project's table never got.
 async fn drop_index_on_owned(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "dropidx").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "dropidx").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -706,7 +712,7 @@ async fn drop_index_on_owned(backend: Backend) {
 /// #2139 — an index a later step drops and re-creates is there on an owned table.
 async fn recreated_index_on_owned(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "reidx").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "reidx").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -739,7 +745,7 @@ async fn recreated_index_on_owned(backend: Backend) {
 /// A table a waiting step made early still gets a later step's new index.
 async fn early_table_gets_a_later_index(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "earlyidx").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "earlyidx").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -781,7 +787,7 @@ async fn early_table_gets_a_later_index(backend: Backend) {
 /// with it: 9002's FK to 9001's table would fail before 9001 ran.
 async fn later_step_waits_on_a_held_table(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "held").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "held").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -889,7 +895,7 @@ async fn dropped_table_gets_its_fks_back(backend: Backend) {
         _ => {}
     }
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "remade").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "remade").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -950,7 +956,7 @@ rustango::register_migration_callback!("syschain_nested_migrate", nested_migrate
 /// A nested migrate lock is an error, not a hang.
 async fn nested_lock_is_an_error(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "nested").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "nested").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -972,7 +978,7 @@ async fn nested_lock_is_an_error(backend: Backend) {
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn cancelled_run_releases_lock(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((a, url)) = fresh(backend, tmp.path(), "cancel").await else {
+    let Some((a, url, _db)) = fresh(backend, tmp.path(), "cancel").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1026,7 +1032,7 @@ async fn owned_table_dropped_later(backend: Backend) {
     let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
     for heal in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((pool, _)) = fresh(backend, tmp.path(), "drop").await else {
+        let Some((pool, _, _db)) = fresh(backend, tmp.path(), "drop").await else {
             eprintln!("skipping — backend URL unset");
             return;
         };
@@ -1053,7 +1059,7 @@ async fn owned_table_dropped_later(backend: Backend) {
 /// #2066 — an empty project table gets a NOT NULL column with no default.
 async fn not_null_column_on_empty_table(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "notnull").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "notnull").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1081,7 +1087,7 @@ async fn not_null_column_on_empty_table(backend: Backend) {
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn concurrent_migrates(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((_, url)) = fresh(backend, tmp.path(), "race").await else {
+    let Some((_, url, _db)) = fresh(backend, tmp.path(), "race").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1107,7 +1113,7 @@ async fn concurrent_migrates(backend: Backend) {
 /// `rustango_users` and adds a column elsewhere; on PG/MySQL it must wait.
 async fn fk_to_project_table(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "fk").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "fk").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1194,7 +1200,7 @@ async fn fk_to_project_table(backend: Backend) {
 /// must still get the new column when another process migrates.
 async fn single_step_chain_converges_project_table(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, _)) = fresh(backend, tmp.path(), "regen").await else {
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "regen").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1216,11 +1222,11 @@ async fn single_step_chain_converges_project_table(backend: Backend) {
 /// `rustango_users` must neither collide nor miss the newer column.
 async fn tenant_project_table_converges(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let Some((registry, _)) = fresh(backend, tmp.path(), "reg").await else {
+    let Some((registry, _, _db)) = fresh(backend, tmp.path(), "reg").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
-    let (_tenant, tenant_url) = fresh(backend, tmp.path(), "ten").await.unwrap();
+    let (_tenant, tenant_url, _tenant_db) = fresh(backend, tmp.path(), "ten").await.unwrap();
     let boot = tmp.path().join("boot/migrations");
     std::fs::create_dir_all(&boot).unwrap();
     rustango::tenancy::migrate_registry_pool(&registry, &boot)
@@ -1282,7 +1288,7 @@ static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn schema_mode_tenant_converges() {
     let _signals = SIGNALS.lock().await;
     let tmp = tempfile::tempdir().unwrap();
-    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "schema").await
+    let Some((registry, registry_url, _db)) = fresh(Backend::Postgres, tmp.path(), "schema").await
     else {
         eprintln!("skipping — DATABASE_URL unset");
         return;
@@ -1337,7 +1343,8 @@ async fn schema_mode_tenant_converges() {
 async fn schema_mode_fk_stays_in_the_tenant_schema() {
     let _signals = SIGNALS.lock().await;
     let tmp = tempfile::tempdir().unwrap();
-    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "fkq").await else {
+    let Some((registry, registry_url, _db)) = fresh(Backend::Postgres, tmp.path(), "fkq").await
+    else {
         eprintln!("skipping — DATABASE_URL unset");
         return;
     };
@@ -1432,7 +1439,7 @@ async fn post_migrate_receiver_can_migrate() {
     use std::sync::{Arc, Mutex};
     let _signals = SIGNALS.lock().await;
     let tmp = tempfile::tempdir().unwrap();
-    let Some((registry, registry_url)) = fresh(Backend::Postgres, tmp.path(), "signal").await
+    let Some((registry, registry_url, _db)) = fresh(Backend::Postgres, tmp.path(), "signal").await
     else {
         eprintln!("skipping — DATABASE_URL unset");
         return;
@@ -1484,7 +1491,7 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
     const KEY: i64 = 0x5255_5354_4d49_4754;
     const N: u32 = 3;
     let tmp = tempfile::tempdir().unwrap();
-    let Some((_, url)) = fresh(backend, tmp.path(), "smallpool").await else {
+    let Some((_, url, _db)) = fresh(backend, tmp.path(), "smallpool").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };
@@ -1585,7 +1592,7 @@ async fn migrate_lock_held(backend: Backend, url: &str) -> bool {
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn lock_is_per_database(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
-    let (Some((a, a_url)), Some((b, _))) = (
+    let (Some((a, a_url, _a_db)), Some((b, _, _b_db))) = (
         fresh(backend, tmp.path(), "lockdba").await,
         fresh(backend, tmp.path(), "lockdbb").await,
     ) else {
@@ -1635,6 +1642,48 @@ async fn lock_is_per_database_mysql() {
     lock_is_per_database(Backend::Mysql).await;
 }
 
+/// #2222 — a test that panics still drops its database.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn panicking_test_drops_its_database(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_owned();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let test = tokio::spawn(async move {
+        let Some((_pool, url, _db)) = fresh(backend, &path, "panic").await else {
+            return;
+        };
+        tx.send(url).unwrap();
+        panic!("the test fails");
+    });
+    let ended = test.await;
+    let Ok(url) = rx.await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    assert!(ended.unwrap_err().is_panic());
+    let err = Pool::connect(&url)
+        .await
+        .err()
+        .expect("the database is left");
+    let err = err.to_string();
+    assert!(
+        err.contains("does not exist") || err.contains("Unknown database"),
+        "{err}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn panicking_test_drops_its_database_postgres() {
+    panicking_test_drops_its_database(Backend::Postgres).await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn panicking_test_drops_its_database_mysql() {
+    panicking_test_drops_its_database(Backend::Mysql).await;
+}
+
 /// A migrate under `with_lock_timeout` gives up on a held lock with a clear error.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn lock_timeout_gives_up(backend: Backend) {
@@ -1642,7 +1691,7 @@ async fn lock_timeout_gives_up(backend: Backend) {
     #[cfg(feature = "postgres")]
     const KEY: i64 = 0x5255_5354_4d49_4754;
     let tmp = tempfile::tempdir().unwrap();
-    let Some((pool, url)) = fresh(backend, tmp.path(), "locktimeout").await else {
+    let Some((pool, url, _db)) = fresh(backend, tmp.path(), "locktimeout").await else {
         eprintln!("skipping — backend URL unset");
         return;
     };

@@ -2679,7 +2679,7 @@ enum ParsedLookup {
 /// Map a date-transform suffix token to its scalar fn. `None` means
 /// the token is not a date transform, so the caller falls through to
 /// the comparison-suffix table.
-fn date_transform_fn(token: &str) -> Option<ScalarFn> {
+pub(crate) fn date_transform_fn(token: &str) -> Option<ScalarFn> {
     match token {
         "year" => Some(ScalarFn::ExtractYear),
         "month" => Some(ScalarFn::ExtractMonth),
@@ -2699,7 +2699,7 @@ fn date_transform_fn(token: &str) -> Option<ScalarFn> {
 /// date-transform lookups. This is a small subset of the full lookup
 /// grammar on purpose: LIKE, IN, IS NULL and regex make no sense on an
 /// extracted integer or date.
-fn date_compare_op(suffix: &str) -> Option<Op> {
+pub(crate) fn date_compare_op(suffix: &str) -> Option<Op> {
     match suffix {
         "exact" => Some(Op::Eq),
         "ne" => Some(Op::Ne),
@@ -3489,14 +3489,29 @@ fn resolve_date_transform(
             model: model.name,
             field: dt.field.clone(),
         })?;
-    Ok(WhereExpr::ExprCompare {
+    Ok(date_transform_where(
+        field.column,
+        dt.transform,
+        dt.op,
+        dt.value,
+    ))
+}
+
+/// `<transform>(column) <op> value`, shared with the ViewSet filters.
+pub(crate) fn date_transform_where(
+    column: &'static str,
+    transform: ScalarFn,
+    op: Op,
+    value: SqlValue,
+) -> WhereExpr {
+    WhereExpr::ExprCompare {
         lhs: Expr::Function {
-            kind: dt.transform,
-            args: vec![Expr::Column(field.column)],
+            kind: transform,
+            args: vec![Expr::Column(column)],
         },
-        op: dt.op,
-        rhs: Expr::Literal(dt.value),
-    })
+        op,
+        rhs: Expr::Literal(value),
+    }
 }
 
 fn resolve_assignment(

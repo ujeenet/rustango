@@ -116,21 +116,19 @@ impl Dialect for Postgres {
     }
 
     fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON COLUMN {}.{} IS '{}'",
+            "COMMENT ON COLUMN {}.{} IS {}",
             self.quote_ident(table),
             self.quote_ident(column),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 
     fn table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON TABLE {} IS '{}'",
+            "COMMENT ON TABLE {} IS {}",
             self.quote_ident(table),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 
@@ -143,17 +141,16 @@ impl Dialect for Postgres {
 
     // #344 — CITextField. Postgres ships the `citext` extension that
     // provides a case-insensitive text type; once the extension is
-    // installed, a `CITEXT` column compares case-insensitively. The
-    // companion `ci_text_extension_sql` emits the one-time
-    // `CREATE EXTENSION` prelude the migration runner threads in
-    // ahead of the first CITEXT CREATE TABLE.
+    // installed, a `CITEXT` column compares case-insensitively. Migrations
+    // run `ci_text_extension_sql` before the first CITEXT column (#2240).
+    // In `public`, so every tenant's `search_path` finds it (#2269).
     fn ci_text_type(&self, _max_length: Option<u32>) -> String {
         // CITEXT has no length parameter; `max_length` is advisory.
         "CITEXT".to_owned()
     }
 
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
-        Some("CREATE EXTENSION IF NOT EXISTS citext;")
+        Some("CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;")
     }
 
     // Postgres has a native `BOOLEAN` type with `TRUE` / `FALSE`
@@ -225,6 +222,25 @@ impl Dialect for Postgres {
     /// `true` is correct; the explicit override documents intent.)
     fn supports_op(&self, _op: Op) -> bool {
         true
+    }
+
+    /// `bigint ILIKE text` has no operator, so a non-text column is
+    /// cast first (#2229).
+    fn write_ilike_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        match ty {
+            Some(ty) if ty != FieldType::String => {
+                let cast = format!("CAST({qualified_col} AS TEXT)");
+                self.write_ilike(sql, &cast, placeholder, negated);
+            }
+            _ => self.write_ilike(sql, qualified_col, placeholder, negated),
+        }
     }
 
     fn write_conflict_clause(

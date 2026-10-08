@@ -208,6 +208,19 @@ How the templates differ inside `main.rs` / `urls.rs`:
 
 Settings load `config/default.toml` first, then `config/<RUSTANGO_ENV>_settings.toml` on top. `RUSTANGO_ENV` defaults to `dev`, so a freshly scaffolded `cargo run` works with no edits; set `RUSTANGO_ENV=prod` in production to pick up `prod_settings.toml`.
 
+### Settings that do not take effect on their own
+
+Not every key is read by the framework. `Cli::with_settings` warns at boot when one of the first group is set.
+
+| Key | Status |
+|---|---|
+| `[sso]` (every key) | No effect yet. Set up admin SSO in the admin UI. |
+| `[auth.jwt] issuer`, `audience` | No effect yet. |
+| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | No effect yet; only `check --deploy` reads them. |
+| `[database] url` | Not used to connect: every pool reads the `DATABASE_URL` env var. |
+| `[audit] retention_days` | Nothing prunes on it; schedule `audit-cleanup --days <N>`. |
+| `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]` TTLs, `[admin]` | User-wired: read only by the constructor you call (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
+
 ### First run
 
 ```sh
