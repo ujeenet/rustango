@@ -77,7 +77,7 @@ pub use executor::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
     UpdaterPool,
 };
-pub(crate) use executor::{bulk_insert_pks_tx, inserted_pk};
+pub(crate) use executor::{bulk_insert_pks_tx, fetch_in_chunks, inserted_pk};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted

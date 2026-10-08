@@ -82,14 +82,16 @@ where
         return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
     }
 
-    let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter_op(
-            child_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(parent_pks),
-        )
-        .fetch(pool)
-        .await?;
+    let children: Vec<C> = super::fetch_in_chunks(pool, parent_pks, |keys| {
+        crate::query::QuerySet::<C>::new()
+            .filter_op(
+                child_fk_column,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(keys),
+            )
+            .fetch(pool)
+    })
+    .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {
@@ -201,14 +203,18 @@ where
     // user already chained — preserves their order_by / limit /
     // existing filters. The IN-predicate AND-composes with the user's
     // WHERE clause (QuerySet default-ANDs raw filters).
-    let children: Vec<C> = child_qs
-        .filter_op(
-            child_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(parent_pks),
-        )
-        .fetch(pool)
-        .await?;
+    // Over the bind cap the keys go in batches; a `limit` then applies per batch.
+    let children: Vec<C> = super::fetch_in_chunks(pool, parent_pks, |keys| {
+        child_qs
+            .clone()
+            .filter_op(
+                child_fk_column,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(keys),
+            )
+            .fetch(pool)
+    })
+    .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {

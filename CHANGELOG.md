@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — bulk_update and IN-list prefetches past the bind cap (#2295)
+
+`Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists.
+
 ### Fixed — `values()` keeps JSON and bool types on MySQL and SQLite (#2296)
 
 MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I64` and `String`. All three now give `Json` and `Bool`.

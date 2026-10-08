@@ -91,6 +91,28 @@ pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
+/// Run `fetch` once per slice of `keys` that fits one `IN` list under the
+/// backend's bind cap, and concatenate the rows (#2295).
+pub(crate) async fn fetch_in_chunks<C, F, Fut>(
+    pool: &Pool,
+    keys: Vec<SqlValue>,
+    mut fetch: F,
+) -> Result<Vec<C>, ExecError>
+where
+    F: FnMut(Vec<SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params()).max(1);
+    if keys.len() <= budget {
+        return fetch(keys).await;
+    }
+    let mut out = Vec::new();
+    for chunk in keys.chunks(budget) {
+        out.extend(fetch(chunk.to_vec()).await?);
+    }
+    Ok(out)
+}
+
 /// True when a `select_related` LEFT JOIN under `alias` matched no row:
 /// the target's PK cell is NULL, so the FK stays unloaded (#2293).
 ///
@@ -1333,8 +1355,33 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let stmt = pool.dialect().compile_bulk_update(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    // Each row binds its PK plus one value per column; past the cap, batch (#2295).
+    let max_rows = (pool.dialect().max_bind_params() / (query.update_columns.len() + 1)).max(1);
+    let mut stmts = query
+        .rows
+        .chunks(max_rows)
+        .map(|chunk| {
+            let batch =
+                BulkUpdateQuery::new(query.model, query.update_columns.clone(), chunk.to_vec());
+            pool.dialect().compile_bulk_update(&batch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if stmts.len() == 1 && !atomic::in_block(pool) {
+        let stmt = stmts.remove(0);
+        return execute_pool(pool, &stmt.sql, stmt.params).await;
+    }
+    // All batches or none, like `bulk_insert_pool`.
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            let mut affected = 0;
+            for stmt in stmts {
+                affected += execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
+            }
+            Ok(affected)
+        })
+    })
+    .await
 }
 
 /// Run arbitrary SQL with bound `SqlValue` params; returns rows
@@ -2862,14 +2909,16 @@ where
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let rows = self
-            .filter_op(
-                C::COLUMN,
-                crate::core::Op::In,
-                crate::core::SqlValue::List(id_values),
-            )
-            .fetch(pool)
-            .await?;
+        let rows = fetch_in_chunks(pool, id_values, |keys| {
+            self.clone()
+                .filter_op(
+                    C::COLUMN,
+                    crate::core::Op::In,
+                    crate::core::SqlValue::List(keys),
+                )
+                .fetch(pool)
+        })
+        .await?;
         let mut out = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let key = extract(&row);

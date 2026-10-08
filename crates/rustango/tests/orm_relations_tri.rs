@@ -4,8 +4,8 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::Model as _;
-use rustango::sql::{FetcherPool as _, ForeignKey, Pool};
+use rustango::core::{BulkInsertQuery, Model as _, SqlValue};
+use rustango::sql::{bulk_insert_pool, CounterPool as _, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -37,6 +37,14 @@ pub struct Article {
     pub editor: Option<ForeignKey<Editor>>,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_row", app = "rel2293")]
+pub struct Row {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub n: i64,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, Article::SCHEMA.table).await;
@@ -44,6 +52,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Profile>(pool).await;
     fresh_table::<Editor>(pool).await;
     fresh_table::<Article>(pool).await;
+    fresh_table::<Row>(pool).await;
 }
 
 /// Article 1 has no editor; article 2 is edited by "Ada".
@@ -130,6 +139,41 @@ async fn shared_first_hop_joins_once(pool: &Pool) {
     assert_eq!(editor_name(&rows[1]), Some("Ada"));
 }
 
+/// Past every backend's bind cap: 33k rows x 2 binds, 70k `IN` keys.
+const ROWS: i64 = 33_000;
+
+async fn bulk_update_past_the_bind_cap(pool: &Pool) {
+    let rows: Vec<Vec<SqlValue>> = (0..ROWS).map(|i| vec![i.into(), 0_i64.into()]).collect();
+    bulk_insert_pool(
+        pool,
+        &BulkInsertQuery::new(Row::SCHEMA, vec!["id", "n"], rows),
+    )
+    .await
+    .expect("seed");
+    let objs: Vec<Row> = (0..ROWS).map(|id| Row { id, n: 7 }).collect();
+    let n = Row::bulk_update(&objs, &["n"], pool)
+        .await
+        .expect("bulk_update batches under the bind cap");
+    assert_eq!(n, ROWS as u64);
+    let sevens = Row::objects().filter("n", 7_i64).count(pool).await.unwrap();
+    assert_eq!(sevens, ROWS);
+}
+
+async fn in_bulk_past_the_bind_cap(pool: &Pool) {
+    let rows: Vec<Vec<SqlValue>> = (0..10).map(|i| vec![i.into(), i.into()]).collect();
+    bulk_insert_pool(
+        pool,
+        &BulkInsertQuery::new(Row::SCHEMA, vec!["id", "n"], rows),
+    )
+    .await
+    .expect("seed");
+    let got = Row::objects()
+        .in_bulk(Row::id, 0..70_000_i64, |r| r.id, pool)
+        .await
+        .expect("in_bulk batches its IN list");
+    assert_eq!(got.len(), 10);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -137,5 +181,7 @@ tri_dialect_test! {
         null_fk_multihop_select_related,
         null_fk_order_by_relation,
         shared_first_hop_joins_once,
+        bulk_update_past_the_bind_cap,
+        in_bulk_past_the_bind_cap,
     ],
 }
