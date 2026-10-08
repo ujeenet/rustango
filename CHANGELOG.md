@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — live tests drop the databases they create (#2222)
+
+A per-test database is now a guard that drops it at the end, also when the test fails.
+
+### Fixed — `migrate-tenant-storage` restore tests no longer drop shared extensions (#2223)
+
+They run against a private registry database, so other suites' `citext` / `hstore` columns survive.
 ### Fixed — ViewSet warns about a nullable cursor column (#2230)
 
 `cursor_pagination` on a nullable field logs an error at build time, and a NULL at a page end is a clear 500. 0.61.0 refuses the field (#2265).

@@ -14,6 +14,10 @@ use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};
 
 use tokio::sync::Mutex;
 
+#[path = "support/scratch_db.rs"]
+mod scratch_db;
+use scratch_db::ScratchDb;
+
 /// Suite-wide lock. Every test in this file resets the shared PG
 /// schema; under cargo's default parallel harness two tests would race
 /// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
@@ -253,7 +257,7 @@ async fn migrate_tenant_storage_rejects_unknown_slug() {
 #[tokio::test]
 async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     let _g = live_lock().lock().await;
-    let Some(pool) = pool().await else {
+    let Some(shared) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };
@@ -266,18 +270,15 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         eprintln!("skipping: pg_dump not on PATH");
         return;
     }
-    fresh(&pool).await;
-    let registry_url = std::env::var("DATABASE_URL").unwrap();
-    let drop_src = "DROP DATABASE IF EXISTS rustango_t1864_src WITH (FORCE)";
-    sqlx_exec(&pool, drop_src).await;
-    sqlx_exec(&pool, "CREATE DATABASE rustango_t1864_src").await;
-    sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t1864_moved CASCADE").await;
-    // So the move has to create them (#2210).
-    for ext in ["citext", "pg_trgm", "dblink", "earthdistance", "cube"] {
-        sqlx_exec(&pool, &format!("DROP EXTENSION IF EXISTS {ext} CASCADE")).await;
-    }
-    let (base, _) = registry_url.rsplit_once('/').unwrap();
-    let src_url = format!("{base}/rustango_t1864_src");
+    let shared_before = extensions(&shared).await;
+    let (registry, pool) = private_registry("rustango_t1864_reg").await;
+    let registry_url = registry.url().to_owned();
+    let src_db = ScratchDb::create(
+        &std::env::var("DATABASE_URL").unwrap(),
+        "rustango_t1864_src",
+    )
+    .await;
+    let src_url = src_db.url().to_owned();
     let mut org = Org {
         id: Auto::default(),
         slug: "t1864".into(),
@@ -324,6 +325,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
                 == 1
         }
     };
+    // A new registry lacks them, so the move has to create them (#2210).
+    for ext in ["citext", "pg_trgm", "dblink", "earthdistance", "cube"] {
+        assert!(!extension(ext).await, "the new registry has {ext}");
+    }
     // An untrusted extension the tenant uses is refused up front (#2210).
     let src = PgPool::connect(&src_url).await.unwrap();
     for stmt in [
@@ -395,18 +400,19 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         .unwrap();
     assert_eq!(moved[0].storage_mode, StorageMode::Schema.as_str());
     assert_eq!(moved[0].schema_name.as_deref(), Some("t1864_moved"));
-
-    sqlx_exec(&pool, "DROP SCHEMA t1864_moved CASCADE").await;
-    drop_extensions(&pool, &["citext", "pg_trgm"]).await;
-    sqlx_exec(&pool, drop_src).await;
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    pool.close().await;
+    assert_eq!(
+        extensions(&shared).await,
+        shared_before,
+        "shared DB touched"
+    );
 }
 
 /// #2189 — schema → database lands the rows in the new database's `public`.
 #[tokio::test]
 async fn migrate_tenant_storage_restores_rows_into_a_database() {
     let _g = live_lock().lock().await;
-    let Some(pool) = pool().await else {
+    let Some(shared) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };
@@ -419,12 +425,14 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         eprintln!("skipping: pg_dump not on PATH");
         return;
     }
-    fresh(&pool).await;
-    let registry_url = std::env::var("DATABASE_URL").unwrap();
-    let drop_dst = "DROP DATABASE IF EXISTS rustango_t2189_dst WITH (FORCE)";
-    sqlx_exec(&pool, drop_dst).await;
-    sqlx_exec(&pool, "CREATE DATABASE rustango_t2189_dst").await;
-    sqlx_exec(&pool, "DROP SCHEMA IF EXISTS t2189_src CASCADE").await;
+    let shared_before = extensions(&shared).await;
+    let (registry, pool) = private_registry("rustango_t2189_reg").await;
+    let registry_url = registry.url().to_owned();
+    let dst_db = ScratchDb::create(
+        &std::env::var("DATABASE_URL").unwrap(),
+        "rustango_t2189_dst",
+    )
+    .await;
     // Extension types and opclasses move too (#2210).
     for stmt in [
         "CREATE EXTENSION IF NOT EXISTS citext",
@@ -439,8 +447,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     ] {
         sqlx_exec(&pool, stmt).await;
     }
-    let (base, _) = registry_url.rsplit_once('/').unwrap();
-    let dst_url = format!("{base}/rustango_t2189_dst");
+    let dst_url = dst_db.url().to_owned();
     let mut org = Org {
         id: Auto::default(),
         slug: "t2189".into(),
@@ -527,24 +534,32 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         .unwrap();
     assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
     assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
-
-    sqlx_exec(&pool, "DROP SCHEMA t2189_src CASCADE").await;
-    drop_extensions(&pool, &["citext", "pg_trgm", "hstore"]).await;
-    sqlx_exec(&pool, drop_dst).await;
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    pool.close().await;
+    assert_eq!(
+        extensions(&shared).await,
+        shared_before,
+        "shared DB touched"
+    );
 }
 
 async fn sqlx_exec(pool: &PgPool, sql: &str) {
     rustango::sql::sqlx::query(sql).execute(pool).await.unwrap();
 }
 
-/// Drop extensions this test installed, unless another suite on the
-/// shared test DB still uses them (e.g. `hstore_field_pg_live`).
-async fn drop_extensions(pool: &PgPool, exts: &[&str]) {
-    for ext in exts {
-        let sql = format!("DROP EXTENSION IF EXISTS {ext}");
-        let _ = rustango::sql::sqlx::query(&sql).execute(pool).await;
-    }
+/// A migrated registry of the test's own: other suites' extensions on the
+/// shared DB stay out of reach (#2223).
+async fn private_registry(prefix: &str) -> (ScratchDb, PgPool) {
+    let db = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), prefix).await;
+    let pool = PgPool::connect(db.url()).await.unwrap();
+    rustango::migrate::apply_all(&pool).await.unwrap();
+    (db, pool)
+}
+
+async fn extensions(pool: &PgPool) -> Vec<String> {
+    rustango::sql::sqlx::query_scalar("SELECT extname::text FROM pg_extension ORDER BY 1")
+        .fetch_all(pool)
+        .await
+        .unwrap()
 }
 
 // Suppress unused-import warning when the file's only consumer
