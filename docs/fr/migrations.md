@@ -36,9 +36,15 @@ Ses fichiers sont générés depuis les modèles compilés du framework — et i
 **conscients de `#[cfg(feature = …)]`** : une colonne ou une table protégée par feature est
 retirée par le compilateur lorsque la feature est désactivée, si bien qu'activer une feature fait
 émettre à `makemigrations` un `AddColumn` / `CreateTable` et la désactiver
-émet un `DropColumn` / `DropTable`. Les projets tenant échafaudés livrent un
+émet un `DropColumn` / `DropTable`. Les projets échafaudés livrent un
 `system/migrations/` **vide** ; le premier `cargo run -- migrate`
 le génère et l'applique (voir [scaffolding](scaffolding.md)).
+
+**Commitez `system/migrations/` et déployez-le avec le binaire**, comme le
+fait le `Dockerfile` échafaudé. Les noms régénérés dépendent des features et
+de la version : quand le dossier est vide, `migrate` ignore donc les noms du
+registre. Il crée les tables et colonnes du framework qui manquent à la base,
+puis enregistre la nouvelle chaîne. Il ne supprime jamais rien sur ce chemin.
 
 `migrate` applique la chaîne système **avant** les migrations de votre projet.
 En mode tenancy, les deux périmètres se chevauchent délibérément sur les tables partagées
@@ -51,12 +57,19 @@ sans tenancy. Les applications sans tenancy qui utilisent un sous-système du fr
 
 ## Réconciliation de squash — `Migration.replaces`
 
-Un **squash** effondre une série de migrations historiques en un seul fichier fraîchement
+Un **squash** effondre une série de migrations en un seul fichier fraîchement
 généré qui recrée le même état final — pratique quand une pile de
-migrations à moitié terminées est plus facile à régénérer qu'à corriger. Le hic :
-les `CREATE TABLE` du fichier entreraient en collision sur toute base de données ayant déjà
-appliqué les migrations qu'il a effondrées (le checkout d'un collègue, la staging,
-la CI).
+migrations à moitié terminées est plus facile à régénérer qu'à corriger.
+
+**Il n'effondre jamais que des migrations *en attente*.** `migrate --squash` filtre
+le répertoire sur les fichiers que le registre n'a pas appliqués : tout ce qui a déjà
+tourné sur cette base reste intact, et sans migration en attente la commande ne fait rien.
+Le mot « historique » serait trompeur ici — un squash est un outil d'itération en
+développement, pour des migrations que vous n'avez pas encore livrées.
+
+Le hic : les `CREATE TABLE` du fichier généré entreraient encore en collision sur toute
+base de données ayant *déjà* appliqué les migrations qu'il a effondrées (le checkout
+d'un collègue, la staging, la CI).
 
 `migrate --squash` résout cela en estampillant la liste **`replaces`** du nouveau fichier
 avec les noms qu'il a effondrés :
@@ -130,6 +143,11 @@ chaîne système du framework effectue la réparation « créer celles qui manqu
 ---
 
 ## Réparer un dérive à la main — `migrate --fake`
+
+> **Nécessite la feature `tenancy`.** `--fake`, `--system` et `--all-tenants`
+> ne sont analysés que par le répartiteur tenancy. Sur un build mono-tenant,
+> le verbe `migrate` accepte une cible positionnelle, `--dry-run` et `--squash`,
+> et rejette tout le reste avec `unknown flag`.
 
 Lorsque la base de données est déjà dans l'état cible mais que le registre ne le
 sait pas (une BDD montée hors-bande, un registre supprimé, une migration partiellement

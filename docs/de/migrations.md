@@ -36,9 +36,15 @@ Ihre Dateien werden aus den kompilierten Framework-Modellen generiert — und si
 **`#[cfg(feature = …)]`-bewusst**: eine feature-gegatete Spalte oder Tabelle wird vom
 Compiler entfernt, wenn das Feature aus ist, sodass das Aktivieren eines Features
 `makemigrations` ein `AddColumn` / `CreateTable` emittieren lässt und das Deaktivieren
-ein `DropColumn` / `DropTable` emittiert. Aufgescaffoldete Tenant-Projekte liefern ein
+ein `DropColumn` / `DropTable` emittiert. Aufgescaffoldete Projekte liefern ein
 **leeres** `system/migrations/`; das erste `cargo run -- migrate`
 generiert und wendet es an (siehe [Scaffolding](scaffolding.md)).
+
+**Committen Sie `system/migrations/` und deployen Sie es mit dem Binary**, wie
+es das gescaffoldete `Dockerfile` tut. Regenerierte Namen hängen von Features
+und Version ab; ist der Ordner leer, ignoriert `migrate` daher die Namen im
+Ledger. Es legt die Framework-Tabellen und -Spalten an, die der Datenbank
+fehlen, und verbucht dann die neue Kette. Auf diesem Weg löscht es nie etwas.
 
 `migrate` wendet die System-Kette **vor** den Migrationen Ihres Projekts an.
 Im Tenancy-Modus überlappen sich die beiden Scopes absichtlich bei den geteilten
@@ -51,12 +57,19 @@ ohne Tenancy. Nicht-Tenancy-Anwendungen, die ein Framework-Subsystem verwenden (
 
 ## Squash-Reconciliation — `Migration.replaces`
 
-Ein **Squash** kollabiert eine Reihe historischer Migrationen in eine einzige frisch
+Ein **Squash** kollabiert eine Reihe von Migrationen in eine einzige frisch
 generierte Datei, die denselben Endzustand nachbildet — praktisch, wenn ein Stapel
-halbfertiger Migrationen leichter neu zu generieren als zu reparieren ist. Der Haken:
-die `CREATE TABLE`s der Datei würden auf jeder Datenbank kollidieren, die die Migrationen,
-die sie kollabiert hat, bereits angewandt hat (der Checkout eines Kollegen, Staging,
-CI).
+halbfertiger Migrationen leichter neu zu generieren als zu reparieren ist.
+
+**Er kollabiert immer nur *ausstehende* Migrationen.** `migrate --squash` filtert
+das Verzeichnis auf die Dateien, die das Ledger nicht angewandt hat; was auf dieser
+Datenbank schon gelaufen ist, bleibt also unberührt, und ohne ausstehende Migrationen
+tut der Befehl nichts. Das Wort „historisch“ führt hier in die Irre — ein Squash ist
+ein Werkzeug für die Entwicklung, für Migrationen, die Sie noch nicht ausgeliefert haben.
+
+Der Haken: die `CREATE TABLE`s der generierten Datei würden trotzdem auf jeder
+Datenbank kollidieren, die die kollabierten Migrationen *bereits* angewandt hat (der
+Checkout eines Kollegen, Staging, CI).
 
 `migrate --squash` löst das, indem es die **`replaces`**-Liste der neuen Datei mit
 den Namen stempelt, die sie kollabiert hat:
@@ -130,6 +143,11 @@ System-Kette des Frameworks führt die stückweise „erstelle die fehlenden“-
 ---
 
 ## Drift von Hand reparieren — `migrate --fake`
+
+> **Benötigt das Feature `tenancy`.** `--fake`, `--system` und `--all-tenants`
+> werden nur vom Tenancy-Dispatcher ausgewertet. In einem Single-Tenant-Build
+> nimmt das Verb `migrate` ein positionales Ziel, `--dry-run` und `--squash`
+> und lehnt alles andere mit `unknown flag` ab.
 
 Wenn die Datenbank bereits im Zielzustand ist, aber das Ledger es nicht
 weiß (eine außerhalb der Reihe aufgesetzte DB, ein gelöschtes Ledger, eine teilweise

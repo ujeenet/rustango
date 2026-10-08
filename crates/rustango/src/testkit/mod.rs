@@ -367,12 +367,9 @@ pub fn assert_strict_csp_html(html: &str, nonce: &str, what: &str) {
 /// Forget this process's cached host-table fingerprint.
 ///
 /// `RegisteredHostResolver` polls a fingerprint of `rustango_org_hosts` so
-/// one pod notices another pod's write. That state is process-global and
-/// keyed by nothing, so a test that resolves against one registry leaves a
-/// fingerprint behind that the next test's brand-new registry compares
-/// against — producing a spurious cache invalidation mid-test. Unlike the
-/// resolution cache, it cannot be side-stepped by using distinct hostnames
-/// per test.
+/// one pod notices another pod's write. That state is kept per registry
+/// pool; this resets it for every registry, so a test that reuses one pool
+/// starts from a clean fingerprint.
 ///
 /// Call this in any test that resolves through `RegisteredHostResolver`,
 /// alongside `invalidate_host_cache()`.

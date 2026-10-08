@@ -1062,6 +1062,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
@@ -1311,11 +1312,13 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_filters_tri
       - run: cargo test -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
       - run: cargo test -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
