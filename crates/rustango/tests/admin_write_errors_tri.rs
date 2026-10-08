@@ -187,7 +187,13 @@ async fn deleting_a_referenced_row_is_a_409(pool: &Pool) {
     ] {
         let (status, body) = post(pool, &uri, &form).await;
         assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body}");
-        assert!(body.contains("wrerr_child"), "{uri}: {body}");
+        // Only PG's error names the table; elsewhere the 409 hedges.
+        let by = if pool.backend_name() == "postgres" {
+            "by rows in wrerr_child"
+        } else {
+            "by other rows, possibly in wrerr_child"
+        };
+        assert!(body.contains(by), "{uri}: {body}");
         assert_eq!(parent_count(pool).await, 1, "{uri}");
     }
     // A table the user cannot open in the admin is not named.
