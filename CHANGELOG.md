@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `i18n::middleware` gated on axum too (#2329)
+
+A build with `_tower` and without `_axum` failed to compile.
+
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 
 The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres. Its echoed command now includes `--rustango-path`.

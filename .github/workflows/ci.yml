@@ -795,6 +795,8 @@ jobs:
           - sqlite,manage,config
           # `config` without `manage` left the settings setters dead (#1948).
           - mysql,tenancy,config,email
+          # `_tower` without `_axum` broke `i18n::middleware` (#2329).
+          - sqlite,_tower
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
