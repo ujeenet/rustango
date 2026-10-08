@@ -598,13 +598,15 @@ fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     let Ok(mut cache) = raw_key_cache().lock() else {
         return;
     };
-    if cache.len() >= RAW_KEY_CACHE_CAP {
-        // Drop the expired entries first. If that is not enough,
-        // clear the lot: this is only an optimization, and refilling
-        // costs one Argon2 per key.
+    if cache.len() >= RAW_KEY_CACHE_CAP && !cache.contains_key(&key) {
+        // Drop the expired entries first, then the oldest one; a full
+        // clear would send every active key back to Argon2 (#2301).
         cache.retain(|_, (_, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
         if cache.len() >= RAW_KEY_CACHE_CAP {
-            cache.clear();
+            let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
         }
     }
     cache.insert(key, (agent_id, std::time::Instant::now()));
@@ -962,6 +964,27 @@ mod tests {
              paths call this so the next request re-runs Argon2 rather \
              than repeating the same refusal for the rest of the TTL",
         );
+    }
+
+    /// #2301 — a full cache drops its oldest entry, not every entry.
+    #[test]
+    fn a_full_cache_evicts_only_the_oldest() {
+        let _g = cache_lock();
+        raw_key_cache().lock().unwrap().clear();
+        let keys: Vec<_> = (0..=RAW_KEY_CACHE_CAP)
+            .map(|i| raw_key_cache_key("acme", &format!("pfx.{i}")))
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            raw_key_cache_put(*key, i as i64);
+        }
+        assert_eq!(raw_key_cache_get(&keys[0]), None, "oldest stays cached");
+        for (i, key) in keys.iter().enumerate().skip(1) {
+            assert_eq!(raw_key_cache_get(key), Some(i as i64), "entry {i} evicted");
+        }
+        // Re-putting a cached key at the cap evicts nothing.
+        raw_key_cache_put(keys[1], 1);
+        assert_eq!(raw_key_cache_get(&keys[2]), Some(2));
+        raw_key_cache().lock().unwrap().clear();
     }
 
     #[test]

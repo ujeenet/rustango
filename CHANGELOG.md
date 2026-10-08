@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MCP raw-key cache evicts its oldest entry, not all of them (#2301)
+
 ### Fixed — `InMemoryCache::clear` resets the pinned budget (#2302)
 
 ### Fixed — MCP `rate_limit_per_minute = 0` is unlimited again (#2299)
