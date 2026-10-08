@@ -2669,6 +2669,13 @@ async fn fk_index_drops(pool: &Pool) {
     let (a, b) = ("mad_fi_author", "mad_fi_book");
     let chain = fk_index_chain(pool, "fi", a, b).await;
     let book = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    // A failed run left the FK dropped; the step still brings it back.
+    if pool.dialect().name() == "mysql" {
+        let fk_name = rustango::migrate::ddl::fk_constraint_name(b, "author_id");
+        exec(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk_name])
+            .await
+            .unwrap();
+    }
     let dropped = chain
         .step(pool, json!({"tables": [table(a, vec![id()]), book]}))
         .await

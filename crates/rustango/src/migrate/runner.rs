@@ -2862,9 +2862,11 @@ impl IndexFks {
         drops: &mut Vec<String>,
     ) -> Option<(String, bool)> {
         let fate = self.fate(column);
-        if names.is_empty() || matches!(fate, FkFate::Keep) {
+        if matches!(fate, FkFate::Keep) {
             return None;
         }
+        // `names` are the live ones; none means a failed run dropped it, so
+        // the declared FK still comes back.
         drops.extend(
             names
                 .iter()
