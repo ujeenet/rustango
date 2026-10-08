@@ -117,6 +117,29 @@ impl Cache for RedisCache {
         Ok(reply.is_some())
     }
 
+    /// `PEXPIRE` / `PERSIST` never create a key, so a racing `delete` stays deleted (#2300).
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let mut conn = self.conn.clone();
+        let err = |e: redis::RedisError| CacheError::Connection(e.to_string());
+        match self.effective_ttl_ms(ttl) {
+            Some(ms) => redis::cmd("PEXPIRE")
+                .arg(key)
+                .arg(ms)
+                .query_async::<bool>(&mut conn)
+                .await
+                .map_err(err),
+            // PERSIST answers 0 for a key without a TTL too, so ask EXISTS.
+            None => {
+                redis::cmd("PERSIST")
+                    .arg(key)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(err)?;
+                conn.exists::<_, bool>(key).await.map_err(err)
+            }
+        }
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         conn.del::<_, ()>(key)

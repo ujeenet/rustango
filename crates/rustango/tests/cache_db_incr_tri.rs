@@ -172,9 +172,43 @@ async fn long_table_names_get_distinct_indexes(pool: &Pool) {
     }
 }
 
+/// #2300 — `touch` extends a live row only; a missing or expired one stays gone.
+async fn touch_extends_only_live_rows(pool: &Pool) {
+    let cache = fresh(pool, "rustango_cache_touch").await;
+    assert!(!cache.touch("absent", None).await.unwrap());
+    assert_eq!(
+        cache.get("absent").await.unwrap(),
+        None,
+        "touch created a row"
+    );
+
+    let short = Some(Duration::from_millis(300));
+    cache.set("live", "v", short).await.unwrap();
+    assert!(cache
+        .touch("live", Some(Duration::from_secs(60)))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(cache.get("live").await.unwrap().as_deref(), Some("v"));
+
+    cache.set("old", "v", short).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !cache.touch("old", None).await.unwrap(),
+        "expired row touched"
+    );
+    assert_eq!(cache.get("old").await.unwrap(), None);
+
+    // An unchanged `expires` still reports the row (MySQL counts changed rows by default).
+    cache.set("forever", "v", None).await.unwrap();
+    assert!(cache.touch("forever", None).await.unwrap());
+    let _ = cache.drop_table().await;
+}
+
 tri_dialect_test! {
     setup: noop,
     scenarios: [
+        touch_extends_only_live_rows,
         parallel_incr_loses_nothing,
         incr_ttl_and_reset,
         incr_overflow_is_an_error,

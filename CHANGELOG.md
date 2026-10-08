@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `SessionStore::touch` cannot revive a session after logout (#2300)
+
+It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock.
+
 ### Fixed — MCP SSE stream ends when its JWT is revoked (#2303)
 
 ### Fixed — MCP raw-key cache evicts its oldest entry, not all of them (#2301)
