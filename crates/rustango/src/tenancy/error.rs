@@ -54,3 +54,10 @@ pub enum TenancyError {
     #[error("password hashing is busy")]
     Busy,
 }
+
+impl TenancyError {
+    /// The text of an error the operator can act on; `None` for a cause to withhold (#2171).
+    pub(crate) fn user_facing(&self) -> Option<String> {
+        matches!(self, Self::Validation(_) | Self::Busy).then(|| self.to_string())
+    }
+}

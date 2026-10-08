@@ -22,67 +22,6 @@ use super::provision_store::{self as store, RunState};
 use crate::core::Column as _;
 use crate::sql::FetcherPool as _;
 
-/// One event, flattened for the run's event table.
-struct Row {
-    step: String,
-    status: String,
-    message: String,
-}
-
-fn flatten(event: &TenantMigrationEvent) -> Row {
-    match event {
-        TenantMigrationEvent::Planned { tenants } => Row {
-            step: "plan".into(),
-            status: "info".into(),
-            message: format!("{tenants} tenant(s) to migrate"),
-        },
-        TenantMigrationEvent::TenantStarted { slug, index, total } => Row {
-            step: "tenant".into(),
-            status: "started".into(),
-            message: format!("{slug} ({index}/{total})"),
-        },
-        TenantMigrationEvent::Migration { slug, chain, event } => Row {
-            step: "migration".into(),
-            status: "info".into(),
-            message: format!("{slug} {}: {}", chain_name(*chain), describe(event)),
-        },
-        TenantMigrationEvent::TenantFinished {
-            slug,
-            applied,
-            error,
-            ..
-        } => error.as_ref().map_or_else(
-            || Row {
-                step: "tenant".into(),
-                status: "ok".into(),
-                message: format!("{slug}: {applied} applied"),
-            },
-            |e| Row {
-                step: "tenant".into(),
-                status: "failed".into(),
-                message: format!("{slug}: {e}"),
-            },
-        ),
-    }
-}
-
-const fn chain_name(chain: tenant_migrate::Chain) -> &'static str {
-    match chain {
-        tenant_migrate::Chain::System => "system",
-        tenant_migrate::Chain::Project => "app",
-    }
-}
-
-fn describe(event: &crate::migrate::MigrationEvent) -> String {
-    use crate::migrate::MigrationEvent as E;
-    match event {
-        E::Planned { total } => format!("{total} pending"),
-        E::Started { name, .. } => format!("{name} started"),
-        E::Finished { name, outcome, .. } => format!("applied {name} ({outcome:?})"),
-        E::Failed { name, error, .. } => format!("{name} failed: {error}"),
-    }
-}
-
 /// Migrate one tenant, or every active one, recording into `run_id`.
 ///
 /// `slug` picks a single tenant; `None` migrates the active batch.
@@ -106,20 +45,16 @@ where
 
     // The observer is synchronous and runs inside the migrate lock, so
     // it hands events off rather than writing them.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Row>();
+    // One log for the run, so each failure is logged once (#2212).
+    let log = std::sync::Arc::new(store::RunLog::new(run_id));
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(&'static str, &'static str, store::RunText)>();
     let writer_registry = registry.clone();
     let writer = tokio::spawn(async move {
         let mut seq = 1i64;
-        while let Some(row) = rx.recv().await {
-            if let Err(e) = store::append_event(
-                &writer_registry,
-                run_id,
-                seq,
-                &row.step,
-                &row.status,
-                &row.message,
-            )
-            .await
+        while let Some((step, status, text)) = rx.recv().await {
+            if let Err(e) =
+                store::append_event_text(&writer_registry, run_id, seq, step, status, &text).await
             {
                 tracing::warn!(
                     target: "rustango::tenancy::migrate_run",
@@ -131,10 +66,11 @@ where
         }
     });
 
+    let observer_log = log.clone();
     let observer = move |event: TenantMigrationEvent| {
         // A closed receiver means the writer died; the migration is
         // still worth finishing.
-        let _ = tx.send(flatten(&event));
+        let _ = tx.send(observer_log.migration(&event));
     };
 
     let result = match slug {
@@ -158,8 +94,12 @@ where
     } else {
         RunState::Failed
     };
-    let error = result.as_ref().err().map(ToString::to_string);
-    if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
+    // Operator-safe, like the event rows (#2209).
+    let error = result
+        .as_ref()
+        .err()
+        .map(|e| log.failure(slug.unwrap_or(""), "Migration failed", e));
+    if let Err(e) = store::finish_run_text(&registry, run_id, state, error.as_ref()).await {
         tracing::warn!(
             target: "rustango::tenancy::migrate_run",
             run_id, error = %e,

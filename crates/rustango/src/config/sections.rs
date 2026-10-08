@@ -198,7 +198,7 @@ impl McpSettings {
 /// # client_secret = ""       # prefer the RUSTANGO__SSO__CLIENT_SECRET env overlay
 /// # redirect_uri = ""        # must match the mounted /login/sso/{provider}/callback
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SsoSettings {
     /// Shows the "Sign in with …" button on the admin login page.
@@ -234,7 +234,7 @@ impl SsoSettings {
 }
 
 /// Connection URL + pool sizing for the primary database.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatabaseSettings {
     /// Connection URL. Needed at runtime, but the loader does not
@@ -389,7 +389,7 @@ pub struct TenancySettings {
 }
 
 /// Which cache backend to build.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CacheSettings {
     /// One of `"memory"` (the default), `"null"` / `"none"`,
@@ -424,7 +424,7 @@ pub struct JobsSettings {
 }
 
 /// Mailer.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MailSettings {
     /// `"smtp"`, `"console"` (the dev default) or `"memory"` (tests).
@@ -803,9 +803,100 @@ pub struct I18nSettings {
     pub fallback_chain: Vec<String>,
 }
 
+/// `Some("<redacted>")` for a set secret: `{:?}` of the settings must not print it.
+fn redacted(v: &Option<String>) -> Option<&'static str> {
+    v.as_ref().map(|_| "<redacted>")
+}
+
+/// A URL with its password masked.
+fn redacted_url(v: &Option<String>) -> Option<String> {
+    v.as_deref().map(crate::sql::connect_diagnosis::redact)
+}
+
+impl std::fmt::Debug for SsoSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoSettings")
+            .field("enabled", &self.enabled)
+            .field("provider", &self.provider)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &redacted(&self.client_secret))
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DatabaseSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseSettings")
+            .field("url", &redacted_url(&self.url))
+            .field("backend", &self.backend)
+            .field("pool_max_size", &self.pool_max_size)
+            .field("pool_min_size", &self.pool_min_size)
+            .field("pool_acquire_timeout_secs", &self.pool_acquire_timeout_secs)
+            .field("pool_idle_timeout_secs", &self.pool_idle_timeout_secs)
+            .field("pool_max_lifetime_secs", &self.pool_max_lifetime_secs)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for CacheSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheSettings")
+            .field("backend", &self.backend)
+            .field("redis_url", &redacted_url(&self.redis_url))
+            .field("file_cache_dir", &self.file_cache_dir)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MailSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailSettings")
+            .field("backend", &self.backend)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &redacted(&self.smtp_password))
+            .field("smtp_tls", &self.smtp_tls)
+            .field("smtp_timeout_secs", &self.smtp_timeout_secs)
+            .field("from_address", &self.from_address)
+            .field("server_email", &self.server_email)
+            .field("email_subject_prefix", &self.email_subject_prefix)
+            .field("admins", &self.admins)
+            .field("managers", &self.managers)
+            .field("file_email_dir", &self.file_email_dir)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `{:?}` of the whole settings prints no secret.
+    #[test]
+    fn settings_debug_redacts_every_secret() {
+        let mut s = Settings::default();
+        s.database.url = Some("postgres://app:DBSECRET@db/app?password=QSECRET".into());
+        s.sso.client_secret = Some("SSOSECRET".into());
+        s.cache.redis_url = Some("redis://:REDISSECRET@cache:6379/0".into());
+        s.mail.smtp_password = Some("SMTPSECRET".into());
+        let dbg = format!("{s:?} {s:#?}");
+        for secret in [
+            "DBSECRET",
+            "QSECRET",
+            "SSOSECRET",
+            "REDISSECRET",
+            "SMTPSECRET",
+        ] {
+            assert!(!dbg.contains(secret), "{secret} in {dbg}");
+        }
+        assert!(
+            dbg.contains("db/app") && dbg.contains("cache:6379"),
+            "{dbg}"
+        );
+    }
 
     #[test]
     fn resolved_backend_uses_explicit_value() {

@@ -180,7 +180,7 @@
 </fieldset>
 
 <script nonce="{{ csp_nonce }}">
-  // Drops the returned fragment in place, so an operator can check a
+  // Shows the probe result in place, so an operator can check a
   // tenant without losing unsaved edits to a page reload. The URL is
   // resolved server-side and never sent here — it carries a password.
   document.getElementById("test-connection").addEventListener("click", async (e) => {
@@ -192,7 +192,7 @@
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken() },
       });
-      out.innerHTML = await res.text();
+      await showProbe(out, res);
     } catch (err) {
       out.textContent = "could not reach the console: " + err;
     } finally {

@@ -5,7 +5,7 @@
 //!
 //! The integration suite is shaped by dialect rather than by feature
 //! (#1461). Of 202 `*_sqlite_live.rs` files, 17 stems have a sibling
-//! file for another backend and **185 have no MySQL or PG counterpart at
+//! file for another backend and **184 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
 //! The `orm_*` scenario files already solved this for eight features;
@@ -773,8 +773,10 @@ mod tests {
     /// for connection sharing. Those suites may be simplifiable; that
     /// is a separate question and wants its own evidence.
     ///
-    /// The invariant asserted is still worth holding: concurrent
-    /// writers on distinct connections land in one database.
+    /// The invariant asserted is still worth holding: writers on distinct
+    /// connections, all held at once, land in one database. They write in
+    /// turn: racing the write lock hit `database is locked` on Windows CI
+    /// even with the 5 s busy timeout (#2205).
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_file_backed_pool_is_one_database_across_connections() {
@@ -786,18 +788,21 @@ mod tests {
         fresh_table::<Row>(&pool).await;
 
         let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let turn = Arc::new(tokio::sync::Mutex::new(()));
         let mut tasks = Vec::new();
         for i in 0..N {
             let pool = pool.clone();
             let barrier = Arc::clone(&barrier);
+            let turn = Arc::clone(&turn);
             tasks.push(tokio::spawn(async move {
-                let crate::sql::Pool::Sqlite(sq) = &pool else {
-                    unreachable!("sqlite_file_pool returns a SQLite pool")
-                };
+                let sq = pool
+                    .as_sqlite()
+                    .expect("sqlite_file_pool returns a SQLite pool");
                 // Hold a connection, and do not let go until every task
                 // holds one too.
                 let mut conn = sq.acquire().await.expect("acquire");
                 barrier.wait().await;
+                let _turn = turn.lock().await;
                 sqlx::query("INSERT INTO matrix_selftest_row (label) VALUES (?)")
                     .bind(format!("row-{i}"))
                     .execute(&mut *conn)

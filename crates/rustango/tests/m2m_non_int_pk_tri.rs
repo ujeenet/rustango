@@ -330,7 +330,7 @@ async fn uuid_destination_keys_round_trip(pool: &Pool) {
     want.sort_unstable();
     assert_eq!(got, want);
     #[cfg(feature = "sqlite")]
-    if let Pool::Sqlite(sq) = pool {
+    if let Some(sq) = pool.as_sqlite() {
         let c = uuid::Uuid::new_v4();
         rustango::sql::sqlx::query(
             "INSERT INTO m2m1926_rack_badge (rack_id, badge_id) VALUES (2, ?)",
