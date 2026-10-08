@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — makemigrations sees `case_insensitive`, `db_comment` and `generated_as` changes (#2239)
+
+A `case_insensitive` change is an `AlterColumnType`, a comment change the new `AlterColumnComment` op, and a `generated_as` change is refused like a primary-key change.
+
 ### Fixed — PG length and type changes keep a column CITEXT (#2238)
 
 `AlterColumnMaxLength` and `AlterColumnType` on a case-insensitive field write `CITEXT`, not `VARCHAR`/`TEXT`, so it keeps ignoring case.

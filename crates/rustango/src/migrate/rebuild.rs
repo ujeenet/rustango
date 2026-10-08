@@ -360,6 +360,9 @@ fn shape_at(
             SC::AlterColumnMaxLength { column, from, .. } => {
                 field(&mut t, column)?.max_length = *from;
             }
+            SC::AlterColumnComment { column, from, .. } => {
+                field(&mut t, column)?.db_comment.clone_from(from);
+            }
             SC::AlterColumnUnique { column, unique, .. } => {
                 field(&mut t, column)?.unique = !unique;
             }

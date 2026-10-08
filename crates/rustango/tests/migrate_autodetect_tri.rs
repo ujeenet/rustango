@@ -2226,9 +2226,101 @@ async fn assert_ci_equal(pool: &Pool, t: &str, column: &str) {
     );
 }
 
+// ---------------------------------------------------------------- #2239
+
+/// Turning `case_insensitive` on and off reaches the column; makemigrations
+/// wrote nothing for it.
+async fn case_insensitive_change_applies(pool: &Pool) {
+    let t = "mad_cf_user";
+    let chain = Chain::new(pool, "cif", &[t]).await;
+    let email = |ci: bool| {
+        json!({"tables": [table(t, vec![id(), col("email", "string",
+            json!({"max_length": 10, "case_insensitive": ci, "unique": true}))])]})
+    };
+    chain.step(pool, email(false)).await.expect("initial");
+    chain.step(pool, email(true)).await.expect("turned on");
+    assert_ci_unique(pool, t, "email").await;
+    chain.step(pool, email(false)).await.expect("turned off");
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'A@x.com')",
+        &[t, "id", "email"],
+    )
+    .await
+    .unwrap();
+    let other_case = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (2, 'a@X.COM')",
+        &[t, "id", "email"],
+    )
+    .await;
+    let distinct = by_dialect! { pool,
+        postgres => true, because "VARCHAR compares case-sensitively",
+        mysql => false, because "the database's default collation ignores case",
+        sqlite => true, because "the rebuilt column has no NOCASE",
+    };
+    assert_eq!(other_case.is_ok(), distinct.value, "{}", distinct.why);
+    let long = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (3, 'abcdefghijk')",
+        &[t, "id", "email"],
+    )
+    .await;
+    let enforced = by_dialect! { pool,
+        postgres => true, because "the column is VARCHAR(10) again, not TEXT",
+        mysql => true, because "the column is VARCHAR(10)",
+        sqlite => false, because "SQLite never enforces VARCHAR length",
+    };
+    assert_eq!(long.is_err(), enforced.value, "{}", enforced.why);
+}
+
+/// The column comment the catalog holds; `None` on SQLite.
+async fn column_comment(pool: &Pool, t: &str, column: &str) -> Option<String> {
+    let sql = match pool.dialect().name() {
+        "postgres" => format!(
+            "SELECT COALESCE(col_description('{t}'::regclass, ordinal_position::int), '') \
+             FROM information_schema.columns WHERE table_name = '{t}' AND column_name = '{column}' \
+             AND table_schema = current_schema()"
+        ),
+        "mysql" => format!(
+            "SELECT CAST(COLUMN_COMMENT AS CHAR) FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}' AND COLUMN_NAME = '{column}'"
+        ),
+        _ => return None,
+    };
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    Some(got[0].0.clone())
+}
+
+/// A `db_comment` change is applied, replaced, dropped and unapplied.
+async fn db_comment_change_applies(pool: &Pool) {
+    let t = "mad_cm_item";
+    let chain = Chain::new(pool, "cm", &[t]).await;
+    let with = |comment: Option<&str>| json!({"tables": [table(t, vec![id(), col("c", "i64", json!({"db_comment": comment}))])]});
+    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    chain.step(pool, with(None)).await.expect("initial");
+    chain.step(pool, with(Some("first"))).await.expect("added");
+    assert_eq!(column_comment(pool, t, "c").await, expect("first"));
+    let name = chain
+        .step(pool, with(Some("it's second")))
+        .await
+        .expect("changed");
+    assert_eq!(column_comment(pool, t, "c").await, expect("it's second"));
+    chain.undo(pool, &name).await.expect("unapply");
+    assert_eq!(column_comment(pool, t, "c").await, expect("first"));
+    chain.discard_head();
+    chain.step(pool, with(None)).await.expect("dropped");
+    assert_eq!(column_comment(pool, t, "c").await, expect(""));
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        case_insensitive_change_applies,
+        db_comment_change_applies,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,

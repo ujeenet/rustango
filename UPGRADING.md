@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### New `SchemaChange::AlterColumnComment`; `generated_as` changes are refused
+
+makemigrations writes `AlterColumnComment` for a `db_comment` change and stops on a `generated_as` change; drop and re-add that column by hand. On PG a type change into a string now writes the field's whole type with no `USING` (#2239).
+
 ### PG migrations create `citext` themselves
 
 A migration that writes a CITEXT column runs `CREATE EXTENSION IF NOT EXISTS citext` first. Where the role cannot create extensions, install it once by hand (#2240).

@@ -1161,3 +1161,73 @@ fn type_change_into_a_string_runs_before_its_length() {
         "{changes:#?}"
     );
 }
+
+// ---------------- #2239 ----------------
+
+/// `diff_user.name` with `extra` merged in.
+fn user_with(extra: serde_json::Value) -> SchemaSnapshot {
+    let mut t = serde_json::to_value(user_table()).unwrap();
+    let name = &mut t["fields"][1];
+    for (k, v) in extra.as_object().unwrap() {
+        name[k] = v.clone();
+    }
+    SchemaSnapshot {
+        tables: vec![serde_json::from_value(t).unwrap()],
+        ..empty_snapshot()
+    }
+}
+
+#[test]
+fn case_insensitive_change_is_a_type_change() {
+    let plain = user_with(serde_json::json!({}));
+    let ci = user_with(serde_json::json!({"case_insensitive": true}));
+    let change = SchemaChange::AlterColumnType {
+        table: "diff_user".into(),
+        column: "name".into(),
+        from: "string".into(),
+        to: "string".into(),
+    };
+    assert_eq!(detect_changes(&plain, &ci), [change.clone()]);
+    assert_eq!(detect_changes(&ci, &plain), [change]);
+    // The whole string type, so turning it off keeps VARCHAR(32).
+    let off = render_changes(&detect_changes(&ci, &plain), &plain).unwrap();
+    assert_eq!(
+        off,
+        [r#"ALTER TABLE "diff_user" ALTER COLUMN "name" TYPE VARCHAR(32)"#]
+    );
+}
+
+#[test]
+fn db_comment_change_is_an_alter() {
+    let none = user_with(serde_json::json!({}));
+    let some = user_with(serde_json::json!({"db_comment": "Shown name"}));
+    let changes = detect_changes(&none, &some);
+    assert_eq!(
+        changes,
+        [SchemaChange::AlterColumnComment {
+            table: "diff_user".into(),
+            column: "name".into(),
+            from: None,
+            to: Some("Shown name".into()),
+        }]
+    );
+    assert_eq!(
+        render_changes(&changes, &some).unwrap(),
+        [r#"COMMENT ON COLUMN "diff_user"."name" IS 'Shown name'"#]
+    );
+    let back = detect_changes(&some, &none);
+    assert_eq!(
+        render_changes(&back, &none).unwrap(),
+        [r#"COMMENT ON COLUMN "diff_user"."name" IS ''"#]
+    );
+}
+
+#[test]
+fn generated_as_change_is_refused() {
+    let a = user_with(serde_json::json!({"generated_as": "'a'"}));
+    let b = user_with(serde_json::json!({"generated_as": "'b'"}));
+    assert!(detect_changes(&a, &b).is_empty());
+    let refused = rustango::migrate::detect_unsupported_field_changes(&a, &b);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].contains("generated_as changed"), "{refused:?}");
+}

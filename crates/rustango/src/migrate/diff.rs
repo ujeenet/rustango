@@ -51,7 +51,8 @@ pub enum SchemaChange {
     /// The types are the neutral name strings from
     /// `FieldSnapshot.ty`, not the closed `FieldType` enum, so an
     /// existing migration file keeps loading when a new type is
-    /// added.
+    /// added. `string` to `string` restates the type for a
+    /// `case_insensitive` change.
     AlterColumnType {
         table: String,
         column: String,
@@ -81,6 +82,14 @@ pub enum SchemaChange {
         column: String,
         from: Option<u32>,
         to: Option<u32>,
+    },
+    /// Change a column's `db_comment`; `None` drops it. SQLite has no
+    /// comments, so it writes nothing there.
+    AlterColumnComment {
+        table: String,
+        column: String,
+        from: Option<String>,
+        to: Option<String>,
     },
     /// Rename a table. `detect_changes` never emits this: a snapshot
     /// diff cannot tell a rename from a drop plus an add. Write it by
@@ -235,6 +244,7 @@ impl SchemaChange {
             | Self::AlterColumnNullable { table: t, .. }
             | Self::AlterColumnDefault { table: t, .. }
             | Self::AlterColumnMaxLength { table: t, .. }
+            | Self::AlterColumnComment { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
             | Self::AlterFkOnDelete { table: t, .. }
@@ -571,8 +581,7 @@ fn push_alter_changes(
     cf: &FieldSnapshot,
     out: &mut Vec<SchemaChange>,
 ) {
-    // `AlterColumnType` to a string renders TEXT and a length change
-    // renders VARCHAR/TEXT, so the length change goes on the string side:
+    // A length change renders a string type, so it goes on the string side:
     // before the type when leaving a string, after it when entering one.
     // Run the other way it undid the type change (#1878).
     let max_length = (pf.max_length != cf.max_length).then(|| SchemaChange::AlterColumnMaxLength {
@@ -585,7 +594,9 @@ fn push_alter_changes(
     if leaving_string {
         out.extend(max_length.clone());
     }
-    if pf.ty != cf.ty {
+    // CITEXT, NOCASE or a `_ci` collation: a type change (#2239).
+    let ci_flip = cf.ty == "string" && pf.case_insensitive != cf.case_insensitive;
+    if pf.ty != cf.ty || ci_flip {
         out.push(SchemaChange::AlterColumnType {
             table: table.to_owned(),
             column: cf.column.clone(),
@@ -617,6 +628,14 @@ fn push_alter_changes(
             table: table.to_owned(),
             column: cf.column.clone(),
             unique: cf.unique,
+        });
+    }
+    if pf.db_comment != cf.db_comment {
+        out.push(SchemaChange::AlterColumnComment {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            from: pf.db_comment.clone(),
+            to: cf.db_comment.clone(),
         });
     }
     // Same FK, new action; `None → Some` included, or an upgrade never gets it (#1557).
@@ -704,6 +723,13 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
         out.push(format!(
             "`{table}.{col}` auto changed: {} → {}",
             pf.auto, cf.auto
+        ));
+    }
+    // No backend alters a generated expression in place (#2239).
+    if pf.generated_as != cf.generated_as {
+        out.push(format!(
+            "`{table}.{col}` generated_as changed: {:?} → {:?}",
+            pf.generated_as, cf.generated_as
         ));
     }
     // `unique` changes are handled by `detect_changes` as
@@ -1173,11 +1199,17 @@ fn render_changes_split_inner(
             | SchemaChange::AlterColumnDefault { table, column, .. }
             | SchemaChange::AlterColumnMaxLength { table, column, .. }
             | SchemaChange::AlterColumnUnique { table, column, .. }
+            | SchemaChange::AlterColumnComment { table, column, .. }
                 if dialect.alters_by_rebuild() || dialect.modifies_whole_column() =>
             {
                 // VARCHAR(n) and TEXT are one affinity there, and n is never enforced (#1220).
+                // Nor has it column comments.
                 if dialect.alters_by_rebuild()
-                    && matches!(change, SchemaChange::AlterColumnMaxLength { .. })
+                    && matches!(
+                        change,
+                        SchemaChange::AlterColumnMaxLength { .. }
+                            | SchemaChange::AlterColumnComment { .. }
+                    )
                 {
                     continue;
                 }
@@ -1204,18 +1236,25 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
-                // A case-insensitive string stays CITEXT (#2238).
-                let ci = current
+                // A string takes the field's whole type, so CITEXT (#2238) or
+                // VARCHAR(n) (#2239). No `USING`: the assignment cast refuses
+                // what `::VARCHAR(n)` would truncate.
+                let string = current
                     .table(table)
                     .and_then(|t| t.field(column))
-                    .filter(|f| f.ty == *to && is_ci_text(f));
-                let pg_to = match ci {
-                    Some(f) => dialect.ci_text_type(f.max_length),
-                    None => pg_type_for_ty_name(to),
-                };
-                out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
-                ));
+                    .filter(|f| f.ty == *to && to == "string");
+                out.immediate.push(match string {
+                    Some(f) => format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {}"#,
+                        sql_type_with_dialect(f, dialect)
+                    ),
+                    None => {
+                        let pg_to = pg_type_for_ty_name(to);
+                        format!(
+                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                        )
+                    }
+                });
             }
             SchemaChange::AlterColumnNullable {
                 table,
@@ -1276,6 +1315,14 @@ fn render_changes_split_inner(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
+            // An empty comment drops it on PG.
+            SchemaChange::AlterColumnComment {
+                table, column, to, ..
+            } => out.immediate.extend(dialect.column_comment_statement(
+                table,
+                column,
+                to.as_deref().unwrap_or(""),
+            )),
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
