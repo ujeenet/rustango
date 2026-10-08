@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an empty ViewSet filter value is no filter (#2226)
+
+`?category_id=` on a nullable field compared to NULL and returned no rows; empty values are now skipped, as in the admin.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

@@ -2144,11 +2144,17 @@ fn no_content() -> Response {
 /// - `startswith` (LIKE v%) / `istartswith` (ILIKE v%)
 /// - `endswith` (LIKE %v) / `iendswith` (ILIKE %v)
 /// - `isnull` — value `"true"` / `"false"`
+///
+/// An empty value is no filter, as in the admin: on a nullable field
+/// it would parse to NULL and `col = NULL` matches nothing (#2226).
 fn build_lookup_filter(
     field: &'static crate::core::FieldSchema,
     lookup: Option<&str>,
     raw: &str,
 ) -> Result<Option<WhereExpr>, crate::list_params::InListTooLong> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
     let column = field.column;
     let predicate =
         |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
@@ -4128,6 +4134,16 @@ mod lookup_tests {
                 .unwrap(),
         );
         assert!(matches!(f.value, SqlValue::Bool(false)));
+    }
+
+    /// #2226: `""` on a nullable field parsed to NULL, so `col = NULL`.
+    #[test]
+    fn an_empty_value_is_no_filter() {
+        for lk in [None, Some("ne"), Some("in"), Some("isnull")] {
+            assert!(build_lookup_filter(string_field(), lk, "")
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[test]

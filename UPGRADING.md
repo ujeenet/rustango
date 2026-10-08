@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet skips empty filter values
+
+`?field=` with an empty value no longer filters, on any field (#2226). It used to match `''` on a string field and nothing on a nullable one.
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
