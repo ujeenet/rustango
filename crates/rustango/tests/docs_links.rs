@@ -332,6 +332,51 @@ fn every_repo_link_names_a_path_that_exists() {
     );
 }
 
+/// #1405 — crates.io resolves a README's relative links against the
+/// crate dir (`crates/rustango/`), where `docs/` and `UPGRADING.md` 404.
+#[test]
+fn readme_links_are_absolute_and_exist() {
+    let root = repo_root();
+    let text = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let mut targets = link_targets(&text);
+    for attr in ["href=\"", "src=\""] {
+        for chunk in text.split(attr).skip(1) {
+            targets.extend(chunk.split('"').next().map(str::to_owned));
+        }
+    }
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+    for target in targets {
+        if target.starts_with('#') || target.starts_with("mailto:") {
+            continue;
+        }
+        if !target.starts_with("http") {
+            problems.push(format!("`{target}` is relative"));
+            continue;
+        }
+        let Some(rest) = ["blob/main/", "tree/main/"]
+            .iter()
+            .find_map(|p| target.strip_prefix(&format!("https://github.com/ujeenet/rustango/{p}")))
+            .or_else(|| {
+                target.strip_prefix("https://raw.githubusercontent.com/ujeenet/rustango/main/")
+            })
+        else {
+            continue;
+        };
+        checked += 1;
+        let path = rest.split(['#', '?']).next().unwrap_or_default();
+        if !root.join(path).exists() {
+            problems.push(format!("`{path}` is not in the repo"));
+        }
+    }
+    assert!(checked > 0, "no repo links found in README.md");
+    assert!(
+        problems.is_empty(),
+        "README.md links that break on crates.io:\n  {}",
+        problems.join("\n  "),
+    );
+}
+
 /// #1304 — a heading that names a release goes stale on the next one.
 ///
 /// `## What's new (v0.41 / v0.42)` sat at the top of the ORM guide for

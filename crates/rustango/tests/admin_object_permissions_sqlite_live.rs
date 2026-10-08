@@ -280,6 +280,81 @@ async fn custom_action_refuses_when_a_row_hook_denies() {
     );
 }
 
+// #2231: the "view" hook hides rows from the list, autocomplete and FK facet names.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_note", admin(list_display = "id", list_filter = "post_id"))]
+#[allow(dead_code)]
+pub struct OpNote {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(fk = "op_post", on = "id")]
+    pub post_id: i64,
+}
+
+/// FK cells show the post's name (#2267).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_cite")]
+#[allow(dead_code)]
+pub struct OpCite {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(fk = "op_post", on = "id")]
+    pub post_id: i64,
+}
+
+/// Post 1 belongs to owner 7 (denied), post 2 to owner 42; one note on each.
+async fn view_pool() -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE op_post (id INTEGER PRIMARY KEY, title TEXT NOT NULL, owner_id INTEGER NOT NULL)",
+        "CREATE TABLE op_note (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
+        "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'theirs-row', 7), (2, 'mine-row', 42)",
+        // Denied rows that sort before every allowed one.
+        "INSERT INTO op_post (id, title, owner_id) VALUES (3, 'aaa-1', 7), (4, 'aaa-2', 7), (5, 'aaa-3', 7)",
+        "INSERT INTO op_note (id, post_id) VALUES (1, 1), (2, 2)",
+        "CREATE TABLE op_cite (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL)",
+        "INSERT INTO op_cite (id, post_id) VALUES (1, 1), (2, 2)",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    pool
+}
+
+async fn get_body(uri: &str) -> String {
+    use http_body_util::BodyExt as _;
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = build_app(view_pool().await).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn view_hook_hides_rows_from_the_list() {
+    let body = get_body("/op_post").await;
+    assert!(body.contains("mine-row"), "control: an allowed row shows");
+    assert!(!body.contains("theirs-row"), "a denied row is listed");
+}
+
+#[tokio::test]
+async fn view_hook_hides_rows_from_autocomplete() {
+    let body = get_body("/op_post/__autocomplete?q=row").await;
+    assert!(body.contains("mine-row"), "control: {body}");
+    assert!(
+        !body.contains("theirs-row"),
+        "a denied row is offered: {body}"
+    );
+}
+
+#[tokio::test]
+async fn view_hook_hides_fk_facet_names() {
+    let body = get_body("/op_note").await;
+    assert!(body.contains("mine-row"), "control: an allowed name shows");
+    assert!(!body.contains("theirs-row"), "a denied row's name shows");
+}
+
 // #1818: an action registered with `ActionPerm::Delete` needs `delete`, not `change`.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "op_purge", admin(actions = "purge_selected, tidy_selected"))]
@@ -349,4 +424,29 @@ async fn a_delete_action_runs_the_delete_hook_and_perm() {
         StatusCode::SEE_OTHER
     );
     assert_eq!(PURGED.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn view_hook_hides_fk_cell_names() {
+    let list = get_body("/op_cite").await;
+    assert!(list.contains("mine-row"), "control: an allowed name shows");
+    assert!(!list.contains("theirs-row"), "the list shows a denied name");
+    let allowed = get_body("/op_cite/2").await;
+    assert!(
+        allowed.contains("mine-row"),
+        "control: detail shows the name"
+    );
+    let denied = get_body("/op_cite/1").await;
+    assert!(
+        !denied.contains("theirs-row"),
+        "the detail shows a denied name"
+    );
+}
+
+// Autocomplete reads past a first page the hook fully denies.
+#[tokio::test]
+async fn autocomplete_fills_past_denied_rows() {
+    let body = get_body("/op_post/__autocomplete?q=&limit=2").await;
+    assert!(body.contains("mine-row"), "allowed row not reached: {body}");
+    assert!(!body.contains("aaa-"), "a denied row is offered: {body}");
 }

@@ -163,3 +163,114 @@ async fn url_email_hidden_widgets_render_correctly() {
     assert!(body.contains(r#"<input type="email" name="contact""#));
     assert!(body.contains(r#"<input type="hidden" name="anything""#));
 }
+
+async fn get_text(pool: Pool, uri: &str) -> String {
+    let resp = build_app(pool)
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+// #2228: `?q=` must not probe a secret column, in the list or autocomplete.
+#[tokio::test]
+async fn search_skips_secret_fields() {
+    let pool = fresh_pool().await;
+    rustango::sql::raw_execute_pool(
+        &pool,
+        r#"INSERT INTO "ffo_account" ("username", "secret", "color", "bio", "age", "homepage", "contact", "anything")
+           VALUES ('alice', 'hunter2', '#000000', '', 1, '', '', '')"#,
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+
+    let hit = get_text(pool.clone(), "/ffo_account?q=alice").await;
+    assert!(hit.contains("alice"), "control: a normal column matches");
+    let list = get_text(pool.clone(), "/ffo_account?q=hunter").await;
+    assert!(!list.contains("alice"), "the list matched the secret");
+
+    let hit = get_text(pool.clone(), "/ffo_account/__autocomplete?q=ali").await;
+    assert!(hit.contains("alice"), "control: autocomplete matches");
+    let ac = get_text(pool, "/ffo_account/__autocomplete?q=hunter").await;
+    assert!(
+        !ac.contains("alice"),
+        "autocomplete matched the secret: {ac}"
+    );
+}
+
+/// A secret in `list_filter` gets no facet.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ffo_vault",
+    admin(
+        list_display = "id",
+        list_filter = "kind, pin",
+        formfield_overrides = "pin:password"
+    )
+)]
+#[allow(dead_code)]
+pub struct Vault {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 30)]
+    pub kind: String,
+    #[rustango(max_length = 30)]
+    pub pin: String,
+}
+
+#[tokio::test]
+async fn secret_list_filter_gets_no_facet() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE ffo_vault (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, pin TEXT NOT NULL)",
+        "INSERT INTO ffo_vault (id, kind, pin) VALUES (1, 'kind-x', 'pin-s3cr3t')",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let body = get_text(pool, "/ffo_vault").await;
+    assert!(body.contains("kind-x"), "control: a normal facet shows");
+    assert!(!body.contains("pin-s3cr3t"), "the secret's facet shows it");
+}
+
+/// `search_fields` names the secret on purpose.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ffo_login",
+    admin(
+        search_fields = "username, secret",
+        formfield_overrides = "secret:password"
+    )
+)]
+#[allow(dead_code)]
+pub struct Login {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 30)]
+    pub username: String,
+    #[rustango(max_length = 30)]
+    pub secret: String,
+}
+
+#[tokio::test]
+async fn explicit_search_fields_skip_the_secret() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE ffo_login (id INTEGER PRIMARY KEY, username TEXT NOT NULL, secret TEXT NOT NULL)",
+        "INSERT INTO ffo_login (id, username, secret) VALUES (1, 'bob', 'hunter2')",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let hit = get_text(pool.clone(), "/ffo_login?q=bob").await;
+    assert!(hit.contains("bob"), "control: username matches");
+    let list = get_text(pool.clone(), "/ffo_login?q=hunter").await;
+    assert!(!list.contains("bob"), "the list matched the secret");
+    let ac = get_text(pool, "/ffo_login/__autocomplete?q=hunter").await;
+    assert!(!ac.contains("bob"), "autocomplete matched the secret: {ac}");
+}

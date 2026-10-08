@@ -382,7 +382,14 @@ Three more registration macros hook into a model's admin pages:
   `register_admin_object_permission!("posts", "change", check)` where
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
   handlers consult the `add`, `change`, `delete` and `view` actions; multiple
-  hooks AND together.
+  hooks AND together. A `view` hook also hides rows from the list, autocomplete,
+  FK facet names and FK cell names, but runs after the page is read: pages may come up short,
+  and totals, facet values and counts, date buckets and "has next" still see
+  hidden rows. Use a queryset hook to hide them everywhere.
+- **Secret fields** — a field with the `password` widget
+  (`formfield_overrides = "x: password"`) never shows its value and is never
+  searched, filtered or faceted. Nothing else marks a secret: give `token` / `api_key` fields that
+  widget too.
 
 For coarser, codename-based access control, `Builder::with_user_perms([...])`
 gates each table on `{table}.view` / `.add` / `.change` / `.delete`: missing
