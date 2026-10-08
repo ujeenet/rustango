@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — PG type change on a column with a DEFAULT (#2242)
 
-`AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically".
+`AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically". A type change no longer writes a separate `AlterColumnDefault`, so it undoes on PG too.
 
 ### Fixed — a migration that drops an EXCLUDE constraint unapplies (#2241)
 
@@ -22,7 +22,7 @@ A `case_insensitive` change is an `AlterColumnType`, a comment change the new `A
 
 ### Fixed — PG file migrations create the `citext` extension (#2240)
 
-`CREATE EXTENSION IF NOT EXISTS citext` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`.
+`CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`. `apply_all_pool` and testkit table creation run it too (#2271), and `public` keeps it shared by every schema-mode tenant (#2269).
 
 ## [0.60.2] — 2026-10-07
 

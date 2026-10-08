@@ -154,9 +154,17 @@ untouched.
 
 makemigrations writes `AlterColumnComment` for a `db_comment` change and stops on a `generated_as` change; drop and re-add that column by hand. On PG a type change into a string now writes the field's whole type with no `USING` (#2239).
 
+Binaries older than 0.60.3 cannot read a migrations directory that holds an `AlterColumnComment` file, so upgrade every checkout before pulling those migrations.
+
+If an older `generated_as` edit was never migrated, makemigrations now refuses. Remove the field and run makemigrations (a DropColumn), add it back and run it again (an AddColumn), then migrate: the column comes back with the new expression.
+
 ### PG migrations create `citext` themselves
 
-A migration that writes a CITEXT column runs `CREATE EXTENSION IF NOT EXISTS citext` first. Where the role cannot create extensions, install it once by hand (#2240).
+A migration, `apply_all_pool` and testkit table creation run `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` before a CITEXT column. It goes in `public` so every schema-mode tenant finds it. Where the role cannot create extensions, install it once by hand (#2240, #2269, #2271).
+
+### A type change no longer writes a separate default op
+
+makemigrations folds the new `DEFAULT` into `AlterColumnType`, so undoing it works on PG.
 
 ## 0.60.2
 
