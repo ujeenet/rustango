@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin forms show a plain message for a refused write, never driver text (#2345)
+
+A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logged under the error id the page shows.
+
 ### Fixed — admin: an unknown or malformed bulk action is a 400, not a 500 (#2346)
 
 ### Fixed — test builds on a single backend pass `-D warnings` (#2313)

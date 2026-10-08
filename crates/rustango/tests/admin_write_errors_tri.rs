@@ -1,4 +1,5 @@
-//! Admin write errors on every backend: a bad action is a 400 (#2346).
+//! Admin write errors on every backend: a bad action is a 400 (#2346);
+//! a refused write shows a plain message, never the driver's text (#2345).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -26,9 +27,24 @@ pub struct Parent {
     pub name: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "wrerr_child", admin(list_display = "note"))]
+#[allow(dead_code)]
+pub struct Child {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "wrerr_parent", on = "id")]
+    pub parent_id: i64,
+    pub qty: i32,
+    #[rustango(max_length = 32, unique)]
+    pub note: String,
+}
+
 async fn setup(pool: &Pool) {
-    use rustango::testkit::matrix::fresh_table;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "wrerr_child").await;
     fresh_table::<Parent>(pool).await;
+    fresh_table::<Child>(pool).await;
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
@@ -68,9 +84,50 @@ async fn unknown_action_is_a_400(pool: &Pool) {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
+/// What a driver message would put on the page.
+fn assert_no_driver_text(body: &str) {
+    for raw in [
+        "violates",
+        "constraint failed",
+        "Duplicate entry",
+        "foreign key constraint",
+        "wrerr_parent_name_key",
+        "wrerr_parent.name",
+        "wrerr_child_parent_id_fkey",
+    ] {
+        assert!(!body.contains(raw), "driver text `{raw}` leaked");
+    }
+    assert!(body.contains("error id "), "no correlation id");
+}
+
+/// A duplicate on create and on edit names the field, not the constraint.
+async fn unique_refusal_is_a_plain_message(pool: &Pool) {
+    seed_parent(pool, "taken").await;
+    let other = seed_parent(pool, "other").await;
+    for uri in ["/wrerr_parent".to_owned(), format!("/wrerr_parent/{other}")] {
+        let (status, body) = post(pool, &uri, "name=taken").await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_no_driver_text(&body);
+        assert!(
+            body.contains("A Parent with this name already exists."),
+            "{uri}: {body}"
+        );
+    }
+}
+
+/// A missing FK target is a plain message too.
+async fn fk_refusal_is_a_plain_message(pool: &Pool) {
+    let (status, body) = post(pool, "/wrerr_child", "parent_id=9999&qty=1&note=n").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_driver_text(&body);
+    assert!(body.contains("does not exist"), "{body}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         unknown_action_is_a_400,
+        unique_refusal_is_a_plain_message,
+        fk_refusal_is_a_plain_message,
     ],
 }

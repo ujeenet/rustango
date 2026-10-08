@@ -1948,7 +1948,13 @@ pub(crate) async fn create_submit(
             pk.to_display_string()
         }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), false, Some(&write_error(&e)));
+            let html = render_form(
+                &state,
+                model,
+                Some(&form),
+                false,
+                Some(&write_error(model, &e)),
+            );
             return Ok(Html(html).into_response());
         }
     };
@@ -1964,14 +1970,37 @@ pub(crate) async fn create_submit(
     Ok(Redirect::to(&target).into_response())
 }
 
-/// The form error for a failed create or edit write.
-fn write_error(e: &crate::sql::ExecError) -> String {
-    match super::errors::missing_table(e) {
-        Some(t) if t == crate::audit::AUDIT_TABLE => {
-            "audit table missing — run `manage migrate`".to_owned()
-        }
-        _ => e.to_string(),
+/// The form error for a failed write. Never the driver's text: it holds
+/// table, constraint and SQL (#2345); that goes to the log under an id.
+fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecError) -> String {
+    use super::errors::Refusal;
+    if super::errors::missing_table(e).is_some_and(|t| t == crate::audit::AUDIT_TABLE) {
+        return "audit table missing — run `manage migrate`".to_owned();
     }
+    let id = super::errors::log_with_id("admin write refused", e);
+    let msg = match Refusal::of(e) {
+        Some(Refusal::Unique) => {
+            let unique: Vec<&str> = model
+                .scalar_fields()
+                .filter(|f| f.unique && !f.primary_key)
+                .map(|f| f.name)
+                .collect();
+            if unique.is_empty() {
+                format!("A {} with these values already exists.", model.name)
+            } else {
+                format!(
+                    "A {} with this {} already exists.",
+                    model.name,
+                    unique.join(" or ")
+                )
+            }
+        }
+        Some(Refusal::ForeignKey) => "A related object it points to does not exist.".to_owned(),
+        Some(Refusal::NotNull) => "A required value is missing.".to_owned(),
+        Some(Refusal::Check) => "A value is outside what this table allows.".to_owned(),
+        None => "The change could not be saved.".to_owned(),
+    };
+    format!("{msg} (error id {id})")
 }
 
 /// Fill read-only, NOT NULL timestamps with no default: the form never
@@ -2295,7 +2324,13 @@ pub(crate) async fn update_submit(
             return Err(AdminError::RowNotFound { table, pk: pk_raw })
         }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&write_error(&e)));
+            let html = render_form(
+                &state,
+                model,
+                Some(&form),
+                true,
+                Some(&write_error(model, &e)),
+            );
             return Ok(Html(html).into_response());
         }
     }

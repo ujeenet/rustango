@@ -142,6 +142,45 @@ pub(crate) fn missing_table(e: &crate::sql::ExecError) -> Option<String> {
     }
 }
 
+/// A write the database refused on a declared constraint (#2345).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    Unique,
+    ForeignKey,
+    NotNull,
+    Check,
+}
+
+impl Refusal {
+    /// Read from the driver's error kind: PG 23503, MySQL 1451, SQLite 787, ...
+    pub(crate) fn of(e: &crate::sql::ExecError) -> Option<Self> {
+        use sqlx::error::ErrorKind;
+        let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e else {
+            return None;
+        };
+        match db.kind() {
+            ErrorKind::UniqueViolation => Some(Self::Unique),
+            ErrorKind::ForeignKeyViolation => Some(Self::ForeignKey),
+            ErrorKind::NotNullViolation => Some(Self::NotNull),
+            ErrorKind::CheckViolation => Some(Self::Check),
+            _ => None,
+        }
+    }
+}
+
+/// Log `raw` under a fresh correlation id and return the id, so a page
+/// can show the id and never the raw text.
+pub(crate) fn log_with_id(context: &str, raw: &dyn std::fmt::Display) -> String {
+    let id = short_correlation_id();
+    tracing::error!(
+        target: "rustango::admin",
+        correlation_id = %id,
+        error = %raw,
+        "{context}"
+    );
+    id
+}
+
 impl From<crate::sql::ExecError> for AdminError {
     fn from(e: crate::sql::ExecError) -> Self {
         // Unwrap the sqlx error so the per-dialect undefined-table
@@ -201,13 +240,7 @@ applied yet for this tenant / database.</p>
                 // column names and SQL, so it must not reach the
                 // client. The response carries only an id the operator
                 // can grep for in the logs.
-                let id = short_correlation_id();
-                tracing::error!(
-                    target: "rustango::admin",
-                    correlation_id = %id,
-                    error = %msg,
-                    "admin internal error"
-                );
+                let id = log_with_id("admin internal error", &msg);
                 ApiError::internal("internal server error")
                     .with_details(json!({ "correlation_id": id }))
                     .into_response()
