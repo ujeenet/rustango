@@ -534,6 +534,8 @@ impl Mailer for InMemoryMailer {
 /// File names are `YYYYMMDDHHMMSS-<pid>-<seq>.eml`, and a send never
 /// overwrites an existing file, so several processes can share one
 /// directory. The directory is created on `send` if it doesn't yet exist.
+/// On unix files are 0600 and a new directory 0700; an existing directory
+/// keeps its mode.
 pub struct FileMailer {
     dir: std::path::PathBuf,
     seq: std::sync::atomic::AtomicU64,
