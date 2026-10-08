@@ -18,6 +18,22 @@ A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logg
 
 ### Fixed — admin: an unknown or malformed bulk action is a 400, not a 500 (#2346)
 
+### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
+
+On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.
+
+### Fixed — MySQL drops the index an FK uses (#2244)
+
+DropIndex takes the FK on the index's first column off first and re-adds it after (none if its table or column goes); MySQL refused with 1553.
+
+### Fixed — file migrations keep `db_comment` on new tables and columns (#2270)
+
+PG writes `COMMENT ON COLUMN` after CreateTable and AddColumn; MySQL's AddColumn inlines `COMMENT` as CREATE TABLE does.
+
+### Fixed — `migrate <target>` reconciles a squash (#2243)
+
+Going forward it applies the same pending set as `migrate`, so a squash whose replaced files were applied is faked, not re-created.
+
 ### Fixed — test builds on a single backend pass `-D warnings` (#2313)
 
 `--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.

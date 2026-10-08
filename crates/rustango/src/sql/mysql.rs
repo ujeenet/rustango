@@ -332,6 +332,19 @@ impl Dialect for MySql {
         )
     }
 
+    fn sole_leading_column_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.INDEX_NAME = ? \
+             AND s.SEQ_IN_INDEX = 1 AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.COLUMN_NAME = s.COLUMN_NAME AND o.SEQ_IN_INDEX = 1 \
+             AND o.INDEX_NAME <> s.INDEX_NAME \
+             AND o.SUB_PART IS NULL AND o.INDEX_TYPE = 'BTREE')",
+        )
+    }
+
     fn modifies_whole_column(&self) -> bool {
         true
     }

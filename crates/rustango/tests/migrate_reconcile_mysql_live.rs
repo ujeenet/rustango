@@ -151,3 +151,56 @@ async fn squash_reconciles_on_mysql_without_colliding() {
     let _ = std::fs::remove_dir_all(&dir);
     println!("MySQL squash reconcile OK");
 }
+
+/// `migrate <target>` must reconcile a squash too, not re-CREATE (#2243).
+#[tokio::test]
+async fn migrate_to_reconciles_a_squash_on_mysql() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let my = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+    let pool = Pool::Mysql(my.clone());
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let (t_a, t_b) = (format!("rect_a_{pid}_{n}"), format!("rect_b_{pid}_{n}"));
+    let (m1, m2, sq) = (
+        format!("1{n:03}_a_{pid}"),
+        format!("2{n:03}_b_{pid}"),
+        format!("3{n:03}_squashed_{pid}"),
+    );
+    let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
+    let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
+    migrate::migrate_pool(&pool, &write_dir(&[&a, &b]))
+        .await
+        .unwrap();
+
+    // `migrate --squash` removed the replaced files.
+    let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
+    let dir = write_dir(&[&squash]);
+    let touched = migrate::migrate_to_pool(&pool, &dir, &sq)
+        .await
+        .expect("migrate_to must reconcile the squash, not hit 1050");
+    assert_eq!(touched.len(), 1);
+    let left: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {LEDGER} WHERE name IN (?, ?, ?)"
+    ))
+    .bind(&m1)
+    .bind(&m2)
+    .bind(&sq)
+    .fetch_one(&my)
+    .await
+    .unwrap();
+    assert_eq!(left, 1, "only the squash should remain");
+
+    for t in [&t_a, &t_b] {
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{t}`"))
+            .execute(&my)
+            .await;
+    }
+    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = ?"))
+        .bind(&sq)
+        .execute(&my)
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
