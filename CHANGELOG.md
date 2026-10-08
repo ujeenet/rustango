@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `prefetch_generic` on an integer PK narrower than i64 (#2298)
+
+Targets with an `Auto<i32>` or `i16` PK were dropped from the result map.
+
 ### Fixed — M2M `set` with a repeated id (#2297)
 
 Repeated ids (e.g. a form posting `tags=1&tags=1`) are linked once instead of failing the whole set.

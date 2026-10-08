@@ -71,6 +71,15 @@ pub struct PostTag {
     pub tag_id: i64,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_badge", app = "rel2293")]
+pub struct Badge {
+    #[rustango(primary_key)]
+    pub id: Auto<i32>,
+    #[rustango(max_length = 40)]
+    pub label: String,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, Article::SCHEMA.table).await;
@@ -80,6 +89,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Article>(pool).await;
     fresh_table::<Row>(pool).await;
     fresh_table::<PostTag>(pool).await;
+    fresh_table::<Badge>(pool).await;
 }
 
 /// Article 1 has no editor; article 2 is edited by "Ada".
@@ -212,6 +222,31 @@ async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
     assert_eq!(tags, vec![3, 4]);
 }
 
+async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
+    use rustango::contenttypes::{self, ContentType};
+    contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    let mut badge = Badge {
+        id: Auto::default(),
+        label: "gold".into(),
+    };
+    badge.insert_pool(pool).await.expect("badge");
+    let pk = i64::from(*badge.id.get().expect("pk"));
+    let ct = ContentType::for_model::<Badge>(pool)
+        .await
+        .unwrap()
+        .expect("badge ct");
+    let ct_id = *ct.id.get().expect("ct id");
+    let map = contenttypes::prefetch_generic::<Badge>(pool, &[(ct_id, pk)])
+        .await
+        .expect("prefetch_generic");
+    assert_eq!(
+        map.get(&(ct_id, pk)).map(|b| b.label.as_str()),
+        Some("gold")
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -222,5 +257,6 @@ tri_dialect_test! {
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
         m2m_set_ignores_repeated_ids,
+        prefetch_generic_keeps_i32_pks,
     ],
 }

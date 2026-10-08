@@ -758,10 +758,14 @@ where
     let mut out: ::std::collections::HashMap<(i64, i64), C> =
         ::std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
-        let pk_value = <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row);
-        if let crate::core::SqlValue::I64(pk) = pk_value {
-            out.insert((target_ct_id, pk), row);
-        }
+        // Any integer PK widens to the i64 key; an `Auto<i32>` gives I32 (#2298).
+        let pk = match <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row) {
+            crate::core::SqlValue::I16(v) => i64::from(v),
+            crate::core::SqlValue::I32(v) => i64::from(v),
+            crate::core::SqlValue::I64(v) => v,
+            _ => continue,
+        };
+        out.insert((target_ct_id, pk), row);
     }
     Ok(out)
 }
