@@ -3038,11 +3038,22 @@ impl RestorePlan {
         parsed: DbRestoreArgs,
         confirm: impl FnOnce(&str) -> bool,
     ) -> Result<Self, MigrateError> {
-        let readable = std::fs::File::open(&parsed.file)
-            .and_then(|f| f.metadata())
+        // Metadata only: opening a FIFO with no writer blocks. A pipe is fine
+        // for a plain load; `--clean` commits its DROP even for an empty dump.
+        let usable = std::fs::metadata(&parsed.file)
             .map_err(|e| e.to_string())
-            .and_then(|m| m.is_file().then_some(()).ok_or_else(|| "not a file".into()));
-        if let Err(e) = readable {
+            .and_then(|m| {
+                if !parsed.clean {
+                    Ok(())
+                } else if !m.is_file() {
+                    Err("--clean needs a regular file".to_owned())
+                } else if m.len() == 0 {
+                    Err("the file is empty".to_owned())
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(e) = usable {
             return Err(MigrateError::Validation(format!(
                 "db:restore: cannot read `{}`: {e}",
                 parsed.file
@@ -3066,13 +3077,19 @@ fn confirm_clean_restore(file: &str) -> bool {
     {
         let prompt =
             format!("db:restore --clean drops schema `public`, then loads {file}. Type `yes`: ");
-        matches!(crate::manage_interactive::ask(&prompt), Ok(Some(a)) if a == "yes")
+        answered_yes(crate::manage_interactive::ask(&prompt))
     }
     #[cfg(not(any(feature = "admin", feature = "tenancy")))]
     {
         let _ = file;
         false
     }
+}
+
+/// Only a typed `yes` confirms; no terminal, EOF or anything else refuses.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
+    matches!(answer, Ok(Some(a)) if a == "yes")
 }
 
 /// Build the psql argv given a checked plan + URL. Pure function — easy
@@ -7372,6 +7389,7 @@ mod db_cmd_tests {
     #[test]
     fn restore_clean_needs_yes_or_a_confirm() {
         let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "SELECT 1;\n").unwrap();
         let path = f.path().to_str().unwrap();
         let err = RestorePlan::check(restore_args(path, true, false), |_| false).unwrap_err();
         assert!(err.to_string().contains("--yes"), "{err}");
@@ -7380,6 +7398,34 @@ mod db_cmd_tests {
         assert!(RestorePlan::check(restore_args(path, false, false), |_| false).is_ok());
         let p = parse_db_restore_args(&args(&["--clean", "--yes", path])).unwrap();
         assert!(p.clean && p.yes);
+    }
+
+    /// An empty dump under `--clean` would commit the DROP and load nothing.
+    #[test]
+    fn restore_clean_refuses_an_empty_file() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let err = RestorePlan::check(restore_args(path, true, true), |_| true).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+        assert!(RestorePlan::check(restore_args(path, false, false), |_| false).is_ok());
+    }
+
+    /// A plain load still takes a pipe; `--clean` does not.
+    #[cfg(unix)]
+    #[test]
+    fn restore_takes_a_pipe_only_without_clean() {
+        assert!(RestorePlan::check(restore_args("/dev/stdin", false, false), |_| false).is_ok());
+        let err = RestorePlan::check(restore_args("/dev/stdin", true, true), |_| true).unwrap_err();
+        assert!(err.to_string().contains("regular file"), "{err}");
+    }
+
+    #[test]
+    fn restore_prompt_needs_a_typed_yes() {
+        assert!(answered_yes(Ok(Some("yes".into()))));
+        for no in [Ok(Some("y".into())), Ok(Some("YES".into())), Ok(None)] {
+            assert!(!answered_yes(no));
+        }
+        assert!(!answered_yes(Err(std::io::Error::other("tty"))));
     }
 
     // -------- build_psql_argv

@@ -410,3 +410,16 @@ async fn flush_never_touches_the_registry() {
     let listed = b.run(&["list-tenants"]).await.expect("list");
     assert!(listed.contains("acme"), "{listed}");
 }
+
+/// `db:restore --clean` would drop the registry with `public` (#2283).
+#[tokio::test]
+async fn restore_clean_is_refused_under_tenancy() {
+    let b = boot().await;
+    // A missing file: even unrefused, nothing reaches psql.
+    let missing = b._tmp.path().join("nope.sql");
+    let err = b
+        .run(&["db:restore", "--clean", "--yes", missing.to_str().unwrap()])
+        .await
+        .expect_err("--clean under tenancy");
+    assert!(err.contains("registry"), "{err}");
+}

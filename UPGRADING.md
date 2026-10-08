@@ -152,7 +152,7 @@ untouched.
 
 ### `db:restore --clean` needs `--yes`
 
-Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).
+Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. `--clean` takes only a non-empty regular file, and a tenancy project refuses it. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).
 
 ### Tenancy `flush` needs `--tenant <slug>`
 

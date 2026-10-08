@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `db:restore --clean` checks the file, asks, and rolls back (#2283)
 
-It dropped `public` before reading the dump. Now a missing file is refused first, `--clean` needs `--yes` (or a typed `yes`), and psql runs in one transaction so a failed load keeps the old data.
+It dropped `public` before reading the dump. Now `--clean` needs a non-empty regular file and `--yes` (or a typed `yes`), is refused in tenancy projects, and psql runs in one transaction so a failed load keeps the old data. A plain restore still reads pipes.
 
 ### Fixed — tenancy `flush` no longer wipes the registry (#2284)
 
