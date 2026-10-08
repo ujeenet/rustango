@@ -4,6 +4,8 @@
 //!
 //! Run: `cargo test -p rustango --test testing_doc`
 
+#![cfg(feature = "admin")]
+
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rustango::test_client::TestClient;

@@ -3,6 +3,8 @@
 //! process-global, so we serialize the tests with a `Mutex` and
 //! `clear_all()` between cases.
 
+#![cfg(all(feature = "signals", feature = "_axum", feature = "_tower"))]
+
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 

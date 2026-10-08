@@ -590,7 +590,7 @@ impl JwtLifecycle {
         let _ = self.jti_store.mark_used(jti, expires_at).await;
     }
 
-    async fn is_blacklisted(&self, jti: &str) -> bool {
+    pub(crate) async fn is_blacklisted(&self, jti: &str) -> bool {
         // v0.48 — `JtiStore::is_used` doesn't filter by the entry's
         // expiry the way the pre-v0.48 in-line map did. That's a
         // tighter behaviour (a revoked-but-not-yet-pruned JTI stays

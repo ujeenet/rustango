@@ -212,12 +212,11 @@ impl SessionStore {
     /// # Errors
     /// A cache error. Returns `false` when the session is gone.
     pub async fn touch(&self, id: &str) -> Result<bool, SessionError> {
-        let key = self.cache_key(id);
-        let Some(raw) = self.cache.get(&key).await? else {
-            return Ok(false);
-        };
-        self.cache.set(&key, &raw, Some(*self.ttl)).await?;
-        Ok(true)
+        // `Cache::touch` only extends a live key, so it cannot undo a racing destroy (#2300).
+        Ok(self
+            .cache
+            .touch(&self.cache_key(id), Some(*self.ttl))
+            .await?)
     }
 
     fn cache_key(&self, id: &str) -> String {
@@ -359,6 +358,44 @@ mod tests {
         let id = store.save(&Session::new()).await.unwrap();
         assert!(store.touch(&id).await.unwrap());
         assert!(store.load(&id).await.unwrap().is_some());
+    }
+
+    /// A cache where a logout lands inside every `get` and `touch`.
+    struct LogoutMidTouch(InMemoryCache);
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for LogoutMidTouch {
+        async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
+            let v = self.0.get(key).await?;
+            self.0.delete(key).await?;
+            Ok(v)
+        }
+        async fn set(&self, k: &str, v: &str, t: Option<Duration>) -> Result<(), CacheError> {
+            self.0.set(k, v, t).await
+        }
+        async fn touch(&self, k: &str, t: Option<Duration>) -> Result<bool, CacheError> {
+            self.0.delete(k).await?;
+            self.0.touch(k, t).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), CacheError> {
+            self.0.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, CacheError> {
+            self.0.exists(key).await
+        }
+        async fn clear(&self) -> Result<(), CacheError> {
+            self.0.clear().await
+        }
+    }
+
+    /// #2300 — touch must not write back a session destroyed under it.
+    #[tokio::test]
+    async fn touch_does_not_revive_a_destroyed_session() {
+        let inner = StdArc::new(LogoutMidTouch(InMemoryCache::new()));
+        let store = SessionStore::new(inner.clone());
+        let id = store.save(&Session::new()).await.unwrap();
+        assert!(!store.touch(&id).await.unwrap());
+        assert!(store.load(&id).await.unwrap().is_none(), "session revived");
     }
 
     #[tokio::test]

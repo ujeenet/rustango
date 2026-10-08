@@ -99,6 +99,8 @@ fn check(root: &Path, extra: &[&str]) -> (bool, usize, String) {
             std::env::temp_dir().join("rustango-scaffold-target"),
         )
         .env("CARGO_INCREMENTAL", "0")
+        // Pick deps the running toolchain supports; the repo pins 1.88 (#2310).
+        .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
         .output()
         .expect("run cargo check");
 

@@ -145,10 +145,10 @@ where
         router = router.cors(CorsLayer::new().allow_origins(settings.allowed_origins.clone()));
     }
     // Per-IP limit, counted over a 60-second window.
-    if let Some(rpm) = settings.rate_limit_per_minute {
+    if let Some(rpm) = settings.rate_limit() {
         use crate::rate_limit::{RateLimitLayer, RateLimitRouterExt};
         router = router.rate_limit(RateLimitLayer::per_ip(
-            rpm,
+            rpm.get(),
             std::time::Duration::from_secs(60),
         ));
     }
