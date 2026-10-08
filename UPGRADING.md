@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `MediaPerms`: upload attribution and collection checks
+
+`POST /uploads/begin` now answers 403 when `uploaded_by_id` is not the caller's id (superusers exempt), and a `collection_id` also needs `rustango_media_collections.view` (#2343).
+
 ### Custom `Cache` backends: override `touch`
 
 `SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).

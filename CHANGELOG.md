@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `MediaPerms` refuses an upload attributed to another user or filed into a hidden collection (#2343)
+
 ### Fixed — admin detail page links a generic FK under the admin prefix (#2341)
 
 It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.

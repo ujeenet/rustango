@@ -200,8 +200,8 @@ pub enum MediaTarget {
         /// Requested `collection_id`, or `None` for the library root.
         collection_id: Option<i64>,
         /// Requested `uploaded_by_id`. Attribution is caller-supplied on
-        /// this route, so a policy that cares should check it against
-        /// the authenticated principal rather than trust it.
+        /// this route, so a policy should check it against the principal;
+        /// `MediaPerms` refuses another user's id unless superuser.
         uploaded_by_id: Option<i64>,
     },
     /// `POST /collections`. Names no existing row: it creates one,
@@ -439,6 +439,11 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
         // arm: same codename, different reason.
         #[allow(clippy::match_same_arms)]
         A::Read(T::Listing) => &["rustango_media.view"],
+        // Filing into a collection needs leave to open it (#2343).
+        A::Add(T::NewUpload {
+            collection_id: Some(_),
+            ..
+        }) => &["rustango_media.add", "rustango_media_collections.view"],
         A::Add(T::NewUpload { .. }) => &["rustango_media.add"],
         A::Add(T::NewCollection { .. }) => &["rustango_media_collections.add"],
         A::Add(T::NewTag { .. }) => &["rustango_media_tags.add"],
@@ -482,7 +487,8 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 ///
 /// # What it checks
 ///
-/// [`required_codenames`] has the full mapping. Superusers
+/// [`required_codenames`] has the full mapping. An upload's
+/// `uploaded_by_id`, when sent, must be the caller's own id. Superusers
 /// short-circuit to allow, except for [`Self::allow_disks`], which is
 /// checked first and applies to them too. `is_superuser` is
 /// per-tenant, and that disk list is the only thing keeping one
@@ -617,6 +623,16 @@ impl MediaAuthorizer for MediaPerms {
         }
         if auth.is_superuser {
             return MediaDecision::Allow;
+        }
+        // Only a superuser may attribute an upload to someone else (#2343).
+        if let MediaAction::Add(MediaTarget::NewUpload {
+            uploaded_by_id: Some(by),
+            ..
+        }) = &action
+        {
+            if *by != auth.id {
+                return MediaDecision::Forbidden;
+            }
         }
         // A variant with no mapping is a route added after this policy
         // was written. Denying it is the point.
