@@ -227,9 +227,9 @@ async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
 
 #[tokio::test]
 async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
-    // Coverage for `render_generic_fk_link_pool` — slice 26c. Used by
-    // the admin to render `(content_type_id, pk)` as a link. Returns
-    // graceful fallback HTML when the CT row is unknown.
+    // Coverage for `render_generic_fk_link_pool` — slice 26c. Renders
+    // `(content_type_id, pk)` as a link (the admin has its own renderer).
+    // Returns graceful fallback HTML when the CT row is unknown.
     let pool = sqlite_pool().await;
     contenttypes::ensure_seeded(&pool).await.expect("seed");
     let ct = ContentType::for_model::<Post>(&pool)
