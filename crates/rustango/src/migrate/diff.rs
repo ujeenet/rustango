@@ -955,6 +955,16 @@ fn alter_column_elsewhere(
     Ok(())
 }
 
+/// PG's `COMMENT ON COLUMN` for `f`; MySQL inlines it and SQLite has none (#2270).
+fn column_comment(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<String> {
+    let comment = f.db_comment.as_deref()?;
+    dialect.column_comment_statement(table, &f.column, comment)
+}
+
 /// The indexes `current` declares on `table`, which a UNIQUE drop keeps.
 pub(crate) fn declared_indexes(current: &SchemaSnapshot, table: &str) -> Vec<String> {
     current
@@ -1076,6 +1086,9 @@ fn render_changes_split_inner(
                 }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
+                for f in &table.fields {
+                    out.immediate.extend(column_comment(name, f, dialect));
+                }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
                         .extend(constraints_sql_from_snapshot(table, dialect, schema)?);
@@ -1160,6 +1173,7 @@ fn render_changes_split_inner(
                 } else {
                     out.immediate.push(add_column_sql(table, f, dialect));
                 }
+                out.immediate.extend(column_comment(table, f, dialect));
                 if f.fk.is_some()
                     && dialect.inline_fks_in_create_table()
                     && inline_fk_on_add_column(f, dialect).is_none()
@@ -2000,6 +2014,14 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
             let _ = write!(sql, "{col_q} <= {max}");
         }
         sql.push(')');
+    }
+    // MySQL's comment; PG's comes after, as `COMMENT ON COLUMN` (#2270).
+    if let Some(inline) = f
+        .db_comment
+        .as_deref()
+        .and_then(|c| dialect.write_inline_column_comment(c))
+    {
+        sql.push_str(&inline);
     }
     // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
     if let Some(rel) = inline_fk_on_add_column(f, dialect) {

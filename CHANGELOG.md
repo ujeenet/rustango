@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — file migrations keep `db_comment` on new tables and columns (#2270)
+
+PG writes `COMMENT ON COLUMN` after CreateTable and AddColumn; MySQL's AddColumn inlines `COMMENT` as CREATE TABLE does.
+
 ### Fixed — `migrate <target>` reconciles a squash (#2243)
 
 Going forward it applies the same pending set as `migrate`, so a squash whose replaced files were applied is faked, not re-created.

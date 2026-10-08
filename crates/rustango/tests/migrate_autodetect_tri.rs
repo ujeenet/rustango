@@ -2663,6 +2663,25 @@ async fn db_comment_change_applies(pool: &Pool) {
     assert_eq!(column_comment(pool, t, "c").await, expect(""));
 }
 
+/// A `db_comment` lands with CreateTable and AddColumn too (#2270).
+async fn db_comment_on_create_and_add_column(pool: &Pool) {
+    let t = "mad_cc_item";
+    let chain = Chain::new(pool, "cc", &[t]).await;
+    let a = col("a", "i64", json!({"db_comment": "on create"}));
+    let b = col("b", "i64", json!({"db_comment": "on add"}));
+    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), a.clone()])]}))
+        .await
+        .expect("CreateTable");
+    assert_eq!(column_comment(pool, t, "a").await, expect("on create"));
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), a, b])]}))
+        .await
+        .expect("AddColumn");
+    assert_eq!(column_comment(pool, t, "b").await, expect("on add"));
+}
+
 // ---------------------------------------------------------------- #2241
 
 /// Unapplying a dropped EXCLUDE puts it back; it always errored.
@@ -2765,6 +2784,7 @@ tri_dialect_test!(
         dropped_exclude_unapplies,
         case_insensitive_change_applies,
         db_comment_change_applies,
+        db_comment_on_create_and_add_column,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,
