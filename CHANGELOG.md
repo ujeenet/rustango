@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG length and type changes keep a column CITEXT (#2238)
+
+`AlterColumnMaxLength` and `AlterColumnType` on a case-insensitive field write `CITEXT`, not `VARCHAR`/`TEXT`, so it keeps ignoring case.
+
 ### Fixed — PG file migrations create the `citext` extension (#2240)
 
 `CREATE EXTENSION IF NOT EXISTS citext` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`.

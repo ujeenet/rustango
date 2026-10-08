@@ -1204,7 +1204,15 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
-                let pg_to = pg_type_for_ty_name(to);
+                // A case-insensitive string stays CITEXT (#2238).
+                let ci = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .filter(|f| f.ty == *to && is_ci_text(f));
+                let pg_to = match ci {
+                    Some(f) => dialect.ci_text_type(f.max_length),
+                    None => pg_type_for_ty_name(to),
+                };
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
                 ));
@@ -1253,7 +1261,12 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                let ci = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .is_some_and(is_ci_text);
                 let pg_to = match to {
+                    _ if ci => dialect.ci_text_type(*to),
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
                 };

@@ -2168,9 +2168,68 @@ async fn citext_column_on_a_fresh_database(shared: &Pool) {
     }
 }
 
+// ---------------------------------------------------------------- #2238
+
+/// A max_length or type change keeps a CITEXT column case-insensitive:
+/// PG turned it into VARCHAR or TEXT.
+async fn citext_survives_length_and_type_changes(pool: &Pool) {
+    let t = "mad_cl_user";
+    let chain = Chain::new(pool, "cl", &[t]).await;
+    let email =
+        |extra: Value| json!({"tables": [table(t, vec![id(), col("email", "string", extra)])]});
+    let ci = |n: u32| json!({"max_length": n, "case_insensitive": true, "unique": true});
+    chain.step(pool, email(ci(100))).await.expect("initial");
+    chain
+        .step(pool, email(ci(200)))
+        .await
+        .expect("the length change applies");
+    assert_ci_unique(pool, t, "email").await;
+
+    // No length, so the type change is the only op.
+    let t = "mad_ct_user";
+    let chain = Chain::new(pool, "ct", &[t]).await;
+    let c = |ty: &str, extra: Value| json!({"tables": [table(t, vec![id(), col("c", ty, extra)])]});
+    chain
+        .step(pool, c("i32", json!({})))
+        .await
+        .expect("initial");
+    chain
+        .step(pool, c("string", json!({"case_insensitive": true})))
+        .await
+        .expect("the type change applies");
+    assert_ci_equal(pool, t, "c").await;
+}
+
+/// `c = 'abc'` finds the row holding `ABC`.
+async fn assert_ci_equal(pool: &Pool, t: &str, column: &str) {
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'ABC')",
+        &[t, "id", column],
+    )
+    .await
+    .unwrap();
+    let sql = q(
+        pool,
+        "SELECT {} FROM {} WHERE {} = 'abc'",
+        &["id", t, column],
+    );
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        [(1,)],
+        "`{t}.{column}` compares ignoring case on {}",
+        pool.dialect().name()
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
