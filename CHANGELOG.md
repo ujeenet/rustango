@@ -14,6 +14,8 @@ A queryset or `view` hook cannot be re-applied to a deleted row's snapshot, so t
 
 ### Fixed — `MediaPerms` refuses an upload attributed to another user or filed into a hidden collection (#2343)
 
+A move into a collection and a collection nested under a parent need `rustango_media_collections.view` too; the gate reads both bodies.
+
 ### Fixed — admin detail page links a generic FK under the admin prefix (#2341)
 
 It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.

@@ -55,7 +55,7 @@
 //! | POST   | `/uploads/{id}/finalize`          | Confirm the storage object landed; flips the row Pending→Ready. |
 //! | GET    | `/media/{id}`                     | Single Media row + URL + presigned link. |
 //! | DELETE | `/media/{id}`                     | Soft-delete the Media row (storage preserved). |
-//! | POST   | `/media/{id}/move`                | Move Media to another collection: body `{collection_id?: i64}`. |
+//! | POST   | `/media/{id}/move`                | Move Media to another collection: body `{collection_id?: i64}`. Authorized as `Change(MediaMove { id, collection_id })`. |
 //! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. |
 //! | DELETE | `/media/{id}/tags/{slug}`         | Remove a single tag. |
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
@@ -164,8 +164,7 @@ pub enum MediaTarget {
     /// and sets `collection_id = NULL` on the media in all of them. One
     /// authorized id can destroy a subtree of any size. The caller does
     /// not control that shape either: `POST /collections` takes
-    /// `parent_id`, so anyone who may create a collection can attach one
-    /// under someone else's.
+    /// `parent_id`, so a collection can be attached under someone else's.
     ///
     /// **Granting this is not the same as granting `Delete(Collection)`.**
     /// A policy that ends on `_ => false` denies it until someone opts
@@ -208,13 +207,29 @@ pub enum MediaTarget {
     /// optionally under a `parent_id` from the body.
     ///
     /// That `parent_id` is why it is its own decision. Collections
-    /// nest, `DELETE /collections/{id}` takes a whole subtree, and
-    /// anyone who may create a collection may attach one under someone
-    /// else's — see [`Self::CollectionSubtree`].
+    /// nest, and `DELETE /collections/{id}` takes a whole subtree — see
+    /// [`Self::CollectionSubtree`].
     ///
     /// Match as `MediaTarget::NewCollection { .. }`, with the braces.
     #[non_exhaustive]
-    NewCollection {},
+    NewCollection {
+        /// Requested `parent_id`, read from the body like
+        /// [`Self::NewUpload`]'s fields: unvalidated input.
+        parent_id: Option<i64>,
+    },
+    /// `POST /media/{id}/move`: changes media `id`, filing it into
+    /// `collection_id` (`None` = library root).
+    ///
+    /// Not [`Self::Media`], so a policy can check the destination too;
+    /// `collection_id` is read from the body and unvalidated. Match as
+    /// `MediaTarget::MediaMove { id, .. }`.
+    #[non_exhaustive]
+    MediaMove {
+        /// The media row being moved.
+        id: i64,
+        /// Requested destination collection.
+        collection_id: Option<i64>,
+    },
     /// `POST /tags`. Creates (or upserts) a tag by slug.
     ///
     /// Separate from [`Self::NewCollection`]: different table,
@@ -340,6 +355,7 @@ impl From<bool> for MediaDecision {
 ///             MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
 ///             MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
 ///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
+///             MediaAction::Change(MediaTarget::MediaMove { id, .. }) => user.owns_media(id).await,
 ///             MediaAction::Delete(MediaTarget::Media(id)) => user.owns_media(id).await,
 ///             // Deleting a collection takes its whole subtree and
 ///             // orphans the media at every level, so it is a separate
@@ -445,9 +461,18 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
             ..
         }) => &["rustango_media.add", "rustango_media_collections.view"],
         A::Add(T::NewUpload { .. }) => &["rustango_media.add"],
+        A::Add(T::NewCollection { parent_id: Some(_) }) => &[
+            "rustango_media_collections.add",
+            "rustango_media_collections.view",
+        ],
         A::Add(T::NewCollection { .. }) => &["rustango_media_collections.add"],
         A::Add(T::NewTag { .. }) => &["rustango_media_tags.add"],
-        A::Change(T::Media(_)) => &["rustango_media.change"],
+        // Same rule for a move as for an upload (#2343).
+        A::Change(T::MediaMove {
+            collection_id: Some(_),
+            ..
+        }) => &["rustango_media.change", "rustango_media_collections.view"],
+        A::Change(T::Media(_) | T::MediaMove { .. }) => &["rustango_media.change"],
         A::Delete(T::Media(_)) => &["rustango_media.delete"],
         // Both are needed. Deleting a collection soft-deletes every
         // descendant *and* sets `collection_id = NULL` on the media in
@@ -695,30 +720,40 @@ struct UploadRequestDetail {
     uploaded_by_id: Option<i64>,
 }
 
-/// The most the gate will buffer from a body it has to read.
+/// The most the gate will buffer from an upload or move body.
 ///
-/// An upload-ticket body is a few hundred bytes of JSON. 16 KiB is far
-/// above any real one and small enough that buffering it in an
-/// authorization layer is not a denial-of-service primitive. Only
-/// [`wants_upload_body`] routes are read; the rest stream through.
+/// Those bodies are a few hundred bytes of JSON. 16 KiB is far above
+/// any real one and small enough that buffering it in an authorization
+/// layer is not a denial-of-service primitive. Only [`gate_body_limit`]
+/// routes are read; the rest stream through.
 const MAX_GATE_BODY_BYTES: usize = 16 * 1024;
 
-/// Does this request's body have to be read before it can be
-/// classified?
+/// `POST /collections` carries a free-text `description`, so its cap is
+/// axum's default body limit: the gate refuses nothing the handler takes.
+const MAX_GATE_COLLECTION_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// How much of this request's body the gate reads to classify it, or
+/// `None` to stream it through unread.
 ///
-/// True for `POST /uploads/begin` alone. That route takes a
-/// caller-chosen disk and key prefix in the body, and the policy needs
-/// both.
-///
+/// `POST /uploads/begin`, `POST /media/{id}/move` and `POST
+/// /collections` carry a disk, destination or parent the policy needs.
 /// Its own function because the middleware must decide whether to
 /// buffer *before* it can call [`classify`].
-fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
+fn gate_body_limit(method: &axum::http::Method, path: &str) -> Option<usize> {
+    if method != axum::http::Method::POST {
+        return None;
+    }
     let seg: Vec<String> = path
         .split('/')
         .filter(|s| !s.is_empty())
         .map(crate::url_codec::percent_decode_path)
         .collect();
-    method == axum::http::Method::POST && seg.len() == 2 && seg[0] == "uploads" && seg[1] == "begin"
+    let s: Vec<&str> = seg.iter().map(String::as_str).collect();
+    match s.as_slice() {
+        ["uploads", "begin"] | ["media", _, "move"] => Some(MAX_GATE_BODY_BYTES),
+        ["collections"] => Some(MAX_GATE_COLLECTION_BODY_BYTES),
+        _ => None,
+    }
 }
 
 /// Classify a request so the authorizer sees what it is deciding about.
@@ -737,15 +772,16 @@ fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
 /// the target, so the id survives and no policy can ask less of the
 /// wide form than of the narrow one.
 ///
-/// `upload` carries the parsed body for the one route that needs it —
-/// see [`wants_upload_body`]. A `None` on `POST /uploads/begin` gives
-/// a target with empty fields, not no target: an unreadable body is
-/// still an upload request, and the policy should refuse it.
+/// `body` is the buffered body of a [`gate_body_limit`] route. A body
+/// that does not parse gives a target with empty fields, not no target:
+/// it is still that request, and the policy decides. Move and collection
+/// bodies parse as the handler's own type, so the handler rejects
+/// exactly the bodies whose destination the gate could not see.
 fn classify(
     method: &axum::http::Method,
     path: &str,
     query: Option<&str>,
-    upload: Option<UploadRequestDetail>,
+    body: Option<&[u8]>,
 ) -> Option<MediaAction> {
     use axum::http::Method;
 
@@ -784,9 +820,13 @@ fn classify(
         })
     });
 
+    fn parse<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
+        body.and_then(|b| serde_json::from_slice(b).ok())
+    }
+
     match (m, s.as_slice()) {
         (&Method::POST, ["uploads", "begin"]) => {
-            let d = upload.unwrap_or_default();
+            let d = parse::<UploadRequestDetail>(body).unwrap_or_default();
             Some(MediaAction::Add(MediaTarget::NewUpload {
                 disk: d.disk,
                 key_prefix: d.key_prefix,
@@ -804,14 +844,22 @@ fn classify(
         (&Method::DELETE, ["media", raw]) => {
             Some(MediaAction::Delete(MediaTarget::Media(id(raw)?)))
         }
-        // move / tag / untag all mutate the media row itself.
-        (&Method::POST, ["media", raw, "move" | "tags"])
-        | (&Method::DELETE, ["media", raw, "tags", _]) => {
+        // A move also names its destination, so the policy can check it.
+        (&Method::POST, ["media", raw, "move"]) => {
+            Some(MediaAction::Change(MediaTarget::MediaMove {
+                id: id(raw)?,
+                collection_id: parse::<MoveBody>(body).and_then(|b| b.collection_id),
+            }))
+        }
+        // tag / untag mutate the media row itself.
+        (&Method::POST, ["media", raw, "tags"]) | (&Method::DELETE, ["media", raw, "tags", _]) => {
             Some(MediaAction::Change(MediaTarget::Media(id(raw)?)))
         }
 
         (&Method::GET, ["collections"]) => Some(MediaAction::Read(MediaTarget::Listing)),
-        (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::NewCollection {})),
+        (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::NewCollection {
+            parent_id: parse::<CreateCollectionBody>(body).and_then(|b| b.parent_id),
+        })),
         // The collection row itself.
         (&Method::GET, ["collections", raw]) => {
             Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
@@ -859,44 +907,40 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                 let auth = Arc::clone(&auth);
                 async move {
                     let (parts, body) = req.into_parts();
-                    // One route needs its body to be classified: the one
-                    // that mints a presigned PUT. Buffered under a cap
-                    // and handed straight back, so nothing downstream
-                    // notices — except that the policy now knows which
-                    // disk and prefix it is being asked to allow.
-                    let (upload, body) = if wants_upload_body(&parts.method, parts.uri.path()) {
-                        // Over the cap, or the stream failed. Refusing
-                        // keeps the gate from being a place to make a
-                        // server buffer.
-                        let Ok(bytes) = axum::body::to_bytes(body, MAX_GATE_BODY_BYTES).await
-                        else {
-                            tracing::debug!(
-                                target: "rustango::media::auth",
-                                path = %parts.uri.path(),
-                                "refused: upload request body could not be read within \
-                                 the gate's limit"
-                            );
-                            return ApiError::forbidden(
-                                "upload request body too large to authorize",
-                            )
-                            .into_response();
+                    // Three routes need their body to be classified.
+                    // Buffered under a cap and handed straight back, so
+                    // nothing downstream notices — except that the policy
+                    // now knows the disk, destination or parent it is
+                    // being asked to allow.
+                    let (bytes, body) =
+                        if let Some(limit) = gate_body_limit(&parts.method, parts.uri.path()) {
+                            // Over the cap, or the stream failed. Refusing
+                            // keeps the gate from being a place to make a
+                            // server buffer.
+                            let Ok(bytes) = axum::body::to_bytes(body, limit).await else {
+                                tracing::debug!(
+                                    target: "rustango::media::auth",
+                                    path = %parts.uri.path(),
+                                    "refused: request body could not be read within the \
+                                     gate's limit"
+                                );
+                                return ApiError::forbidden("request body too large to authorize")
+                                    .into_response();
+                            };
+                            // `Bytes` clones by refcount, not by copy.
+                            (Some(bytes.clone()), axum::body::Body::from(bytes))
+                        } else {
+                            (None, body)
                         };
-                        // A body that does not parse is still an upload
-                        // request. It reaches the policy with empty
-                        // fields, not as a 400: the gate decides
-                        // authorization, the handler decides validity.
-                        let detail = serde_json::from_slice::<UploadRequestDetail>(&bytes)
-                            .unwrap_or_default();
-                        (Some(detail), axum::body::Body::from(bytes))
-                    } else {
-                        (None, body)
-                    };
                     // No classification means no route here matches, or
                     // the id cannot be a row id. Refuse rather than
                     // pass an unrecognised shape through.
-                    let Some(action) =
-                        classify(&parts.method, parts.uri.path(), parts.uri.query(), upload)
-                    else {
+                    let Some(action) = classify(
+                        &parts.method,
+                        parts.uri.path(),
+                        parts.uri.query(),
+                        bytes.as_deref(),
+                    ) else {
                         tracing::debug!(
                             target: "rustango::media::auth",
                             method = %parts.method,

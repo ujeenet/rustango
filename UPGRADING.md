@@ -156,7 +156,9 @@ Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables wi
 
 ### `MediaPerms`: upload attribution and collection checks
 
-`POST /uploads/begin` now answers 403 when `uploaded_by_id` is not the caller's id (superusers exempt), and a `collection_id` also needs `rustango_media_collections.view` (#2343).
+`POST /uploads/begin` now answers 403 when `uploaded_by_id` is not the caller's id (superusers exempt), and a `collection_id` also needs `rustango_media_collections.view` (#2343). The same view is needed to move media into a collection and to create one under a `parent_id`. `required_codenames` returns the extra codename too, so policies built on it change the same way.
+
+Custom `MediaAuthorizer`s: `POST /media/{id}/move` now arrives as `Change(MediaMove { id, collection_id, .. })`, not `Change(Media(id))`; a policy ending in `_ => false` refuses moves until it gets an arm. `NewCollection` carries `parent_id`.
 
 ### `makemigrations` renames an M2M junction's column
 
