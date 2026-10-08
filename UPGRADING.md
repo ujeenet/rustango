@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Webhook headers are checked
+
+`WebhookSubscription::header` with an invalid name or value makes `dispatch` return `JobError::Fatal` (#2236).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant
