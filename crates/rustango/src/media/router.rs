@@ -785,6 +785,10 @@ fn classify(
 ) -> Option<MediaAction> {
     use axum::http::Method;
 
+    fn parse<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
+        body.and_then(|b| serde_json::from_slice(b).ok())
+    }
+
     let seg: Vec<String> = path
         .split('/')
         .filter(|s| !s.is_empty())
@@ -819,10 +823,6 @@ fn classify(
             crate::url_codec::url_decode(key) == "recursive"
         })
     });
-
-    fn parse<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
-        body.and_then(|b| serde_json::from_slice(b).ok())
-    }
 
     match (m, s.as_slice()) {
         (&Method::POST, ["uploads", "begin"]) => {

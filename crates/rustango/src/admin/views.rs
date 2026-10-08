@@ -108,13 +108,14 @@ fn render_gfk_cell(
     )
 }
 
-/// ContentTypes of the GFK targets in `rows`, by id. A target table the
+/// Content types of the GFK targets in `rows`, by id. A target table the
 /// user may not view is left out, so its cell gets no label or link (#2341).
 async fn gfk_ct_map(
     state: &AppState,
     rows: &[serde_json::Value],
     relations: impl Iterator<Item = &'static crate::core::GenericRelation>,
 ) -> HashMap<i64, crate::contenttypes::ContentType> {
+    use crate::sql::FetcherPool as _;
     let mut needed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for gr in relations {
         needed.extend(
@@ -125,7 +126,6 @@ async fn gfk_ct_map(
     if needed.is_empty() {
         return HashMap::new();
     }
-    use crate::sql::FetcherPool as _;
     // One round trip; ids are bounded by the page size.
     let ids = needed.into_iter().map(SqlValue::I64).collect();
     let cts: Vec<crate::contenttypes::ContentType> = crate::contenttypes::ContentType::objects()
