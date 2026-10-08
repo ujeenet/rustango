@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a migration that drops an EXCLUDE constraint unapplies (#2241)
+
+The inverse `AddExclusionConstraint` is rebuilt from the predecessor snapshot; it always errored.
+
 ### Fixed — makemigrations sees `case_insensitive`, `db_comment` and `generated_as` changes (#2239)
 
 A `case_insensitive` change is an `AlterColumnType`, a comment change the new `AlterColumnComment` op, and a `generated_as` change is refused like a primary-key change.

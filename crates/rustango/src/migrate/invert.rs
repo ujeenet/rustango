@@ -189,13 +189,13 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 table: table.clone(),
             }))
         }
-        Operation::Schema(SchemaChange::DropExclusionConstraint { name, table }) => {
-            // `SchemaSnapshot` does not track exclusion constraints,
-            // so the Add payload cannot be rebuilt. Fail with a clear
-            // message instead.
-            Err(MigrateError::Validation(format!(
-                "cannot invert DropExclusionConstraint(`{name}` on `{table}`): exclusion constraints aren't tracked in SchemaSnapshot; write the inverse `AddExclusionConstraint` by hand. Issue #32.",
-            )))
+        Operation::Schema(SchemaChange::DropExclusionConstraint { name, .. }) => {
+            let x = prev.excludes.iter().find(|x| x.name == *name).ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "cannot invert DropExclusionConstraint(`{name}`): constraint not in predecessor snapshot",
+                ))
+            })?;
+            Ok(Operation::Schema(super::diff::add_exclude(x)))
         }
         Operation::Schema(SchemaChange::CreateIndex { name, table, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex {

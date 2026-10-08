@@ -2316,9 +2316,43 @@ async fn db_comment_change_applies(pool: &Pool) {
     assert_eq!(column_comment(pool, t, "c").await, expect(""));
 }
 
+// ---------------------------------------------------------------- #2241
+
+/// Unapplying a dropped EXCLUDE puts it back; it always errored.
+async fn dropped_exclude_unapplies(pool: &Pool) {
+    let t = "mad_xu_booking";
+    let chain = Chain::new(pool, "xu", &[t]).await;
+    let with = |exclude: bool| {
+        let excludes = if exclude {
+            json!([{"name": "mad_xu_no_overlap", "table": t, "using": "gist",
+                    "elements": [["during", "&&"]]}])
+        } else {
+            json!([])
+        };
+        json!({"tables": [table(t, vec![id(), col("during", "range_datetime", json!({}))])],
+               "excludes": excludes})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    let name = chain.step(pool, with(false)).await.expect("dropped");
+    chain.undo(pool, &name).await.expect("unapply");
+    if pool.dialect().name() != "postgres" {
+        return;
+    }
+    for id in [1, 2] {
+        let overlap = exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, '[2026-01-01,2026-01-02)')"),
+            &[t, "id", "during"],
+        )
+        .await;
+        assert_eq!(overlap.is_err(), id == 2, "the EXCLUDE is back");
+    }
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        dropped_exclude_unapplies,
         case_insensitive_change_applies,
         db_comment_change_applies,
         citext_survives_length_and_type_changes,

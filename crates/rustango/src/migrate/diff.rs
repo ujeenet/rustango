@@ -498,7 +498,7 @@ fn add_check(c: &super::snapshot::CheckSnapshot) -> SchemaChange {
     }
 }
 
-fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
+pub(super) fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChange {
     SchemaChange::AddExclusionConstraint {
         name: x.name.clone(),
         table: x.table.clone(),
