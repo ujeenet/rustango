@@ -810,7 +810,8 @@ pub struct I18nSettings {
     /// The locales the project supports.
     /// `LocaleMiddleware` treats this as the allowlist when reading
     /// Accept-Language. An empty list activates every catalog found
-    /// under `locale_paths`.
+    /// under `locale_paths`. Entries match file stems as locales, so
+    /// `pt-BR` loads `pt_BR.json`.
     pub languages: Vec<String>,
 
     /// Directories holding catalog files at `<dir>/<lang>.json`.

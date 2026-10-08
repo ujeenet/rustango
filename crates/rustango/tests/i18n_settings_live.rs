@@ -148,15 +148,34 @@ fn from_settings_allowlist_matches_normalised_locales() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `pt-BR.json` and `pt_BR.json` are one locale: the first by name wins,
-/// whatever order the directory lists them in.
+/// `xx-YY.json` and `xx_YY.json` are one locale: the first by name (`-`)
+/// wins whatever order the directory lists them in. Several pairs, written
+/// in both orders, so an unsorted read loses on any filesystem.
+fn write_spelling_pairs(dir: &std::path::Path) -> Vec<&'static str> {
+    let tags = [
+        "pt-BR", "en-GB", "zh-CN", "fr-CA", "es-MX", "de-AT", "sr-RS", "nl-BE",
+    ];
+    for (i, tag) in tags.iter().enumerate() {
+        let hyphen = (format!("{tag}.json"), r#"{"hi": "hyphen"}"#);
+        let underscore = (
+            format!("{}.json", tag.replace('-', "_")),
+            r#"{"hi": "underscore"}"#,
+        );
+        let (a, b) = if i % 2 == 0 {
+            (hyphen, underscore)
+        } else {
+            (underscore, hyphen)
+        };
+        write_catalog(dir, &a.0, a.1);
+        write_catalog(dir, &b.0, b.1);
+    }
+    tags.to_vec()
+}
+
 #[test]
 fn from_settings_keeps_the_first_of_two_spellings() {
     let dir = tempdir();
-    // The winner is written first, so "last listed wins" would pick the other.
-    write_catalog(&dir, "pt-BR.json", r#"{"hi": "hyphen"}"#);
-    write_catalog(&dir, "pt_BR.json", r#"{"hi": "underscore"}"#);
-
+    let tags = write_spelling_pairs(&dir);
     let settings = I18nSettings {
         default_locale: Some("en".into()),
         languages: vec![],
@@ -164,7 +183,19 @@ fn from_settings_keeps_the_first_of_two_spellings() {
         fallback_chain: vec![],
     };
     let t = Translator::from_settings(&settings).expect("load ok");
-    // `-` (0x2D) sorts before `_` (0x5F).
-    assert_eq!(t.translate("pt-BR", "hi", &[]), "hyphen");
+    for tag in tags {
+        assert_eq!(t.translate(tag, "hi", &[]), "hyphen", "{tag}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn from_directory_keeps_the_first_of_two_spellings() {
+    let dir = tempdir();
+    let tags = write_spelling_pairs(&dir);
+    let t = Translator::from_directory(&dir, rustango::i18n::Locale::new("en")).expect("load ok");
+    for tag in tags {
+        assert_eq!(t.translate(tag, "hi", &[]), "hyphen", "{tag}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

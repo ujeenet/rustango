@@ -662,6 +662,8 @@ impl Translator {
 
     /// Load every `*.json` file in `dir` as a locale catalog. The file
     /// stem becomes the locale identifier (e.g. `en.json` → `Locale::new("en")`).
+    /// Of two spellings of one locale (`pt_BR.json`, `pt-BR.json`) the first
+    /// by name wins; the other is skipped with a warning.
     ///
     /// Each file must contain a flat object of string→string entries.
     ///
@@ -670,22 +672,8 @@ impl Translator {
     /// [`I18nError::Parse`] when a JSON file is malformed.
     pub fn from_directory(dir: &Path, default_locale: Locale) -> Result<Self, I18nError> {
         let t = Translator::new(default_locale);
-        let entries = std::fs::read_dir(dir).map_err(|e| I18nError::Io(e.to_string()))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let raw = std::fs::read_to_string(&path).map_err(|e| I18nError::Io(e.to_string()))?;
-            let catalog: HashMap<String, String> =
-                serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
-                    file: path.display().to_string(),
-                    detail: e.to_string(),
-                })?;
-            t.insert_locale(Locale::new(stem), catalog);
+        for (locale, path) in catalog_files(dir)? {
+            t.insert_locale(locale, read_catalog(&path)?);
         }
         Ok(t)
     }
@@ -716,6 +704,8 @@ impl Translator {
     /// Defaults when fields are unset:
     /// - `default_locale = None` → `"en"`.
     /// - `languages = []` → every catalog discovered via `locale_paths` stays active.
+    /// - `languages` and file stems match as [`Locale`]s, so `pt-BR` loads
+    ///   `pt_BR.json`; a second spelling in one directory is skipped.
     /// - `locale_paths = []` → no directory scan; resulting translator has
     ///   no registered catalogs (apps that build catalogs programmatically
     ///   via `add_locale` skip the TOML path entirely).
@@ -747,42 +737,13 @@ impl Translator {
 
         for raw_path in &settings.locale_paths {
             let path = std::path::Path::new(raw_path);
-            // Sorted, so which of `pt_BR.json` / `pt-BR.json` wins is stable.
-            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(path)
-                .map_err(|e| I18nError::Io(format!("{}: {e}", path.display())))?
-                .flatten()
-                .map(|e| e.path())
-                .collect();
-            files.sort();
-            let mut seen = std::collections::HashSet::new();
-            for p in files {
-                if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let locale = Locale::new(stem);
+            for (locale, p) in catalog_files(path)? {
                 if let Some(allow) = &allowlist {
                     if !allow.contains(&locale) {
                         continue;
                     }
                 }
-                if !seen.insert(locale.clone()) {
-                    tracing::warn!(
-                        file = %p.display(),
-                        locale = locale.as_str(),
-                        "i18n: duplicate catalog for one locale in the same directory, ignored"
-                    );
-                    continue;
-                }
-                let raw = std::fs::read_to_string(&p).map_err(|e| I18nError::Io(e.to_string()))?;
-                let catalog: HashMap<String, String> =
-                    serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
-                        file: p.display().to_string(),
-                        detail: e.to_string(),
-                    })?;
-                t.insert_locale(locale, catalog);
+                t.insert_locale(locale, read_catalog(&p)?);
             }
         }
 
@@ -1118,12 +1079,52 @@ pub fn plural_category_is_explicit(locale: &str) -> bool {
     plural_family(&Locale::new(locale)).is_some()
 }
 
+/// `dir`'s `*.json` catalogs by locale, sorted by file name. A second
+/// spelling of one locale (`pt_BR` after `pt-BR`) is skipped with a warning.
+fn catalog_files(dir: &Path) -> Result<Vec<(Locale, std::path::PathBuf)>, I18nError> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| I18nError::Io(format!("{}: {e}", dir.display())))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    let mut out: Vec<(Locale, std::path::PathBuf)> = Vec::new();
+    for p in files {
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let locale = Locale::new(stem);
+        if out.iter().any(|(l, _)| *l == locale) {
+            tracing::warn!(
+                file = %p.display(),
+                locale = locale.as_str(),
+                "i18n: duplicate catalog for one locale in the same directory, ignored"
+            );
+            continue;
+        }
+        out.push((locale, p));
+    }
+    Ok(out)
+}
+
+/// One flat string→string JSON catalog.
+fn read_catalog(path: &Path) -> Result<HashMap<String, String>, I18nError> {
+    let raw = std::fs::read_to_string(path).map_err(|e| I18nError::Io(e.to_string()))?;
+    serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
+        file: path.display().to_string(),
+        detail: e.to_string(),
+    })
+}
+
 // ------------------------------------------------------------------ Accept-Language negotiation
 
 /// Pick the best-matching language from `Accept-Language`.
 ///
 /// `accept_language` is the raw header value (e.g. `"fr-FR,fr;q=0.9,en;q=0.8"`).
 /// `available` is the list of locales the app supports.
+///
+/// A bare base language beats a sibling region: `en-US` picks `en` over `en-GB`.
 ///
 /// Returns the best match or `None` if no acceptable language is supported.
 #[must_use]
