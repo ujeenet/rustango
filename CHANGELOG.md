@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG type change on a column with a DEFAULT (#2242)
+
+`AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically".
+
 ### Fixed — a migration that drops an EXCLUDE constraint unapplies (#2241)
 
 The inverse `AddExclusionConstraint` is rebuilt from the predecessor snapshot; it always errored.

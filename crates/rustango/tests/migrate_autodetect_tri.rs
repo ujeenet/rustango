@@ -2349,9 +2349,54 @@ async fn dropped_exclude_unapplies(pool: &Pool) {
     }
 }
 
+// ---------------------------------------------------------------- #2242
+
+/// A type change on a column with a DEFAULT: PG said the default
+/// "cannot be cast automatically". The new default applies after.
+async fn type_change_with_a_default(pool: &Pool) {
+    let t = "mad_td_item";
+    let chain = Chain::new(pool, "td", &[t]).await;
+    let uuid0 = "'00000000-0000-0000-0000-000000000000'";
+    let with = |flag: (&str, &str), code: &str| {
+        json!({"tables": [table(t, vec![id(),
+            col("flag", flag.0, json!({"default": flag.1})),
+            col("code", code, json!({"default": uuid0}))])]})
+    };
+    let bools = by_dialect! { pool,
+        postgres => ("false", "true"), because "PG has a boolean type",
+        mysql => ("0", "1"), because "MySQL's BOOLEAN is TINYINT(1)",
+        sqlite => ("0", "1"), because "SQLite stores booleans as integers",
+    };
+    let (f, tr) = bools.value;
+    chain
+        .step(pool, with(("bool", f), "string"))
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        &format!("INSERT INTO {{}} ({{}}, {{}}, {{}}) VALUES (1, {tr}, {uuid0})"),
+        &[t, "id", "flag", "code"],
+    )
+    .await
+    .unwrap();
+    chain
+        .step(pool, with(("i32", "7"), "uuid"))
+        .await
+        .expect("bool → i32 and string → uuid apply with their defaults");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[t, "id"])
+        .await
+        .unwrap();
+    let sql = q(pool, "SELECT {} FROM {} ORDER BY {}", &["flag", t, "id"]);
+    let got: Vec<(i32,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(1,), (7,)], "the old value cast, the new default set");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        type_change_with_a_default,
         dropped_exclude_unapplies,
         case_insensitive_change_applies,
         db_comment_change_applies,

@@ -1236,13 +1236,23 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                let field = current
+                    .table(table)
+                    .and_then(|t| t.field(column))
+                    .filter(|f| f.ty == *to);
+                // The old DEFAULT may not cast to the new type, so it goes
+                // first and the new one comes back after (#2242). A serial
+                // or generated column keeps its own.
+                let default = field.filter(|f| !f.auto && f.generated_as.is_none());
+                if default.is_some() {
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                    ));
+                }
                 // A string takes the field's whole type, so CITEXT (#2238) or
                 // VARCHAR(n) (#2239). No `USING`: the assignment cast refuses
                 // what `::VARCHAR(n)` would truncate.
-                let string = current
-                    .table(table)
-                    .and_then(|t| t.field(column))
-                    .filter(|f| f.ty == *to && to == "string");
+                let string = field.filter(|_| to == "string");
                 out.immediate.push(match string {
                     Some(f) => format!(
                         r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {}"#,
@@ -1255,6 +1265,14 @@ fn render_changes_split_inner(
                         )
                     }
                 });
+                if let Some(f) = default {
+                    if let Some(expr) = &f.default {
+                        let value = render_column_default(expr, &f.ty, f.max_length, dialect);
+                        out.immediate.push(format!(
+                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
+                        ));
+                    }
+                }
             }
             SchemaChange::AlterColumnNullable {
                 table,

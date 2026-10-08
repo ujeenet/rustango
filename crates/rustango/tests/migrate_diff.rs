@@ -1192,8 +1192,8 @@ fn case_insensitive_change_is_a_type_change() {
     // The whole string type, so turning it off keeps VARCHAR(32).
     let off = render_changes(&detect_changes(&ci, &plain), &plain).unwrap();
     assert_eq!(
-        off,
-        [r#"ALTER TABLE "diff_user" ALTER COLUMN "name" TYPE VARCHAR(32)"#]
+        off.last().unwrap(),
+        r#"ALTER TABLE "diff_user" ALTER COLUMN "name" TYPE VARCHAR(32)"#
     );
 }
 
