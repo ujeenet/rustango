@@ -503,6 +503,14 @@ fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
     if field.is_serial() {
         return dialect.serial_type(field.ty).to_owned();
     }
+    if field.primary_key
+        && field.default.is_some()
+        && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
+    {
+        if let Some(ty) = dialect.defaulted_integer_pk_type() {
+            return ty.to_owned();
+        }
+    }
     // Case-insensitive text only means something for `String`.
     if field.case_insensitive && matches!(field.ty, FieldType::String) {
         return dialect.ci_text_type(field.max_length);

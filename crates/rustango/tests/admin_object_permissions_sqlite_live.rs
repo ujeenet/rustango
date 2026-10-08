@@ -279,3 +279,74 @@ async fn custom_action_refuses_when_a_row_hook_denies() {
         vec![rustango::core::SqlValue::I64(1)]
     );
 }
+
+// #1818: an action registered with `ActionPerm::Delete` needs `delete`, not `change`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_purge", admin(actions = "purge_selected, tidy_selected"))]
+#[allow(dead_code)]
+pub struct OpPurge {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+}
+rustango::register_admin_object_permission!("op_purge", "delete", deny);
+
+static PURGED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
+
+fn purge<'a>(
+    _: &'a Pool,
+    pks: &'a [rustango::core::SqlValue],
+) -> rustango::admin::AdminActionFuture<'a> {
+    PURGED.lock().unwrap().extend_from_slice(pks);
+    Box::pin(async { Ok(()) })
+}
+
+async fn run_purge(perms: Option<&[&str]>, form: &'static str) -> StatusCode {
+    use rustango::admin::ActionPerm;
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE op_purge (id INTEGER PRIMARY KEY)",
+        Vec::new(),
+    )
+    .await
+    .expect("create");
+    rustango::sql::raw_execute_pool(&pool, "INSERT INTO op_purge (id) VALUES (1)", Vec::new())
+        .await
+        .expect("seed");
+    rustango::audit::ensure_table_pool(&pool)
+        .await
+        .expect("audit table");
+    let mut b = rustango::admin::Builder::new(pool)
+        .admin_prefix("")
+        .register_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
+        .register_action("op_purge", "tidy_selected", purge);
+    if let Some(p) = perms {
+        b = b.with_user_perms(p.iter().map(|s| (*s).to_owned()));
+    }
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/op_purge/__action")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .unwrap();
+    b.build().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn a_delete_action_runs_the_delete_hook_and_perm() {
+    let purge_form = "action=purge_selected&_selected=1";
+    assert_eq!(run_purge(None, purge_form).await, StatusCode::FORBIDDEN);
+    let change_only: &[&str] = &["op_purge.view", "op_purge.change"];
+    assert_eq!(
+        run_purge(Some(change_only), purge_form).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(PURGED.lock().unwrap().is_empty(), "handler not run");
+    // The same handler as a `change` action passes: no `change` hook denies.
+    let tidy = "action=tidy_selected&_selected=1";
+    assert_eq!(
+        run_purge(Some(change_only), tidy).await,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(PURGED.lock().unwrap().len(), 1);
+}

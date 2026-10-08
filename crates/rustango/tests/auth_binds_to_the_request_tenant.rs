@@ -108,9 +108,7 @@ async fn tenant_db(url: &str, user: Option<(&str, &str)>) -> rustango::sql::Pool
         .expect("users table");
     if let Some((username, password)) = user {
         let hash = rustango::tenancy::password::hash(password).expect("hash");
-        let rustango::sql::Pool::Sqlite(sq) = &pool else {
-            unreachable!("sqlite-only test")
-        };
+        let sq = pool.as_sqlite().expect("sqlite-only test");
         sqlx::query(
             "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
              VALUES (?, ?, 0, 1, datetime('now'))",

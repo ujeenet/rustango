@@ -241,8 +241,8 @@ connection check passes.</p>
     applySlug();
   })();
 
-  // Posts just the URL to the probe endpoint and drops the returned
-  // fragment in place, so an operator can check a URL without losing
+  // Posts just the URL to the probe endpoint and shows the result in
+  // place, so an operator can check a URL without losing
   // the rest of the form to a page reload.
   document.getElementById("test-connection").addEventListener("click", async (e) => {
     const out = document.getElementById("probe-result");
@@ -265,7 +265,7 @@ connection check passes.</p>
           slug: document.getElementById("slug").value,
         }),
       });
-      out.innerHTML = await res.text();
+      await showProbe(out, res);
     } catch (err) {
       out.textContent = "could not reach the console: " + err;
     } finally {

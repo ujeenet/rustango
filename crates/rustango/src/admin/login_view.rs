@@ -59,8 +59,12 @@ pub(crate) fn protected_router(state: AppState) -> Router {
 
 // ============================================================ Login form (GET)
 
-async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    login_response(&state, &headers, None).await
+async fn login_form(
+    State(state): State<AppState>,
+    extensions: axum::http::Extensions,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    login_response(&state, &extensions, &headers, None).await
 }
 
 /// Render the login page and seed a double-submit CSRF token. The GET
@@ -69,6 +73,7 @@ async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMa
 /// outer middleware.
 async fn login_response(
     state: &AppState,
+    extensions: &axum::http::Extensions,
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
@@ -96,7 +101,7 @@ async fn login_page(
     // Under `protect_with_csrf` the outer layer already chose the token (#2131).
     let (token, set_cookie) = match super::session::current_csrf_token() {
         Some(token) => (token, None),
-        None => csrf::ensure_token(headers, csrf::CSRF_COOKIE),
+        None => csrf::ensure_token_under_layer(headers, extensions),
     };
     let html = render_login_form(state, error, &csrf::csrf_input_html(&token), totp_step).await;
     let mut resp = Html(html).into_response();
@@ -199,9 +204,14 @@ async fn login_submit(
     // Check the double-submit CSRF token before any database work or
     // password check. A cross-site POST cannot read the SameSite=Lax
     // cookie to echo the token back, so it fails here.
-    if !crate::forms::csrf::verify_form_token(&headers, form.csrf_token.as_deref()) {
+    if !crate::forms::csrf::verify_form_token_under_layer(
+        &headers,
+        &extensions,
+        form.csrf_token.as_deref(),
+    ) {
         return login_response(
             &state,
+            &extensions,
             &headers,
             Some("Your session expired or the form was invalid. Please try again."),
         )
@@ -248,7 +258,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return login_response(&state, &headers, Some("Invalid credentials.")).await;
+        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
     };
     let stored_name = row
         .get("username")
@@ -289,7 +299,7 @@ async fn login_submit(
         // Use the same generic message as unknown user or wrong
         // password, so the form cannot be used to enumerate accounts.
         // The signal above still records the real reason.
-        return login_response(&state, &headers, Some("Invalid credentials.")).await;
+        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
     }
     if !password_ok {
         attempt.failed().await;
@@ -300,7 +310,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return login_response(&state, &headers, Some("Invalid credentials.")).await;
+        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
     }
 
     // Two-factor challenge. A user with a confirmed TOTP device must
@@ -329,7 +339,8 @@ async fn login_submit(
                     request: meta.clone(),
                 })
                 .await;
-                return login_response(&state, &headers, Some("Invalid credentials.")).await;
+                return login_response(&state, &extensions, &headers, Some("Invalid credentials."))
+                    .await;
             }
         };
         if let Some(totp_secret) = enrolled {
@@ -357,6 +368,7 @@ async fn login_submit(
                 .await;
                 return login_response(
                     &state,
+                    &extensions,
                     &headers,
                     Some("Enter the 6-digit code from your authenticator app."),
                 )
@@ -1170,6 +1182,82 @@ mod tests {
             .await
             .unwrap();
         assert!(std::str::from_utf8(&body).unwrap().contains("try again"));
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod outer_csrf_tests {
+    use super::*;
+    use crate::forms::csrf::{with_config, CsrfConfig};
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    /// #2160 — under a custom cookie name the GET seeds that cookie and
+    /// the POST passes both the outer layer and the login check.
+    #[tokio::test]
+    async fn login_round_trip_uses_the_outer_layers_cookie() {
+        let pool = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let mut config = super::super::urls::Config::default();
+        config.session_secret = Some(crate::session::SessionSecret::from_bytes(vec![7u8; 32]));
+        let state = AppState {
+            pool: crate::sql::Pool::Sqlite(pool),
+            config: Arc::new(config),
+        };
+        let app = public_router(state).layer(with_config(CsrfConfig {
+            cookie_name: "outer_csrf".into(),
+            ..CsrfConfig::default()
+        }));
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookies: Vec<String> = get
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_owned())
+            .collect();
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(cookies[0].starts_with("outer_csrf="), "{cookies:?}");
+        let body = axum::body::to_bytes(get.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        let token = body
+            .split(r#"name="_csrf" value=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("form token")
+            .to_owned();
+
+        let post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::COOKIE, cookies.join("; "))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "username=nobody&password=wrong&_csrf={token}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(post.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Invalid credentials."), "{body}");
     }
 }
 
