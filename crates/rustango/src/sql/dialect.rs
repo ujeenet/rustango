@@ -120,6 +120,13 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// The column type for a non-`Auto` integer primary key that has a
+    /// DB default, when [`Self::column_type`] would make the DB ignore
+    /// that default. `None` keeps [`Self::column_type`].
+    fn defaulted_integer_pk_type(&self) -> Option<&'static str> {
+        None
+    }
+
     /// `true` when foreign keys must go inside `CREATE TABLE` instead
     /// of a later `ALTER TABLE … ADD CONSTRAINT`.
     ///

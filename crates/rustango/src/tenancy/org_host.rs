@@ -185,17 +185,9 @@ pub async fn add_host(
     else {
         return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
-    if host_claimed(registry, &host, None).await? {
-        return Err(HostError::Taken(host));
-    }
-    let mut row = OrgHost {
-        id: crate::sql::Auto::Unset,
-        org_id: org.id.get().copied().unwrap_or_default(),
-        hostname: host,
-        enabled: true,
-        created_at: crate::sql::Auto::Unset,
-    };
-    row.insert_pool(registry).await?;
+    let org_id = org.id.get().copied().unwrap_or_default();
+    let Claimed { tx, row } = claim_host(registry, &host, Claimant::Extra(org_id)).await?;
+    tx.commit().await.map_err(crate::sql::ExecError::from)?;
     super::invalidate_host_cache();
     Ok(row)
 }
@@ -229,6 +221,143 @@ pub(crate) async fn host_claimed(
     Ok(extra
         .iter()
         .any(|h| except_org.is_none() || Some(h.org_id) != except_org))
+}
+
+/// Who a [`claim_host`] takes the host for.
+pub(crate) enum Claimant<'a> {
+    /// A new `rustango_org_hosts` row: clashes with any other host, its own tenant's too.
+    Extra(i64),
+    /// This tenant's `Org.host_pattern`: clashes only with another tenant's hosts.
+    Base(i64),
+    /// A tenant inserted in the claim's transaction, claiming its base host.
+    NewOrg(&'a mut super::Org),
+}
+
+/// A held claim: commit `tx` after the write the claim guards.
+pub(crate) struct Claimed {
+    pub(crate) tx: crate::sql::PoolTx<'static>,
+    pub(crate) row: OrgHost,
+}
+
+/// Claim `host` in a transaction this opens, so nothing reads before it (#2099).
+///
+/// The claim is the hostname's `rustango_org_hosts` row: its unique index
+/// makes a concurrent claim wait for the transaction, then fail. A base
+/// host's claim row is dropped again before commit. MySQL breaks two
+/// claims of a free host with a deadlock; the loser retries once and
+/// then sees the winner's row.
+///
+/// # Errors
+/// [`HostError::Taken`] when another tenant has it, or a driver failure.
+pub(crate) async fn claim_host(
+    registry: &Pool,
+    host: &str,
+    mut claimant: Claimant<'_>,
+) -> Result<Claimed, HostError> {
+    match claim_once(registry, host, &mut claimant).await {
+        Err(HostError::Driver(e)) if e.is_deadlock() => {
+            claim_once(registry, host, &mut claimant).await
+        }
+        r => r,
+    }
+}
+
+async fn claim_once(
+    registry: &Pool,
+    host: &str,
+    claimant: &mut Claimant<'_>,
+) -> Result<Claimed, HostError> {
+    use crate::sql::FetcherTx as _;
+    let taken = || HostError::Taken(host.to_owned());
+    let mut tx = crate::sql::write_transaction_pool(registry).await?;
+    let (org_id, base) = match claimant {
+        Claimant::Extra(id) => (*id, false),
+        Claimant::Base(id) => (*id, true),
+        Claimant::NewOrg(org) => {
+            // A retry re-inserts: the deadlock rolled the first INSERT back.
+            org.id = crate::sql::Auto::Unset;
+            org.insert_tx(&mut tx).await?;
+            (org.id.get().copied().unwrap_or_default(), true)
+        }
+    };
+    // A locking read: waits for a writer holding the row, takes no snapshot.
+    let held: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.eq(host.to_owned()))
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(&mut tx)
+        .await?;
+    let (row, inserted) = match held.into_iter().next() {
+        // Promoting the tenant's own extra host: that row is the claim.
+        Some(own) if base && own.org_id == org_id => (own, false),
+        Some(_) => return Err(taken()),
+        None => {
+            let mut row = OrgHost {
+                id: crate::sql::Auto::Unset,
+                org_id,
+                hostname: host.to_owned(),
+                enabled: true,
+                created_at: crate::sql::Auto::Unset,
+            };
+            match row.insert_tx(&mut tx).await {
+                Err(e) if e.is_unique_violation() => return Err(taken()),
+                r => r?,
+            }
+            (row, true)
+        }
+    };
+    // The first plain reads, so MySQL's snapshot starts after the claim.
+    // `iexact`, as `host_claimed`: a row stored before lowercasing clashes too.
+    let orgs: Vec<super::Org> = super::Org::objects()
+        .where_(super::Org::host_pattern.iexact(host))
+        .fetch_tx(&mut tx)
+        .await?;
+    let extra: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.iexact(host))
+        .fetch_tx(&mut tx)
+        .await?;
+    let except = base.then_some(org_id);
+    let clash = other_org(&orgs, except)
+        || extra
+            .iter()
+            .any(|h| h.id.get() != row.id.get() && except != Some(h.org_id));
+    if clash {
+        return Err(taken());
+    }
+    if inserted && base {
+        row.delete_tx(&mut tx).await?;
+    }
+    Ok(Claimed { tx, row })
+}
+
+/// Insert a new `org`, claiming its host in the same transaction (#2099).
+///
+/// # Errors
+/// As [`claim_error`], or the INSERT's driver failure.
+pub(crate) async fn insert_org(
+    registry: &Pool,
+    org: &mut super::Org,
+) -> Result<(), super::TenancyError> {
+    let Some(host) = org.host_pattern.clone() else {
+        org.insert_pool(registry).await?;
+        return Ok(());
+    };
+    let claimed = claim_host(registry, &host, Claimant::NewOrg(org))
+        .await
+        .map_err(claim_error)?;
+    claimed.tx.commit().await?;
+    Ok(())
+}
+
+/// A [`claim_host`] failure as the tenant-edit and provisioning paths report it.
+pub(crate) fn claim_error(e: HostError) -> super::TenancyError {
+    match e {
+        HostError::Driver(e) => super::TenancyError::Exec(e),
+        HostError::Taken(h) => {
+            super::TenancyError::Validation(format!("host `{h}` is already used by another tenant"))
+        }
+        other => super::TenancyError::Validation(other.to_string()),
+    }
 }
 
 /// Is `prefix` another tenant's path prefix? Two would route by row order.

@@ -51,12 +51,14 @@ const DDL_SQLITE: &str = r#"CREATE TABLE atomic_widget (
     priority INTEGER NOT NULL
 )"#;
 
+#[cfg(feature = "postgres")]
 const DDL_PG: &str = r#"CREATE TABLE atomic_widget (
     id       BIGSERIAL PRIMARY KEY,
     label    VARCHAR(60) NOT NULL UNIQUE,
     priority INTEGER NOT NULL
 )"#;
 
+#[cfg(feature = "mysql")]
 const DDL_MYSQL: &str = r#"CREATE TABLE atomic_widget (
     id       BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     label    VARCHAR(60) NOT NULL UNIQUE,

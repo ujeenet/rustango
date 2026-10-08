@@ -137,6 +137,12 @@ impl Dialect for Sqlite {
         true
     }
 
+    /// `INTEGER PRIMARY KEY` is the rowid, which skips a DEFAULT (#2137).
+    /// Any other spelling keeps INTEGER affinity and honours it.
+    fn defaulted_integer_pk_type(&self) -> Option<&'static str> {
+        Some("BIGINT")
+    }
+
     /// SQLite has no `ALTER TABLE … ADD CONSTRAINT` at all, so every
     /// foreign key has to go inside its `CREATE TABLE`.
     fn inline_fks_in_create_table(&self) -> bool {

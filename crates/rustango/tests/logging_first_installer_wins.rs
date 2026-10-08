@@ -97,7 +97,7 @@ fn the_second_installer_is_discarded_and_setup_says_so() {
     );
     let warning = &first.contents()[before..];
     assert!(
-        warning.contains("[logging] settings ignored"),
+        warning.contains("logging setup ignored"),
         "a discarded `Setup::install` must say so — that silence was the \
          whole of #1465. Emitted since the last assert: {warning:?}",
     );
