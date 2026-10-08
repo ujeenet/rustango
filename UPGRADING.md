@@ -156,7 +156,9 @@ Changing `src_col` / `dst_col` with the same `through` and tables now writes `Re
 
 ### Colliding FK names are refused
 
-Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail the migration before any DDL on PG and MySQL; rename a table or column (#2245).
+Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail at render, before the op that adds them, on PG and MySQL; rename a table or column. On MySQL, earlier ops of that migration have already committed (#2245).
+
+A self-referencing M2M whose two columns both change is refused by `makemigrations`; rename one per migration.
 
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 

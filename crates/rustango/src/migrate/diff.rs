@@ -295,9 +295,10 @@ impl SchemaChange {
 /// first, then create the dependents. MySQL commits each DDL statement, so
 /// a drop that fails after its column or table went cannot roll back (#1879).
 ///
-/// Renames are **never** emitted, but for an M2M junction's columns: a
-/// snapshot diff cannot tell a rename from a drop plus an add. Write those by hand with
-/// `manage makemigrations --empty <name>`. Changes this cannot
+/// Table and model-column renames are never emitted: a snapshot diff cannot
+/// tell them from a drop plus an add. Write those by hand with
+/// `manage makemigrations --empty <name>`. A changed M2M junction column is
+/// the exception: its junction stays, so it is a `RenameColumn`. Changes this cannot
 /// express are reported by [`detect_unsupported_field_changes`]
 /// instead of being silently skipped.
 #[must_use]
@@ -512,33 +513,31 @@ pub(super) fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChang
 
 /// The column renames that turn junction `old` into `new` over the same
 /// tables, so its rows survive (#2245). `None` if an end's table changed,
-/// or a self-referencing junction renamed both columns (ambiguous).
+/// or a self-referencing junction renamed both columns, which
+/// [`detect_unsupported_field_changes`] refuses.
 fn m2m_renames(
     old: &super::snapshot::M2MTableSnapshot,
     new: &super::snapshot::M2MTableSnapshot,
 ) -> Option<Vec<SchemaChange>> {
-    let direct = (old.src_table == new.src_table && old.dst_table == new.dst_table)
-        .then_some([(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
-    let mirrored = (old.src_table == new.dst_table && old.dst_table == new.src_table)
-        .then_some([(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
-    let kept = |p: &[(&String, &String); 2]| p.iter().filter(|(a, b)| a == b).count();
-    let pairs = match (direct, mirrored) {
-        (Some(d), Some(m)) if kept(&d) == kept(&m) => return None,
-        (Some(d), Some(m)) => {
-            if kept(&d) > kept(&m) {
-                d
-            } else {
-                m
-            }
-        }
-        (Some(p), None) | (None, Some(p)) => p,
-        (None, None) => return None,
-    };
     let rename = |from: &str, to: &str| SchemaChange::RenameColumn {
         table: old.through.clone(),
         old_column: from.to_owned(),
         new_column: to.to_owned(),
     };
+    // Self-referencing: the snapshot sorts the ends by name, so only a
+    // column that keeps its name says which end is which.
+    if is_self_ref(old) && is_self_ref(new) && old.src_table == new.src_table {
+        let (olds, news) = ([&old.src_col, &old.dst_col], [&new.src_col, &new.dst_col]);
+        let gone = olds.iter().find(|c| !news.contains(c))?;
+        let came = news.iter().find(|c| !olds.contains(c))?;
+        let kept = olds.iter().filter(|c| news.contains(c)).count();
+        return (kept == 1).then(|| vec![rename(gone, came)]);
+    }
+    let direct = (old.src_table == new.src_table && old.dst_table == new.dst_table)
+        .then_some([(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
+    let mirrored = (old.src_table == new.dst_table && old.dst_table == new.src_table)
+        .then_some([(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
+    let pairs = direct.or(mirrored)?;
     let changed: Vec<_> = pairs.into_iter().filter(|(a, b)| a != b).collect();
     Some(match changed[..] {
         [(a, b)] => vec![rename(a, b)],
@@ -552,6 +551,10 @@ fn m2m_renames(
         [(a, b), (c, d)] => vec![rename(a, b), rename(c, d)],
         _ => Vec::new(),
     })
+}
+
+fn is_self_ref(m: &super::snapshot::M2MTableSnapshot) -> bool {
+    m.src_table == m.dst_table
 }
 
 /// A junction column name that is neither `a` nor `b` and fits PG's 63 bytes.
@@ -743,6 +746,22 @@ pub fn detect_unsupported_field_changes(
                 continue;
             };
             push_field_diffs(&ct.name, pf, cf, &mut out);
+        }
+    }
+    // A self-referencing junction with both columns renamed: which end is
+    // which is unknown, and a Drop + Create would lose its rows (#2245).
+    for pm in prev.m2m_tables.iter().filter(|m| is_self_ref(m)) {
+        let Some(cm) = current.m2m_table(&pm.through) else {
+            continue;
+        };
+        if cm != pm && is_self_ref(cm) && cm.src_table == pm.src_table {
+            if m2m_renames(pm, cm).is_none() {
+                out.push(format!(
+                    "self-referencing M2M `{}` renamed both columns (`{}`, `{}` → `{}`, `{}`); \
+                     rename one per migration, or write the RenameColumn ops by hand",
+                    pm.through, pm.src_col, pm.dst_col, cm.src_col, cm.dst_col
+                ));
+            }
         }
     }
     out
@@ -1427,10 +1446,15 @@ fn render_changes_split_inner(
                 }
                 // A serial's sequence keeps its old type, so i32 → i64 still stops at 2^31 (#2245).
                 if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
+                    // A tagged body, so a `$$` in a name cannot end it.
+                    const TAG: &str = "$rustango_seq$";
+                    if table.contains(TAG) || column.contains(TAG) {
+                        return Err(format!("`{table}.{column}`: a name cannot contain `{TAG}`"));
+                    }
                     out.immediate.push(format!(
-                        "DO $$ DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
+                        "DO {TAG} DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
                          IF s IS NOT NULL THEN EXECUTE format('ALTER SEQUENCE %s AS {}', s); \
-                         END IF; END $$",
+                         END IF; END {TAG}",
                         dialect.quote_literal(&dialect.quote_ident(table)),
                         dialect.quote_literal(column),
                         pg_type_for_ty_name(to),
