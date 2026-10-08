@@ -374,3 +374,39 @@ async fn password_and_key_verbs_take_flags_anywhere() {
         .await
         .is_err());
 }
+
+/// `flush` never wipes the registry; `--tenant` clears that tenant only (#2284).
+#[tokio::test]
+async fn flush_never_touches_the_registry() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+
+    let plain = b.run(&["flush", "--yes"]).await;
+    let listed = b.run(&["list-tenants"]).await.expect("list");
+    assert!(
+        listed.contains("acme"),
+        "flush wiped the registry: {listed}"
+    );
+    let err = plain.expect_err("plain flush");
+    assert!(err.contains("--tenant"), "{err}");
+    let out = b
+        .run(&["flush", "--tenant", "acme", "--yes", "--model", "Org"])
+        .await
+        .expect("registry model filtered out");
+    assert!(out.contains("no tables match"), "{out}");
+
+    b.run(&["flush", "--tenant", "acme", "--yes", "--model", "User"])
+        .await
+        .expect("tenant flush");
+    assert!(
+        b.run(&["set-superuser", "acme", "bob", "--off"])
+            .await
+            .is_err(),
+        "the tenant's user survived the flush"
+    );
+    let listed = b.run(&["list-tenants"]).await.expect("list");
+    assert!(listed.contains("acme"), "{listed}");
+}

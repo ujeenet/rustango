@@ -174,7 +174,7 @@ pub async fn run_with_writer<W: Write + Send>(
         // to the unknown-subcommand error.
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
-        "flush" => flush_cmd(pool, &args[1..], writer).await,
+        "flush" => flush_cmd(pool, &args[1..], None, writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
         // Purges expired entries from a DatabaseCache-backed
@@ -4229,7 +4229,15 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
 ///
 /// `--app <label>` / `--model <name>` filters narrow the wipe.
 /// Pass either flag multiple times to limit to a set.
-async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+///
+/// `scope = Some(s)` keeps only models of that scope: tenancy's
+/// `flush --tenant` passes `Tenant` with the tenant's pool (#2284).
+pub(crate) async fn flush_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    scope: Option<crate::core::ModelScope>,
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let parsed = parse_flush_args(args)?;
     if parsed.help {
         writeln!(w, "flush [--yes] [--app <label>] [--model <name>]")?;
@@ -4269,6 +4277,9 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         let schema = entry.schema;
         // The operator owns unmanaged tables and views; a view also fails PG's TRUNCATE (#2285).
         if !schema.managed || schema.is_view {
+            continue;
+        }
+        if scope.is_some_and(|s| schema.scope != s) {
             continue;
         }
         let app = entry.resolved_app_label().unwrap_or("");

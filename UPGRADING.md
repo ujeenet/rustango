@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Tenancy `flush` needs `--tenant <slug>`
+
+In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).

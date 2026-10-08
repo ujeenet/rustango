@@ -1063,6 +1063,25 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     assert!(!is_super, "set-superuser --off did not land");
     assert!(rustango::tenancy::password::verify("hunter3", &hash).unwrap());
 
+    // 6c. flush --tenant clears the tenant schema; the org stays (#2284).
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "User"],
+    )
+    .await;
+    res.unwrap();
+    assert!(out.contains("cleared"), "{out}");
+    let user_count: i64 = sqlx::query_as::<_, (i64,)>(&format!(
+        r#"SELECT COUNT(*)::bigint FROM "{slug}"."rustango_users""#,
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(user_count, 0, "flush --tenant left the tenant's users");
+
     // 7. Org row landed.
     let org_count: i64 =
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")

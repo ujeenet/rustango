@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenancy `flush` no longer wipes the registry (#2284)
+
+It fell through to the single-tenant flush on the registry pool and deleted orgs, operators and hosts. Plain `flush` is refused now; `flush --tenant <slug>` clears that tenant's tables only.
+
 ### Fixed — `flush` skips unmanaged models and views (#2285)
 
 It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail.
