@@ -931,7 +931,8 @@ pub struct InlineApplyOutcome {
     /// New rows successfully inserted (extra/empty slots with content).
     pub inserted: usize,
     /// Always 0: a row that fails to parse or write now refuses the
-    /// whole POST and rolls the inline writes back (#2339).
+    /// whole POST and rolls the edit back (#2339).
+    #[deprecated(since = "0.60.4", note = "always 0 since #2339; removed in 0.61.0")]
     pub failed: usize,
 }
 

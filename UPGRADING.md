@@ -152,7 +152,7 @@ untouched.
 
 ### Admin write errors
 
-A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346).
+A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346). `InlineApplyOutcome::failed` is deprecated: it is always 0.
 
 ### `makemigrations` renames an M2M junction's column
 
