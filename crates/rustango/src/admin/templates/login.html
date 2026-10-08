@@ -91,6 +91,13 @@
     {{ csrf_input | safe }}
     <h1>{{ admin_title }}</h1>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    {% if totp_step %}
+    <label>
+      Authenticator code
+      <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+             pattern="[0-9]*" maxlength="8" placeholder="123456" autofocus required>
+    </label>
+    {% else %}
     <label>
       Username
       <input type="text" name="username" autocomplete="username" autofocus required>
@@ -99,7 +106,8 @@
       Password
       <input type="password" name="password" autocomplete="current-password" required>
     </label>
-    {% if totp_enabled %}
+    {% endif %}
+    {% if totp_enabled and not totp_step %}
     <label>
       Authenticator code <span class="hint">(if two-factor is enabled)</span>
       <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
@@ -108,7 +116,7 @@
     {% endif %}
     <button type="submit">Sign in</button>
   </form>
-  {% if sso_enabled %}
+  {% if sso_enabled and not totp_step %}
   <div class="sso-divider"><span>or</span></div>
   {% for p in sso_providers %}
   <a class="sso-button" href="{{ p.login_url }}">{{ p.label }}</a>

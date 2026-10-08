@@ -107,16 +107,33 @@ impl PasswordReset {
     /// Build a signed reset URL valid for `ttl`. `base_url` should be your
     /// public callback (e.g. `"https://app.example.com/auth/reset"`).
     /// `user_id` is encoded as a query param so the verifier can identify
-    /// the account.
+    /// the account. The signed issue time lets a password change since end
+    /// the link (#2248).
     #[must_use]
     pub fn issue(base_url: &str, user_id: i64, secret: &[u8], ttl: Duration) -> String {
         let url = format!(
-            "{}?user_id={}&purpose={}",
+            "{}?user_id={}&purpose={}&{}={}",
             base_url.trim_end_matches('?'),
             user_id,
             Self::PURPOSE,
+            Self::ISSUED_AT,
+            chrono::Utc::now().timestamp_micros(),
         );
         sign(&url, secret, Some(ttl))
+    }
+
+    /// Query param holding the issue time, unix microseconds.
+    const ISSUED_AT: &'static str = "iat";
+
+    /// [`Self::verify`] plus the link's issue time; `Expired` for a link
+    /// minted before it carried one.
+    #[cfg(feature = "passwords")]
+    fn verify_issued(url: &str, secret: &[u8]) -> Result<(i64, i64), AuthFlowError> {
+        let user_id = Self::verify(url, secret)?;
+        let iat = extract_query(url, Self::ISSUED_AT)
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or(AuthFlowError::Expired)?;
+        Ok((user_id, iat))
     }
 
     /// Verify a reset URL. On success returns the `user_id` extracted from
@@ -169,11 +186,8 @@ impl PasswordReset {
 /// the same policy `docs/auth-passwords.md` documents, so a password
 /// refused at registration can no longer be set by resetting (#1399).
 ///
-/// **This link is replayable for its full TTL.** A copy of the email —
-/// forwarded, archived, in a shared inbox, pasted into a support ticket —
-/// still works after the legitimate reset completes. Use
-/// [`confirm_password_reset_single_use`] instead wherever you have a
-/// cache.
+/// The link works only while `password_changed_at` is older than it, so
+/// any password change, this reset included, ends every older link (#2248).
 ///
 /// Sessions carry a fingerprint of the password hash (#1338), so the new
 /// hash ends every session issued before the reset, an attacker's
@@ -186,6 +200,7 @@ impl PasswordReset {
 /// # Errors
 /// - [`AuthFlowError`] from `PasswordReset::verify` (Malformed,
 ///   InvalidSignature, Expired, WrongPurpose).
+/// - [`AuthFlowError::Expired`] too when the password changed since the link.
 /// - [`AuthFlowError::WeakPassword`] when the password fails the policy.
 /// - [`AuthFlowError::Database`] for SQL / driver failures.
 #[cfg(feature = "passwords")]
@@ -195,7 +210,7 @@ pub async fn confirm_password_reset_pool(
     new_password: &str,
     secret: &[u8],
 ) -> Result<i64, AuthFlowError> {
-    let user_id = PasswordReset::verify(url, secret)?;
+    let (user_id, iat) = PasswordReset::verify_issued(url, secret)?;
     check_password_strength(new_password)?;
     // Not a delegation to `_into`: this form owns `rustango_users`, so it
     // also stamps `password_changed_at` and ends existing sessions (#1449).
@@ -206,7 +221,7 @@ pub async fn confirm_password_reset_pool(
         "rustango_users",
         "id",
         "password_hash",
-        Some("password_changed_at"),
+        Some(Rotation::since(iat)),
     )
     .await
 }
@@ -268,7 +283,7 @@ pub async fn confirm_password_reset_single_use(
     secret: &[u8],
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<i64, AuthFlowError> {
-    let user_id = PasswordReset::verify(url, secret)?;
+    let (user_id, iat) = PasswordReset::verify_issued(url, secret)?;
     check_password_strength(new_password)?;
     consume_single_use(url, cache).await?;
     // As with the non-single-use form: this one owns `rustango_users`,
@@ -280,7 +295,7 @@ pub async fn confirm_password_reset_single_use(
         "rustango_users",
         "id",
         "password_hash",
-        Some("password_changed_at"),
+        Some(Rotation::since(iat)),
     )
     .await
 }
@@ -344,14 +359,34 @@ fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
     )))
 }
 
+/// `password_changed_at`, stamped by a reset and compared with the link's
+/// issue time. Only `rustango_users` is known to have it.
+#[cfg(feature = "passwords")]
+struct Rotation {
+    /// Unix microseconds, so a link asked for just after a change still works.
+    link_issued_at: i64,
+}
+
+#[cfg(feature = "passwords")]
+impl Rotation {
+    const COLUMN: &'static str = "password_changed_at";
+
+    fn since(link_issued_at: i64) -> Self {
+        Self { link_issued_at }
+    }
+
+    fn issued(&self) -> Result<chrono::DateTime<chrono::Utc>, AuthFlowError> {
+        chrono::DateTime::from_timestamp_micros(self.link_issued_at).ok_or(AuthFlowError::Malformed)
+    }
+}
+
 /// Hash and store the new password. Shared by the replayable and
 /// single-use confirm helpers.
 ///
-/// `rotated_at_column`, when given, is stamped with "now" in the same
-/// UPDATE so sessions issued before the reset stop validating (#1449).
-/// It is `Some("password_changed_at")` for the framework's own
-/// `rustango_users` and `None` for a caller-named table, which may have
-/// no such column.
+/// `rotation`, when given, stamps `password_changed_at` in the same UPDATE
+/// so older sessions end (#1449), and the UPDATE lands only if the password
+/// has not changed since the link was issued (#2248). `None` for a
+/// caller-named table, which may have no such column.
 #[cfg(feature = "passwords")]
 async fn write_password_hash(
     pool: &crate::sql::Pool,
@@ -360,34 +395,97 @@ async fn write_password_hash(
     user_table: &str,
     pk_column: &str,
     password_column: &str,
-    rotated_at_column: Option<&str>,
+    rotation: Option<Rotation>,
 ) -> Result<i64, AuthFlowError> {
     let hash = crate::passwords::hash_async(new_password)
         .await
         .map_err(|e| AuthFlowError::Database(e.to_string()))?;
-    let dialect = pool.dialect();
-    let t = dialect.quote_ident(user_table);
-    let pw = dialect.quote_ident(password_column);
-    let pk = dialect.quote_ident(pk_column);
-
-    let mut sets = format!("{pw} = {}", dialect.placeholder(1));
-    let mut args = vec![crate::core::SqlValue::String(hash)];
-    if let Some(col) = rotated_at_column {
-        // Same statement as the hash: a reset that rotated the password
-        // but not the timestamp would leave every existing session live,
-        // which is the failure this closes.
-        let rot = dialect.quote_ident(col);
-        sets.push_str(&format!(", {rot} = {}", dialect.placeholder(2)));
-        args.push(crate::core::SqlValue::DateTime(chrono::Utc::now()));
+    if let Some(rotation) = rotation {
+        let written = rotate_user_password(pool, user_id, hash, &rotation).await?;
+        // A changed password (or a missing row) ends the link (#2248).
+        return if written == 0 {
+            Err(AuthFlowError::Expired)
+        } else {
+            Ok(user_id)
+        };
     }
-    let pk_ph = dialect.placeholder(args.len() + 1);
-    args.push(crate::core::SqlValue::I64(user_id));
-
-    let sql = format!("UPDATE {t} SET {sets} WHERE {pk} = {pk_ph}");
+    // Raw: the table and columns are caller-named, so there is no model.
+    let dialect = pool.dialect();
+    let sql = format!(
+        "UPDATE {} SET {} = {} WHERE {} = {}",
+        dialect.quote_ident(user_table),
+        dialect.quote_ident(password_column),
+        dialect.placeholder(1),
+        dialect.quote_ident(pk_column),
+        dialect.placeholder(2),
+    );
+    let args = vec![
+        crate::core::SqlValue::String(hash),
+        crate::core::SqlValue::I64(user_id),
+    ];
     crate::sql::raw_execute_pool(pool, &sql, args)
         .await
         .map_err(|e| AuthFlowError::Database(e.to_string()))?;
     Ok(user_id)
+}
+
+/// Store `hash` and stamp the rotation, only while the password is
+/// unchanged since the link. Rows written.
+#[cfg(all(feature = "passwords", feature = "tenancy"))]
+async fn rotate_user_password(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    hash: String,
+    rotation: &Rotation,
+) -> Result<u64, AuthFlowError> {
+    use crate::core::Column as _;
+    use crate::query::Q;
+    use crate::sql::UpdaterPool as _;
+    use crate::tenancy::User;
+    let since = rotation.issued()?;
+    User::objects()
+        .where_(User::id.eq(user_id))
+        .where_(Q::is_null(Rotation::COLUMN) | Q::lt(Rotation::COLUMN, since))
+        .update()
+        .set_typed(User::password_hash.set(hash))
+        .set_typed(User::password_changed_at.set(Some(chrono::Utc::now())))
+        .execute_pool(pool)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))
+}
+
+/// [`rotate_user_password`] without `tenancy`. Raw: `rustango_users` has
+/// no model in that build (#2273).
+#[cfg(all(feature = "passwords", not(feature = "tenancy")))]
+async fn rotate_user_password(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    hash: String,
+    rotation: &Rotation,
+) -> Result<u64, AuthFlowError> {
+    use crate::core::SqlValue;
+    let d = pool.dialect();
+    let rot = d.quote_ident(Rotation::COLUMN);
+    // Binds follow text order: MySQL and SQLite placeholders are positional.
+    let sql = format!(
+        "UPDATE {} SET {} = {}, {rot} = {} WHERE {} = {} AND ({rot} IS NULL OR {rot} < {})",
+        d.quote_ident("rustango_users"),
+        d.quote_ident("password_hash"),
+        d.placeholder(1),
+        d.placeholder(2),
+        d.quote_ident("id"),
+        d.placeholder(3),
+        d.placeholder(4),
+    );
+    let args = vec![
+        SqlValue::String(hash),
+        SqlValue::DateTime(chrono::Utc::now()),
+        SqlValue::I64(user_id),
+        SqlValue::DateTime(rotation.issued()?),
+    ];
+    crate::sql::raw_execute_pool(pool, &sql, args)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))
 }
 
 // ------------------------------------------------------------------ Email verification

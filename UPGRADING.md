@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### Password-reset links from before the upgrade are refused
+
+`confirm_password_reset_pool` / `_single_use` need the issue time new links carry, and return `Expired` for older ones and for a link older than the last password change (#2248). Users request a new link. The `_into` forms are unchanged.
+
+### Admin SSO with a TOTP device shows a code step
+
+The callback now renders a code form posting to `{admin}/login/sso-totp` before the session is minted (#2249). With `totp` on, SSO also fails closed when the device table cannot be read.
+
+### Member logout on a path-prefix tenant
+
+Use `member_auth::logout_at(pool, &user, &org, full_request_path)`; `logout` clears `Path=/`, which leaves a prefix tenant's cookie in the browser (#2251).
+
 ### `Dialect::write_ilike_typed`
 
 New provided method; the writers call it with the column's field type. A custom dialect that needs a cast before `ILIKE` overrides it (#2229).
