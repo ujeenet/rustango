@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `cursor_pagination` on a nullable column is logged, and will be refused in 0.61.0
+
+It logs `tracing::error!` at build time (#2230), and will panic from 0.61.0 (#2265). Paginate on a NOT NULL column such as the primary key.
+
+### ViewSet answers a bad filter with 400
+
+An unknown `__lookup` or a value that does not parse (`?id=abc`, `?id__in=1,x`, `?flag__isnull=maybe`) now returns `400` instead of being ignored (#2227). With a filter backend registered, an unknown lookup is still passed to it. `iexact`/`contains`/... on a non-string field is a `400`.
+
+### ViewSet skips empty filter values
+
+`?field=` with an empty value no longer filters, on any field (#2226). It used to match `''` on a string field and nothing on a nullable one.
+
 ### Resolver caches are per registry
 
 `invalidate_org_cache`, `invalidate_host_cache` and the testkit resolver resets still act on every registry in the process (#2077).
