@@ -2496,10 +2496,11 @@ fn refused_delete(
     if e.refusal() != Some(crate::sql::Refusal::ForeignKey) {
         return Err(e.into());
     }
-    // PG names the table; elsewhere list the models whose FK would block.
-    let mut tables: Vec<String> = e
-        .fk_referencing_table()
-        .map_or_else(|| blocking_referrers(model.table), |t| vec![t.to_owned()]);
+    // PG names the table; elsewhere list the models whose FK could block.
+    let named = e.fk_referencing_table().map(str::to_owned);
+    let exact = named.is_some();
+    let mut tables: Vec<String> =
+        named.map_or_else(|| blocking_referrers(model.table), |t| vec![t]);
     let id = super::errors::log_with_id(
         &format!("admin delete refused; referrers {tables:?}"),
         &e,
@@ -2507,10 +2508,10 @@ fn refused_delete(
     );
     // Name only tables this user may open in the admin.
     tables.retain(|t| lookup_model(state, t).is_some());
-    let by = if tables.is_empty() {
-        "other rows".to_owned()
-    } else {
-        format!("rows in {}", tables.join(", "))
+    let by = match (tables.is_empty(), exact) {
+        (true, _) => "other rows".to_owned(),
+        (false, true) => format!("rows in {}", tables.join(", ")),
+        (false, false) => format!("other rows, possibly in {}", tables.join(", ")),
     };
     Ok(crate::api_errors::ApiError::conflict(format!(
         "{} is still referenced by {by}; delete or change those first.",
