@@ -914,7 +914,7 @@ next boot, and a webhook retry with the same `event_id` runs again.
 Sets up a new tenant (customer/org) and applies the tenant migrations to
 it. The `<slug>` is its short identifier. **Not** safe to re-run: calling it
 again on an existing slug is refused up front with ``tenant slug `<slug>`
-already exists`` (tenancy/provision.rs:599), before anything else happens.
+already exists`` (`tenancy::provision::provision_tenant`), before anything else happens.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"

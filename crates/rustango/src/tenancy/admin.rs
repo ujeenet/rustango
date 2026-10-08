@@ -1489,7 +1489,7 @@ fn end_impersonation_response(cookie_path: &str) -> Response {
         })
         .collect();
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
-    let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+    let apex = crate::tenancy::server::apex_domain();
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
         .ok()
         .filter(|s| !s.is_empty() && s != "80" && s != "443")

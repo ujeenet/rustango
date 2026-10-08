@@ -501,7 +501,7 @@ tenancy = [
 # tokio in their own Cargo.toml just to use the rustango entrypoint shim.
 # That re-export no longer needs a feature to carry it — tokio is an
 # unconditional dependency (see the note on the `tokio` line below).
-runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
+runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:dotenvy"]
 
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
 # single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
@@ -604,6 +604,8 @@ lettre = { version = "0.11", default-features = false, features = [
 # `[logging] color` setting; this only makes the choice available.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json", "ansi"], optional = true }
 tracing-appender = { workspace = true, optional = true }
+# `#[rustango::main]` loads `.env` before installing its subscriber (#2204).
+dotenvy = { workspace = true, optional = true }
 # Not used directly — declared only to pin the transitive `time` away from
 # the broken 0.3.48 (see the workspace.dependencies note). `time` is
 # already pulled by cookie / tracing-appender / sqlx in every real build.

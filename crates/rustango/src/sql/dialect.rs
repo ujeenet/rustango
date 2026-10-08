@@ -540,9 +540,9 @@ pub trait Dialect: Send + Sync {
         "TEXT".to_owned()
     }
 
-    /// DDL to run once before any case-insensitive column is created,
-    /// such as `CREATE EXTENSION IF NOT EXISTS citext` on Postgres.
-    /// `None` when nothing is needed.
+    /// DDL a migration runs before it writes a case-insensitive column,
+    /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
+    /// Postgres. `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
         None
     }

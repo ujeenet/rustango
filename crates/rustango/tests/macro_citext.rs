@@ -87,9 +87,78 @@ fn mysql_emits_varchar_collate_utf8mb4_general_ci() {
 fn postgres_extension_prelude_is_available() {
     assert_eq!(
         Postgres.ci_text_extension_sql(),
-        Some("CREATE EXTENSION IF NOT EXISTS citext;"),
+        Some("CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;"),
     );
     // SQLite + MySQL need no prelude.
     assert_eq!(Sqlite.ci_text_extension_sql(), None);
     assert_eq!(MySql.ci_text_extension_sql(), None);
+}
+
+/// A fresh PG database, its pool and an admin pool to drop it with.
+#[cfg(feature = "postgres")]
+async fn fresh_pg(tag: &str) -> Option<(rustango::sql::Pool, rustango::sql::Pool, String)> {
+    use rustango::sql::{raw_execute_pool, Pool};
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let admin = Pool::connect(&url).await.unwrap();
+    let db = format!("rustango_citext_{tag}_{}", std::process::id());
+    let _ = raw_execute_pool(&admin, &format!("DROP DATABASE IF EXISTS {db}"), Vec::new()).await;
+    raw_execute_pool(&admin, &format!("CREATE DATABASE {db}"), Vec::new())
+        .await
+        .unwrap();
+    let base = url.rsplit_once('/').unwrap().0;
+    let pool = Pool::connect(&format!("{base}/{db}")).await.unwrap();
+    Some((admin, pool, db))
+}
+
+/// `email` compares ignoring case in the fresh database.
+#[cfg(feature = "postgres")]
+async fn assert_citext_works(admin: rustango::sql::Pool, pool: rustango::sql::Pool, db: String) {
+    use rustango::sql::raw_execute_pool;
+    raw_execute_pool(
+        &pool,
+        "INSERT INTO ci_users (id, email, bio) VALUES (1, 'A@x.com', '')",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT id FROM ci_users WHERE email = 'a@X.COM'",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(got, [(1,)]);
+    pool.close().await;
+    let _ = raw_execute_pool(
+        &admin,
+        &format!("DROP DATABASE {db} WITH (FORCE)"),
+        Vec::new(),
+    )
+    .await;
+}
+
+/// The bootstrap paths create `citext` too, not only file migrations (#2271).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn testkit_tables_create_citext_on_a_fresh_database() {
+    let Some((admin, pool, db)) = fresh_pg("testkit").await else {
+        return;
+    };
+    rustango::testkit::create_tables_for::<CiUser>(&pool)
+        .await
+        .expect("CITEXT on a database without the extension");
+    assert_citext_works(admin, pool, db).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn apply_all_creates_citext_on_a_fresh_database() {
+    let Some((admin, pool, db)) = fresh_pg("apply_all").await else {
+        return;
+    };
+    rustango::migrate::apply_all_pool(&pool)
+        .await
+        .expect("CITEXT on a database without the extension");
+    assert_citext_works(admin, pool, db).await;
 }
