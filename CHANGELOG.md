@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The `rustango_users` UPDATE was raw SQL in that build; both builds now share one ORM update.
 
+### Fixed — single-backend test builds pass `-D warnings` (#2274)
+
+`--tests` on `postgres`, `mysql` or `sqlite` with `admin,testkit` hit unreachable or irrefutable `Pool` patterns; the suites use the typed accessors now.
+
 ### Fixed — `IpFilterLayer` gates the trusted client IP (#2278)
 
 Behind a `RealIpLayer` with `trust_proxies` it read the socket peer, so an allow- or block-list saw only the proxy.

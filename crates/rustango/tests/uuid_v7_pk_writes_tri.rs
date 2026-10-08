@@ -186,7 +186,7 @@ async fn bulk_writes_fill_the_pk(pool: &Pool) {
 /// The PG-only `bulk_insert_on` also writes the ids back into the rows.
 async fn pg_bulk_insert_writes_ids_back(pool: &Pool) {
     #[cfg(feature = "postgres")]
-    if let Pool::Postgres(pg) = pool {
+    if let Some(pg) = pool.as_postgres() {
         let mut rows = vec![item("x", 1), item("y", 2)];
         Item::bulk_insert(&mut rows, pg).await.expect("bulk_insert");
         let mut stored: Vec<Uuid> = Item::objects()
@@ -238,7 +238,7 @@ async fn db_pk_is_read_back_beside_a_rust_filled_auto(pool: &Pool) {
 /// A set PK beside an unset `auto_now_add` stamps the clock, not NULL (#1950).
 async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
     #[cfg(feature = "postgres")]
-    if let Pool::Postgres(pg) = pool {
+    if let Some(pg) = pool.as_postgres() {
         let ticket = |id: i64| Ticket {
             created_at: Auto::Unset,
             id: Auto::Set(id),

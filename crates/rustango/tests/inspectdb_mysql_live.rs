@@ -147,10 +147,7 @@ async fn inspectdb_emits_view_with_marker_and_definition_on_mysql() {
     let Some(pool) = make_pool().await else {
         return;
     };
-    let pool_inner = match &pool {
-        Pool::Mysql(p) => p.clone(),
-        _ => unreachable!(),
-    };
+    let pool_inner = pool.as_mysql().expect("mysql pool").clone();
     let _ = sqlx::query("DROP VIEW IF EXISTS `published_posts`")
         .execute(&pool_inner)
         .await;
