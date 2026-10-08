@@ -132,24 +132,42 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
         .await;
 }
 
-/// Warn once when database queues in this process get different mailers.
+/// Warn once per database when two of its queues get different mailers.
 #[cfg(feature = "jobs-postgres")]
 fn warn_on_second_db_mailer<Q: JobQueue>(queue: &Q, mailer: &BoxedMailer) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static FIRST: OnceLock<BoxedMailer> = OnceLock::new();
-    static WARNED: AtomicBool = AtomicBool::new(false);
     let any: &dyn std::any::Any = queue;
-    if !any.is::<crate::jobs::pg::PgJobQueue>() {
+    let Some(q) = any.downcast_ref::<crate::jobs::pg::PgJobQueue>() else {
         return;
-    }
-    let first = FIRST.get_or_init(|| mailer.clone());
-    if !std::sync::Arc::ptr_eq(first, mailer) && !WARNED.swap(true, Ordering::Relaxed) {
+    };
+    let (db, queue_id) = q.identity();
+    if mixed_db_mailers(db, queue_id, mailer) {
         tracing::warn!(
             target: "rustango::email_jobs",
-            "register_email_job: a second mailer on a database queue; queues share \
-             rustango_jobs, so either mailer may send any queued mail (#2338)"
+            "register_email_job: two queues on one jobs table have different mailers; \
+             either may send any queued mail (#2338)"
         );
     }
+}
+
+/// Record `mailer` for `queue_id` on `db`. `true` the first time the
+/// queues of `db` disagree on their mailer.
+#[cfg(feature = "jobs-postgres")]
+fn mixed_db_mailers(db: u64, queue_id: usize, mailer: &BoxedMailer) -> bool {
+    use std::collections::HashMap;
+    type Seen = HashMap<u64, (HashMap<usize, BoxedMailer>, bool)>;
+    static SEEN: OnceLock<std::sync::Mutex<Seen>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (queues, warned) = seen.entry(db).or_default();
+    queues.insert(queue_id, mailer.clone());
+    let mixed = queues.values().any(|m| !std::sync::Arc::ptr_eq(m, mailer));
+    if mixed && !*warned {
+        *warned = true;
+        return true;
+    }
+    false
 }
 
 /// Queue an email and return at once; a worker delivers it.
@@ -313,6 +331,23 @@ mod tests {
         assert_eq!((m1.count(), m2.count()), (1, 0), "sent by the wrong mailer");
         q1.shutdown().await;
         q2.shutdown().await;
+    }
+
+    /// The warning fires once per database, only when two of its queues
+    /// have different mailers.
+    #[cfg(feature = "jobs-postgres")]
+    #[test]
+    fn mixed_db_mailers_warns_once_per_database() {
+        let (m1, m2): (BoxedMailer, BoxedMailer) =
+            (StdArc::new(NullMailer), StdArc::new(NullMailer));
+        // Distinct `db` keys keep this test apart from any other.
+        let db = 0xD8_2337;
+        assert!(!mixed_db_mailers(db, 1, &m1), "first queue");
+        assert!(!mixed_db_mailers(db, 1, &m2), "same queue re-registered");
+        assert!(!mixed_db_mailers(db + 1, 2, &m1), "own database");
+        assert!(!mixed_db_mailers(db, 2, &m2), "same mailer on the database");
+        assert!(mixed_db_mailers(db, 3, &m1), "two mailers on one table");
+        assert!(!mixed_db_mailers(db, 4, &m1), "warned once");
     }
 
     /// Retries span minutes, so a short relay outage does not dead-letter

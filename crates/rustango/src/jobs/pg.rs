@@ -211,6 +211,13 @@ CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
 }
 
 impl PgJobQueue {
+    /// `(database, queue)`: the jobs table this queue claims from, and
+    /// this queue across its clones.
+    #[cfg(feature = "email")]
+    pub(crate) fn identity(&self) -> (u64, usize) {
+        (self.pool.scope_key(), Arc::as_ptr(&self.registry) as usize)
+    }
+
     /// Build a queue from a [`crate::sql::Pool`] with `worker_count`
     /// worker tasks. Call [`Self::start`] to spawn them.
     #[must_use]
