@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — test builds on a single backend pass `-D warnings` (#2313)
+
+`--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.
+
+### Fixed — example compose files publish the DB on loopback only (#2311)
+
+Postgres binds to `127.0.0.1:5432` as the scaffolder's does; the stale `migrate_framework` doc is corrected.
+
+### Fixed — scaffold compile tests on the pinned 1.88 toolchain (#2310)
+
+The harness resolves the generated project's deps MSRV-aware, so `uuid` 1.27 (rustc 1.89) no longer breaks them.
+
 ### Fixed — `SessionStore::touch` cannot revive a session after logout (#2300)
 
 It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock. `RedisCache` caps a huge TTL so `PX`/`PEXPIRE` stay valid.

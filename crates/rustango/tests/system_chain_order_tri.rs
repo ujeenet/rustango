@@ -1314,9 +1314,7 @@ async fn schema_mode_tenant_converges() {
     rustango::tenancy::migrate_registry_pool(&registry, &dir)
         .await
         .expect("registry");
-    let Pool::Postgres(pg) = &registry else {
-        unreachable!()
-    };
+    let pg = registry.as_postgres().expect("a Postgres pool");
     let pools = rustango::tenancy::TenantPools::new(pg.clone());
     for run in 0..2 {
         let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
@@ -1363,9 +1361,7 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
         ..rustango::testkit::org()
     };
     org.insert_pool(&registry).await.unwrap();
-    let Pool::Postgres(pg) = &registry else {
-        unreachable!()
-    };
+    let pg = registry.as_postgres().expect("a Postgres pool");
     rustango::sql::sqlx::query("CREATE TABLE fkq_parent (id BIGINT PRIMARY KEY)")
         .execute(pg)
         .await
@@ -1470,9 +1466,7 @@ async fn post_migrate_receiver_can_migrate() {
             *out.lock().unwrap() = Some(r.map(|_| ()).map_err(|e| e.to_string()));
         }
     });
-    let Pool::Postgres(pg) = &registry else {
-        unreachable!()
-    };
+    let pg = registry.as_postgres().expect("a Postgres pool");
     let pools = rustango::tenancy::TenantPools::new(pg.clone());
     let run = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url);
     let report = tokio::time::timeout(std::time::Duration::from_secs(60), run).await;
