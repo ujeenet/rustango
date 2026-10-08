@@ -79,6 +79,24 @@ pub struct OwnedView {
     pub name: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2315_target", app = "cli2315")]
+pub struct Target {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// Unmanaged, and it references a table `flush` clears.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2315_ref", app = "cli2315", managed = false)]
+pub struct TargetRef {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub target: ForeignKey<Target, i64>,
+}
+
 async fn fresh_parent_child(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Child::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Parent>(pool).await;
@@ -223,6 +241,35 @@ async fn flush_skips_unmanaged_tables_and_views(pool: &Pool) {
     assert_eq!(legacy.len(), 2, "flush wiped the unmanaged table");
 }
 
+/// An unmanaged table referencing a flushed one makes flush fail, not empty it.
+async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, TargetRef::SCHEMA.table).await;
+    rustango::testkit::matrix::fresh_table::<Target>(pool).await;
+    rustango::testkit::matrix::fresh_table::<TargetRef>(pool).await;
+    let mut t = Target {
+        id: Auto::default(),
+        name: "t".into(),
+    };
+    t.insert_pool(pool).await.expect("target");
+    let mut r = TargetRef {
+        id: Auto::default(),
+        target: ForeignKey::unloaded(t.id.get().copied().expect("pk")),
+    };
+    r.insert_pool(pool).await.expect("ref");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2315"]).await;
+    let refs: Vec<TargetRef> = TargetRef::objects().fetch(pool).await.expect("refs");
+    let targets: Vec<Target> = Target::objects().fetch(pool).await.expect("targets");
+    rustango::testkit::matrix::drop_table(pool, TargetRef::SCHEMA.table).await;
+    assert_eq!(refs.len(), 1, "flush emptied the unmanaged table");
+    assert_eq!(
+        targets.len(),
+        1,
+        "the refused flush still cleared the target"
+    );
+    assert!(out.is_err(), "flush must fail: {out:?}");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -304,6 +351,7 @@ tri_dialect_test! {
     scenarios: [
         flush_yes_clears_the_table,
         flush_skips_unmanaged_tables_and_views,
+        flush_refuses_when_an_unmanaged_table_references_a_target,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,

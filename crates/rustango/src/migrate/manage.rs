@@ -4305,9 +4305,8 @@ pub(crate) enum FlushScope<'a> {
 /// touching the database (dry-run by default — a hand-typed
 /// `manage flush` doesn't accidentally nuke production).
 ///
-/// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY
-/// CASCADE` in a single statement so FK constraints resolve and
-/// sequences reset. On MySQL/SQLite, emits per-table `DELETE FROM
+/// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY` in a
+/// single statement so FK constraints resolve and sequences reset. On MySQL/SQLite, emits per-table `DELETE FROM
 /// <table>` in registration order; sequences are NOT reset
 /// (caller can `DROP SEQUENCE` + `CREATE SEQUENCE` manually if
 /// they need that). The migrations ledger is left untouched —
@@ -4341,11 +4340,11 @@ pub(crate) async fn flush_cmd<W: Write>(
         writeln!(w)?;
         writeln!(
             w,
-            "  Postgres runs TRUNCATE … RESTART IDENTITY CASCADE: ids restart, and tables"
+            "  Postgres runs TRUNCATE … RESTART IDENTITY: ids restart. A table outside"
         )?;
         writeln!(
             w,
-            "  that reference the targets are cleared too, even outside the filter."
+            "  the filter that references a target makes the flush fail; nothing is cleared."
         )?;
         writeln!(
             w,
@@ -4418,10 +4417,8 @@ pub(crate) async fn flush_cmd<W: Write>(
             .iter()
             .map(|t| format!("{prefix}{}", d.quote_ident(t.table)))
             .collect();
-        let sql = format!(
-            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
-            quoted.join(", "),
-        );
+        // No CASCADE: a table outside the targets that references one makes PG refuse.
+        let sql = format!("TRUNCATE TABLE {} RESTART IDENTITY", quoted.join(", "));
         match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
             Ok(_) => cleared = targets.len(),
             Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
