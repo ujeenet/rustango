@@ -518,9 +518,9 @@ fn m2m_renames(
     new: &super::snapshot::M2MTableSnapshot,
 ) -> Option<Vec<SchemaChange>> {
     let direct = (old.src_table == new.src_table && old.dst_table == new.dst_table)
-        .then(|| [(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
+        .then_some([(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
     let mirrored = (old.src_table == new.dst_table && old.dst_table == new.src_table)
-        .then(|| [(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
+        .then_some([(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
     let kept = |p: &[(&String, &String); 2]| p.iter().filter(|(a, b)| a == b).count();
     let pairs = match (direct, mirrored) {
         (Some(d), Some(m)) if kept(&d) == kept(&m) => return None,
