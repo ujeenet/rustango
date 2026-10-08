@@ -12,6 +12,10 @@ The wizard skips a question a flag already answered; before, Enter reset it to f
 
 `--rustango-path` is TOML-escaped (Windows paths work), names like `tokio` or `serde` are refused, and the compose DB port binds to 127.0.0.1.
 
+### Fixed — i18n `languages = ["pt-BR"]` loads `pt_BR.json` (#2288)
+
+`Translator::from_settings` compares the allowlist and file stems as `Locale`s.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

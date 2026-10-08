@@ -126,3 +126,24 @@ fn from_settings_io_error_on_missing_directory() {
         Err(other) => panic!("expected I18nError::Io, got {other:?}"),
     }
 }
+
+/// `languages = ["pt-BR"]` admits `pt_BR.json`: both spell one locale (#2288).
+#[test]
+fn from_settings_allowlist_matches_normalised_locales() {
+    let dir = tempdir();
+    write_catalog(&dir, "pt_BR.json", r#"{"hi": "Olá"}"#);
+    write_catalog(&dir, "en-gb.json", r#"{"hi": "Hello"}"#);
+    write_catalog(&dir, "ja.json", r#"{"hi": "konnichiwa"}"#);
+
+    let settings = I18nSettings {
+        default_locale: Some("en".into()),
+        languages: vec!["pt-BR".into(), "en_GB".into()],
+        locale_paths: vec![dir.to_string_lossy().to_string()],
+        fallback_chain: vec![],
+    };
+    let t = Translator::from_settings(&settings).expect("load ok");
+    assert_eq!(t.translate("pt-BR", "hi", &[]), "Olá");
+    assert_eq!(t.translate("en-GB", "hi", &[]), "Hello");
+    assert!(!t.has_locale("ja"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -736,12 +736,13 @@ impl Translator {
 
         // Build the active-language allowlist. Empty `languages`
         // means "no narrowing"; non-empty means we only insert
-        // catalogs whose stem matches one of the entries.
-        let allowlist: Option<std::collections::HashSet<String>> = if settings.languages.is_empty()
+        // catalogs whose stem matches one of the entries. Both sides are
+        // `Locale`s, so `pt-BR` admits `pt_BR.json` (#2288).
+        let allowlist: Option<std::collections::HashSet<Locale>> = if settings.languages.is_empty()
         {
             None
         } else {
-            Some(settings.languages.iter().cloned().collect())
+            Some(settings.languages.iter().map(Locale::new).collect())
         };
 
         for raw_path in &settings.locale_paths {
@@ -756,8 +757,9 @@ impl Translator {
                 let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
+                let locale = Locale::new(stem);
                 if let Some(allow) = &allowlist {
-                    if !allow.contains(stem) {
+                    if !allow.contains(&locale) {
                         continue;
                     }
                 }
@@ -767,7 +769,7 @@ impl Translator {
                         file: p.display().to_string(),
                         detail: e.to_string(),
                     })?;
-                t.insert_locale(Locale::new(stem), catalog);
+                t.insert_locale(locale, catalog);
             }
         }
 
