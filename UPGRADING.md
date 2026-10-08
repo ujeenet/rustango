@@ -154,9 +154,9 @@ untouched.
 
 Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
 
-### `S3Storage` requests time out after 60 s
+### `S3Storage` gives up after 60 s without a reply
 
-An object that takes longer to move now fails; pass a client with a longer timeout to `with_http` (#2220).
+The default client has a 10 s connect and a 60 s read timeout. reqwest counts an upload in those 60 s, so for slow uploads pass a client with a longer `read_timeout` to `with_http` (#2220).
 
 ### `m2m_changed` skips no-op `add` / `remove`
 

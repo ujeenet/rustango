@@ -14,7 +14,7 @@ A response that varies on `*` or on a request header outside the key (compressio
 
 ### Fixed — `S3Storage` default client times out (#2220)
 
-10 s to connect and 60 s per request, so a stalled endpoint errors instead of hanging; `with_http` still overrides.
+10 s to connect and 60 s without a reply or body chunk, so a stalled endpoint errors instead of hanging; `with_http` still overrides.
 
 ### Fixed — m2m `add` / `remove` fire `m2m_changed` only on a change (#2221)
 

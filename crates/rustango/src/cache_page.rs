@@ -389,11 +389,14 @@ where
                         .unwrap_or(false)
                 });
 
-            if status != StatusCode::OK
-                || sets_cookie
-                || cache_control_opt_out
-                || !vary_is_keyed(resp.headers(), &vary, cache_authenticated)
-            {
+            if status != StatusCode::OK || sets_cookie || cache_control_opt_out {
+                return Ok(resp);
+            }
+            if let Some(token) = unkeyed_vary(resp.headers(), &vary, cache_authenticated) {
+                warn_unkeyed_vary(&token);
+                let mut resp = resp;
+                resp.headers_mut()
+                    .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
                 return Ok(resp);
             }
 
@@ -608,23 +611,41 @@ fn payload_too_large() -> Response<Body> {
     resp
 }
 
-/// Whether every request header the response `Vary` names is in the key (#2219).
+/// The first `Vary` token outside the key, if any (#2219).
 /// `Cookie` and `Authorization` count unless `cache_authenticated`: such
 /// requests skip this cache, so every entry was made without them.
-fn vary_is_keyed(headers: &HeaderMap, vary_on: &[HeaderName], cache_authenticated: bool) -> bool {
+fn unkeyed_vary(
+    headers: &HeaderMap,
+    vary_on: &[HeaderName],
+    cache_authenticated: bool,
+) -> Option<String> {
     headers
         .get_all(axum::http::header::VARY)
         .iter()
         .flat_map(|v| v.to_str().unwrap_or("*").split(','))
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .all(|t| {
-            t.eq_ignore_ascii_case("host")
+        .find(|t| {
+            !(t.eq_ignore_ascii_case("host")
                 || vary_on.iter().any(|n| t.eq_ignore_ascii_case(n.as_str()))
                 || (!cache_authenticated
                     && (t.eq_ignore_ascii_case("cookie")
-                        || t.eq_ignore_ascii_case("authorization")))
+                        || t.eq_ignore_ascii_case("authorization"))))
         })
+        .map(str::to_owned)
+}
+
+/// Log once per process: an unkeyed `Vary` otherwise just stops caching.
+fn warn_unkeyed_vary(token: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            target: "rustango::cache_page",
+            vary = token,
+            "response varies on a header outside the cache key; not cached. \
+             Add it with CachePageLayer::vary_on to cache per value"
+        );
+    });
 }
 
 /// Append `<len>:<bytes>|` so parts can be joined without ambiguity.

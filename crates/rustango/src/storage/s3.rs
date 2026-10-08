@@ -90,7 +90,8 @@ pub struct S3Storage {
 
 /// Default client timeouts; [`S3Storage::with_http`] replaces them.
 const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Waiting for a reply or the next body chunk; a total cap would fail big objects.
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The endpoint without its `http(s)://` scheme.
 fn strip_scheme(endpoint: &str) -> &str {
@@ -108,7 +109,7 @@ impl S3Storage {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-            .timeout(DEFAULT_TIMEOUT)
+            .read_timeout(DEFAULT_READ_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {
@@ -147,7 +148,9 @@ impl S3Storage {
 
     /// Use your own reqwest client, for custom timeouts, proxies or
     /// TLS roots. Turn its redirects off, as the default client does.
-    /// The default gives up after 10 s to connect and 60 s in total.
+    /// The default gives up after 10 s to connect, or 60 s without a
+    /// response or a body chunk. reqwest 0.12 counts an upload in those
+    /// 60 s, so pass a client with a longer `read_timeout` for slow uploads.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = http;
@@ -1133,16 +1136,23 @@ mod tests {
         assert!(hop.await.is_err(), "the redirect was followed");
     }
 
-    /// A stalled endpoint errors within the default timeout, not never (#2220).
+    /// An endpoint that connects but never answers hits the read timeout (#2220).
     #[tokio::test(start_paused = true)]
     async fn stalled_endpoint_times_out() {
-        // Never accepts or answers; the kernel backlog still completes the connect.
         let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let storage = mock_storage(format!("http://{}", stalled.local_addr().unwrap()));
+        // Accept, then hold the socket open without a reply.
+        let held = tokio::spawn(async move { stalled.accept().await.unwrap().0 });
         let start = tokio::time::Instant::now();
-        let call = tokio::time::timeout(DEFAULT_TIMEOUT * 2, storage.exists("a.png"));
+        let call = tokio::time::timeout(DEFAULT_READ_TIMEOUT * 2, storage.exists("a.png"));
         assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
-        assert!(start.elapsed() <= DEFAULT_TIMEOUT);
+        assert!(held.is_finished(), "the connect never completed");
+        // Past the connect timeout, so the read timeout fired.
+        assert!(
+            start.elapsed() >= DEFAULT_READ_TIMEOUT,
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

@@ -1039,5 +1039,5 @@ async fn vary_star_is_not_cached() {
         .layer(CachePageLayer::new(Arc::new(InMemoryCache::new())).tenant_agnostic(true));
     app.clone().oneshot(get_req("/s", &[])).await.unwrap();
     let resp = app.oneshot(get_req("/s", &[])).await.unwrap();
-    assert_ne!(cache_status(&resp), Some("HIT"));
+    assert_eq!(cache_status(&resp), Some("BYPASS"));
 }
