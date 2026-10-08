@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.2
+
 ### `migrate-tenant-storage --to database` replaces the target's `public`
 
 The target database's `public` must be empty, extensions included (the tenant's own are created there by the move, #2210), and droppable by the user: the database owner on PG 15+, else a superuser. Both are checked before anything moves. The new `public` is owned by that user, with `USAGE` granted to `PUBLIC` (#2189).
