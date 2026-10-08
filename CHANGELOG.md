@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
+
+On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.
+
 ### Fixed — MySQL drops the index an FK uses (#2244)
 
 DropIndex takes the FK on the index's first column off first and re-adds it after (none if its table or column goes); MySQL refused with 1553.

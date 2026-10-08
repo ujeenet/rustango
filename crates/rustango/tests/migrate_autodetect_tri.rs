@@ -2710,6 +2710,109 @@ async fn fk_index_chain(pool: &Pool, tag: &str, a: &str, b: &str) -> Chain {
     chain
 }
 
+/// An `Auto` PK widened to i64 hands out ids past 2^31; PG's sequence
+/// stayed `AS integer` (#2245).
+async fn auto_pk_widens_its_sequence(pool: &Pool) {
+    let t = "mad_aw_item";
+    let chain = Chain::new(pool, "aw", &[t]).await;
+    let with = |ty: &str| {
+        json!({"tables": [table(t, vec![
+            json!({"name": "id", "column": "id", "ty": ty, "nullable": false,
+                   "primary_key": true, "auto": true}),
+            col("n", "i32", json!({}))])]})
+    };
+    chain.step(pool, with("i32")).await.expect("initial");
+    chain.step(pool, with("i64")).await.expect("i32 → i64");
+    let jump = by_dialect! { pool,
+        postgres => "SELECT setval(pg_get_serial_sequence('{}', 'id'), 3000000000)",
+            because "PG's sequence must be bigint to take it",
+        mysql => "ALTER TABLE {} AUTO_INCREMENT = 3000000001",
+            because "MySQL's counter follows the column type",
+        sqlite => "INSERT INTO {} (id) VALUES (3000000000)",
+            because "SQLite's rowid is always 64-bit",
+    };
+    exec(pool, jump.value, &[t])
+        .await
+        .expect("the counter takes 3e9");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "n"])
+        .await
+        .expect("an id past 2^31");
+    let sql = q(pool, "SELECT MAX({}) FROM {}", &["id", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3_000_000_001,)]);
+}
+
+/// Two FKs whose names cut to the same 63 bytes are refused before any
+/// DDL; PG and MySQL failed mid-migration (#2245).
+async fn fk_name_collision_is_refused(pool: &Pool) {
+    let (a, b) = (
+        "mad_fn_author",
+        "mad_fn_book_with_a_rather_long_table_name_xxxx",
+    );
+    let chain = Chain::new(pool, "fn", &[b, a]).await;
+    let got = chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), table(b, vec![id(),
+                col("author_reference_first", "i64", fk(a)),
+                col("author_reference_second", "i64", fk(a))])]}),
+        )
+        .await;
+    let refused = by_dialect! { pool,
+        postgres => true, because "PG wants FK names unique per table",
+        mysql => true, because "MySQL wants them unique per database",
+        sqlite => false, because "SQLite does not care",
+    };
+    match got {
+        Err(e) if refused.value => assert!(e.contains("rename a table or column"), "{e}"),
+        other => assert_eq!(other.is_ok(), !refused.value, "{}: {other:?}", refused.why),
+    }
+}
+
+/// A junction column renamed keeps its rows (#2245).
+async fn m2m_column_rename_keeps_rows(pool: &Pool) {
+    let (post, tag, through) = ("mad_mr_post", "mad_mr_tag", "mad_mr_post_tags");
+    let chain = Chain::new(pool, "mr", &[through, post, tag]).await;
+    let with = |dst_col: &str| {
+        json!({
+            "tables": [table(post, vec![id()]), table(tag, vec![id()])],
+            "m2m_tables": [{"through": through, "src_table": post, "src_col": "post_id",
+                            "dst_table": tag, "dst_col": dst_col}],
+        })
+    };
+    chain.step(pool, with("tag_id")).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[tag, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[through, "post_id", "tag_id"],
+    )
+    .await
+    .unwrap();
+    let name = chain
+        .step(pool, with("label_id"))
+        .await
+        .expect("the rename applies");
+    let sql = q(pool, "SELECT {} FROM {}", &["label_id", through]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)], "the row survived the rename");
+    chain.undo(pool, &name).await.expect("unapply");
+    let sql = q(pool, "SELECT {} FROM {}", &["tag_id", through]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)], "and the unapply");
+}
+
 /// A `db_comment` lands with CreateTable and AddColumn too (#2270).
 async fn db_comment_on_create_and_add_column(pool: &Pool) {
     let t = "mad_cc_item";
@@ -2833,6 +2936,9 @@ tri_dialect_test!(
         db_comment_change_applies,
         db_comment_on_create_and_add_column,
         fk_index_drops,
+        auto_pk_widens_its_sequence,
+        fk_name_collision_is_refused,
+        m2m_column_rename_keeps_rows,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,

@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### `makemigrations` renames an M2M junction's column
+
+Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
+
+### Colliding FK names are refused
+
+Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail the migration before any DDL on PG and MySQL; rename a table or column (#2245).
+
 ### `Cli` behind a reverse proxy
 
 Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).

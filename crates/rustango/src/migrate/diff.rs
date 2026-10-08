@@ -295,8 +295,8 @@ impl SchemaChange {
 /// first, then create the dependents. MySQL commits each DDL statement, so
 /// a drop that fails after its column or table went cannot roll back (#1879).
 ///
-/// Renames are **never** emitted: a snapshot diff cannot tell a
-/// rename from a drop plus an add. Write those by hand with
+/// Renames are **never** emitted, but for an M2M junction's columns: a
+/// snapshot diff cannot tell a rename from a drop plus an add. Write those by hand with
 /// `manage makemigrations --empty <name>`. Changes this cannot
 /// express are reported by [`detect_unsupported_field_changes`]
 /// instead of being silently skipped.
@@ -376,7 +376,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // Dropped or edited M2M junctions, before the tables they reference.
     for mt in &prev.m2m_tables {
         let now = current.m2m_table(&mt.through);
-        if now != Some(mt) {
+        if let Some(renames) = now.filter(|c| *c != mt).and_then(|c| m2m_renames(mt, c)) {
+            changes.extend(renames);
+        } else if now != Some(mt) {
             changes.push(SchemaChange::DropM2MTable {
                 through: mt.through.clone(),
             });
@@ -506,6 +508,50 @@ pub(super) fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChang
         elements: x.elements.clone(),
         where_clause: x.where_clause.clone(),
     }
+}
+
+/// The column renames that turn junction `old` into `new` over the same
+/// tables, so its rows survive (#2245). `None` if an end's table changed,
+/// or a self-referencing junction renamed both columns (ambiguous).
+fn m2m_renames(
+    old: &super::snapshot::M2MTableSnapshot,
+    new: &super::snapshot::M2MTableSnapshot,
+) -> Option<Vec<SchemaChange>> {
+    let direct = (old.src_table == new.src_table && old.dst_table == new.dst_table)
+        .then(|| [(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
+    let mirrored = (old.src_table == new.dst_table && old.dst_table == new.src_table)
+        .then(|| [(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
+    let kept = |p: &[(&String, &String); 2]| p.iter().filter(|(a, b)| a == b).count();
+    let pairs = match (direct, mirrored) {
+        (Some(d), Some(m)) if kept(&d) == kept(&m) => return None,
+        (Some(d), Some(m)) => {
+            if kept(&d) > kept(&m) {
+                d
+            } else {
+                m
+            }
+        }
+        (Some(p), None) | (None, Some(p)) => p,
+        (None, None) => return None,
+    };
+    let rename = |from: &str, to: &str| SchemaChange::RenameColumn {
+        table: old.through.clone(),
+        old_column: from.to_owned(),
+        new_column: to.to_owned(),
+    };
+    let changed: Vec<_> = pairs.into_iter().filter(|(a, b)| a != b).collect();
+    Some(match changed[..] {
+        [(a, b)] => vec![rename(a, b)],
+        // A swap goes through a spare name.
+        [(a, b), (c, d)] if b == c && d == a => {
+            let spare = format!("{a}_swap");
+            vec![rename(a, &spare), rename(c, d), rename(&spare, b)]
+        }
+        // `b` is still `c`'s name until `c` moves.
+        [(a, b), (c, d)] if b == c => vec![rename(c, d), rename(a, b)],
+        [(a, b), (c, d)] => vec![rename(a, b), rename(c, d)],
+        _ => Vec::new(),
+    })
 }
 
 pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
@@ -1055,6 +1101,78 @@ impl UniqueNames {
     }
 }
 
+/// Who holds each FK name in `current`, where `dialect` wants it unique:
+/// per table on PG, per database on MySQL. Two FKs cut to one 63-byte
+/// name are refused before any DDL runs (#2245).
+struct FkNames {
+    holders: std::collections::HashMap<(String, String), Vec<String>>,
+    per_database: bool,
+}
+
+impl FkNames {
+    fn new(current: &SchemaSnapshot, dialect: &dyn crate::sql::Dialect) -> Self {
+        let mut names = Self {
+            holders: std::collections::HashMap::new(),
+            per_database: dialect.name() == "mysql",
+        };
+        // SQLite's inline FK names need not be unique.
+        if dialect.inline_fks_in_create_table() {
+            return names;
+        }
+        for t in &current.tables {
+            for f in t.fields.iter().filter(|f| f.fk.is_some()) {
+                let name = super::ddl::fk_constraint_name(&t.name, &f.column);
+                names.hold(&t.name, name, format!("`{}.{}`", t.name, f.column));
+            }
+            for c in &t.composite_fks {
+                names.hold(
+                    &t.name,
+                    c.name.clone(),
+                    format!("`{}` FK `{}`", t.name, c.name),
+                );
+            }
+        }
+        for m in &current.m2m_tables {
+            for col in [&m.src_col, &m.dst_col] {
+                let name = super::ddl::fk_constraint_name(&m.through, col);
+                names.hold(&m.through, name, format!("`{}.{col}`", m.through));
+            }
+        }
+        names
+    }
+
+    fn key(&self, table: &str, name: String) -> (String, String) {
+        let scope = if self.per_database { "" } else { table };
+        (scope.to_owned(), name)
+    }
+
+    fn hold(&mut self, table: &str, name: String, holder: String) {
+        let key = self.key(table, name);
+        self.holders.entry(key).or_default().push(holder);
+    }
+
+    /// Fails if another FK holds the name of the one on `table.column`.
+    fn check(&self, table: &str, column: &str) -> Result<(), String> {
+        let name = super::ddl::fk_constraint_name(table, column);
+        let me = format!("`{table}.{column}`");
+        let others: Vec<&str> = self
+            .holders
+            .get(&self.key(table, name.clone()))
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|h| *h != me)
+            .collect();
+        if others.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "the FK on {me} is named `{name}`, which {} also uses; rename a table or column",
+            others.join(", ")
+        ))
+    }
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
@@ -1066,6 +1184,7 @@ fn render_changes_split_inner(
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
+    let fk_names = FkNames::new(current, dialect);
     // Once, before the first change that writes a CITEXT column (#2240).
     let mut ci_extension = dialect.ci_text_extension_sql();
     for change in changes {
@@ -1083,6 +1202,9 @@ fn render_changes_split_inner(
                     .filter(|f| f.unique && !f.primary_key && f.generated_as.is_none())
                 {
                     unique_names.get(name, &f.column)?;
+                }
+                for f in table.fields.iter().filter(|f| f.fk.is_some()) {
+                    fk_names.check(name, &f.column)?;
                 }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
@@ -1194,6 +1316,7 @@ fn render_changes_split_inner(
                     f.fk.as_ref()
                         .filter(|_| !dialect.inline_fks_in_create_table())
                 {
+                    fk_names.check(table, column)?;
                     out.deferred_fks
                         .push(field_fk_sql(table, column, rel, dialect, schema)?);
                 }
@@ -1288,6 +1411,17 @@ fn render_changes_split_inner(
                             r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
                         ));
                     }
+                }
+                // A serial's sequence keeps its old type, so i32 → i64 still stops at 2^31 (#2245).
+                if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
+                    out.immediate.push(format!(
+                        "DO $$ DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
+                         IF s IS NOT NULL THEN EXECUTE format('ALTER SEQUENCE %s AS {}', s); \
+                         END IF; END $$",
+                        dialect.quote_literal(&dialect.quote_ident(table)),
+                        dialect.quote_literal(column),
+                        pg_type_for_ty_name(to),
+                    ));
                 }
             }
             SchemaChange::AlterColumnNullable {
@@ -1624,6 +1758,8 @@ fn render_changes_split_inner(
                 dst_table,
                 dst_col,
             } => {
+                fk_names.check(through, src_col)?;
+                fk_names.check(through, dst_col)?;
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);

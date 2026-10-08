@@ -1232,3 +1232,53 @@ fn generated_as_change_is_refused() {
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert!(refused[0].contains("generated_as changed"), "{refused:?}");
 }
+
+/// A junction column renamed over the same tables is a RenameColumn,
+/// not a Drop + Create that loses the rows (#2245).
+#[test]
+fn junction_column_change_renames_it() {
+    let snap = |src: &str, dst: &str, src_table: &str| -> SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
+            {"through": "rj_post_tags", "src_table": src_table, "src_col": src,
+             "dst_table": "rj_tag", "dst_col": dst}] }))
+        .unwrap()
+    };
+    let rename = |old: &str, new: &str| SchemaChange::RenameColumn {
+        table: "rj_post_tags".into(),
+        old_column: old.into(),
+        new_column: new.into(),
+    };
+    let prev = snap("post_id", "tag_id", "rj_post");
+    assert_eq!(
+        detect_changes(&prev, &snap("post_id", "label_id", "rj_post")),
+        vec![rename("tag_id", "label_id")]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("tag_id", "post_id", "rj_post")),
+        vec![
+            rename("post_id", "post_id_swap"),
+            rename("tag_id", "post_id"),
+            rename("post_id_swap", "tag_id"),
+        ]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("x_id", "post_id", "rj_post")),
+        vec![rename("post_id", "x_id"), rename("tag_id", "post_id")]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("tag_id", "y_id", "rj_post")),
+        vec![rename("tag_id", "y_id"), rename("post_id", "tag_id")]
+    );
+    // Self-referencing, both renamed: which is which is unknown.
+    let self_ref = |a: &str, b: &str| -> SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
+            {"through": "rj_follows", "src_table": "rj_user", "src_col": a,
+             "dst_table": "rj_user", "dst_col": b}] }))
+        .unwrap()
+    };
+    let changes = detect_changes(&self_ref("from_id", "to_id"), &self_ref("a_id", "b_id"));
+    assert!(
+        matches!(changes[0], SchemaChange::DropM2MTable { .. }),
+        "{changes:?}"
+    );
+}
