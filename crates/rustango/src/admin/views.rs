@@ -73,9 +73,8 @@ fn render_json_path_cell(
 /// Render one generic-FK cell: read `(ct_column, pk_column)` off the
 /// JSON row and emit a link to the target.
 ///
-/// Output matches `contenttypes::render_generic_fk_link`, but this is
-/// synchronous. The list view preloads every ContentType on the page
-/// first, so there is no DB I/O per cell.
+/// Synchronous: the list and detail views preload the ContentTypes
+/// with [`gfk_ct_map`] first, so there is no DB I/O per cell.
 fn render_gfk_cell(
     row: &serde_json::Value,
     gr: &crate::core::GenericRelation,
@@ -94,7 +93,7 @@ fn render_gfk_cell(
         return "<em>NULL</em>".to_owned();
     }
     let Some(ct) = ct_map.get(&ct_id) else {
-        // CT stale or not seeded: same fallback `render_generic_fk_link` uses.
+        // CT stale, not seeded, or a table the user may not view.
         return format!("<em>(ct={ct_id}, pk={object_pk})</em>");
     };
     let label = format!("{}.{}", ct.app_label, ct.model_name);
@@ -107,6 +106,32 @@ fn render_gfk_cell(
         pk = object_pk,
         label = label_esc,
     )
+}
+
+/// ContentTypes of the GFK targets in `rows`, by id. A target table the
+/// user may not view is left out, so its cell gets no label or link (#2341).
+async fn gfk_ct_map(
+    state: &AppState,
+    rows: &[serde_json::Value],
+    relations: impl Iterator<Item = &'static crate::core::GenericRelation>,
+) -> HashMap<i64, crate::contenttypes::ContentType> {
+    let mut needed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for gr in relations {
+        needed.extend(
+            rows.iter()
+                .filter_map(|row| row.get(gr.ct_column).and_then(serde_json::Value::as_i64)),
+        );
+    }
+    let mut map = HashMap::with_capacity(needed.len());
+    for id in needed {
+        // The CT registry is process-cached: one round-trip per id at most.
+        if let Ok(Some(ct)) = crate::contenttypes::ContentType::by_id(&state.pool, id).await {
+            if lookup_model(state, &ct.table).is_some() {
+                map.insert(id, ct);
+            }
+        }
+    }
+    map
 }
 
 // ============================================================== INDEX
@@ -567,31 +592,17 @@ pub(crate) async fn table_view(
 
     // Preload every ContentType used by a `DisplayItem::GenericFk`
     // cell, so the row loop reads a map instead of doing one async
-    // lookup per cell. The CT registry is process-cached, so this is
-    // at most one round-trip per distinct ct_id.
-    let gfk_ct_map: std::collections::HashMap<i64, crate::contenttypes::ContentType> = {
-        use std::collections::HashSet;
-        let mut needed: HashSet<i64> = HashSet::new();
-        for gr in model.generic_relations {
-            if display_items
+    // lookup per cell.
+    let gfk_ct_map = gfk_ct_map(
+        &state,
+        &rows,
+        model.generic_relations.iter().filter(|gr| {
+            display_items
                 .iter()
                 .any(|i| matches!(i, DisplayItem::GenericFk(g) if g.name == gr.name))
-            {
-                for row in &rows {
-                    if let Some(id) = row.get(gr.ct_column).and_then(serde_json::Value::as_i64) {
-                        needed.insert(id);
-                    }
-                }
-            }
-        }
-        let mut map = std::collections::HashMap::with_capacity(needed.len());
-        for id in needed {
-            if let Ok(Some(ct)) = crate::contenttypes::ContentType::by_id(&state.pool, id).await {
-                map.insert(id, ct);
-            }
-        }
-        map
-    };
+        }),
+    )
+    .await;
 
     // Per-column header label. The PK gets a `<small>(pk)</small>`
     // suffix. Computed fields show their declared label, or the bare
@@ -1678,22 +1689,16 @@ pub(crate) async fn detail_view(
     // the `(content_type_id, object_pk)` pair and render a link to
     // the target. A stale reference (CT not seeded, target deleted)
     // falls back to `(ct=N, pk=M)` instead of failing the page.
+    let gfk_cts = gfk_ct_map(
+        &state,
+        std::slice::from_ref(&row),
+        model.generic_relations.iter(),
+    )
+    .await;
     for gfk in model.generic_relations {
-        let ct_id = row
-            .get(gfk.ct_column)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let object_pk = row
-            .get(gfk.pk_column)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
-        let html = crate::contenttypes::render_generic_fk_link(&state.pool, g)
-            .await
-            .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
         cells_ctx.push(serde_json::json!({
             "label": gfk.name,
-            "value": html,
+            "value": render_gfk_cell(&row, gfk, &gfk_cts, &state.config.admin_prefix),
         }));
     }
 

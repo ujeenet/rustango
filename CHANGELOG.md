@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin detail page links a generic FK under the admin prefix (#2341)
+
+It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.
+
 ### Fixed — test builds on a single backend pass `-D warnings` (#2313)
 
 `--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.
