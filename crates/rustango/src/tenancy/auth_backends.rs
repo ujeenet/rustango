@@ -441,6 +441,8 @@ pub async fn create_api_key(
 /// themselves until then).
 pub struct JwtBackend {
     secret: Vec<u8>,
+    /// Same key, for the login-session `pwf` claim (#2247).
+    pwf_secret: crate::session::SessionSecret,
     /// Token lifetime in seconds for tokens issued via [`JwtBackend::issue`].
     pub ttl_secs: i64,
     /// Revocation list consulted on every authentication (#1402).
@@ -474,6 +476,7 @@ impl JwtBackend {
             "JwtBackend signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
+            pwf_secret: crate::session::SessionSecret::from_bytes(secret.clone()),
             secret,
             ttl_secs: 3600,
             jti_store: None,
@@ -548,7 +551,7 @@ impl JwtBackend {
         format!("{payload_b64}.{sig_b64}")
     }
 
-    /// Verify and return `(sub, jti)`.
+    /// Verify and return `(sub, jti, login session)`.
     ///
     /// Accepts both token shapes. Three segments is what `JwtLifecycle`
     /// issues since #1397 and what any standard JWT looks like; two is
@@ -573,7 +576,11 @@ impl JwtBackend {
         &self,
         token: &str,
         scope: super::jwt_lifecycle::UserTokenScope<'_>,
-    ) -> Option<(i64, Option<String>)> {
+    ) -> Option<(
+        i64,
+        Option<String>,
+        Option<super::auth_routes::RefreshSession>,
+    )> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -614,13 +621,14 @@ impl JwtBackend {
                 return None;
             }
         }
-        scope.admits(payload.as_object()?).ok()?;
+        let claims = payload.as_object()?;
+        scope.admits(claims).ok()?;
         let sub = payload.get("sub")?.as_i64()?;
         let jti = payload
             .get("jti")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        Some((sub, jti))
+        Some((sub, jti, super::auth_routes::RefreshSession::read(claims)))
     }
 }
 
@@ -677,7 +685,7 @@ impl AuthBackend for JwtBackend {
             Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,
         };
-        let (user_id, jti) = match self.verify_claims(token, scope) {
+        let (user_id, jti, session) = match self.verify_claims(token, scope) {
             Some(c) => c,
             None => return Err(AuthError::InvalidToken),
         };
@@ -705,6 +713,18 @@ impl AuthBackend for JwtBackend {
 
         if !user.active {
             return Err(AuthError::Inactive);
+        }
+
+        // A login token ends with its session, as on `require_bearer` (#2247).
+        if let Some(session) = session {
+            let check = super::auth_routes::SessionCheck {
+                pwf_secret: &self.pwf_secret,
+                families: self.jti_store.as_deref(),
+                cap_secs: None,
+            };
+            if !session.admits(&check, &user).await {
+                return Err(AuthError::InvalidToken);
+            }
         }
 
         Ok(Some(AuthUser {
