@@ -203,27 +203,31 @@ async fn bad_inline_value_rerenders_the_form(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("wrerr_child row 2"), "{body}");
     assert!(notes(pool).await.is_empty(), "inline rows saved");
-    let names: Vec<String> = Parent::objects()
+    assert_eq!(parent_names(pool).await, ["p"]);
+}
+
+async fn parent_names(pool: &Pool) -> Vec<String> {
+    Parent::objects()
         .fetch(pool)
         .await
         .expect("fetch")
         .into_iter()
         .map(|p| p.name)
-        .collect();
-    assert_eq!(names, ["p"]);
+        .collect()
 }
 
-/// A refused inline write rolls back every inline row and says so (#2339).
+/// A refused inline write rolls back the inline rows and the parent edit (#2339).
 async fn refused_inline_write_rolls_back(pool: &Pool) {
     let p = seed_parent(pool, "p").await;
     seed_child(pool, p, "taken").await;
     let form = inline_form(&[("1", "fresh"), ("2", "taken")]);
     let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_no_driver_text(&body);
-    assert!(body.contains("no inline row was"), "{body}");
-    assert!(body.contains("already exists"), "{body}");
     assert_eq!(notes(pool).await, ["taken"], "partial inline write kept");
+    assert_eq!(parent_names(pool).await, ["p"], "parent edit kept");
+    assert_no_driver_text(&body);
+    assert!(body.contains("Nothing was saved"), "{body}");
+    assert!(body.contains("already exists"), "{body}");
 }
 
 tri_dialect_test! {

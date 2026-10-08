@@ -1435,7 +1435,7 @@ async fn plan_target(
     Ok(())
 }
 
-/// Why [`apply_plan`] rolled every inline write back (#2339).
+/// Why [`apply_plan_tx`] failed; the whole edit rolls back (#2339).
 pub(crate) enum InlineApplyError {
     /// The database refused a write to `child`.
     Write {
@@ -1444,18 +1444,13 @@ pub(crate) enum InlineApplyError {
     },
     /// A delete the inserts needed to stay within `max_num` removed nothing.
     MaxNum { table: &'static str },
-    /// `BEGIN` or `COMMIT` failed.
-    Tx(ExecError),
 }
 
-/// Run a checked plan in one transaction: any failure rolls all of it back.
-pub(crate) async fn apply_plan(
-    pool: &Pool,
+/// Run a checked plan in the parent's `tx`; the caller rolls back on error.
+pub(crate) async fn apply_plan_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
     plan: InlinePlan,
 ) -> Result<InlineApplyOutcome, InlineApplyError> {
-    let mut tx = crate::sql::write_transaction_pool(pool)
-        .await
-        .map_err(InlineApplyError::Tx)?;
     let mut outcome = InlineApplyOutcome::default();
     for target in plan.targets {
         let child = target.child;
@@ -1464,12 +1459,12 @@ pub(crate) async fn apply_plan(
         for write in target.existing {
             match write {
                 InlineWrite::Update(q) => {
-                    crate::sql::update_tx(&mut tx, &q).await.map_err(refused)?;
+                    crate::sql::update_tx(tx, &q).await.map_err(refused)?;
                     outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
                 InlineWrite::Delete(q) => {
-                    if crate::sql::delete_tx(&mut tx, &q).await.map_err(refused)? > 0 {
+                    if crate::sql::delete_tx(tx, &q).await.map_err(refused)? > 0 {
                         deleted += 1;
                     }
                 }
@@ -1481,13 +1476,10 @@ pub(crate) async fn apply_plan(
             return Err(InlineApplyError::MaxNum { table: child.table });
         }
         for q in target.inserts {
-            crate::sql::insert_tx(&mut tx, &q).await.map_err(refused)?;
+            crate::sql::insert_tx(tx, &q).await.map_err(refused)?;
             outcome.inserted += 1;
         }
     }
-    tx.commit()
-        .await
-        .map_err(|e| InlineApplyError::Tx(e.into()))?;
     Ok(outcome)
 }
 

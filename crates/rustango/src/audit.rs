@@ -1441,7 +1441,7 @@ pub(crate) enum DiffEmit {
     AfterCommit,
 }
 
-/// Outcome of [`update_one_with_row_diff`].
+/// Outcome of [`update_one_with_row_diff_tx`].
 #[cfg(feature = "admin")]
 #[derive(Debug)]
 pub(crate) enum RowDiffWrite {
@@ -1451,11 +1451,12 @@ pub(crate) enum RowDiffWrite {
     Written { deferred: Option<PendingEntry> },
 }
 
-/// Lock the row `before` selects in the UPDATE's transaction, build the
-/// entry from that row, then UPDATE. A concurrent edit cannot slip
-/// between the diff's read and the write.
+/// Lock the row `before` selects in `tx`, build the entry from that row,
+/// then UPDATE. A concurrent edit cannot slip between the diff's read and
+/// the write. The caller commits, so later writes can share the tx.
 #[cfg(feature = "admin")]
-pub(crate) async fn update_one_with_row_diff(
+pub(crate) async fn update_one_with_row_diff_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
     pool: &crate::sql::Pool,
     query: &crate::core::UpdateQuery,
     mut before: crate::core::SelectQuery,
@@ -1469,18 +1470,15 @@ pub(crate) async fn update_one_with_row_diff(
         silent_on_sqlite: true,
         ..crate::core::LockMode::default()
     });
-    let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let Some(row) = crate::sql::select_one_row_as_json_tx(&mut tx, &before, fields).await? else {
-        tx.rollback().await?;
+    let Some(row) = crate::sql::select_one_row_as_json_tx(tx, &before, fields).await? else {
         return Ok(RowDiffWrite::Gone);
     };
     let entry = entry_of(&row);
-    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    let affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
     let entry = entry.filter(|_| affected > 0);
     if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
-        emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
+        emit_one_tx(tx, Via::Pool(pool), entry).await?;
     }
-    tx.commit().await?;
     Ok(RowDiffWrite::Written {
         deferred: entry.filter(|_| emit == DiffEmit::AfterCommit),
     })

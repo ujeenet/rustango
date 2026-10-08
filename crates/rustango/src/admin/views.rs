@@ -2306,7 +2306,15 @@ pub(crate) async fn update_submit(
     } else {
         crate::audit::DiffEmit::AfterCommit
     };
-    let written = crate::audit::update_one_with_row_diff(
+    // Parent and inline writes share one transaction: a refused inline
+    // row rolls the parent back too (#2339).
+    let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
+    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+    };
+    let written = crate::audit::update_one_with_row_diff_tx(
+        &mut tx,
         &state.pool,
         &query,
         before_select,
@@ -2318,27 +2326,33 @@ pub(crate) async fn update_submit(
         emit,
     )
     .await;
-    match written {
-        Ok(crate::audit::RowDiffWrite::Written { deferred }) => {
-            if let Some(entry) = deferred {
-                super::audit::emit_best_effort(&state, &entry).await;
-            }
-        }
+    let deferred = match written {
+        Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
         Ok(crate::audit::RowDiffWrite::Gone) => {
-            return Err(AdminError::RowNotFound { table, pk: pk_raw })
+            tx.rollback().await?;
+            return Err(AdminError::RowNotFound { table, pk: pk_raw });
         }
         Err(e) => {
-            let html = render_form(
-                &state,
-                model,
-                Some(&form),
-                true,
-                Some(&write_error(model, &e)),
-            );
-            return Ok(Html(html).into_response());
+            tx.rollback().await?;
+            return Ok(refused(write_error(model, &e)).into_response());
         }
+    };
+    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, inline_plan).await {
+        use super::inlines::InlineApplyError as E;
+        tx.rollback().await?;
+        let why = match e {
+            E::Write { child, error } => write_error(child, &error),
+            E::MaxNum { table } => format!("{table} allows no more rows here."),
+        };
+        return Ok(refused(format!("Nothing was saved: {why}")).into_response());
     }
-    // The `post_save` hook fires after the UPDATE and the audit
+    if let Err(e) = tx.commit().await {
+        return Ok(refused(write_error(model, &e.into())).into_response());
+    }
+    if let Some(entry) = deferred {
+        super::audit::emit_best_effort(&state, &entry).await;
+    }
+    // The `post_save` hook fires after the commit and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
@@ -2346,20 +2360,6 @@ pub(crate) async fn update_submit(
         change: true,
     })
     .await;
-
-    // The inline writes share one transaction, after the parent's. A
-    // failure rolls them all back and re-renders the form (#2339).
-    if let Err(e) = super::inlines::apply_plan(&state.pool, inline_plan).await {
-        use super::inlines::InlineApplyError as E;
-        let why = match e {
-            E::Write { child, error } => write_error(child, &error),
-            E::MaxNum { table } => format!("{table} allows no more rows here."),
-            E::Tx(error) => write_error(model, &error),
-        };
-        let msg = format!("{} was saved, but no inline row was: {why}", model.name);
-        let html = render_form(&state, model, Some(&form), true, Some(&msg));
-        return Ok(Html(html).into_response());
-    }
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
