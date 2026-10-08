@@ -82,8 +82,11 @@ where
         return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
     }
 
-    let children: Vec<C> =
-        super::fetch_in_chunks(pool, C::SCHEMA.table, false, parent_pks, |keys| {
+    let children: Vec<C> = super::fetch_in_chunks(
+        pool,
+        &crate::query::QuerySet::<C>::new(),
+        parent_pks,
+        |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
                     child_fk_column,
@@ -91,8 +94,9 @@ where
                     crate::core::SqlValue::List(keys),
                 )
                 .fetch(pool)
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {
@@ -146,7 +150,8 @@ where
 /// `ROW_NUMBER() OVER (PARTITION BY ...)` elsewhere) is a follow-up.
 ///
 /// # Errors
-/// As [`fetch_with_prefetch_pool`].
+/// As [`fetch_with_prefetch_pool`]; [`ExecError::InListUnsplittable`] when the
+/// parents exceed one `IN` list and `child_qs` has a limit or offset.
 pub async fn fetch_with_prefetch_filtered<P, C>(
     parent_qs: crate::query::QuerySet<P>,
     child_fk_column: &'static str,
@@ -205,19 +210,17 @@ where
     // existing filters. The IN-predicate AND-composes with the user's
     // WHERE clause (QuerySet default-ANDs raw filters).
     // Over the bind cap the keys go in batches; a limit or offset then refuses.
-    let sliced = child_qs.is_sliced();
-    let children: Vec<C> =
-        super::fetch_in_chunks(pool, C::SCHEMA.table, sliced, parent_pks, |keys| {
-            child_qs
-                .clone()
-                .filter_op(
-                    child_fk_column,
-                    crate::core::Op::In,
-                    crate::core::SqlValue::List(keys),
-                )
-                .fetch(pool)
-        })
-        .await?;
+    let children: Vec<C> = super::fetch_in_chunks(pool, &child_qs, parent_pks, |keys| {
+        child_qs
+            .clone()
+            .filter_op(
+                child_fk_column,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(keys),
+            )
+            .fetch(pool)
+    })
+    .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {

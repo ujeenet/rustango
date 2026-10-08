@@ -664,8 +664,11 @@ where
         .copied()
         .map(crate::core::SqlValue::I64)
         .collect();
-    let children: Vec<C> =
-        crate::sql::fetch_in_chunks(pool, C::SCHEMA.table, false, pk_values, |keys| {
+    let children: Vec<C> = crate::sql::fetch_in_chunks(
+        pool,
+        &crate::query::QuerySet::<C>::new(),
+        pk_values,
+        |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
                     target_fk_column,
@@ -673,8 +676,9 @@ where
                     crate::core::SqlValue::List(keys),
                 )
                 .fetch(pool)
-        })
-        .await?;
+        },
+    )
+    .await?;
     let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
     for child in children {
         let key = extract(&child);
@@ -745,8 +749,11 @@ where
         .ok_or_else(|| ExecError::MissingPrimaryKey {
             table: C::SCHEMA.table,
         })?;
-    let rows: Vec<C> =
-        crate::sql::fetch_in_chunks(pool, C::SCHEMA.table, false, pk_values, |keys| {
+    let rows: Vec<C> = crate::sql::fetch_in_chunks(
+        pool,
+        &crate::query::QuerySet::<C>::new(),
+        pk_values,
+        |keys| {
             crate::query::QuerySet::<C>::new()
                 .filter_op(
                     pk_field.column,
@@ -754,8 +761,9 @@ where
                     crate::core::SqlValue::List(keys),
                 )
                 .fetch(pool)
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let mut out: ::std::collections::HashMap<(i64, i64), C> =
         ::std::collections::HashMap::with_capacity(rows.len());

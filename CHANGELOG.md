@@ -14,7 +14,7 @@ Repeated ids (e.g. a form posting `tags=1&tags=1`) are linked once instead of fa
 
 ### Fixed — bulk_update and IN-list prefetches past the bind cap (#2295)
 
-`Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists.
+`Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists, and return `ExecError::InListUnsplittable` when a limit or offset forbids it.
 
 ### Fixed — `values()` keeps JSON and bool types on MySQL and SQLite (#2296)
 

@@ -7602,8 +7602,9 @@ fn inherent_impl_tokens(
             }
             quote! {
                 /// Write per-row-different values for the named `fields`
-                /// across every object in `objs` in a single statement,
-                /// matched by primary key.
+                /// across every object in `objs`, matched by primary key.
+                /// Past the backend's bind cap the rows go in batches inside
+                /// one transaction, so the update is all or none.
                 ///
                 /// `fields` names the **columns** to update. The primary
                 /// key identifies each row and cannot itself be updated
@@ -7613,7 +7614,7 @@ fn inherent_impl_tokens(
                 /// Objects whose PK matches no row are simply not updated.
                 /// Returns the number of rows affected.
                 ///
-                /// Tri-dialect: lowers to one
+                /// Tri-dialect: lowers to a
                 /// [`#root::core::BulkUpdateQuery`] and dispatches
                 /// per-backend — `UPDATE … FROM (VALUES …)` on Postgres,
                 /// a CTE + correlated subquery on SQLite, an inner

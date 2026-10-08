@@ -328,6 +328,8 @@ fn src_key(pk: &SqlValue, through: &'static str) -> Result<SqlValue, ExecError> 
 
 /// [`dst_key`] for each id, first occurrence kept: a repeated id
 /// (`tags=1&tags=1`) would hit the junction's unique key in `set` (#2297).
+/// Exact match only: on MySQL's case-insensitive collation `"a"` and `"A"`
+/// still collide.
 fn dst_keys<K: Clone + Into<SqlValue>>(
     ids: &[K],
     through: &'static str,

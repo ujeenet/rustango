@@ -317,12 +317,11 @@ pub enum ExecError {
     #[error("m2m on `{through}` needs a saved source row; its primary key is unset")]
     M2mUnsavedSource { through: &'static str },
 
-    /// A prefetch or `in_bulk` needed more keys than one `IN` list takes, on a
-    /// queryset with a limit or offset that batching would change (#2295).
-    #[error(
-        "`{table}`: {keys} keys exceed one IN list ({max}) and the queryset has a limit or offset"
-    )]
-    InListTooLongForSlice {
+    /// A prefetch or `in_bulk` needed more keys than one `IN` list takes
+    /// and the query cannot be split: a limit or offset would apply per
+    /// batch, or the query's own binds already fill the cap (#2295).
+    #[error("`{table}`: {keys} IN-list keys do not fit the {max} binds left, and the query cannot be split")]
+    InListUnsplittable {
         table: &'static str,
         keys: usize,
         max: usize,

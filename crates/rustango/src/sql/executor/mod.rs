@@ -91,23 +91,27 @@ pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
-/// Run `fetch` once per slice of `keys` that fits one `IN` list under the
-/// backend's bind cap, and concatenate the rows (#2295).
-///
-/// `sliced` is whether the query carries a limit or offset; see [`in_chunk_size`].
-pub(crate) async fn fetch_in_chunks<C, F, Fut>(
+/// Run `fetch` once per slice of `keys` that fits one `IN` list beside the
+/// binds `base` already carries, and concatenate the rows (#2295).
+/// `fetch` must add exactly one `IN` list over its keys to `base`.
+pub(crate) async fn fetch_in_chunks<T, C, F, Fut>(
     pool: &Pool,
-    table: &'static str,
-    sliced: bool,
+    base: &QuerySet<T>,
     keys: Vec<SqlValue>,
     mut fetch: F,
 ) -> Result<Vec<C>, ExecError>
 where
+    T: Model,
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let budget = crate::list_params::in_values_budget(pool.dialect().max_bind_params());
-    let size = in_chunk_size(table, keys.len(), budget, sliced)?;
+    let carried = pool
+        .dialect()
+        .compile_select(&base.clone().compile()?)?
+        .params
+        .len();
+    let room = pool.dialect().max_bind_params().saturating_sub(carried);
+    let size = in_chunk_size(T::SCHEMA.table, keys.len(), room, base.is_sliced())?;
     if keys.len() <= size {
         return fetch(keys).await;
     }
@@ -118,23 +122,22 @@ where
     Ok(out)
 }
 
-/// Keys per `IN` list: `budget` (at least 1). A limit or offset would apply
-/// per batch, so a sliced query over budget is refused instead.
+/// Keys per `IN` list: the `room` the query's own binds leave. Refused when
+/// there is none, or when a limit or offset would apply per batch.
 fn in_chunk_size(
     table: &'static str,
     keys: usize,
-    budget: usize,
+    room: usize,
     sliced: bool,
 ) -> Result<usize, ExecError> {
-    let budget = budget.max(1);
-    if sliced && keys > budget {
-        return Err(ExecError::InListTooLongForSlice {
+    if room == 0 || (sliced && keys > room) {
+        return Err(ExecError::InListUnsplittable {
             table,
             keys,
-            max: budget,
+            max: room,
         });
     }
-    Ok(budget)
+    Ok(room)
 }
 
 /// Fails when the `select_related` LEFT JOIN under `alias` matched no row
@@ -1377,6 +1380,8 @@ pub(crate) fn compile_bulk_insert_batches(
 
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN
 /// (VALUES …)` (MySQL); returns rows affected.
+///
+/// Rows past the bind cap go in batches inside one transaction (#2295).
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
@@ -2917,7 +2922,9 @@ where
     /// column, the later row wins. Prefer a unique column.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch`].
+    /// As [`FetcherPool::fetch`];
+    /// [`ExecError::InListUnsplittable`] when `ids` exceed one `IN` list
+    /// and the queryset has a limit or offset, or binds of its own fill the cap.
     pub async fn in_bulk<C, K, I, F>(
         self,
         column: C,
@@ -2938,8 +2945,7 @@ where
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let sliced = self.is_sliced();
-        let rows = fetch_in_chunks(pool, T::SCHEMA.table, sliced, id_values, |keys| {
+        let rows = fetch_in_chunks(pool, &self, id_values, |keys| {
             self.clone()
                 .filter_op(
                     C::COLUMN,
@@ -3034,18 +3040,21 @@ mod in_chunk_tests {
     use super::*;
 
     #[test]
-    fn a_sliced_query_over_budget_is_refused() {
+    fn a_query_that_cannot_be_split_is_refused() {
         assert_eq!(in_chunk_size("t", 10, 10, true).unwrap(), 10);
         assert!(matches!(
             in_chunk_size("t", 11, 10, true),
-            Err(ExecError::InListTooLongForSlice {
+            Err(ExecError::InListUnsplittable {
                 keys: 11,
                 max: 10,
                 ..
             })
         ));
         assert_eq!(in_chunk_size("t", 11, 10, false).unwrap(), 10);
-        assert_eq!(in_chunk_size("t", 5, 0, false).unwrap(), 1);
+        assert!(matches!(
+            in_chunk_size("t", 5, 0, false),
+            Err(ExecError::InListUnsplittable { max: 0, .. })
+        ));
     }
 }
 
