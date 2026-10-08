@@ -45,6 +45,7 @@ pub struct Post {
     /// building the table from `SCHEMA` rather than by hand.
     pub published: bool,
     pub score: Option<i64>,
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Rebuild the table and seed the four rows every scenario reads.
@@ -66,6 +67,7 @@ async fn seeded(pool: &Pool) {
             view_count,
             published,
             score,
+            meta: Some(serde_json::json!({ "views": view_count })),
         };
         p.insert_pool(pool).await.expect("seed row");
     }
@@ -181,6 +183,31 @@ async fn values_list_flat_decodes_a_boolean_column(pool: &Pool) {
     );
 }
 
+/// A bool reads as `Bool` and a JSON column as `Json` on every backend;
+/// MySQL gave `I64` and `Null` (#2296).
+async fn values_keep_bool_and_json_types(pool: &Pool) {
+    let qs = || Post::objects().where_(Post::id.eq(1_i64));
+    let dict = qs()
+        .values_dict(&["published", "meta"])
+        .fetch(pool)
+        .await
+        .expect("values_dict");
+    let list = qs()
+        .values_list(&["published", "meta"])
+        .fetch(pool)
+        .await
+        .expect("values_list");
+    let want = [
+        SqlValue::Bool(true),
+        SqlValue::Json(serde_json::json!({ "views": 100 })),
+    ];
+    assert_eq!(
+        [dict[0]["published"].clone(), dict[0]["meta"].clone()],
+        want
+    );
+    assert_eq!(list[0], want);
+}
+
 /// NULL must error into a bare `i64` and read as `None` into
 /// `Option<i64>`; SQLite used to hand back `0` (#1773).
 async fn values_list_flat_null_needs_an_option(pool: &Pool) {
@@ -236,5 +263,6 @@ tri_dialect_test! {
         values_list_flat_decodes_a_boolean_column,
         values_list_flat_null_needs_an_option,
         pluck_pairs_null_needs_an_option,
+        values_keep_bool_and_json_types,
     ],
 }

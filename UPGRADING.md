@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `values()` returns `Bool` and `Json` on MySQL and SQLite
+
+A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Match on `Bool` / `Json` as on Postgres (#2296).
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).

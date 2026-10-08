@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `values()` keeps JSON and bool types on MySQL and SQLite (#2296)
+
+MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I64` and `String`. All three now give `Json` and `Bool`.
+
 ### Fixed — select_related chains sharing a hop (#2294)
 
 `.select_related("a").select_related("a__b")` joins `a` once; it emitted a duplicate alias every backend rejects.
