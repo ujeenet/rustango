@@ -22,3 +22,7 @@ path = "src/main.rs"
 # Standalone — does not depend on the `rustango` library crate. The
 # scaffolder writes user-project source files; it doesn't link to
 # any rustango runtime types.
+
+[dev-dependencies]
+# Parses the generated Cargo.toml in tests.
+toml = { workspace = true }

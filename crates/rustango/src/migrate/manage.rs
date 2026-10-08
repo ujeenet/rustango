@@ -5547,9 +5547,9 @@ pub fn settings_audit_check(
                     .into(),
             );
         }
-        if settings.mcp.rate_limit_per_minute.is_none() {
+        if settings.mcp.rate_limit().is_none() {
             out.info.push(
-                "[mcp] rate_limit_per_minute unset in prod tier — the agent token + JSON-RPC \
+                "[mcp] rate_limit_per_minute unset or 0 in prod tier — the agent token + JSON-RPC \
                  endpoints are unthrottled. Set a per-IP cap to blunt credential-stuffing / abuse."
                     .into(),
             );

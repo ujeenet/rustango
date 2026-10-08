@@ -91,9 +91,7 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
 }
 
 async fn make_user(pool: &Pool, name: &str) -> i64 {
-    let Pool::Mysql(my) = pool else {
-        unreachable!()
-    };
+    let my = pool.as_mysql().expect("a MySQL pool");
     sqlx::query(
         "INSERT INTO `rustango_users` \
          (`username`, `password_hash`, `is_superuser`, `active`, `data`, `created_at`) \

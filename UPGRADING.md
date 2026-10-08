@@ -162,6 +162,28 @@ If a table outside the filter references a flushed one, the flush now fails and 
 
 In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
 
+### `makemigrations` renames an M2M junction's column
+
+Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
+
+### Colliding FK names are refused
+
+Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail at render, before the op that adds them, on PG and MySQL; rename a table or column. On MySQL, earlier ops of that migration have already committed (#2245).
+
+A self-referencing M2M whose two columns both change is refused by `makemigrations`; rename one per migration.
+
+### Custom `Cache` backends: override `touch`
+
+`SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).
+
+### `[mcp] rate_limit_per_minute = 0` means unlimited
+
+It used to refuse every request with 429 (#2299).
+
+### i18n locale matching
+
+`languages = ["pt-BR"]` now loads `pt_BR.json` (#2288), and `negotiate_language` picks `en` over `en-GB` for `en-US` (#2289). Check any test that pinned the old pick.
+
 ### `IpFilterLayer::behind_trusted_proxy` (opt-in)
 
 The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).

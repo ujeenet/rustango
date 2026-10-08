@@ -7,7 +7,7 @@
 
 use std::io::{self, IsTerminal, Write};
 
-use crate::{Backend, NewArgs, Template, OPTIONAL_FEATURES};
+use crate::{Backend, NewArgs, NewFlags, Template, OPTIONAL_FEATURES};
 
 const TEMPLATES: &[(&str, Template, &str)] = &[
     (
@@ -45,7 +45,7 @@ const BACKENDS: &[(&str, Backend, &str)] = &[
 ///
 /// `given` carries what was parsed from the command line; the wizard only
 /// asks about the rest, so `new myapp -i` skips straight to the menus.
-pub fn run(given: NewArgs, name_was_given: bool) -> Result<NewArgs, String> {
+pub fn run(given: NewFlags, name_was_given: bool) -> Result<NewArgs, String> {
     if !io::stdin().is_terminal() {
         return Err(
             "--interactive needs a terminal — pass --template / --backend / --features instead"
@@ -56,20 +56,43 @@ pub fn run(given: NewArgs, name_was_given: bool) -> Result<NewArgs, String> {
     println!();
     println!("  rustango — new project");
     println!("  (enter accepts the default; ctrl-c aborts)");
+    ask(given, name_was_given, &mut prompt)
+}
 
+/// The wizard proper; `prompt` reads one answer, so a test can script it.
+fn ask(given: NewFlags, name_was_given: bool, prompt: &mut Prompt<'_>) -> Result<NewArgs, String> {
     let name = if name_was_given {
         given.name
     } else {
-        ask_name()?
+        ask_name(prompt)?
     };
 
-    let template = choose("Template", TEMPLATES.iter().map(|(n, _, a)| (*n, *a)), 0)
-        .map(|ix| TEMPLATES[ix].1)?;
+    // A flag already answered the question (#2286).
+    let template = match given.template {
+        Some(t) => t,
+        None => {
+            let default = TEMPLATES
+                .iter()
+                .position(|(_, t, _)| *t == Template::DEFAULT)
+                .unwrap_or(0);
+            let menu = TEMPLATES.iter().map(|(n, _, a)| (*n, *a));
+            TEMPLATES[choose("Template", menu, default, prompt)?].1
+        }
+    };
 
-    let backend = choose("Database", BACKENDS.iter().map(|(n, _, a)| (*n, *a)), 0)
-        .map(|ix| BACKENDS[ix].1)?;
+    let backend = match given.backend {
+        Some(b) => b,
+        None => {
+            let default = BACKENDS
+                .iter()
+                .position(|(_, b, _)| *b == Backend::DEFAULT)
+                .unwrap_or(0);
+            let menu = BACKENDS.iter().map(|(n, _, a)| (*n, *a));
+            BACKENDS[choose("Database", menu, default, prompt)?].1
+        }
+    };
 
-    let features = ask_features(template, &given.features)?;
+    let features = ask_features(template, &given.features, prompt)?;
 
     let args = NewArgs {
         name,
@@ -77,18 +100,20 @@ pub fn run(given: NewArgs, name_was_given: bool) -> Result<NewArgs, String> {
         backend,
         features,
         rustango_path: given.rustango_path,
-        interactive: false,
     };
 
     println!();
     println!("  Same thing without the wizard:");
     println!("    {}", equivalent_command(&args));
     println!();
-    if !confirm("Create it?")? {
+    if !confirm("Create it?", prompt)? {
         return Err("cancelled".to_owned());
     }
     Ok(args)
 }
+
+/// Prints a label and returns the line typed after it.
+type Prompt<'a> = dyn FnMut(&str) -> Result<String, String> + 'a;
 
 /// The non-interactive command line that produces `args`.
 fn equivalent_command(args: &NewArgs) -> String {
@@ -101,10 +126,25 @@ fn equivalent_command(args: &NewArgs) -> String {
     if !args.features.is_empty() {
         cmd.push_str(&format!(" --features {}", args.features.join(",")));
     }
+    if let Some(path) = &args.rustango_path {
+        cmd.push_str(&format!(" --rustango-path {}", shell_quote(path)));
+    }
     cmd
 }
 
-fn ask_name() -> Result<String, String> {
+/// `s` as one POSIX shell word; plain paths stay unquoted.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if plain {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+fn ask_name(prompt: &mut Prompt<'_>) -> Result<String, String> {
     loop {
         let raw = prompt("\n  Project name: ")?;
         let name = raw.trim();
@@ -124,6 +164,7 @@ fn choose<'a>(
     title: &str,
     options: impl Iterator<Item = (&'a str, &'a str)>,
     default_ix: usize,
+    prompt: &mut Prompt<'_>,
 ) -> Result<usize, String> {
     let options: Vec<(&str, &str)> = options.collect();
     let width = options.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
@@ -152,7 +193,11 @@ fn choose<'a>(
 }
 
 /// Any-of-N, by number. Features the template already turns on are left out.
-fn ask_features(template: Template, preselected: &[String]) -> Result<Vec<String>, String> {
+fn ask_features(
+    template: Template,
+    preselected: &[String],
+    prompt: &mut Prompt<'_>,
+) -> Result<Vec<String>, String> {
     let base = template.base_features();
     let menu: Vec<(&str, &str)> = OPTIONAL_FEATURES
         .iter()
@@ -160,7 +205,7 @@ fn ask_features(template: Template, preselected: &[String]) -> Result<Vec<String
         .map(|(n, a)| (*n, *a))
         .collect();
     if menu.is_empty() {
-        return Ok(Vec::new());
+        return Ok(preselected.to_vec());
     }
 
     let width = menu.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
@@ -176,7 +221,7 @@ fn ask_features(template: Template, preselected: &[String]) -> Result<Vec<String
         println!("  {on} {:>iw$}) {name:<width$}  {about}", i + 1);
     }
     if !preselected.is_empty() {
-        println!("    (* already set by --features; enter keeps them)");
+        println!("    (* already set by --features; numbers add to them)");
     }
 
     loop {
@@ -185,7 +230,8 @@ fn ask_features(template: Template, preselected: &[String]) -> Result<Vec<String
         if raw.is_empty() {
             return Ok(preselected.to_vec());
         }
-        let mut picked = Vec::new();
+        // Given `--features` stay; the menu only adds (#2286).
+        let mut picked = preselected.to_vec();
         let mut bad = None;
         for tok in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
             match tok.parse::<usize>() {
@@ -208,7 +254,7 @@ fn ask_features(template: Template, preselected: &[String]) -> Result<Vec<String
     }
 }
 
-fn confirm(question: &str) -> Result<bool, String> {
+fn confirm(question: &str, prompt: &mut Prompt<'_>) -> Result<bool, String> {
     loop {
         let raw = prompt(&format!("  {question} [Y/n] "))?;
         return Ok(match raw.trim().to_ascii_lowercase().as_str() {
@@ -256,7 +302,6 @@ mod tests {
                 backend,
                 features: features.clone(),
                 rustango_path: None,
-                interactive: false,
             };
             let cmd = equivalent_command(&args);
             // Re-parse it exactly as a user retyping the line would.
@@ -268,10 +313,99 @@ mod tests {
             let back = crate::parse_new_args(&argv, false)
                 .unwrap_or_else(|e| panic!("`{cmd}` does not parse: {e}"));
             assert_eq!(back.name, "probe", "{cmd}");
-            assert_eq!(back.template.name(), template.name(), "{cmd}");
+            assert_eq!(back.template, template, "{cmd}");
             assert_eq!(back.backend, backend, "{cmd}");
             assert_eq!(back.features, features, "{cmd}");
         }
+    }
+
+    /// Enter on every question keeps `--template` / `--backend`: they are
+    /// not asked at all, so a menu default cannot override them (#2286).
+    #[test]
+    fn given_template_and_backend_are_not_asked() {
+        let argv: Vec<String> = ["shop", "-i", "--template", "tenant", "--backend", "sqlite"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let flags = crate::parse_new_flags(&argv, true).expect("parse");
+        let mut asked = Vec::new();
+        let mut enter = |label: &str| {
+            asked.push(label.to_owned());
+            Ok("\n".to_owned())
+        };
+        let args = ask(flags, true, &mut enter).expect("wizard");
+        assert_eq!(args.template, Template::Tenant);
+        assert_eq!(args.backend, Backend::Sqlite);
+        // Extra features, then the confirm — no template or backend menu.
+        assert_eq!(asked.len(), 2, "{asked:?}");
+    }
+
+    /// Absent flags are still asked, and Enter takes the documented default.
+    #[test]
+    fn missing_template_and_backend_are_asked_with_defaults() {
+        let flags = crate::parse_new_flags(&["shop".to_owned()], true).expect("parse");
+        let mut asked = 0;
+        let mut enter = |_: &str| {
+            asked += 1;
+            Ok("\n".to_owned())
+        };
+        let args = ask(flags, true, &mut enter).expect("wizard");
+        assert_eq!(args.template, Template::DEFAULT);
+        assert_eq!(args.backend, Backend::DEFAULT);
+        assert_eq!(asked, 4);
+    }
+
+    /// Picking from the menu adds to `--features`, it does not replace them.
+    #[test]
+    fn menu_picks_add_to_given_features() {
+        let argv: Vec<String> = [
+            "shop",
+            "-i",
+            "-t",
+            "api",
+            "-b",
+            "sqlite",
+            "--features",
+            "csrf",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let flags = crate::parse_new_flags(&argv, true).expect("parse");
+        let sso = OPTIONAL_FEATURES
+            .iter()
+            .filter(|(n, _)| !Template::Api.base_features().contains(n))
+            .position(|(n, _)| *n == "sso")
+            .expect("sso on the api menu")
+            + 1;
+        let mut answers = vec![format!("{sso}\n"), "\n".to_owned()].into_iter();
+        let mut next = |_: &str| Ok(answers.next().expect("asked too often"));
+        let args = ask(flags, true, &mut next).expect("wizard");
+        assert_eq!(args.features, vec!["csrf", "sso"]);
+    }
+
+    /// A local checkout picked with `--rustango-path` is echoed too, quoted
+    /// when the shell would split it.
+    #[test]
+    fn the_echoed_command_keeps_rustango_path() {
+        let mut args = NewArgs {
+            name: "probe".to_owned(),
+            template: Template::Api,
+            backend: Backend::Sqlite,
+            features: vec![],
+            rustango_path: Some("../rustango/crates/rustango".to_owned()),
+        };
+        let cmd = equivalent_command(&args);
+        let argv: Vec<String> = cmd.split_whitespace().skip(3).map(str::to_owned).collect();
+        let back = crate::parse_new_args(&argv, false).expect("parses");
+        assert_eq!(back.rustango_path, args.rustango_path, "{cmd}");
+
+        args.rustango_path = Some("my dir/it's".to_owned());
+        assert!(
+            equivalent_command(&args).ends_with(r"--rustango-path 'my dir/it'\''s'"),
+            "{}",
+            equivalent_command(&args)
+        );
     }
 
     /// Every menu entry must map onto a value the flags accept, so a wizard
@@ -279,7 +413,7 @@ mod tests {
     #[test]
     fn every_menu_label_is_a_valid_flag_value() {
         for (label, template, _) in TEMPLATES {
-            assert_eq!(Template::parse(label).expect(label).name(), template.name());
+            assert_eq!(&Template::parse(label).expect(label), template);
         }
         for (label, backend, _) in BACKENDS {
             assert_eq!(&Backend::parse(label).expect(label), backend);

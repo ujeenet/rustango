@@ -368,6 +368,13 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for an index's first column when no other index starts with it,
+    /// binding `(table, index)`, where an FK refuses to lose the only index
+    /// it can use (MySQL, 1553; #2244).
+    fn sole_leading_column_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for the names of the single-column UNIQUE indexes on one
     /// column, binding `(table, column)`. `Some` where an `AlterColumnUnique`
     /// drops the index by that name (MySQL) (#1676).
