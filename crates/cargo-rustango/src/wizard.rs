@@ -205,7 +205,7 @@ fn ask_features(
         .map(|(n, a)| (*n, *a))
         .collect();
     if menu.is_empty() {
-        return Ok(Vec::new());
+        return Ok(preselected.to_vec());
     }
 
     let width = menu.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
@@ -221,7 +221,7 @@ fn ask_features(
         println!("  {on} {:>iw$}) {name:<width$}  {about}", i + 1);
     }
     if !preselected.is_empty() {
-        println!("    (* already set by --features; enter keeps them)");
+        println!("    (* already set by --features; numbers add to them)");
     }
 
     loop {
@@ -230,7 +230,8 @@ fn ask_features(
         if raw.is_empty() {
             return Ok(preselected.to_vec());
         }
-        let mut picked = Vec::new();
+        // Given `--features` stay; the menu only adds (#2286).
+        let mut picked = preselected.to_vec();
         let mut bad = None;
         for tok in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
             match tok.parse::<usize>() {
@@ -352,6 +353,35 @@ mod tests {
         assert_eq!(args.template.name(), Template::DEFAULT.name());
         assert_eq!(args.backend, Backend::DEFAULT);
         assert_eq!(asked, 4);
+    }
+
+    /// Picking from the menu adds to `--features`, it does not replace them.
+    #[test]
+    fn menu_picks_add_to_given_features() {
+        let argv: Vec<String> = [
+            "shop",
+            "-i",
+            "-t",
+            "api",
+            "-b",
+            "sqlite",
+            "--features",
+            "csrf",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let flags = crate::parse_new_flags(&argv, true).expect("parse");
+        let sso = OPTIONAL_FEATURES
+            .iter()
+            .filter(|(n, _)| !Template::Api.base_features().contains(n))
+            .position(|(n, _)| *n == "sso")
+            .expect("sso on the api menu")
+            + 1;
+        let mut answers = vec![format!("{sso}\n"), "\n".to_owned()].into_iter();
+        let mut next = |_: &str| Ok(answers.next().expect("asked too often"));
+        let args = ask(flags, true, &mut next).expect("wizard");
+        assert_eq!(args.features, vec!["csrf", "sso"]);
     }
 
     /// A local checkout picked with `--rustango-path` is echoed too, quoted

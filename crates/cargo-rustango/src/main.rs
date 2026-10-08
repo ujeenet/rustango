@@ -422,6 +422,7 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     } else {
         flags.resolve()
     };
+    validate_features(&parsed.features, parsed.template)?;
     validate_name(&parsed.name)?;
 
     let root = PathBuf::from(&parsed.name);
@@ -462,14 +463,16 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 fn parse_new_args(args: &[String], interactive: bool) -> Result<NewArgs, String> {
-    parse_new_flags(args, interactive).map(NewFlags::resolve)
+    let args = parse_new_flags(args, interactive)?.resolve();
+    validate_features(&args.features, args.template)?;
+    Ok(args)
 }
 
 /// Parse `new`'s arguments.
 ///
 /// `interactive` relaxes the one requirement the flags impose — a project
-/// name — because the wizard asks for it. Everything else already has a
-/// default, so a bare `cargo rustango new` is a complete request.
+/// name — because the wizard asks for it. Absent flags stay `None`;
+/// [`NewFlags::resolve`] or the wizard fills them in.
 fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, String> {
     let mut name: Option<String> = None;
     let mut template: Option<Template> = None;
@@ -569,7 +572,11 @@ fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, Strin
         seen.push(f.clone());
         fresh
     });
-    validate_features(&features, template.unwrap_or(Template::DEFAULT))?;
+    // Early when the template is known; the wizard's pick is checked in
+    // `cmd_new`.
+    if template.is_some() || !interactive {
+        validate_features(&features, template.unwrap_or(Template::DEFAULT))?;
+    }
     Ok(NewFlags {
         name,
         template,
@@ -1226,6 +1233,20 @@ mod tests {
                 "should redirect to --backend: {err}"
             );
         }
+    }
+
+    /// With no `--template`, the wizard picks it later; a feature only that
+    /// template has must not be refused against the default first.
+    #[test]
+    fn features_wait_for_the_wizards_template() {
+        let argv: Vec<String> = ["shop", "-i", "--features", "manage"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut flags = parse_new_flags(&argv, true).expect("not checked yet");
+        flags.template = Some(Template::Api);
+        let args = flags.resolve();
+        validate_features(&args.features, args.template).expect("api has manage");
     }
 
     /// Caught at parse time, where the message can name the flag — not at
