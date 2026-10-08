@@ -154,6 +154,10 @@ untouched.
 
 With a `RealIpLayer::trust_proxies` layer outside it, the filter now gates the trusted client IP, not the proxy. List client networks, not proxy ones (#2278).
 
+### Trusted `X-Forwarded-Host` / `-Proto` read the rightmost value
+
+SSO and MCP now use the value your nearest trusted proxy appended. If an inner proxy appends its own `http`, make it overwrite or pass the header through (#2279).
+
 ### `Cli` behind a reverse proxy
 
 Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).

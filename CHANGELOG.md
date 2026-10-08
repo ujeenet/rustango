@@ -16,6 +16,10 @@ The `rustango_users` UPDATE was raw SQL in that build; both builds now share one
 
 Behind a `RealIpLayer` with `trust_proxies` it read the socket peer, so an allow- or block-list saw only the proxy.
 
+### Fixed — trusted `X-Forwarded-Host` / `-Proto` take the rightmost value (#2279)
+
+SSO and MCP redirect URLs read the leftmost hop, which a client can write; now they read the one the trusted proxy appended.
+
 ### Added — `Cli::with_trusted_proxies` (#2255)
 
 A `Cli` app behind a reverse proxy names its proxies, and the access log and per-IP limits, login throttling included, see the client. `X-Forwarded-For` from other peers is still ignored.
