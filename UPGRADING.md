@@ -156,7 +156,7 @@ Scripts must pass `--clean --yes`; without it the command asks on a terminal and
 
 ### `flush` on Postgres no longer cascades
 
-If a table outside the filter references a flushed one, the flush now fails and clears nothing; add that model with `--model` or `--app` (#2285).
+If a table outside the filter references a flushed one, the flush now fails and clears nothing; add that model with `--model` or `--app` (#2285). An `ON DELETE CASCADE` link from such a table still empties it on MySQL and SQLite, but Postgres refuses.
 
 ### Tenancy `flush` needs `--tenant <slug>`
 
