@@ -232,7 +232,7 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("test_utils", "test-only constructors for downstream crates"),
 ];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Template {
     Api,
     Fullstack,
@@ -1303,6 +1303,8 @@ mod tests {
             r"C:\Users\dev\rustango",
             r#"dir "q"/x"#,
             "tab\there",
+            "new\nline",
+            "del\u{7f}ete",
         ] {
             let toml =
                 templates::cargo_toml("app", Template::Api, Backend::Sqlite, &[], Some(path));

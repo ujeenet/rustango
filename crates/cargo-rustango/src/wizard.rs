@@ -73,7 +73,7 @@ fn ask(given: NewFlags, name_was_given: bool, prompt: &mut Prompt<'_>) -> Result
         None => {
             let default = TEMPLATES
                 .iter()
-                .position(|(_, t, _)| t.name() == Template::DEFAULT.name())
+                .position(|(_, t, _)| *t == Template::DEFAULT)
                 .unwrap_or(0);
             let menu = TEMPLATES.iter().map(|(n, _, a)| (*n, *a));
             TEMPLATES[choose("Template", menu, default, prompt)?].1
@@ -313,7 +313,7 @@ mod tests {
             let back = crate::parse_new_args(&argv, false)
                 .unwrap_or_else(|e| panic!("`{cmd}` does not parse: {e}"));
             assert_eq!(back.name, "probe", "{cmd}");
-            assert_eq!(back.template.name(), template.name(), "{cmd}");
+            assert_eq!(back.template, template, "{cmd}");
             assert_eq!(back.backend, backend, "{cmd}");
             assert_eq!(back.features, features, "{cmd}");
         }
@@ -334,7 +334,7 @@ mod tests {
             Ok("\n".to_owned())
         };
         let args = ask(flags, true, &mut enter).expect("wizard");
-        assert_eq!(args.template.name(), "tenant");
+        assert_eq!(args.template, Template::Tenant);
         assert_eq!(args.backend, Backend::Sqlite);
         // Extra features, then the confirm — no template or backend menu.
         assert_eq!(asked.len(), 2, "{asked:?}");
@@ -350,7 +350,7 @@ mod tests {
             Ok("\n".to_owned())
         };
         let args = ask(flags, true, &mut enter).expect("wizard");
-        assert_eq!(args.template.name(), Template::DEFAULT.name());
+        assert_eq!(args.template, Template::DEFAULT);
         assert_eq!(args.backend, Backend::DEFAULT);
         assert_eq!(asked, 4);
     }
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn every_menu_label_is_a_valid_flag_value() {
         for (label, template, _) in TEMPLATES {
-            assert_eq!(Template::parse(label).expect(label).name(), template.name());
+            assert_eq!(&Template::parse(label).expect(label), template);
         }
         for (label, backend, _) in BACKENDS {
             assert_eq!(&Backend::parse(label).expect(label), backend);
