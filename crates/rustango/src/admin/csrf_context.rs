@@ -33,11 +33,9 @@ pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response
     if super::session::current_csrf_token().is_some() {
         return next.run(request).await;
     }
-    let (token, set_cookie) = crate::forms::csrf::ensure_token_under_layer(
-        request.headers(),
-        request.extensions(),
-        crate::forms::csrf::CSRF_COOKIE,
-    );
+    // The outer layer's cookie name and `Secure` flag, or it checks a cookie never set (#2160).
+    let (token, set_cookie) =
+        crate::forms::csrf::ensure_token_under_layer(request.headers(), request.extensions());
 
     let mut response = CURRENT_CSRF_TOKEN.scope(token, next.run(request)).await;
 
@@ -53,4 +51,54 @@ pub(crate) async fn csrf_context(request: Request<Body>, next: Next) -> Response
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt as _;
+
+    use crate::forms::csrf::{with_config, CsrfConfig};
+
+    /// #2160 — the page's token rides in the outer layer's cookie, and
+    /// no second cookie is set.
+    #[tokio::test]
+    async fn the_token_cookie_follows_the_outer_layer() {
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async { super::super::session::current_csrf_token().unwrap_or_default() }),
+            )
+            .layer(axum::middleware::from_fn(super::csrf_context))
+            .layer(with_config(CsrfConfig {
+                cookie_name: "outer_csrf".into(),
+                ..CsrfConfig::default()
+            }));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(super::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookies: Vec<String> = resp
+            .headers()
+            .get_all(super::SET_COOKIE)
+            .iter()
+            .map(|c| c.to_str().unwrap().to_owned())
+            .collect();
+        let token = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let token = String::from_utf8_lossy(&token);
+        assert_eq!(cookies.len(), 1, "{cookies:?}");
+        assert!(
+            cookies[0].starts_with(&format!("outer_csrf={token};")),
+            "{cookies:?}"
+        );
+        assert!(cookies[0].contains("; Secure"), "{cookies:?}");
+    }
 }

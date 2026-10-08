@@ -408,6 +408,12 @@ einem W3C-`traceparent`-Header, werden zusätzlich `trace_id`, `parent_span_id`
 und `trace_flags` aufgezeichnet — genau das greift eine
 `tracing-opentelemetry`-Schicht ab, um sich in den Trace einzuklinken.
 
+Status, Body-Größe und Dauer werden erst aufgezeichnet, wenn die Response
+zurückkommt — dann sind die Events des Requests schon geschrieben. Der
+`fmt`-Subscriber gibt Span-Felder nur an Events aus, zeigt diese drei also nie.
+Lies sie aus der Access-Log-Zeile oder aus einer OpenTelemetry-Schicht, die den
+Span beim Schließen ausliest.
+
 Schon wegen des Mandantenfelds lohnt sich diese Schicht: weil die Felder am
 *Span* hängen, trägt jedes während des Requests emittierte Event — auch die des
 ORM — sie im Span-Kontext, ohne dass irgendein Subsystem wissen muss, was ein
