@@ -196,9 +196,7 @@ async fn sqlite_nullable_pk_column_still_rejects_a_missing_pk() {
         .pool()
         .await
         .expect("sqlite");
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite");
     rustango::sql::sqlx::query(
         "CREATE TABLE vs_natural_pk_tag (slug TEXT PRIMARY KEY, name TEXT NOT NULL)",
     )

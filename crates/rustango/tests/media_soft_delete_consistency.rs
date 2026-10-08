@@ -207,7 +207,7 @@ async fn deleting_a_collection_takes_its_subtree_with_it() {
     );
 
     let visible: Vec<String> = mgr
-        .list_collections()
+        .list_collections_paged(1000, 0)
         .await
         .expect("list")
         .into_iter()
@@ -264,7 +264,7 @@ async fn deleting_a_childless_collection_deletes_it() {
         "a childless collection was not deleted"
     );
     let live: Vec<String> = mgr
-        .list_collections()
+        .list_collections_paged(1000, 0)
         .await
         .expect("list")
         .into_iter()
@@ -308,7 +308,7 @@ async fn a_deep_subtree_is_deleted_at_every_level() {
     mgr.delete_collection(ids[0]).await.expect("delete root");
 
     let live: Vec<String> = mgr
-        .list_collections()
+        .list_collections_paged(1000, 0)
         .await
         .expect("list")
         .into_iter()

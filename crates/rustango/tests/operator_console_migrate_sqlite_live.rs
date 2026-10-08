@@ -379,3 +379,51 @@ async fn the_migrate_routes_require_a_session() {
         "an unauthenticated post must not start a migration: {runs:?}"
     );
 }
+
+/// #2212 — a console migrate run whose migration fails stores no driver
+/// text, in its events or its `error`.
+#[tokio::test]
+async fn a_failed_migration_stores_no_driver_text() {
+    use rustango::migrate::{file, DataOp, Migration, Operation};
+    let b = boot().await;
+    let slug = a_tenant(&b).await;
+    let boom = Migration {
+        name: "0001_boom".into(),
+        created_at: "2026-10-07T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        snapshot: Default::default(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT * FROM boom_missing_tbl".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    file::write(&b._migrations.path().join("0001_boom.json"), &boom).unwrap();
+
+    let resp = b.post(&format!("/orgs/{slug}/migrate")).await;
+    let run_id = Booted::run_id(&resp);
+    let run = b.settled(run_id).await;
+    assert_eq!(RunState::parse(&run.state), RunState::Failed);
+    let error = run.error.unwrap_or_default();
+    assert!(
+        !error.contains("boom_missing_tbl"),
+        "run.error leaked: {error}"
+    );
+    assert!(error.contains("ref "), "run.error: {error}");
+    let events = store::events_since(&b.registry, run_id, 0).await.unwrap();
+    for e in &events {
+        assert!(
+            !e.message.contains("boom_missing_tbl"),
+            "event leaked: {e:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| e.message.contains("0001_boom failed")),
+        "{events:?}"
+    );
+}

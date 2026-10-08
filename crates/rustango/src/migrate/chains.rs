@@ -763,6 +763,7 @@ mod tests {
         assert!(early_creations(&step, |c| *c == parent).is_empty());
     }
 
+    #[cfg(feature = "sqlite")]
     fn write(dir: &Path, m: &Migration) {
         std::fs::create_dir_all(dir).unwrap();
         file::write(&dir.join(format!("{}.json", m.name)), m).unwrap();

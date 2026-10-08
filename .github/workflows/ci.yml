@@ -1033,6 +1033,8 @@ jobs:
             --test funcs_batch2_sqlite_live \
             --test get_or_create_sqlite_live \
             --test i18n_admin_editor_sqlite_live \
+            --test i18n_admin_editor_tri \
+            --test org_host_claims_tri \
             --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
@@ -1315,6 +1317,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
@@ -1349,6 +1353,8 @@ jobs:
           --test media_tags_mysql_live -- --test-threads=1
       # #1573 — collection delete/create under concurrent row locks.
       - run: cargo test -p rustango --features mysql,media,testkit --test media_collection_race_tri
+      # #1570 — media listings return a page; tagging is batched.
+      - run: cargo test -p rustango --features mysql,media,testkit,admin --test media_listing_bounds_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
@@ -1407,6 +1413,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_long_keys_tri
       # `incr` was get-then-set, so parallel failed logins were lost (#1871).
       - run: cargo test -p rustango --features mysql,testkit,cache --test cache_db_incr_tri
+      # Login per-IP/global limits shared through a database cache (#1809).
+      - run: cargo test -p rustango --features mysql,testkit,admin --test login_throttle_cache_tri
       - run: cargo test -p rustango --features mysql --test like_escape_live
       - run: cargo test -p rustango --features mysql --test migrate_progress_live
       - run: cargo test -p rustango --features mysql,tenancy --test preflight_live
