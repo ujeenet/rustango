@@ -119,9 +119,9 @@ struct PendingAction {
 #[cfg(feature = "postgres")]
 impl Builder<sqlx::Postgres> {
     /// Connect to `DATABASE_URL`, build [`TenantPools`], read
-    /// `RUSTANGO_APEX_DOMAIN` (else `[tenancy] apex_domain`). Tracing
-    /// init is left to the caller — one `tracing_subscriber::fmt().init()`
-    /// away.
+    /// `RUSTANGO_APEX_DOMAIN`, else `[tenancy] apex_domain` if
+    /// `Cli::with_settings` already ran in this process. Tracing init is
+    /// left to the caller — one `tracing_subscriber::fmt().init()` away.
     ///
     /// PG-only: defaults to `postgres://...` and uses
     /// `PgPool::connect`. For sqlite / mysql tenancy apps, use

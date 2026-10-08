@@ -19,7 +19,7 @@ use crate::sql::{Auto, FetcherPool, UpdaterPool as _};
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::quote_ident;
-use crate::tenancy::manage::args::{next_value, parse, reject_leading_flag, Spec};
+use crate::tenancy::manage::args::{parse, Spec};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
 
@@ -33,32 +33,20 @@ pub(super) async fn create_operator_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "create-operator <username> [--password <p> | --generate]";
+    let parsed = parse(
         args,
-        "create-operator",
-        "username",
-        "create-operator <username> [--password <p> | --generate]",
+        &Spec {
+            verb: "create-operator",
+            usage: USAGE,
+            switches: &["--generate"],
+            valued: &["--password"],
+            max_positionals: 1,
+        },
     )?;
-    let mut iter = args.iter();
-    let username_arg = iter.next().cloned();
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "create-operator <username> [--password <p> | --generate]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "create-operator: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let username_arg = parsed.positional(0).cloned();
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "create-operator: --generate and --password are mutually exclusive".into(),
@@ -426,36 +414,20 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "reset-operator-password <username> [--password <s> | --generate]";
+    let parsed = parse(
         args,
-        "reset-operator-password",
-        "username",
-        "reset-operator-password <username> [--password <s> | --generate]",
+        &Spec {
+            verb: "reset-operator-password",
+            usage: USAGE,
+            switches: &["--generate"],
+            valued: &["--password"],
+            max_positionals: 1,
+        },
     )?;
-    let mut iter = args.iter();
-    let username = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation(
-            "reset-operator-password <username> [--password <s> | --generate]".into(),
-        )
-    })?;
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "reset-operator-password <username> [--password <s> | --generate]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "reset-operator-password: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    let username = parsed.required(0, USAGE)?;
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "reset-operator-password: --generate and --password are mutually exclusive".into(),
@@ -521,37 +493,23 @@ pub(super) async fn change_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let mut iter = args.iter();
-    let slug = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation(
-            "change-password <slug> <username> [--current <s>] [--password <s> | --generate]"
-                .into(),
-        )
-    })?;
-    let username = iter
-        .next()
-        .cloned()
-        .ok_or_else(|| TenancyError::Validation("change-password requires a username".into()))?;
-    let mut current: Option<String> = None;
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--current" => current = Some(next_value(&mut iter, "--current")?),
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "change-password <slug> <username> [--current <s>] [--password <s> | --generate]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "change-password: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    const USAGE: &str =
+        "change-password <slug> <username> [--current <s>] [--password <s> | --generate]";
+    let parsed = parse(
+        args,
+        &Spec {
+            verb: "change-password",
+            usage: USAGE,
+            switches: &["--generate"],
+            valued: &["--current", "--password"],
+            max_positionals: 2,
+        },
+    )?;
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    let current = parsed.value("--current")?.map(str::to_owned);
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "change-password: --generate and --password are mutually exclusive".into(),
@@ -626,33 +584,22 @@ pub(super) async fn change_operator_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let mut iter = args.iter();
-    let username = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation(
-            "change-operator-password <username> [--current <s>] [--password <s> | --generate]"
-                .into(),
-        )
-    })?;
-    let mut current: Option<String> = None;
-    let mut password: Option<String> = None;
-    let mut generate = false;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--current" => current = Some(next_value(&mut iter, "--current")?),
-            "--password" => password = Some(next_value(&mut iter, "--password")?),
-            "--generate" => generate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "change-operator-password <username> [--current <s>] [--password <s> | --generate]".into(),
-                ));
-            }
-            other => {
-                return Err(TenancyError::Validation(format!(
-                    "change-operator-password: unknown argument `{other}`"
-                )));
-            }
-        }
-    }
+    const USAGE: &str =
+        "change-operator-password <username> [--current <s>] [--password <s> | --generate]";
+    let parsed = parse(
+        args,
+        &Spec {
+            verb: "change-operator-password",
+            usage: USAGE,
+            switches: &["--generate"],
+            valued: &["--current", "--password"],
+            max_positionals: 1,
+        },
+    )?;
+    let username = parsed.required(0, USAGE)?;
+    let current = parsed.value("--current")?.map(str::to_owned);
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let generate = parsed.has("--generate");
     if generate && password.is_some() {
         return Err(TenancyError::Validation(
             "change-operator-password: --generate and --password are mutually exclusive".into(),

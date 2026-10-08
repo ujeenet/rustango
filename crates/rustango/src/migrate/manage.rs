@@ -5182,12 +5182,11 @@ pub fn settings_audit_check(
     // `admin::Builder::from_settings`; flag dev-defaults left in prod.
     let admin = &settings.admin;
 
-    // CSRF cookie must be Secure in prod (HTTPS only).
+    // These three [admin] keys have no reader yet (#1379); say so.
     if matches!(admin.csrf_cookie_secure, Some(false)) {
         out.warnings.push(
-            "[admin] csrf_cookie_secure = false in prod tier — admin CSRF cookie will be \
-             sent over plain HTTP, which strips its tamper resistance. Set true (or remove \
-             the override) so the framework default Secure flag applies."
+            "[admin] csrf_cookie_secure = false in prod tier — this key has no effect yet \
+             (#1379): the CSRF cookie follows `[security] secure_cookies`. Remove it."
                 .into(),
         );
     }
@@ -5200,8 +5199,8 @@ pub fn settings_audit_check(
         if !hex.starts_with('#') || !valid_len || !all_hex {
             out.warnings.push(format!(
                 "[admin] primary_color = `{hex}` does not parse as a hex color (expected \
-                 `#RRGGBB`, `#RGB`, or `#RRGGBBAA`) — the theme will fall back to the default \
-                 accent. Check for a missing leading `#` or non-hex characters."
+                 `#RRGGBB`, `#RGB`, or `#RRGGBBAA`). The key has no effect yet (#1379), so \
+                 the admin accent is unchanged either way."
             ));
         }
     }
@@ -5216,13 +5215,11 @@ pub fn settings_audit_check(
         }
     }
 
-    // session_timeout_minutes = 0 in prod means no idle expiry — info-flag
-    // (some deploys want this deliberately for kiosks etc.).
+    // Info-level: the key does nothing yet (#1379).
     if matches!(admin.session_timeout_minutes, Some(0)) {
         out.info.push(
-            "[admin] session_timeout_minutes = 0 in prod tier — admin sessions never idle-expire. \
-             Confirm this is deliberate (kiosk / single-user setup); otherwise pick a non-zero \
-             value so abandoned sessions can't be hijacked."
+            "[admin] session_timeout_minutes = 0 in prod tier — this key has no effect yet \
+             (#1379): the admin has no idle timeout whatever it says."
                 .into(),
         );
     }

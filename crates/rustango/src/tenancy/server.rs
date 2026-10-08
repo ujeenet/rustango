@@ -79,19 +79,60 @@ impl ServerConfig {
 }
 
 /// `[tenancy] apex_domain`, recorded at boot by `Cli::with_settings`.
-static APEX_FROM_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static APEX_FROM_SETTINGS: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-/// Record `[tenancy] apex_domain`. The first call wins, like the other boot globals.
-#[cfg(all(feature = "config", feature = "manage"))]
-pub(crate) fn set_apex_domain_setting(apex: &str) -> bool {
-    !apex.is_empty() && APEX_FROM_SETTINGS.set(apex.to_owned()).is_ok()
+/// Serializes tests that touch [`APEX_FROM_SETTINGS`].
+#[cfg(test)]
+pub(crate) static APEX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Record `[tenancy] apex_domain`. The first call wins, like the other boot
+/// globals; a later, different value is logged rather than dropped silently.
+#[cfg(any(test, all(feature = "config", feature = "manage")))]
+pub(crate) fn set_apex_domain_setting(apex: &str) {
+    if apex.is_empty() {
+        return;
+    }
+    let mut slot = APEX_FROM_SETTINGS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match slot.as_deref() {
+        None => *slot = Some(apex.to_owned()),
+        Some(kept) if kept != apex => tracing::warn!(
+            target: "rustango::tenancy",
+            kept,
+            ignored = apex,
+            "[tenancy] apex_domain was already set by an earlier Cli::with_settings; keeping the first"
+        ),
+        Some(_) => {}
+    }
+}
+
+/// Forget the recorded apex, so each test starts clean.
+#[cfg(test)]
+pub(crate) fn reset_apex_domain_setting() {
+    *APEX_FROM_SETTINGS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The recorded `[tenancy] apex_domain`, ignoring the env var.
+pub(crate) fn apex_domain_setting() -> Option<String> {
+    APEX_FROM_SETTINGS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// `RUSTANGO_APEX_DOMAIN`, else `[tenancy] apex_domain`; env wins, as for `bind`.
 pub(crate) fn configured_apex_domain() -> Option<String> {
-    std::env::var("RUSTANGO_APEX_DOMAIN")
-        .ok()
-        .or_else(|| APEX_FROM_SETTINGS.get().cloned())
+    pick_apex(
+        std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
+        apex_domain_setting(),
+    )
+}
+
+fn pick_apex(env: Option<String>, setting: Option<String>) -> Option<String> {
+    env.or(setting)
 }
 
 /// The apex host, defaulting to `localhost`.
@@ -243,5 +284,31 @@ async fn no_operators_warn<W: Write + Send>(
         Ok(false)
     } else {
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod apex_tests {
+    use super::*;
+
+    #[test]
+    fn env_wins_over_the_setting() {
+        let s = || Some("toml.test".to_owned());
+        assert_eq!(
+            pick_apex(Some("env.test".into()), s()).as_deref(),
+            Some("env.test")
+        );
+        assert_eq!(pick_apex(None, s()).as_deref(), Some("toml.test"));
+    }
+
+    /// A second, different apex keeps the first (and warns) (#2225).
+    #[test]
+    fn the_first_apex_setting_wins() {
+        let _g = APEX_TEST_LOCK.blocking_lock();
+        reset_apex_domain_setting();
+        set_apex_domain_setting("one.test");
+        set_apex_domain_setting("two.test");
+        assert_eq!(apex_domain_setting().as_deref(), Some("one.test"));
+        reset_apex_domain_setting();
     }
 }

@@ -340,3 +340,37 @@ async fn set_superuser_and_reset_password_write_the_row() {
     .await
     .expect("the reset password works");
 }
+
+/// The remaining user and key verbs take flags before positionals too (#2225).
+#[tokio::test]
+async fn password_and_key_verbs_take_flags_anywhere() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-operator", "--password", "pw", "alice"])
+        .await
+        .expect("create-operator");
+    b.run(&["reset-operator-password", "--password", "pw2", "alice"])
+        .await
+        .expect("reset-operator-password");
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    b.run(&[
+        "change-password",
+        "--current",
+        "pw",
+        "--password",
+        "pw2",
+        "acme",
+        "bob",
+    ])
+    .await
+    .expect("change-password");
+    b.run(&["create-api-key", "--label", "ci", "acme", "bob"])
+        .await
+        .expect("create-api-key");
+    assert!(b
+        .run(&["create-api-key", "acme", "bob", "junk"])
+        .await
+        .is_err());
+}

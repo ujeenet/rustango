@@ -15,7 +15,7 @@ use crate::tenancy::{auth_backends, permissions, Org, User};
 
 use super::super::error::TenancyError;
 use super::super::pools::TenantPools;
-use super::args::{next_value, parse, reject_leading_flag, Spec};
+use super::args::{next_value, parse, Spec};
 
 // ------------------------------------------------------------------ create-role
 
@@ -269,38 +269,28 @@ pub(super) async fn create_api_key_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    reject_leading_flag(
+    const USAGE: &str = "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]";
+    let parsed = parse(
         args,
-        "create-api-key",
-        "slug",
-        "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]",
+        &Spec {
+            verb: "create-api-key",
+            usage: USAGE,
+            switches: &[],
+            valued: &["--label", "--expires-days"],
+            max_positionals: 2,
+        },
     )?;
-    let mut iter = args.iter();
-    let slug = next_value(&mut iter, "<tenant-slug>")?;
-    let username = next_value(&mut iter, "<username>")?;
-    let mut label = String::new();
-    let mut expires_days: Option<i64> = None;
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--label" => label = next_value(&mut iter, "--label")?,
-            "--expires-days" => {
-                let raw = next_value(&mut iter, "--expires-days")?;
-                expires_days = Some(raw.parse::<i64>().map_err(|_| {
-                    TenancyError::Validation(format!(
-                        "--expires-days expects an integer, got `{raw}`"
-                    ))
-                })?);
-            }
-            "--help" | "-h" => {
-                writeln!(
-                    w,
-                    "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]"
-                )?;
-                return Ok(());
-            }
-            other => return Err(TenancyError::Validation(format!("unknown flag `{other}`"))),
-        }
-    }
+    let slug = parsed.required(0, USAGE)?;
+    let username = parsed.required(1, USAGE)?;
+    let label = parsed.value("--label")?.unwrap_or_default().to_owned();
+    let expires_days = parsed
+        .value("--expires-days")?
+        .map(|raw| {
+            raw.parse::<i64>().map_err(|_| {
+                TenancyError::Validation(format!("--expires-days expects an integer, got `{raw}`"))
+            })
+        })
+        .transpose()?;
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     auth_backends::ensure_api_keys_table_pool(&pool)

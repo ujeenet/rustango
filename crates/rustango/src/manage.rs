@@ -579,21 +579,11 @@ impl Cli {
             }
         }
 
-        // Say so rather than let a parsed-and-dropped key look applied (#1379).
-        let inert = s.inert_keys();
-        if !inert.is_empty() {
-            tracing::warn!(
-                target: "rustango::manage",
-                keys = %inert.join(", "),
-                "these settings have no effect yet; see the config docs"
-            );
-        }
-
         // `[tenancy] apex_domain` was parsed and dropped (#1379).
         // Process-wide like the cookie policy below; env still wins.
         #[cfg(feature = "tenancy")]
         if let Some(apex) = s.tenancy.apex_domain.as_deref() {
-            let _ = crate::tenancy::server::set_apex_domain_setting(apex);
+            crate::tenancy::server::set_apex_domain_setting(apex);
         }
 
         // Pool sizing + timeouts, applied by every pool this process
@@ -746,6 +736,11 @@ impl Cli {
         } else {
             None
         };
+        // After logging is installed, so the warning is not lost (#2225).
+        #[cfg(feature = "config")]
+        if let Some(s) = self.settings_for_layers.as_ref() {
+            warn_unread_settings(&s.inert_keys());
+        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         let verb = args.first().map_or("", String::as_str);
 
@@ -1593,6 +1588,21 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     inert
 }
 
+/// Say which set keys nothing reads yet (#1379). Falls back to stderr
+/// when no tracing subscriber is installed, so the warning is never lost.
+#[cfg(feature = "config")]
+fn warn_unread_settings(keys: &[&str]) {
+    if keys.is_empty() {
+        return;
+    }
+    let keys = keys.join(", ");
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(target: "rustango::manage", keys = %keys, "these settings have no effect yet; see the config docs");
+    } else {
+        eprintln!("warning: these settings have no effect yet: {keys}");
+    }
+}
+
 /// Emit a `WARN` naming every layer-driving setting that is configured in the
 /// environment while no settings layer is installed. Silent when nothing is
 /// configured (the common case for projects that never used `Settings`).
@@ -1997,17 +2007,26 @@ mod tests {
     #[cfg(all(feature = "config", feature = "tenancy"))]
     #[test]
     fn with_settings_sets_the_tenancy_apex() {
-        if std::env::var("RUSTANGO_APEX_DOMAIN").is_ok() {
-            return; // env wins; nothing to observe
-        }
+        use crate::tenancy::server as srv;
+        let _g = srv::APEX_TEST_LOCK.blocking_lock();
+        srv::reset_apex_domain_setting();
         let mut s = crate::config::Settings::default();
         s.tenancy.apex_domain = Some("apex.example.com".into());
         let _cli = Cli::new().with_settings(&s);
-        assert_eq!(crate::tenancy::server::apex_domain(), "apex.example.com");
+        // Checked on the recorded value, so a set RUSTANGO_APEX_DOMAIN cannot hide it.
         assert_eq!(
-            crate::tenancy::server::ServerConfig::from_env().apex_domain,
-            "apex.example.com"
+            srv::apex_domain_setting().as_deref(),
+            Some("apex.example.com")
         );
+        if std::env::var("RUSTANGO_APEX_DOMAIN").is_err() {
+            assert_eq!(
+                srv::ServerConfig::from_env().apex_domain,
+                "apex.example.com"
+            );
+        } else {
+            eprintln!("RUSTANGO_APEX_DOMAIN is set: skipping the from_env half");
+        }
+        srv::reset_apex_domain_setting();
     }
 
     /// Settings.server.bind = None doesn't clobber the existing
