@@ -112,7 +112,7 @@ where
                 )));
             }
             // It was active, so no provisioning retry may revive it (#2292).
-            let forget = super::provision_store::forget_failed_runs(id)?;
+            let forget = super::provision_store::forget_unsucceeded_runs(id)?;
             crate::sql::update_tx(&mut tx, &forget).await?;
             tx.commit().await?;
             super::invalidate_org_cache();

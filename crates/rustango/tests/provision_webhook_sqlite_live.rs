@@ -830,3 +830,53 @@ async fn a_retry_does_not_revive_a_deactivated_tenant() {
     let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
     assert!(!orgs[0].active, "a replay revived a deactivated tenant");
 }
+
+/// A run left `running` after it activated the org (its close failed) is
+/// unlinked too, so once reaped as failed it cannot revive the org (#2292).
+#[tokio::test]
+async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("reaped");
+    let registry = b.pools.registry_pool();
+    let run = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        None,
+        Some("evt-reaped"),
+    )
+    .await
+    .unwrap();
+    let run_id = run.id.get().copied().unwrap();
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite://{}/t_{slug}.db?mode=rwc",
+            holder.path().display()
+        )),
+        active: true,
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&registry).await.unwrap();
+    store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    rustango::tenancy::decommission::decommission(
+        b.pools.as_ref(),
+        &slug,
+        rustango::tenancy::decommission::Action::Deactivate,
+    )
+    .await
+    .expect("deactivate");
+    age_run(&b, run_id).await;
+
+    let run = replay(&b, &slug, "evt-reaped").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a reaped run revived a deactivated tenant");
+}

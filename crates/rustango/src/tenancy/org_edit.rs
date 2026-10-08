@@ -244,7 +244,7 @@ pub(crate) async fn apply_values(
     };
     crate::sql::update_tx(&mut tx, &update).await?;
     if existing.active || activating {
-        let forget = crate::tenancy::provision_store::forget_failed_runs(existing_id)?;
+        let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(existing_id)?;
         crate::sql::update_tx(&mut tx, &forget).await?;
     }
     tx.commit().await?;
