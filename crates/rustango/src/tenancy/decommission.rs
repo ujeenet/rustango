@@ -98,23 +98,11 @@ where
                 .get()
                 .copied()
                 .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
-            let deactivate = Org::objects()
-                .where_(Org::id.eq(id))
-                .update()
-                .set("active", false)
-                .compile()
-                .map_err(crate::sql::ExecError::from)?;
-            let mut tx = crate::sql::write_transaction_pool(&registry).await?;
-            let updated = crate::sql::update_tx(&mut tx, &deactivate).await?;
-            if updated == 0 {
+            if deactivate(&registry, id).await? == 0 {
                 return Err(TenancyError::Validation(format!(
                     "no row updated for id {id} — race condition?"
                 )));
             }
-            // It was active, so no provisioning retry may revive it (#2292).
-            let forget = super::provision_store::forget_unsucceeded_runs(id)?;
-            crate::sql::update_tx(&mut tx, &forget).await?;
-            tx.commit().await?;
             super::invalidate_org_cache();
             report.deactivated = true;
         }
@@ -123,6 +111,25 @@ where
         }
     }
     Ok(report)
+}
+
+/// `active = false` and unlink its unsucceeded runs, in one transaction:
+/// it was activated, so no provisioning retry may revive it (#2292).
+async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, TenancyError> {
+    let update = Org::objects()
+        .where_(Org::id.eq(id))
+        .update()
+        .set("active", false)
+        .compile()
+        .map_err(crate::sql::ExecError::from)?;
+    let mut tx = crate::sql::write_transaction_pool(registry).await?;
+    let updated = crate::sql::update_tx(&mut tx, &update).await?;
+    if updated > 0 {
+        let forget = super::provision_store::forget_unsucceeded_runs(id)?;
+        crate::sql::update_tx(&mut tx, &forget).await?;
+    }
+    tx.commit().await?;
+    Ok(updated)
 }
 
 async fn purge<DB: Database>(
@@ -159,12 +166,7 @@ where
     }
     // Out of service before anything is destroyed (#1930): if a later
     // step fails, the tenant is inactive and a retry finishes the job.
-    Org::objects()
-        .where_(Org::id.eq(id))
-        .update()
-        .set("active", false)
-        .execute_pool(registry)
-        .await?;
+    deactivate(registry, id).await?;
     super::invalidate_org_cache();
     pools.invalidate(slug).await;
 
