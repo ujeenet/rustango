@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.3
+
 ### `makemigrations` renames an M2M junction's column
 
 Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
