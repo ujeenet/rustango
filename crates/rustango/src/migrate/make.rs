@@ -582,6 +582,9 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
         [SchemaChange::AlterColumnMaxLength { table, column, .. }] => {
             format!("alter_max_length_of_{column}_on_{table}")
         }
+        [SchemaChange::AlterColumnComment { table, column, .. }] => {
+            format!("alter_comment_of_{column}_on_{table}")
+        }
         [SchemaChange::AlterFkOnDelete { table, column, .. }] => {
             format!("alter_on_delete_of_{column}_on_{table}")
         }

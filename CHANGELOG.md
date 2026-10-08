@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG type change on a column with a DEFAULT (#2242)
+
+`AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically". A type change no longer writes a separate `AlterColumnDefault`, so it undoes on PG too.
+
+### Fixed — a migration that drops an EXCLUDE constraint unapplies (#2241)
+
+The inverse `AddExclusionConstraint` is rebuilt from the predecessor snapshot; it always errored.
+
+### Fixed — makemigrations sees `case_insensitive`, `db_comment` and `generated_as` changes (#2239)
+
+A `case_insensitive` change is an `AlterColumnType`, a comment change the new `AlterColumnComment` op, and a `generated_as` change is refused like a primary-key change.
+
+### Fixed — PG length and type changes keep a column CITEXT (#2238)
+
+`AlterColumnMaxLength` and `AlterColumnType` on a case-insensitive field write `CITEXT`, not `VARCHAR`/`TEXT`, so it keeps ignoring case.
+
+### Fixed — PG file migrations create the `citext` extension (#2240)
+
+`CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` runs before the first change that writes a CITEXT column, so a fresh database no longer fails with `type "citext" does not exist`. `apply_all_pool` and testkit table creation run it too (#2271), and `public` keeps it shared by every schema-mode tenant (#2269).
+
 ### Fixed — live tests drop the databases they create (#2222)
 
 A per-test database is now a guard that drops it at the end, also when the test fails.
@@ -11,6 +31,7 @@ A per-test database is now a guard that drops it at the end, also when the test 
 ### Fixed — `migrate-tenant-storage` restore tests no longer drop shared extensions (#2223)
 
 They run against a private registry database, so other suites' `citext` / `hstore` columns survive.
+
 ### Fixed — ViewSet warns about a nullable cursor column (#2230)
 
 `cursor_pagination` on a nullable field logs an error at build time, and a NULL at a page end is a clear 500. 0.61.0 refuses the field (#2265).
