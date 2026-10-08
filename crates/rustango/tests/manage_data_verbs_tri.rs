@@ -177,6 +177,25 @@ pub struct M2mTag {
     pub n: i64,
 }
 
+// Two tables that reference each other through nullable links.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2318_a", app = "cli2318")]
+pub struct CycA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2318_b", on = "id")]
+    pub b_id: Option<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2318_b", app = "cli2318")]
+pub struct CycB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2318_a", on = "id")]
+    pub a_id: Option<i64>,
+}
+
 async fn fresh_parent_child(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Child::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<Parent>(pool).await;
@@ -411,6 +430,52 @@ async fn flush_clears_children_before_parents(pool: &Pool) {
     assert_eq!(left, [0; 5], "rows left behind");
 }
 
+/// Two tables linked both ways through nullable FKs still flush.
+async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    // Clear old links first: they block a DROP of either table on MySQL/PG.
+    if let Ok(rows) = CycA::objects().fetch(pool).await {
+        for mut a in rows {
+            a.b_id = None;
+            let _ = a.save_pool(pool).await;
+        }
+    }
+    // PG and MySQL drop the pair together; SQLite takes one table at a time.
+    let q = |t| pool.dialect().quote_ident(t);
+    let both = format!(
+        "DROP TABLE IF EXISTS {}, {}",
+        q(CycA::SCHEMA.table),
+        q(CycB::SCHEMA.table)
+    );
+    let _ = raw_execute_pool(pool, &both, vec![]).await;
+    for t in [CycA::SCHEMA.table, CycB::SCHEMA.table] {
+        drop_table(pool, t).await;
+    }
+    rustango::testkit::create_tables(pool, &[CycA::SCHEMA, CycB::SCHEMA])
+        .await
+        .expect("cycle tables");
+    let mut a = CycA {
+        id: Auto::default(),
+        b_id: None,
+    };
+    a.insert_pool(pool).await.expect("a");
+    let mut b = CycB {
+        id: Auto::default(),
+        a_id: a.id.get().copied(),
+    };
+    b.insert_pool(pool).await.expect("b");
+    a.b_id = b.id.get().copied();
+    a.save_pool(pool).await.expect("close the cycle");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2318"]).await;
+    let left = [
+        CycA::objects().count(pool).await.expect("a"),
+        CycB::objects().count(pool).await.expect("b"),
+    ];
+    out.expect("flush --app cli2318");
+    assert_eq!(left, [0, 0], "rows left behind");
+}
+
 /// An auto-created M2M junction with rows does not block the flush; it clears too.
 async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
@@ -542,6 +607,7 @@ tri_dialect_test! {
         flush_refuses_when_an_unmanaged_table_references_a_target,
         flush_clears_children_before_parents,
         flush_clears_auto_m2m_junctions,
+        flush_breaks_a_nullable_cycle,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,

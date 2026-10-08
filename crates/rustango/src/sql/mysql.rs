@@ -308,6 +308,11 @@ impl Dialect for MySql {
 
     /// No deferred FKs: the hint drops checks for one statement only, so
     /// no session state leaks back into the pool (a `SET` would).
+    /// `foreign_key_checks` is per session or per statement, never per transaction.
+    fn defer_foreign_keys_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
         tables
             .iter()

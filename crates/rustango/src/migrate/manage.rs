@@ -4344,89 +4344,133 @@ fn flush_junctions(
     out
 }
 
-/// Tables this one references through an FK or one-to-one, itself included.
-fn referenced_tables(s: &crate::core::ModelSchema) -> impl Iterator<Item = &'static str> + '_ {
+/// FK and one-to-one links out of `s`: the target table, and the column
+/// when it may be set to NULL. Composite links never can.
+fn fk_edges(
+    s: &crate::core::ModelSchema,
+) -> impl Iterator<Item = (&'static str, Option<&'static str>)> + '_ {
     use crate::core::Relation;
     let single = s.fields.iter().filter_map(|f| match f.relation {
-        Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) => Some(to),
+        Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) => {
+            Some((to, f.nullable.then_some(f.column)))
+        }
         _ => None,
     });
-    single.chain(s.composite_relations.iter().map(|c| c.to))
+    single.chain(s.composite_relations.iter().map(|c| (c.to, None)))
 }
 
-/// `targets` reordered so every table comes after the targets that
-/// reference it. Tables left in a cycle keep their order at the end.
-fn flush_delete_order(
-    targets: &[&'static crate::core::ModelSchema],
-) -> Vec<&'static crate::core::ModelSchema> {
-    // How many other targets still reference each target.
-    let mut referrers: Vec<usize> = targets
-        .iter()
-        .map(|t| {
-            targets
-                .iter()
-                .filter(|o| o.table != t.table && referenced_tables(o).any(|r| r == t.table))
-                .count()
-        })
-        .collect();
-    let mut done = vec![false; targets.len()];
-    let mut order = Vec::with_capacity(targets.len());
-    while let Some(i) = (0..targets.len()).find(|&i| !done[i] && referrers[i] == 0) {
+/// `nodes` with each table after every node that references it through an
+/// edge `binds` keeps (self-links never count). Returns the order and the
+/// nodes left in a cycle.
+fn children_first(
+    nodes: &[&'static crate::core::ModelSchema],
+    binds: impl Fn(Option<&'static str>) -> bool,
+) -> (
+    Vec<&'static crate::core::ModelSchema>,
+    Vec<&'static crate::core::ModelSchema>,
+) {
+    let links = |from: &crate::core::ModelSchema, to: &str| {
+        from.table != to && fk_edges(from).any(|(t, col)| t == to && binds(col))
+    };
+    let mut done = vec![false; nodes.len()];
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some(i) = (0..nodes.len()).find(|&i| {
+        !done[i] && !(0..nodes.len()).any(|j| !done[j] && links(nodes[j], nodes[i].table))
+    }) {
         done[i] = true;
-        order.push(targets[i]);
-        for (j, t) in targets.iter().enumerate() {
-            if !done[j]
-                && t.table != targets[i].table
-                && referenced_tables(targets[i]).any(|r| r == t.table)
-            {
-                referrers[j] -= 1;
-            }
-        }
+        order.push(nodes[i]);
     }
-    order.extend((0..targets.len()).filter(|&i| !done[i]).map(|i| targets[i]));
-    order
+    let stuck = (0..nodes.len())
+        .filter(|&i| !done[i])
+        .map(|i| nodes[i])
+        .collect();
+    (order, stuck)
 }
 
-/// Delete every row of `order` in one transaction; on error nothing commits.
+/// How `flush` empties `targets` without a table-wide FK bypass.
+struct FlushPlan {
+    /// Nullable links to clear first: self-links, and links inside a cycle.
+    unlink: Vec<(&'static crate::core::ModelSchema, Vec<&'static str>)>,
+    /// Children before parents.
+    order: Vec<&'static crate::core::ModelSchema>,
+    /// Tables in a cycle of NOT NULL links: no delete order exists.
+    stuck: Vec<&'static str>,
+}
+
+fn flush_plan(targets: &[&'static crate::core::ModelSchema]) -> FlushPlan {
+    let (mut order, cyclic) = children_first(targets, |_| true);
+    // Inside a cycle only NOT NULL links bind; nullable ones are cleared first.
+    let (rest, stuck) = children_first(&cyclic, |col| col.is_none());
+    order.extend(rest);
+    order.extend(&stuck);
+    let in_cycle = |t: &str| cyclic.iter().any(|c| c.table == t);
+    let unlink = targets
+        .iter()
+        .map(|s| {
+            let cols: Vec<&'static str> = fk_edges(s)
+                .filter(|(to, _)| *to == s.table || (in_cycle(s.table) && in_cycle(to)))
+                .filter_map(|(_, col)| col)
+                .collect();
+            (*s, cols)
+        })
+        .filter(|(_, cols)| !cols.is_empty())
+        .collect();
+    FlushPlan {
+        unlink,
+        order,
+        stuck: stuck.iter().map(|s| s.table).collect(),
+    }
+}
+
+/// Run `plan` after clearing `junctions`, in one transaction; on error nothing commits.
 async fn delete_all_in_tx(
     pool: &Pool,
-    order: &[&'static crate::core::ModelSchema],
-) -> Result<(), (&'static str, crate::sql::ExecError)> {
-    use crate::core::{Assignment, DeleteQuery, Relation, SqlValue, UpdateQuery, WhereExpr};
+    junctions: &[&'static crate::core::ModelSchema],
+    plan: &FlushPlan,
+) -> Result<(), (String, String)> {
+    use crate::core::{Assignment, DeleteQuery, SqlValue, UpdateQuery, WhereExpr};
+    let defer = pool.dialect().defer_foreign_keys_sql();
+    if defer.is_none() && !plan.stuck.is_empty() {
+        let tables = plan.stuck.join(", ");
+        let why = "they reference each other through NOT NULL foreign keys; no delete order exists";
+        return Err((tables, why.to_owned()));
+    }
     let mut tx = crate::sql::write_transaction_pool(pool)
         .await
-        .map_err(|e| ("BEGIN", e))?;
-    for schema in order {
-        // InnoDB checks each row as it goes, so a self-referencing table
-        // must drop its own links before the DELETE.
-        let self_links: Vec<Assignment> = schema
-            .fields
-            .iter()
-            .filter(|f| {
-                f.nullable
-                    && matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == schema.table)
-            })
-            .map(|f| Assignment::new(f.column, SqlValue::Null))
-            .collect();
-        if !self_links.is_empty() {
-            let unlink = UpdateQuery {
-                model: schema,
-                set: self_links,
-                where_clause: WhereExpr::And(Vec::new()),
-            };
-            crate::sql::update_tx(&mut tx, &unlink)
-                .await
-                .map_err(|e| (schema.table, e))?;
-        }
+        .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
+    // SQLite: FK checks wait for COMMIT, for this transaction only.
+    if let Some(sql) = defer {
+        crate::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
+    }
+    // InnoDB checks each row as it goes: links inside a cycle, or to the
+    // row's own table, must go before the DELETEs.
+    for (schema, cols) in &plan.unlink {
+        let unlink = UpdateQuery {
+            model: schema,
+            set: cols
+                .iter()
+                .map(|c| Assignment::new(c, SqlValue::Null))
+                .collect(),
+            where_clause: WhereExpr::And(Vec::new()),
+        };
+        crate::sql::update_tx(&mut tx, &unlink)
+            .await
+            .map_err(|e| (schema.table.to_owned(), e.to_string()))?;
+    }
+    for schema in junctions.iter().chain(&plan.order) {
         let all = DeleteQuery {
             model: schema,
             where_clause: WhereExpr::And(Vec::new()),
         };
         crate::sql::delete_tx(&mut tx, &all)
             .await
-            .map_err(|e| (schema.table, e))?;
+            .map_err(|e| (schema.table.to_owned(), e.to_string()))?;
     }
-    tx.commit().await.map_err(|e| ("COMMIT", e.into()))
+    tx.commit()
+        .await
+        .map_err(|e| ("COMMIT".to_owned(), e.to_string()))
 }
 
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
@@ -4554,14 +4598,9 @@ pub(crate) async fn flush_cmd<W: Write>(
     } else {
         // MySQL / SQLite: one transaction, junctions then children before
         // parents, so a failure leaves every table as it was (#2285).
-        let order: Vec<_> = junctions
-            .iter()
-            .copied()
-            .chain(flush_delete_order(&targets))
-            .collect();
-        match delete_all_in_tx(pool, &order).await {
-            Ok(()) => cleared = order.len(),
-            Err((table, e)) => failures.push((table.to_owned(), e.to_string())),
+        match delete_all_in_tx(pool, &junctions, &flush_plan(&targets)).await {
+            Ok(()) => cleared = junctions.len() + targets.len(),
+            Err(failed) => failures.push(failed),
         }
     }
 
@@ -6133,6 +6172,33 @@ mod gen_tests {
     fn parse_flush_args_help_short_circuits() {
         let p = parse_flush_args(&["--help".into()]).unwrap();
         assert!(p.help);
+    }
+
+    /// A cycle is broken at a nullable link; with none, its tables are named.
+    #[test]
+    fn flush_plan_breaks_cycles_at_nullable_links() {
+        use crate::core::{FieldSchema, FieldType, ModelSchema, Relation};
+        fn table(name: &'static str, to: &'static str, nullable: bool) -> &'static ModelSchema {
+            let mut f = FieldSchema::new("link", "link", FieldType::I64);
+            f.relation = Some(Relation::fk(to, "id"));
+            f.nullable = nullable;
+            let mut s = ModelSchema::new(name, name);
+            s.fields = Box::leak(Box::new([f]));
+            Box::leak(Box::new(s))
+        }
+        let stuck = flush_plan(&[table("a", "b", false), table("b", "a", false)]);
+        assert_eq!(stuck.stuck, ["a", "b"]);
+        let plan = flush_plan(&[table("a", "b", true), table("b", "a", false)]);
+        assert!(plan.stuck.is_empty());
+        let unlinked: Vec<_> = plan
+            .unlink
+            .iter()
+            .map(|(s, c)| (s.table, c.clone()))
+            .collect();
+        assert_eq!(unlinked, [("a", vec!["link"])]);
+        // b's NOT NULL link to a still binds: b goes first.
+        let order: Vec<_> = plan.order.iter().map(|s| s.table).collect();
+        assert_eq!(order, ["b", "a"]);
     }
 
     #[test]
