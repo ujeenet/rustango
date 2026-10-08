@@ -174,3 +174,57 @@ async fn ttl_keeps_millisecond_precision() {
         assert!(!redis.exists(key).await.unwrap(), "{key} outlived its TTL");
     }
 }
+
+/// #2300 — `touch` extends a live key and never recreates a missing one.
+#[tokio::test]
+async fn touch_extends_only_live_keys() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+
+    assert!(!redis
+        .touch("absent", Some(Duration::from_secs(60)))
+        .await
+        .unwrap());
+    assert!(!redis.touch("absent", None).await.unwrap());
+    assert!(
+        !redis.exists("absent").await.unwrap(),
+        "touch created a key"
+    );
+
+    redis
+        .set("live", "v", Some(Duration::from_millis(500)))
+        .await
+        .unwrap();
+    assert!(redis
+        .touch("live", Some(Duration::from_secs(60)))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(redis.get("live").await.unwrap().as_deref(), Some("v"));
+
+    redis.set("forever", "v", None).await.unwrap();
+    assert!(redis.touch("forever", None).await.unwrap());
+}
+
+/// A huge TTL is clamped, so `PX` / `PEXPIRE` never get an invalid expire time.
+#[tokio::test]
+async fn a_max_ttl_is_accepted() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+
+    redis
+        .set("huge", "v", Some(Duration::MAX))
+        .await
+        .expect("set with Duration::MAX");
+    assert!(redis
+        .touch("huge", Some(Duration::MAX))
+        .await
+        .expect("touch with Duration::MAX"));
+    assert_eq!(redis.get("huge").await.unwrap().as_deref(), Some("v"));
+}

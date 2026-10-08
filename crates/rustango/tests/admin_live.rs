@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 //! Integration test for `rustango::admin::router`.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently. We boot

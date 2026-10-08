@@ -126,3 +126,76 @@ fn from_settings_io_error_on_missing_directory() {
         Err(other) => panic!("expected I18nError::Io, got {other:?}"),
     }
 }
+
+/// `languages = ["pt-BR"]` admits `pt_BR.json`: both spell one locale (#2288).
+#[test]
+fn from_settings_allowlist_matches_normalised_locales() {
+    let dir = tempdir();
+    write_catalog(&dir, "pt_BR.json", r#"{"hi": "Olá"}"#);
+    write_catalog(&dir, "en-gb.json", r#"{"hi": "Hello"}"#);
+    write_catalog(&dir, "ja.json", r#"{"hi": "konnichiwa"}"#);
+
+    let settings = I18nSettings {
+        default_locale: Some("en".into()),
+        languages: vec!["pt-BR".into(), "en_GB".into()],
+        locale_paths: vec![dir.to_string_lossy().to_string()],
+        fallback_chain: vec![],
+    };
+    let t = Translator::from_settings(&settings).expect("load ok");
+    assert_eq!(t.translate("pt-BR", "hi", &[]), "Olá");
+    assert_eq!(t.translate("en-GB", "hi", &[]), "Hello");
+    assert!(!t.has_locale("ja"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `xx-YY.json` and `xx_YY.json` are one locale: the first by name (`-`)
+/// wins whatever order the directory lists them in. Several pairs, written
+/// in both orders, so an unsorted read loses on any filesystem.
+fn write_spelling_pairs(dir: &std::path::Path) -> Vec<&'static str> {
+    let tags = [
+        "pt-BR", "en-GB", "zh-CN", "fr-CA", "es-MX", "de-AT", "sr-RS", "nl-BE",
+    ];
+    for (i, tag) in tags.iter().enumerate() {
+        let hyphen = (format!("{tag}.json"), r#"{"hi": "hyphen"}"#);
+        let underscore = (
+            format!("{}.json", tag.replace('-', "_")),
+            r#"{"hi": "underscore"}"#,
+        );
+        let (a, b) = if i % 2 == 0 {
+            (hyphen, underscore)
+        } else {
+            (underscore, hyphen)
+        };
+        write_catalog(dir, &a.0, a.1);
+        write_catalog(dir, &b.0, b.1);
+    }
+    tags.to_vec()
+}
+
+#[test]
+fn from_settings_keeps_the_first_of_two_spellings() {
+    let dir = tempdir();
+    let tags = write_spelling_pairs(&dir);
+    let settings = I18nSettings {
+        default_locale: Some("en".into()),
+        languages: vec![],
+        locale_paths: vec![dir.to_string_lossy().to_string()],
+        fallback_chain: vec![],
+    };
+    let t = Translator::from_settings(&settings).expect("load ok");
+    for tag in tags {
+        assert_eq!(t.translate(tag, "hi", &[]), "hyphen", "{tag}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn from_directory_keeps_the_first_of_two_spellings() {
+    let dir = tempdir();
+    let tags = write_spelling_pairs(&dir);
+    let t = Translator::from_directory(&dir, rustango::i18n::Locale::new("en")).expect("load ok");
+    for tag in tags {
+        assert_eq!(t.translate(tag, "hi", &[]), "hyphen", "{tag}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

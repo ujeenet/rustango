@@ -297,3 +297,51 @@ async fn plain_migration_is_not_faked_when_table_exists() {
 
     cleanup(pool, &path, &dir);
 }
+
+/// `migrate <target>` after `migrate --squash` deleted the replaced files:
+/// the squash must reconcile, not re-CREATE its tables (#2243).
+#[tokio::test]
+async fn migrate_to_reconciles_a_squash() {
+    let (pool, path) = sqlite_pool().await;
+    let dir = fresh_dir();
+    write(&dir, &mig("0001_a", &["sq7_a"], &[]));
+    write(&dir, &mig("0002_b", &["sq7_b"], &[]));
+    migrate::migrate_pool(&pool, &dir).await.unwrap();
+
+    for name in ["0001_a", "0002_b"] {
+        std::fs::remove_file(dir.join(format!("{name}.json"))).unwrap();
+    }
+    write(
+        &dir,
+        &mig("0003_squashed", &["sq7_a", "sq7_b"], &["0001_a", "0002_b"]),
+    );
+    let touched = migrate::migrate_to_pool(&pool, &dir, "0003_squashed")
+        .await
+        .expect("migrate_to must reconcile the squash");
+    assert_eq!(touched.len(), 1);
+    assert_eq!(ledger_names(&pool).await, vec!["0003_squashed"]);
+
+    cleanup(pool, &path, &dir);
+}
+
+/// As above with the replaced files still on disk, so `migrate_to` goes
+/// forward from a head (#2243).
+#[tokio::test]
+async fn migrate_to_reconciles_a_squash_after_its_predecessors() {
+    let (pool, path) = sqlite_pool().await;
+    let dir = fresh_dir();
+    write(&dir, &mig("0001_a", &["sq8_a"], &[]));
+    write(&dir, &mig("0002_b", &["sq8_b"], &[]));
+    migrate::migrate_pool(&pool, &dir).await.unwrap();
+    write(
+        &dir,
+        &mig("0003_squashed", &["sq8_a", "sq8_b"], &["0001_a", "0002_b"]),
+    );
+    let touched = migrate::migrate_to_pool(&pool, &dir, "0003_squashed")
+        .await
+        .expect("migrate_to must reconcile the squash");
+    assert_eq!(touched.len(), 1);
+    assert_eq!(ledger_names(&pool).await, vec!["0003_squashed"]);
+
+    cleanup(pool, &path, &dir);
+}

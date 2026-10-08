@@ -16,6 +16,64 @@ Tenant PG pools connect as `application_name = rustango-tenant:<org id>`; a purg
 
 Activating a tenant by edit, or deactivating it, unlinks the failed run that made it, so a webhook replay stops resuming it.
 
+### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
+
+On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.
+
+### Fixed — MySQL drops the index an FK uses (#2244)
+
+DropIndex takes the FK on the index's first column off first and re-adds it after (none if its table or column goes); MySQL refused with 1553.
+
+### Fixed — file migrations keep `db_comment` on new tables and columns (#2270)
+
+PG writes `COMMENT ON COLUMN` after CreateTable and AddColumn; MySQL's AddColumn inlines `COMMENT` as CREATE TABLE does.
+
+### Fixed — `migrate <target>` reconciles a squash (#2243)
+
+Going forward it applies the same pending set as `migrate`, so a squash whose replaced files were applied is faked, not re-created.
+
+### Fixed — test builds on a single backend pass `-D warnings` (#2313)
+
+`--tests` with bare `sqlite`, `mysql` or `postgres` now builds: suites gate on the features they use, and two more use the typed `Pool` accessors.
+
+### Fixed — example compose files publish the DB on loopback only (#2311)
+
+Postgres binds to `127.0.0.1:5432` as the scaffolder's does; the stale `migrate_framework` doc is corrected.
+
+### Fixed — scaffold compile tests on the pinned 1.88 toolchain (#2310)
+
+The harness resolves the generated project's deps MSRV-aware, so `uuid` 1.27 (rustc 1.89) no longer breaks them.
+
+### Fixed — `SessionStore::touch` cannot revive a session after logout (#2300)
+
+It goes through `Cache::touch`, which every built-in backend now does in one step that only extends a live key; `FileCache::delete` takes the stripe lock. `RedisCache` caps a huge TTL so `PX`/`PEXPIRE` stay valid.
+
+### Fixed — MCP SSE stream ends when its JWT is revoked (#2303)
+
+### Fixed — MCP raw-key cache evicts its oldest entry, not all of them (#2301)
+
+### Fixed — `InMemoryCache::clear` resets the pinned budget (#2302)
+
+### Fixed — MCP `rate_limit_per_minute = 0` is unlimited again (#2299)
+
+It built a zero-capacity limiter that sent 429 with `Retry-After: u64::MAX` on every request; `check --deploy` now flags 0 like unset. Any zero-capacity `RateLimitLayer` now sends one refill period as `Retry-After`.
+
+### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
+
+The wizard skips a question a flag already answered; before, Enter reset it to fullstack / postgres. Its echoed command now includes `--rustango-path`.
+
+### Fixed — `cargo rustango new`: escaped path, dependency names, loopback DB port (#2287)
+
+`--rustango-path` is TOML-escaped (Windows paths work), names like `tokio` or `serde` are refused, and the compose DB port binds to 127.0.0.1.
+
+### Fixed — i18n `languages = ["pt-BR"]` loads `pt_BR.json` (#2288)
+
+`Translator::from_settings` compares the allowlist and file stems as `Locale`s. Two spellings of one locale in a directory: the first by name wins, with a warning.
+
+### Fixed — `negotiate_language` prefers `en` over `en-GB` for `en-US` (#2289)
+
+The bare base language now beats a sibling region.
+
 ### Fixed — PG `LIKE` on a non-text column (#2263)
 
 `__contains`, `Q::like` and any LIKE or ILIKE through a relation cast an int or UUID column to text on Postgres, as `__icontains` already did.

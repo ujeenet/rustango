@@ -1232,3 +1232,142 @@ fn generated_as_change_is_refused() {
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert!(refused[0].contains("generated_as changed"), "{refused:?}");
 }
+
+/// A junction column renamed over the same tables is a RenameColumn,
+/// not a Drop + Create that loses the rows (#2245).
+#[test]
+fn junction_column_change_renames_it() {
+    let snap = |src: &str, dst: &str, src_table: &str| -> SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
+            {"through": "rj_post_tags", "src_table": src_table, "src_col": src,
+             "dst_table": "rj_tag", "dst_col": dst}] }))
+        .unwrap()
+    };
+    let rename = |old: &str, new: &str| SchemaChange::RenameColumn {
+        table: "rj_post_tags".into(),
+        old_column: old.into(),
+        new_column: new.into(),
+    };
+    let prev = snap("post_id", "tag_id", "rj_post");
+    assert_eq!(
+        detect_changes(&prev, &snap("post_id", "label_id", "rj_post")),
+        vec![rename("tag_id", "label_id")]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("tag_id", "post_id", "rj_post")),
+        vec![
+            rename("post_id", "post_id_swp0"),
+            rename("tag_id", "post_id"),
+            rename("post_id_swp0", "tag_id"),
+        ]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("x_id", "post_id", "rj_post")),
+        vec![rename("post_id", "x_id"), rename("tag_id", "post_id")]
+    );
+    assert_eq!(
+        detect_changes(&prev, &snap("tag_id", "y_id", "rj_post")),
+        vec![rename("tag_id", "y_id"), rename("post_id", "tag_id")]
+    );
+    // The swap's spare name fits 63 bytes and is not a junction column.
+    let long = "p".repeat(60);
+    for (src, dst) in [(long.as_str(), "tag_id"), ("x_id", "x_id_swp0")] {
+        let changes = detect_changes(&snap(src, dst, "rj_post"), &snap(dst, src, "rj_post"));
+        let SchemaChange::RenameColumn { new_column, .. } = &changes[0] else {
+            panic!("{changes:?}");
+        };
+        assert!(new_column.len() <= 63, "{new_column}");
+        assert!(new_column != src && new_column != dst, "{new_column}");
+    }
+    // Self-referencing, both renamed: which is which is unknown.
+    let self_ref = |a: &str, b: &str| -> SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
+            {"through": "rj_follows", "src_table": "rj_user", "src_col": a,
+             "dst_table": "rj_user", "dst_col": b}] }))
+        .unwrap()
+    };
+    let (prev, both) = (self_ref("from_id", "to_id"), self_ref("a_id", "b_id"));
+    let refused = rustango::migrate::detect_unsupported_field_changes(&prev, &both);
+    assert!(refused[0].contains("renamed both columns"), "{refused:?}");
+    // One renamed: `from_id` keeps its rows' role, whichever end sorts first.
+    let to_b = |a: &str, b: &str| SchemaChange::RenameColumn {
+        table: "rj_follows".into(),
+        old_column: a.into(),
+        new_column: b.into(),
+    };
+    for now in [self_ref("from_id", "b_id"), self_ref("b_id", "from_id")] {
+        assert!(rustango::migrate::detect_unsupported_field_changes(&prev, &now).is_empty());
+        assert_eq!(detect_changes(&prev, &now), vec![to_b("to_id", "b_id")]);
+    }
+    // Not self-referencing, the old file's ends in the other order.
+    let flipped = snap_m2m("rj_tag", "tag_id", "rj_post", "post_id");
+    assert_eq!(
+        detect_changes(
+            &flipped,
+            &snap_m2m("rj_post", "post_id", "rj_tag", "label_id")
+        ),
+        vec![rename("tag_id", "label_id")]
+    );
+}
+
+fn snap_m2m(src_table: &str, src_col: &str, dst_table: &str, dst_col: &str) -> SchemaSnapshot {
+    serde_json::from_value(serde_json::json!({ "tables": [], "m2m_tables": [
+        {"through": "rj_post_tags", "src_table": src_table, "src_col": src_col,
+         "dst_table": dst_table, "dst_col": dst_col}] }))
+    .unwrap()
+}
+
+/// FK names that cut to one 63-byte name are refused where the backend
+/// wants them unique: per table on PG, per database on MySQL (#2245).
+#[test]
+fn colliding_fk_names_are_refused() {
+    use rustango::migrate::diff::render_changes_split_with_dialect as render;
+    use rustango::sql::{MySql, Postgres};
+    let fk_col = |c: &str, to: &str| {
+        serde_json::json!({"name": c, "column": c, "ty": "i64", "nullable": true,
+            "primary_key": false, "fk": {"kind": "fk", "to": to, "on": "id"}})
+    };
+    let id = || {
+        serde_json::json!({"name": "id", "column": "id", "ty": "i64",
+        "nullable": false, "primary_key": true})
+    };
+    let snap = |v: serde_json::Value| -> SchemaSnapshot { serde_json::from_value(v).unwrap() };
+    let refused = |r: Result<_, String>| r.is_err_and(|e| e.contains("rename a table or column"));
+    // `a_b.c` and `a.b_c` both make `a_b_c_fkey`: only MySQL refuses.
+    let cross = snap(serde_json::json!({"tables": [
+        {"name": "p", "model": "P", "fields": [id()]},
+        {"name": "a_b", "model": "AB", "fields": [id(), fk_col("c", "p")]},
+        {"name": "a", "model": "A", "fields": [id(), fk_col("b_c", "p")]}]}));
+    let create = [
+        SchemaChange::CreateTable("a_b".into()),
+        SchemaChange::CreateTable("a".into()),
+    ];
+    assert!(refused(render(&create, &cross, &MySql)));
+    assert!(render(&create, &cross, &Postgres).is_ok());
+    // AddColumn: two long columns on one table, cut to one name.
+    let t = "t".repeat(46);
+    let long = snap(serde_json::json!({"tables": [
+        {"name": "p", "model": "P", "fields": [id()]},
+        {"name": t, "model": "T", "fields": [id(),
+            fk_col("author_reference_first", "p"), fk_col("author_reference_second", "p")]}]}));
+    let add = [SchemaChange::AddColumn {
+        table: t.clone(),
+        column: "author_reference_second".into(),
+    }];
+    assert!(refused(render(&add, &long, &Postgres)));
+    // CreateM2MTable: its two FK names collide.
+    let through = "j".repeat(46);
+    let m2m = snap(
+        serde_json::json!({"tables": [{"name": "p", "model": "P", "fields": [id()]}],
+        "m2m_tables": [{"through": through, "src_table": "p", "src_col": "author_reference_first",
+                        "dst_table": "p", "dst_col": "author_reference_second"}]}),
+    );
+    let create_m2m = [SchemaChange::CreateM2MTable {
+        through: through.clone(),
+        src_table: "p".into(),
+        src_col: "author_reference_first".into(),
+        dst_table: "p".into(),
+        dst_col: "author_reference_second".into(),
+    }];
+    assert!(refused(render(&create_m2m, &m2m, &MySql)));
+}
