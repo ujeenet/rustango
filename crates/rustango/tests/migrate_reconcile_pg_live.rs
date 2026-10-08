@@ -196,3 +196,56 @@ async fn migrate_to_reconciles_a_squash_on_postgres() {
         .await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// As above with the replaced files still on disk, so `migrate_to` goes
+/// forward from a head (#2243).
+#[tokio::test]
+async fn migrate_to_reconciles_a_squash_after_its_predecessors_on_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping — set DATABASE_URL");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect postgres");
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let (t_a, t_b) = (
+        format!("recg_pg_a_{pid}_{n}"),
+        format!("recg_pg_b_{pid}_{n}"),
+    );
+    let (m1, m2, sq) = (
+        format!("1{n:03}_a_{pid}"),
+        format!("2{n:03}_b_{pid}"),
+        format!("3{n:03}_squashed_{pid}"),
+    );
+    let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
+    let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
+    migrate::migrate(&pool, &write_dir(&[&a, &b]))
+        .await
+        .unwrap();
+
+    let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
+    let dir = write_dir(&[&a, &b, &squash]);
+    let touched = migrate::migrate_to(&pool, &dir, &sq)
+        .await
+        .expect("migrate_to must reconcile the squash, not hit 42P07");
+    assert_eq!(touched.len(), 1);
+    let left: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {LEDGER} WHERE name = ANY($1)"
+    ))
+    .bind(vec![m1.clone(), m2.clone(), sq.clone()])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 1, "only the squash should remain");
+
+    for t in [&t_a, &t_b] {
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS \"{t}\""))
+            .execute(&pool)
+            .await;
+    }
+    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = $1"))
+        .bind(&sq)
+        .execute(&pool)
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
