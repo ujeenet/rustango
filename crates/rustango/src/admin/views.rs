@@ -122,16 +122,21 @@ async fn gfk_ct_map(
                 .filter_map(|row| row.get(gr.ct_column).and_then(serde_json::Value::as_i64)),
         );
     }
-    let mut map = HashMap::with_capacity(needed.len());
-    for id in needed {
-        // The CT registry is process-cached: one round-trip per id at most.
-        if let Ok(Some(ct)) = crate::contenttypes::ContentType::by_id(&state.pool, id).await {
-            if lookup_model(state, &ct.table).is_some() {
-                map.insert(id, ct);
-            }
-        }
+    if needed.is_empty() {
+        return HashMap::new();
     }
-    map
+    use crate::sql::FetcherPool as _;
+    // One round trip; ids are bounded by the page size.
+    let ids = needed.into_iter().map(SqlValue::I64).collect();
+    let cts: Vec<crate::contenttypes::ContentType> = crate::contenttypes::ContentType::objects()
+        .filter_op("id", Op::In, SqlValue::List(ids))
+        .fetch(&state.pool)
+        .await
+        .unwrap_or_default();
+    cts.into_iter()
+        .filter(|ct| lookup_model(state, &ct.table).is_some())
+        .filter_map(|ct| Some((*ct.id.get()?, ct)))
+        .collect()
 }
 
 // ============================================================== INDEX
