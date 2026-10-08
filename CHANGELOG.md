@@ -4,9 +4,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Added — `CachePageLayer::invalidate` and `key_for` (#2252)
+### Added — `CachePageLayer::invalidate` (#2252)
 
-Purge a cached page through the layer, which builds keys with the same function. Any hand-built key mirror (e.g. a CMS purge) must switch to it: 0.60 added the tenant to the key, and old mirrors delete nothing.
+Purge a cached page through the layer, which builds the key with its own function. Only the exact query and vary values passed are purged. Any hand-built key mirror (e.g. a CMS purge) must switch to it: 0.60 added the tenant to the key, and old mirrors delete nothing.
 
 ### Added — JSON logs from one env var under `#[rustango::main]` (#2258)
 

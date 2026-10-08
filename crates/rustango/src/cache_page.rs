@@ -12,8 +12,8 @@
 //! 3. [`never_cache`]: `Cache-Control: no-store, no-cache,
 //!    must-revalidate, max-age=0`.
 //! 4. [`vary_on`]: builds a `Vary` header from header names.
-//! 5. [`CachePageLayer::invalidate`]: purge a page's cached entries;
-//!    [`CachePageLayer::key_for`] gives its key. Never rebuild the key by hand.
+//! 5. [`CachePageLayer::invalidate`]: purge a page's cached entries.
+//!    Never rebuild the key by hand.
 //!
 //! ## Quick start
 //!
@@ -77,7 +77,6 @@
 //! [`CachePageLayer::tenant_agnostic`]: crate::cache_page::CachePageLayer::tenant_agnostic
 //! [`CachePageLayer::vary_on`]: crate::cache_page::CachePageLayer::vary_on
 //! [`CachePageLayer::invalidate`]: crate::cache_page::CachePageLayer::invalidate
-//! [`CachePageLayer::key_for`]: crate::cache_page::CachePageLayer::key_for
 //! [`CacheControl`]: crate::cache_page::CacheControl
 //! [`never_cache`]: crate::cache_page::never_cache
 //! [`vary_on`]: crate::cache_page::vary_on
@@ -232,13 +231,11 @@ impl CachePageLayer {
         self
     }
 
-    /// The cache key this layer writes for a `GET` of `page`.
-    ///
-    /// The layer builds its own keys with the same function, so use
-    /// this instead of copying the key format. The page's tenant is
-    /// ignored when the layer does not key on tenants.
+    /// The key this layer writes for a `GET` of `page`, built by the
+    /// layer's own key function. The tenant is ignored when the layer
+    /// does not key on tenants.
     #[must_use]
-    pub fn key_for(&self, page: &PageKey) -> String {
+    pub(crate) fn key_for(&self, page: &PageKey) -> String {
         let tenant = if tenant_keyed(self.tenant_agnostic) {
             page.tenant.as_deref()
         } else {
@@ -260,6 +257,10 @@ impl CachePageLayer {
 
     /// Delete the cached `GET` response of every page given, from the
     /// layer's own cache. Pass one [`PageKey`] per `vary_on` value set.
+    ///
+    /// Only the exact query string and vary values given are purged: the
+    /// key holds them raw, not sorted or decoded. Other variants (say
+    /// `?utm_source=x`) stay until the layer's timeout.
     ///
     /// # Errors
     /// The cache backend's delete error.
@@ -287,11 +288,13 @@ impl CachePageLayer {
     }
 }
 
-/// A cached page, for [`CachePageLayer::key_for`] and
-/// [`CachePageLayer::invalidate`].
+/// A cached page, for [`CachePageLayer::invalidate`].
 ///
-/// A `vary_on` header not set here counts as missing, as on a request.
-#[derive(Debug, Clone, Default)]
+/// Give path, query and host exactly as the request sends them: path
+/// percent-encoded (`/caf%C3%A9`) and relative to any `Router::nest`,
+/// host with the same case and port. A `vary_on` header not set here
+/// counts as missing, as on a request.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PageKey {
     path: String,
@@ -308,8 +311,10 @@ impl PageKey {
     pub fn new(path: impl Into<String>, host: impl Into<String>) -> Self {
         Self {
             path: path.into(),
+            query: String::new(),
             host: host.into(),
-            ..Self::default()
+            tenant: None,
+            vary: Vec::new(),
         }
     }
 
