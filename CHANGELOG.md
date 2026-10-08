@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin list facets read only the values they show (#2344)
+
+The `GROUP BY` stops one past the cap unless `facet_show_all`; a count query keeps "+N more" exact, and an active value past the cut is read on its own.
+
 ### Fixed — admin audit feed hides tables whose rows a hook scopes from non-superusers (#2342)
 
 A queryset or `view` hook cannot be re-applied to a deleted row's snapshot, so those tables are superuser-only in the feed; a row's own history stays on its detail page.

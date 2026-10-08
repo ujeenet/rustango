@@ -76,6 +76,53 @@ pub struct Tagged {
     pub tag: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "adminls_owner", display = "name")]
+#[allow(dead_code)]
+pub struct Owner {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// An FK facet with more values than the facet shows (#2344).
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "adminls_pet",
+    admin(
+        list_display = "name",
+        list_filter = "owner_id, name",
+        list_per_page = 1,
+        ordering = "id"
+    )
+)]
+#[allow(dead_code)]
+pub struct Pet {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(fk = "adminls_owner", on = "id")]
+    pub owner_id: i64,
+}
+
+/// Owner ids whose row the admin read for a display name.
+static OWNERS_READ: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+/// Scenarios on [`OWNERS_READ`] run one at a time.
+static OWNERS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn record_owner_read(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    if let Some(id) = row
+        .and_then(|r| r.get("id"))
+        .and_then(serde_json::Value::as_i64)
+    {
+        OWNERS_READ.lock().unwrap().push(id);
+    }
+    true
+}
+rustango::register_admin_object_permission!("adminls_owner", "view", record_owner_read);
+
 async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
     let s = Slugged {
         slug: slug.into(),
@@ -90,6 +137,9 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Slugged>(pool).await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
     rustango::testkit::matrix::fresh_table::<Tagged>(pool).await;
+    rustango::testkit::matrix::drop_table(pool, "adminls_pet").await;
+    rustango::testkit::matrix::fresh_table::<Owner>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Pet>(pool).await;
 }
 
 fn kind_filters(value: &str) -> Vec<Filter> {
@@ -496,6 +546,45 @@ async fn empty_facet_lists_the_empty_rows(pool: &Pool) {
     assert!(body.contains(r#"href="/adm/adminls_tag""#), "{body}");
 }
 
+/// A facet reads only the values it shows, not every one; the "+N more"
+/// count stays exact and an active value past the cut still shows (#2344).
+async fn facet_reads_only_the_values_it_shows(pool: &Pool) {
+    let _g = OWNERS_LOCK.lock().await;
+    let mut owners = Vec::new();
+    for i in 0..20 {
+        let mut o = Owner {
+            id: Auto::default(),
+            name: format!("owner-{i:02}"),
+        };
+        o.insert_pool(pool).await.expect("insert owner");
+        let id = *o.id.get().expect("pk");
+        let mut p = Pet {
+            id: Auto::default(),
+            name: format!("pet-{i:02}"),
+            owner_id: id,
+        };
+        p.insert_pool(pool).await.expect("insert pet");
+        owners.push(id);
+    }
+    // Equal counts tie-break by key, so the last owner is past the cut.
+    let last = *owners.last().unwrap();
+
+    OWNERS_READ.lock().unwrap().clear();
+    let body = get(pool, "/adminls_pet").await;
+    let read = std::mem::take(&mut *OWNERS_READ.lock().unwrap());
+    assert!(!read.contains(&last), "read past the cut: {read:?}");
+    assert!(body.contains("+5 more"), "{body}");
+
+    let body = get(pool, &format!("/adminls_pet?owner_id={last}")).await;
+    assert!(body.contains("owner-19"), "active FK value hidden: {body}");
+    let body = get(pool, "/adminls_pet?name=pet-19").await;
+    assert!(
+        body.contains(r#"class="active">pet-19<"#),
+        "active value hidden: {body}"
+    );
+    assert!(body.contains("+5 more"), "{body}");
+}
+
 /// A bulk action past the bind-safe key cap is a 400 and writes nothing (#2049).
 async fn bulk_action_selection_is_capped(pool: &Pool) {
     let id = seed(pool, "kept-row", false).await;
@@ -527,6 +616,7 @@ tri_dialect_test! {
         url_filters_skip_secret_and_unshown_fields,
         null_facet_lists_the_null_rows,
         empty_facet_lists_the_empty_rows,
+        facet_reads_only_the_values_it_shows,
         bulk_action_selection_is_capped,
     ],
 }

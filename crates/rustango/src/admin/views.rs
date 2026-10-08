@@ -903,7 +903,9 @@ pub(crate) async fn table_view(
 ///
 /// Counts are within the list's filters and search, minus the facet's
 /// own field filter, as Django does (#2004). One ORM `GROUP BY` per
-/// facet, plus one lookup for an FK facet's display values.
+/// facet capped past `FACET_TRUNCATE`, plus one lookup for an FK facet's
+/// display values. A capped facet also counts its values and reads the
+/// active one.
 ///
 /// Clicking the active value clears that filter. Clicking another
 /// value sets it.
@@ -941,12 +943,44 @@ async fn compute_facets(
             .chain(other_filters.iter().cloned())
             .collect();
         let source = SelectQuery {
-            where_clause: WhereExpr::and_predicates(facet_filters),
+            where_clause: WhereExpr::and_predicates(facet_filters.clone()),
             search: search.cloned(),
             ..SelectQuery::new(model)
         };
         let is_bool = field.ty == crate::core::FieldType::Bool;
-        let mut facet_rows = fetch_facet_counts(state, source, field, is_bool).await?;
+        let show_all = show_all_facet == Some(field.name);
+        // One past the cap tells whether there are more (#2344).
+        let limit = (!show_all).then_some(FACET_TRUNCATE + 1);
+        let mut facet_rows =
+            fetch_facet_counts(state, source.clone(), field, is_bool, limit).await?;
+        let is_active = |r: &FacetRow| {
+            active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw))
+        };
+        let mut total_values = facet_rows.len();
+        if !show_all && total_values > FACET_TRUNCATE {
+            total_values = fetch_facet_value_total(state, source, field).await?;
+            // The active value may sit past the cut: read it on its own.
+            // The field's own filters select at most one value.
+            if !facet_rows.iter().any(is_active) {
+                let own: Vec<Filter> = field_filters
+                    .iter()
+                    .filter(|(name, _)| *name == field.name)
+                    .map(|(_, f)| f.clone())
+                    .collect();
+                if !own.is_empty() {
+                    let active_source = SelectQuery {
+                        where_clause: WhereExpr::and_predicates(
+                            facet_filters.into_iter().chain(own).collect(),
+                        ),
+                        search: search.cloned(),
+                        ..SelectQuery::new(model)
+                    };
+                    facet_rows.extend(
+                        fetch_facet_counts(state, active_source, field, is_bool, Some(1)).await?,
+                    );
+                }
+            }
+        }
         // An FK facet shows the target's display value: "Dr. Maeve O'Hara (3)", not "1 (3)".
         let fk_target = field.relation.and_then(|rel| match rel {
             crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
@@ -1013,8 +1047,6 @@ async fn compute_facets(
         // Truncate to FACET_TRUNCATE values unless "show all" is on
         // for this column. Active values always render, so one never
         // hides behind the cutoff. They count toward the budget.
-        let show_all = show_all_facet == Some(field.name);
-        let total_values = values.len();
         let mut more_count: usize = 0;
         if !show_all && total_values > FACET_TRUNCATE {
             // Keep every active value + as many of the rest as fit.
@@ -1073,12 +1105,45 @@ struct FacetRow {
     count: i64,
 }
 
-/// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used first.
+/// How many distinct values (NULL included) `field` takes over `source`'s rows.
+async fn fetch_facet_value_total(
+    state: &AppState,
+    source: SelectQuery,
+    field: &'static FieldSchema,
+) -> Result<usize, AdminError> {
+    use crate::core::{AggregateExpr, AggregateQuery};
+    let agg = AggregateQuery::over_select(
+        source,
+        vec![
+            (
+                "facet_distinct".into(),
+                AggregateExpr::CountDistinct(field.column),
+            ),
+            ("facet_rows".into(), AggregateExpr::Count(None)),
+            (
+                "facet_non_null".into(),
+                AggregateExpr::Count(Some(field.column)),
+            ),
+        ],
+    );
+    let row = crate::sql::fetch_aggregate_dict(&state.pool, &agg)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    // COUNT(DISTINCT) skips NULL, but GROUP BY gives it a value of its own.
+    let has_null = sql_int(row.get("facet_rows")) > sql_int(row.get("facet_non_null"));
+    Ok(usize::try_from(sql_int(row.get("facet_distinct"))).unwrap_or(0) + usize::from(has_null))
+}
+
+/// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used
+/// first, at most `limit` values.
 async fn fetch_facet_counts(
     state: &AppState,
     source: SelectQuery,
     field: &'static FieldSchema,
     is_bool: bool,
+    limit: Option<usize>,
 ) -> Result<Vec<FacetRow>, AdminError> {
     use crate::core::{AggregateExpr, AggregateQuery, Expr, OrderItem};
     let mut agg = AggregateQuery::over_select(
@@ -1090,6 +1155,7 @@ async fn fetch_facet_counts(
         OrderItem::expr(Expr::Aggregate(Box::new(AggregateExpr::Count(None))), true),
         OrderItem::column(field.column, false),
     ];
+    agg.limit = limit.and_then(|n| i64::try_from(n).ok());
     let rows = crate::sql::fetch_aggregate_dict(&state.pool, &agg).await?;
     Ok(rows
         .into_iter()
