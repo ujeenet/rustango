@@ -82,6 +82,7 @@ impl ServerConfig {
 static APEX_FROM_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Record `[tenancy] apex_domain`. The first call wins, like the other boot globals.
+#[cfg(all(feature = "config", feature = "manage"))]
 pub(crate) fn set_apex_domain_setting(apex: &str) -> bool {
     !apex.is_empty() && APEX_FROM_SETTINGS.set(apex.to_owned()).is_ok()
 }

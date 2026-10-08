@@ -69,6 +69,7 @@ pub struct Settings {
 impl Settings {
     /// Keys that are set but that nothing reads yet (#1379), so boot can
     /// say so instead of failing silently.
+    #[cfg(any(test, feature = "manage"))]
     pub(crate) fn inert_keys(&self) -> Vec<&'static str> {
         let checks = [
             (self.sso != SsoSettings::default(), "[sso]"),
