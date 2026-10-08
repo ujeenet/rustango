@@ -193,9 +193,10 @@ impl RegistryState {
     }
 }
 
-/// Registries tracked at once. Each entry holds a clone of its pool, so
-/// the cap bounds how many dropped pools stay open; an evicted registry
-/// only starts again from empty caches.
+/// Registries tracked at once. Each entry holds a clone of its pool, so a
+/// dropped registry's idle connections stay open until evicted or
+/// `close()`d; accepted, as the cap bounds it. Closed pools go first, then
+/// the oldest, which only restarts from empty caches.
 const REGISTRY_MAX: usize = 8;
 
 /// One [`RegistryState`] per registry pool, oldest first.
@@ -217,7 +218,11 @@ fn state(registry: &Pool) -> Arc<RegistryState> {
         return s;
     }
     if states.len() >= REGISTRY_MAX {
-        states.remove(0);
+        let victim = states
+            .iter()
+            .position(|(id, _)| id.is_closed())
+            .unwrap_or(0);
+        states.remove(victim);
     }
     let s = Arc::new(RegistryState::new());
     states.push((PoolId::of(registry), s.clone()));
@@ -898,6 +903,27 @@ mod tests {
         let path: http::Uri = "/".parse().unwrap();
         assert_eq!(host_of(&h, &path).as_deref(), Some("[::1]"));
         assert!(host_is_apex(&h, &path, "[::1]"));
+    }
+
+    /// At the cap a closed pool is evicted before the oldest live one.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_full_list_evicts_a_closed_pool_first() {
+        let _iso = isolated().await;
+        STATES.write().unwrap().clear();
+        let mut pools = Vec::new();
+        for _ in 0..REGISTRY_MAX {
+            let p = Pool::connect("sqlite::memory:").await.unwrap();
+            state(&p);
+            pools.push(p);
+        }
+        pools[3].close().await;
+        let extra = Pool::connect("sqlite::memory:").await.unwrap();
+        state(&extra);
+        let kept = |p: &Pool| STATES.read().unwrap().iter().any(|(id, _)| id.is(p));
+        assert!(kept(&pools[0]), "the oldest live pool was evicted");
+        assert!(!kept(&pools[3]), "the closed pool was kept");
+        STATES.write().unwrap().clear();
     }
 
     #[test]

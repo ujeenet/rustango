@@ -105,6 +105,19 @@ impl PoolId {
     pub(crate) fn is(&self, pool: &Pool) -> bool {
         self.key() == key_of(pool)
     }
+
+    /// `true` once the pool has been closed.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn is_closed(&self) -> bool {
+        match &self.0 {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => p.is_closed(),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => p.is_closed(),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => p.is_closed(),
+        }
+    }
 }
 
 fn key_of(pool: &Pool) -> *const () {

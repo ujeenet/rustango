@@ -964,7 +964,7 @@ impl Cache for InMemoryCache {
 /// Keep the directory private (0700): anyone who can open a lock file
 /// can stall writers for up to 5 seconds per call.
 /// There is no entry cap with a cull strategy. The directory is per host.
-/// File I/O runs on tokio's blocking pool, so every call needs a tokio runtime.
+/// File I/O runs on tokio's blocking pool, or inline outside a tokio runtime.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }
@@ -1090,13 +1090,17 @@ impl FileCache {
 
     /// Run `op` on tokio's blocking pool. Every method's file I/O goes
     /// through here, so none of it parks an async worker (#1530).
+    /// Outside a tokio runtime it runs inline, as before.
     async fn blocking<T, F>(&self, op: F) -> Result<T, CacheError>
     where
         T: Send + 'static,
         F: FnOnce(&Self) -> Result<T, CacheError> + Send + 'static,
     {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return op(self);
+        };
         let me = Self::new(self.dir.clone());
-        tokio::task::spawn_blocking(move || op(&me))
+        rt.spawn_blocking(move || op(&me))
             .await
             .map_err(|e| CacheError::Connection(format!("blocking task: {e}")))?
     }
@@ -1638,6 +1642,28 @@ mod file_cache_tests {
             waited < Duration::from_millis(200),
             "worker blocked {waited:?}"
         );
+    }
+
+    /// Poll `f` to completion with no runtime at all.
+    fn block_on_no_runtime<F: std::future::Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    /// Outside a tokio runtime the I/O runs inline instead of panicking.
+    #[test]
+    fn works_without_a_tokio_runtime() {
+        let dir = tmp_dir("nort");
+        let cache = FileCache::new(&dir);
+        block_on_no_runtime(cache.set("k", "v", None)).unwrap();
+        let got = block_on_no_runtime(cache.get("k")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got.as_deref(), Some("v"));
     }
 
     /// Racing writers and readers on one key never see it missing.
