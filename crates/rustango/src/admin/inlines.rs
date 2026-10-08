@@ -1278,6 +1278,8 @@ async fn plan_target(
     plan: &mut InlinePlan,
 ) -> Result<(), InlinePlanError> {
     let table = target.child.table;
+    // Messages name the model, as the parent's do.
+    let name = target.child.name;
     // No management form: the panel was not rendered, nothing to do.
     let total_forms = match crate::forms::formset::total_forms(form, table) {
         Ok(n) => n,
@@ -1293,7 +1295,7 @@ async fn plan_target(
     };
     // Never skipped quietly: the user must see the row is not saved (#2339).
     let bad_row = |idx: usize, e: crate::forms::FormError| {
-        InlinePlanError::Rejected(format!("{table} row {}: {e}", idx + 1))
+        InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1))
     };
 
     // Slots past INITIAL_FORMS are new rows, so a typed natural PK
@@ -1383,7 +1385,7 @@ async fn plan_target(
         }
         let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
             return Err(InlinePlanError::Rejected(format!(
-                "{table} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
+                "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
             )));
         };
         if target.unchanged(&before, &values) {
@@ -1427,7 +1429,7 @@ async fn plan_target(
             .saturating_sub(max);
         if out.deletes_needed > deletes {
             return Err(InlinePlanError::Rejected(format!(
-                "{table} allows at most {max} rows here."
+                "{name} allows at most {max} rows here."
             )));
         }
     }
@@ -1443,7 +1445,7 @@ pub(crate) enum InlineApplyError {
         error: ExecError,
     },
     /// A delete the inserts needed to stay within `max_num` removed nothing.
-    MaxNum { table: &'static str },
+    MaxNum { child: &'static ModelSchema },
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
@@ -1473,7 +1475,7 @@ pub(crate) async fn apply_plan_tx(
         outcome.deleted += deleted;
         // A delete that removed nothing frees no room under `max_num`.
         if deleted < target.deletes_needed {
-            return Err(InlineApplyError::MaxNum { table: child.table });
+            return Err(InlineApplyError::MaxNum { child });
         }
         for q in target.inserts {
             crate::sql::insert_tx(tx, &q).await.map_err(refused)?;

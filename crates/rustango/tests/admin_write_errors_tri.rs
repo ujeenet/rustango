@@ -209,7 +209,7 @@ async fn bad_inline_value_rerenders_the_form(pool: &Pool) {
     let form = inline_form(&[("1", "ok"), ("abc", "bad")]);
     let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("wrerr_child row 2"), "{body}");
+    assert!(body.contains("Child row 2"), "{body}");
     assert!(notes(pool).await.is_empty(), "inline rows saved");
     assert_eq!(parent_names(pool).await, ["p"]);
 }

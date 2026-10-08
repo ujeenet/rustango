@@ -2343,7 +2343,7 @@ pub(crate) async fn update_submit(
         tx.rollback().await?;
         let why = match e {
             E::Write { child, error } => write_error(child, &error),
-            E::MaxNum { table } => format!("{table} allows no more rows here."),
+            E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
         };
         return Ok(refused(format!("Nothing was saved: {why}")).into_response());
     }
