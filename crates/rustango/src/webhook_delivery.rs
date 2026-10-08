@@ -42,6 +42,7 @@
 //! - Other 4xx: dead-lettered at once. A bad URL or bad auth will not
 //!   fix itself.
 //! - Transport errors (refused connection, DNS, TLS): retried.
+//! - A request that will not build (a bad header): dead-lettered.
 //!
 //! Add more retryable codes with
 //! [`WebhookSubscription::retry_status_codes`].
@@ -184,6 +185,10 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
 
     let resp = match req.send().await {
         Ok(r) => r,
+        // A bad header never builds: retrying cannot fix it (#2236).
+        Err(e) if e.is_builder() => {
+            return Err(JobError::Fatal(format!("request: {}", e.without_url())));
+        }
         Err(e) => {
             // Transport, DNS or TLS: worth retrying. No URL: its path
             // can be the receiver's secret (#1852).
@@ -223,6 +228,8 @@ pub struct WebhookSubscription {
     timeout: Duration,
     retry_status_codes: Vec<u16>,
     allow_private_targets: bool,
+    /// The first header [`Self::header`] refused; `dispatch` fails on it (#2236).
+    bad_header: Option<String>,
 }
 
 /// The secret, header values and URL path are redacted (#2116, #2161).
@@ -236,6 +243,7 @@ impl std::fmt::Debug for WebhookSubscription {
             .field("timeout", &self.timeout)
             .field("retry_status_codes", &self.retry_status_codes)
             .field("allow_private_targets", &self.allow_private_targets)
+            .field("bad_header", &self.bad_header)
             .finish()
     }
 }
@@ -250,6 +258,7 @@ impl WebhookSubscription {
             timeout: Duration::from_secs(10),
             retry_status_codes: Vec::new(),
             allow_private_targets: false,
+            bad_header: None,
         }
     }
 
@@ -259,9 +268,24 @@ impl WebhookSubscription {
         self
     }
 
+    /// Add a header to every delivery. An invalid name or value is
+    /// dropped and makes [`Self::dispatch`] fail with [`JobError::Fatal`].
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
+        let (name, value) = (name.into(), value.into());
+        let bad = if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            // Length only: a pasted "Authorization: Bearer …" name holds a secret.
+            format!("invalid header name ({} bytes)", name.len())
+        } else if reqwest::header::HeaderValue::from_str(&value).is_err() {
+            // The value often carries auth: name only.
+            format!("invalid value for header {name:?}")
+        } else {
+            self.headers.insert(name, value);
+            return self;
+        };
+        if self.bad_header.is_none() {
+            self.bad_header = Some(bad);
+        }
         self
     }
 
@@ -298,12 +322,16 @@ impl WebhookSubscription {
     /// # Errors
     /// [`JobError::Queue`] if the enqueue fails: database down, channel
     /// closed, or a payload that will not serialize.
+    /// [`JobError::Fatal`] if [`Self::header`] got an invalid header.
     pub async fn dispatch<Q: JobQueue>(
         &self,
         queue: &Q,
         event_name: impl Into<String>,
         payload: impl Serialize,
     ) -> Result<String, JobError> {
+        if let Some(bad) = &self.bad_header {
+            return Err(JobError::Fatal(bad.clone()));
+        }
         let id = Uuid::new_v4().to_string();
         let body = serde_json::to_string(&payload)
             .map_err(|e| JobError::Queue(format!("payload serialize: {e}")))?;
@@ -672,6 +700,37 @@ mod tests {
         let msg = format!("{err:?}");
         assert!(matches!(err, JobError::Retryable(_)), "{msg}");
         assert!(!msg.contains("PATHSECRET"), "{msg}");
+    }
+
+    /// #2236 — a bad header is refused at dispatch, not retried as transport.
+    #[tokio::test]
+    async fn an_invalid_header_fails_dispatch_fatally() {
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        for sub in [
+            WebhookSubscription::new("https://example.com/hook", "s")
+                .header("Authorization: Bearer SECRET", "v"),
+            WebhookSubscription::new("https://example.com/hook", "s")
+                .header("X-Ok", "line\nbreak-SECRET"),
+        ] {
+            let dbg = format!("{sub:?}");
+            assert!(!dbg.contains("SECRET"), "{dbg}");
+            let err = sub.dispatch(&q, "ping", &()).await.unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(matches!(err, JobError::Fatal(_)), "{msg}");
+            assert!(!msg.contains("SECRET"), "{msg}");
+        }
+    }
+
+    /// #2236 — an already-queued bad header dead-letters instead of retrying.
+    #[tokio::test]
+    async fn a_request_build_error_is_fatal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let mut ev = event(url, true);
+        ev.headers.insert("X Bad".into(), "v".into());
+        let err = deliver(&ev).await.unwrap_err();
+        assert!(matches!(err, JobError::Fatal(_)), "{err:?}");
     }
 
     fn event(url: String, allow_private_targets: bool) -> WebhookEvent {

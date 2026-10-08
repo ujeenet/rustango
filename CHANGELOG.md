@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `FormView` renders the CSRF token (#2234)
+
+GET and the POST re-render stamp `csrf_token` / `csrf_input` and set the cookie, like the model CBVs; a `{{ csrf_input | safe }}` template no longer 500s.
+
+### Fixed — a bad webhook header fails at once (#2236)
+
+`WebhookSubscription::header` checks the name and value; `dispatch` then returns `JobError::Fatal`, and a request that will not build is dead-lettered instead of retried 8 times.
+
+### Fixed — the MCP SSE stream ends at token expiry or revoke (#2237)
+
+It closes at the JWT's `exp`, and re-checks the agent every 4 keep-alives (once a minute), so a revoked or rotated agent stops getting frames.
+
 ### Fixed — `cache_page` sends a body over 1 MiB in full (#2218)
 
 It was replaced by an empty body with the old `Content-Length`; now it passes through uncached.

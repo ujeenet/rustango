@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Webhook headers are checked
+
+`WebhookSubscription::header` with an invalid name or value makes `dispatch` return `JobError::Fatal` (#2236).
+
+### MCP SSE streams close
+
+The stream ends at the JWT's `exp` and within a minute of a revoke; clients should reconnect with a fresh token (#2237).
+
 ### `CachePageLayer` skips responses whose `Vary` is not in the key
 
 Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
