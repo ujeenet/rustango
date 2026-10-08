@@ -145,6 +145,10 @@ where
              deactivate instead."
         )));
     }
+    #[cfg(feature = "postgres")]
+    if mode == StorageMode::Database && org.backend_kind == "postgres" {
+        refuse_registry_database(pools, &pools.resolved_database_url(org).await?)?;
+    }
     let id = org
         .id
         .get()
@@ -224,6 +228,36 @@ where
     }
     super::invalidate_org_cache();
     report.row_deleted = true;
+    Ok(())
+}
+
+/// A forced drop would take the registry with it if a row points there.
+/// Same endpoint rule as `provision::refuse_registry_url`.
+#[cfg(feature = "postgres")]
+fn refuse_registry_database<DB: Database>(
+    pools: &TenantPools<DB>,
+    tenant_url: &str,
+) -> Result<(), TenancyError> {
+    use crate::sql::sqlx::postgres::PgConnectOptions;
+    use std::str::FromStr;
+
+    let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+    else {
+        return Ok(());
+    };
+    // An unparsable URL is refused by `drop_database_at`.
+    let Ok(tenant) = PgConnectOptions::from_str(tenant_url) else {
+        return Ok(());
+    };
+    let registry = pg.registry_inner().connect_options();
+    if tenant.get_host().eq_ignore_ascii_case(registry.get_host())
+        && tenant.get_port() == registry.get_port()
+        && tenant.get_database() == registry.get_database()
+    {
+        return Err(TenancyError::Validation(
+            "refusing to drop this tenant's database — it is the registry's own".into(),
+        ));
+    }
     Ok(())
 }
 

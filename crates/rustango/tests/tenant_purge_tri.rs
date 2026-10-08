@@ -170,3 +170,39 @@ async fn database_purge_drops_a_database_another_pod_holds_open() {
             .unwrap();
     assert_eq!(left, 0, "the tenant database survived the purge");
 }
+
+/// A row pointing at the registry's own database is never force-dropped (#2291).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_refuses_the_registry_database() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let slug = format!("purge-registry-{}", std::process::id());
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "postgres".into(),
+        database_url: Some(std::env::var("DATABASE_URL").unwrap()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&pool).await.expect("insert org");
+
+    let err = purge_on(&pool, &slug)
+        .await
+        .expect_err("registry drop must be refused");
+    assert!(err.to_string().contains("registry"), "{err}");
+    let one: i32 = rustango::sql::sqlx::query_scalar("SELECT 1")
+        .fetch_one(pg)
+        .await
+        .expect("the registry database survived");
+    assert_eq!(one, 1);
+    org.delete_pool(&pool).await.unwrap();
+}
