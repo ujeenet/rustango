@@ -168,6 +168,16 @@ impl Refusal {
     }
 }
 
+/// The referencing table of an FK refusal, where the driver names it (PG).
+pub(crate) fn fk_referencing_table(e: &crate::sql::ExecError) -> Option<String> {
+    let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e else {
+        return None;
+    };
+    db.is_foreign_key_violation()
+        .then(|| db.table().map(str::to_owned))
+        .flatten()
+}
+
 /// Log `raw` under a fresh correlation id and return the id, so a page
 /// can show the id and never the raw text.
 pub(crate) fn log_with_id(context: &str, raw: &dyn std::fmt::Display) -> String {

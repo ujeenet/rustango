@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin: deleting a still-referenced row is a 409, not a 500 (#2340)
+
+Single delete and `delete_selected` name the referencing table. `pre_delete` signals have already fired by then; `post_delete` does not.
+
 ### Fixed — admin forms show a plain message for a refused write, never driver text (#2345)
 
 A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logged under the error id the page shows.

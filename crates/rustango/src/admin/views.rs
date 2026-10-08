@@ -2412,7 +2412,7 @@ pub(crate) async fn delete_submit(
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
         crate::sql::update_pool(&state.pool, &stamp).await?
     } else {
-        crate::sql::delete_pool(
+        let deleted = crate::sql::delete_pool(
             &state.pool,
             &DeleteQuery {
                 model,
@@ -2423,7 +2423,11 @@ pub(crate) async fn delete_submit(
                 }),
             },
         )
-        .await?
+        .await;
+        match deleted {
+            Ok(n) => n,
+            Err(e) => return refused_delete(model, e),
+        }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
     if affected == 0 {
@@ -2465,6 +2469,53 @@ pub(crate) async fn delete_submit(
     })
     .await;
     Ok(Redirect::to(&list_url).into_response())
+}
+
+/// A failed hard delete: a 409 naming who still points at the row when
+/// the database refused on an FK (#2340), else the usual error.
+fn refused_delete(
+    model: &'static crate::core::ModelSchema,
+    e: crate::sql::ExecError,
+) -> Result<Response, AdminError> {
+    if super::errors::Refusal::of(&e) != Some(super::errors::Refusal::ForeignKey) {
+        return Err(e.into());
+    }
+    let id = super::errors::log_with_id("admin delete refused", &e);
+    // PG names the table; elsewhere list the models whose FK would block.
+    let tables: Vec<String> = super::errors::fk_referencing_table(&e)
+        .map_or_else(|| blocking_referrers(model.table), |t| vec![t]);
+    let by = if tables.is_empty() {
+        "other rows".to_owned()
+    } else {
+        format!("rows in {}", tables.join(", "))
+    };
+    Ok(crate::api_errors::ApiError::conflict(format!(
+        "{} is still referenced by {by}; delete or change those first.",
+        model.name
+    ))
+    .with_details(serde_json::json!({
+        "table": model.table,
+        "referenced_by": tables,
+        "correlation_id": id,
+    }))
+    .into_response())
+}
+
+/// Tables whose FK onto `table` refuses a parent delete.
+fn blocking_referrers(table: &str) -> Vec<String> {
+    use crate::core::{OnDeleteAction as A, Relation};
+    let mut out: Vec<String> = super::helpers::inventory_entries_dedup_by_table()
+        .into_iter()
+        .filter(|entry| {
+            entry.schema.scalar_fields().any(|f| {
+                matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == table)
+                    && !matches!(f.fk_on_delete, Some(A::Cascade | A::SetNull | A::SetDefault))
+            })
+        })
+        .map(|entry| entry.schema.table.to_owned())
+        .collect();
+    out.sort();
+    out
 }
 
 // ============================================================== ACTIONS
@@ -2625,7 +2676,9 @@ pub(crate) async fn action_submit(
             Some(col) => Some(mark(col, Some(chrono::Utc::now())).await?),
             None => {
                 let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
-                crate::sql::delete_pool(&state.pool, &query).await?;
+                if let Err(e) = crate::sql::delete_pool(&state.pool, &query).await {
+                    return refused_delete(model, e);
+                }
                 None
             }
         },
