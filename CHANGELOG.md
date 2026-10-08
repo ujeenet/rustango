@@ -22,6 +22,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
 
+### Fixed — admin search skips secret fields (#2228)
+
+`?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
+
+### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
+
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267). Autocomplete reads up to 5 pages to fill its limit past denied rows. A password-widget field in `list_filter` gets no facet.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)
