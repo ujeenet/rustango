@@ -141,6 +141,12 @@ pub trait JobQueue: Send + Sync + 'static {
         Fut: Future<Output = Result<(), JobError>> + Send + 'static,
     {
         drop(run);
+        tracing::warn!(
+            target: "rustango::jobs",
+            job = T::NAME,
+            "this JobQueue does not override register_with; the handler is ignored \
+             and Job::run (with any process-wide fallback) runs instead"
+        );
         self.register::<T>().await;
     }
 
