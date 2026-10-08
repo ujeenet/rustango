@@ -1314,6 +1314,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Resolver caches are per registry
+
+`invalidate_org_cache`, `invalidate_host_cache` and the testkit resolver resets still act on every registry in the process (#2077).
+
 ### `FileCache` needs a tokio runtime for every call
 
 Its file I/O moved to `spawn_blocking` (#1530).

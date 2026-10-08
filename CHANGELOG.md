@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — tenant resolver state is per registry (#2077)
+
+The org/host caches, fingerprint polls and breakers are keyed by registry pool, so two registries in one process no longer share them.
+
 ### Fixed — `FileCache` no longer blocks the async runtime (#1530)
 
 All its file I/O now runs on tokio's blocking pool.
