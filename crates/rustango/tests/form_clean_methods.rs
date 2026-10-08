@@ -9,6 +9,8 @@
 //! a cross-field validation function called after every field
 //! parses successfully.
 
+#![cfg(feature = "forms")]
+
 use std::collections::HashMap;
 
 use rustango::forms::{Form as _, FormErrors};

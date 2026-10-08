@@ -9,7 +9,7 @@
 //!    and INSERTs a fresh row via one of the blank `extra` slots.
 //! 3. Re-GET and assert all three writes took effect.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use std::collections::HashMap;
 

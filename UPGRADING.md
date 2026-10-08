@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Custom `Cache` backends: override `touch`
+
+`SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).
+
+### `[mcp] rate_limit_per_minute = 0` means unlimited
+
+It used to refuse every request with 429 (#2299).
+
 ### i18n locale matching
 
 `languages = ["pt-BR"]` now loads `pt_BR.json` (#2288), and `negotiate_language` picks `en` over `en-GB` for `en-US` (#2289). Check any test that pinned the old pick.
