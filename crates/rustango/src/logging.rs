@@ -97,6 +97,20 @@ pub enum Format {
     Json,
 }
 
+#[cfg(feature = "runtime")]
+impl Format {
+    /// The format a `[logging] format` value names; `None` if unknown.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(Self::Full),
+            "pretty" => Some(Self::Pretty),
+            "compact" => Some(Self::Compact),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
+}
+
 /// When to emit ANSI colour.
 ///
 /// # Not honoured under `#[rustango::main]`
@@ -337,12 +351,10 @@ impl Setup {
         if let Some(filter) = s.level.as_deref() {
             setup = setup.with_default_env_filter(filter);
         }
-        setup = match s.format.as_deref() {
-            Some("json") => setup.with_format(Format::Json),
-            Some("pretty") => setup.with_format(Format::Pretty),
-            Some("compact") => setup.with_format(Format::Compact),
-            Some("full") | None => setup.with_format(Format::Full),
-            Some(other) => {
+        setup = match s.format.as_deref().map(|n| (n, Format::from_name(n))) {
+            None => setup.with_format(Format::Full),
+            Some((_, Some(format))) => setup.with_format(format),
+            Some((other, None)) => {
                 tracing::warn!(
                     target: "rustango::logging",
                     format = other,
