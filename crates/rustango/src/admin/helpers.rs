@@ -314,6 +314,7 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
 
 /// Columns `?q=` searches, for the list and autocomplete alike:
 /// `search_fields` when set, else the searchable fields. Never a secret (#2228).
+/// "Secret" means the `password` widget: a `token` field without it stays searchable.
 #[must_use]
 pub(crate) fn search_columns(
     model: &'static ModelSchema,

@@ -236,3 +236,41 @@ async fn secret_list_filter_gets_no_facet() {
     assert!(body.contains("kind-x"), "control: a normal facet shows");
     assert!(!body.contains("pin-s3cr3t"), "the secret's facet shows it");
 }
+
+/// `search_fields` names the secret on purpose.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ffo_login",
+    admin(
+        search_fields = "username, secret",
+        formfield_overrides = "secret:password"
+    )
+)]
+#[allow(dead_code)]
+pub struct Login {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 30)]
+    pub username: String,
+    #[rustango(max_length = 30)]
+    pub secret: String,
+}
+
+#[tokio::test]
+async fn explicit_search_fields_skip_the_secret() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE ffo_login (id INTEGER PRIMARY KEY, username TEXT NOT NULL, secret TEXT NOT NULL)",
+        "INSERT INTO ffo_login (id, username, secret) VALUES (1, 'bob', 'hunter2')",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let hit = get_text(pool.clone(), "/ffo_login?q=bob").await;
+    assert!(hit.contains("bob"), "control: username matches");
+    let list = get_text(pool.clone(), "/ffo_login?q=hunter").await;
+    assert!(!list.contains("bob"), "the list matched the secret");
+    let ac = get_text(pool, "/ffo_login/__autocomplete?q=hunter").await;
+    assert!(!ac.contains("bob"), "autocomplete matched the secret: {ac}");
+}

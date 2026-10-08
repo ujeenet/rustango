@@ -386,6 +386,10 @@ Three more registration macros hook into a model's admin pages:
   FK facet names and FK cell names, but runs after the page is read: pages may come up short,
   and totals, facet values and counts, date buckets and "has next" still see
   hidden rows. Use a queryset hook to hide them everywhere.
+- **Secret fields** — a field with the `password` widget
+  (`formfield_overrides = "x: password"`) never shows its value and is never
+  searched, filtered or faceted. Nothing else marks a secret: give `token` / `api_key` fields that
+  widget too.
 
 For coarser, codename-based access control, `Builder::with_user_perms([...])`
 gates each table on `{table}.view` / `.add` / `.change` / `.delete`: missing

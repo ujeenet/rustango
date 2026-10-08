@@ -152,7 +152,7 @@ untouched.
 
 ### Admin search never covers a secret field
 
-A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228).
+A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228). Only the `password` widget marks a secret: give `token` / `api_key` fields that widget too.
 
 ### A "view" object-permission hook now filters the admin list
 
