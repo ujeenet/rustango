@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `IpFilterLayer::behind_trusted_proxy` (opt-in)
+
+The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).
+
 ### Purge pages with `CachePageLayer::invalidate`
 
 Replace hand-built page-cache keys with `layer.invalidate([&PageKey::new(path, host).tenant(slug)])`; since 0.60 they miss the tenant and delete nothing (#2252).

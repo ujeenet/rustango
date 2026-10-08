@@ -353,25 +353,18 @@ impl Dialect for Sqlite {
     }
 
     /// sqlx stores a UUID as a 16-byte blob, which `LIKE` never matches,
-    /// so it is matched in its dashed text form (#2229).
-    fn write_ilike_typed(
-        &self,
-        sql: &mut String,
-        qualified_col: &str,
-        ty: Option<FieldType>,
-        placeholder: &str,
-        negated: bool,
-    ) {
+    /// so it is matched in its dashed lowercase text form, as Postgres
+    /// prints it (#2229).
+    fn like_operand(&self, qualified_col: &str, ty: Option<FieldType>) -> String {
         if ty != Some(FieldType::Uuid) {
-            return self.write_ilike(sql, qualified_col, placeholder, negated);
+            return qualified_col.to_owned();
         }
-        let h = format!("hex({qualified_col})");
-        let text = format!(
+        let h = format!("lower(hex({qualified_col}))");
+        format!(
             "CASE typeof({qualified_col}) WHEN 'blob' THEN substr({h}, 1, 8) || '-' || \
              substr({h}, 9, 4) || '-' || substr({h}, 13, 4) || '-' || substr({h}, 17, 4) \
              || '-' || substr({h}, 21) ELSE {qualified_col} END"
-        );
-        self.write_ilike(sql, &text, placeholder, negated);
+        )
     }
 
     /// SQLite's `REGEXP` calls a `regexp(pattern, value)` function

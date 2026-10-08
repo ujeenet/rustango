@@ -67,20 +67,19 @@ async fn fixture_load_into_pool_inserts_rows_on_mysql() {
         .expect("load_into_pool");
     assert_eq!(inserted, 2);
 
-    if let Pool::Mysql(my) = &pool {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `fixture_widgets`")
+    let my = pool.as_mysql().expect("mysql pool");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `fixture_widgets`")
+        .fetch_one(my)
+        .await
+        .expect("count");
+    assert_eq!(count, 2);
+
+    let first_name: String =
+        sqlx::query_scalar("SELECT `name` FROM `fixture_widgets` WHERE `id` = 1")
             .fetch_one(my)
             .await
-            .expect("count");
-        assert_eq!(count, 2);
-
-        let first_name: String =
-            sqlx::query_scalar("SELECT `name` FROM `fixture_widgets` WHERE `id` = 1")
-                .fetch_one(my)
-                .await
-                .expect("name");
-        assert_eq!(first_name, "alpha");
-    }
+            .expect("name");
+    assert_eq!(first_name, "alpha");
 }
 
 #[tokio::test]

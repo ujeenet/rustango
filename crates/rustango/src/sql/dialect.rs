@@ -575,9 +575,14 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
-    /// [`Self::write_ilike`] on a column whose field type is known
-    /// (`None` when it is not). Postgres overrides it to cast a
-    /// non-text column, which has no `ILIKE` operator (#2229).
+    /// `qualified_col` as text a `LIKE` can match, given its field type
+    /// (`None` when unknown). Postgres casts a non-text column (#2229).
+    fn like_operand(&self, qualified_col: &str, ty: Option<FieldType>) -> String {
+        let _ = ty;
+        qualified_col.to_owned()
+    }
+
+    /// [`Self::write_ilike`] on [`Self::like_operand`].
     fn write_ilike_typed(
         &self,
         sql: &mut String,
@@ -586,8 +591,22 @@ pub trait Dialect: Send + Sync {
         placeholder: &str,
         negated: bool,
     ) {
-        let _ = ty;
-        self.write_ilike(sql, qualified_col, placeholder, negated);
+        let col = self.like_operand(qualified_col, ty);
+        self.write_ilike(sql, &col, placeholder, negated);
+    }
+
+    /// Case-sensitive `<col> [NOT] LIKE <p>` on [`Self::like_operand`] (#2263).
+    fn write_like_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        sql.push_str(&self.like_operand(qualified_col, ty));
+        sql.push_str(if negated { " NOT LIKE " } else { " LIKE " });
+        sql.push_str(placeholder);
     }
 
     /// POSIX regex match, for the `__regex` and `__iregex` lookups.
