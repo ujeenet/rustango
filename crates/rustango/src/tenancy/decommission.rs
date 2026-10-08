@@ -152,18 +152,30 @@ where
              deactivate instead."
         )));
     }
-    #[cfg(feature = "postgres")]
-    if mode == StorageMode::Database && org.backend_kind == "postgres" {
-        refuse_registry_database(pools, &pools.resolved_database_url(org).await?)?;
-    }
     let id = org
         .id
         .get()
         .copied()
         .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+    // Every refusal before the org is touched, so a refused purge leaves it active.
     if mode == StorageMode::Schema {
         refuse_shared_schema(registry, org.effective_schema(), id).await?;
     }
+    #[cfg(feature = "postgres")]
+    let pg_target = if mode == StorageMode::Database && org.backend_kind == "postgres" {
+        let opts = parse_pg_url(&pools.resolved_database_url(org).await?)?;
+        refuse_registry_database(pools, &opts)?;
+        if let Some(other) = database_claimed(pools, registry, id, &opts).await? {
+            return Err(TenancyError::Validation(format!(
+                "refusing to drop this tenant's database — tenant `{other}` uses it too"
+            )));
+        }
+        let mut target = PgDropTarget::connect(&opts, super::pools::tenant_session_tag(id)).await?;
+        target.refuse_foreign_sessions().await?;
+        Some(target)
+    } else {
+        None
+    };
     // Out of service before anything is destroyed (#1930): if a later
     // step fails, the tenant is inactive and a retry finishes the job.
     deactivate(registry, id).await?;
@@ -188,8 +200,8 @@ where
             let url = pools.resolved_database_url(org).await?;
             if org.backend_kind == "postgres" {
                 #[cfg(feature = "postgres")]
-                {
-                    drop_database_at(&url, &super::pools::tenant_session_tag(id)).await?;
+                if let Some(target) = pg_target {
+                    target.drop().await?;
                     report.database_dropped = Some(crate::sql::connect_diagnosis::redact(&url));
                 }
                 #[cfg(not(feature = "postgres"))]
@@ -256,29 +268,40 @@ async fn refuse_shared_schema(
     Ok(())
 }
 
-/// An early, friendly refusal: host, port and database name match the
-/// registry pool's. Text-level only; the session check in the drop is the guard.
+/// Same Postgres database: host (case-insensitive), port and name.
+/// Text-level, so `localhost` and `127.0.0.1` differ; the session check covers that.
+#[cfg(feature = "postgres")]
+fn same_pg_database(
+    a: &crate::sql::sqlx::postgres::PgConnectOptions,
+    b: &crate::sql::sqlx::postgres::PgConnectOptions,
+) -> bool {
+    a.get_host().eq_ignore_ascii_case(b.get_host())
+        && a.get_port() == b.get_port()
+        && a.get_database() == b.get_database()
+}
+
+#[cfg(feature = "postgres")]
+fn parse_pg_url(url: &str) -> Result<crate::sql::sqlx::postgres::PgConnectOptions, TenancyError> {
+    use std::str::FromStr;
+    crate::sql::sqlx::postgres::PgConnectOptions::from_str(url).map_err(|e| {
+        TenancyError::Validation(format!(
+            "cannot parse the tenant's database URL: {e} ({})",
+            crate::sql::connect_diagnosis::redact(url)
+        ))
+    })
+}
+
+/// An early, friendly refusal when the URL names the registry pool's database.
 #[cfg(feature = "postgres")]
 fn refuse_registry_database<DB: Database>(
     pools: &TenantPools<DB>,
-    tenant_url: &str,
+    tenant: &crate::sql::sqlx::postgres::PgConnectOptions,
 ) -> Result<(), TenancyError> {
-    use crate::sql::sqlx::postgres::PgConnectOptions;
-    use std::str::FromStr;
-
     let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
     else {
         return Ok(());
     };
-    // An unparsable URL is refused by `drop_database_at`.
-    let Ok(tenant) = PgConnectOptions::from_str(tenant_url) else {
-        return Ok(());
-    };
-    let registry = pg.registry_inner().connect_options();
-    if tenant.get_host().eq_ignore_ascii_case(registry.get_host())
-        && tenant.get_port() == registry.get_port()
-        && tenant.get_database() == registry.get_database()
-    {
+    if same_pg_database(tenant, &pg.registry_inner().connect_options()) {
         return Err(TenancyError::Validation(
             "refusing to drop this tenant's database — it is the registry's own".into(),
         ));
@@ -286,61 +309,126 @@ fn refuse_registry_database<DB: Database>(
     Ok(())
 }
 
-/// `DROP DATABASE` through an admin connection on the same server.
+/// Another Postgres database-mode tenant points at the same database. An idle
+/// one holds no session, so only the registry rows can tell (#2291).
 #[cfg(feature = "postgres")]
-async fn drop_database_at(tenant_url: &str, tag: &str) -> Result<(), TenancyError> {
-    use crate::sql::sqlx::postgres::PgConnectOptions;
-    use crate::sql::sqlx::ConnectOptions;
-    use std::str::FromStr;
-
-    let opts = PgConnectOptions::from_str(tenant_url).map_err(|e| {
-        TenancyError::Validation(format!(
-            "cannot parse the tenant's database URL: {e} ({})",
-            crate::sql::connect_diagnosis::redact(tenant_url)
-        ))
-    })?;
-    let dbname = opts.get_database().ok_or_else(|| {
-        TenancyError::Validation(
-            "the tenant's database URL names no database — nothing to drop".into(),
-        )
-    })?;
-    if matches!(
-        dbname.to_ascii_lowercase().as_str(),
-        "postgres" | "template0" | "template1"
-    ) {
-        return Err(TenancyError::Validation(format!(
-            "refusing to drop `{dbname}` — that is a Postgres system database"
-        )));
-    }
-    let dbname = dbname.to_owned();
-    // `DROP DATABASE` cannot run from inside the database being
-    // dropped, so this connects to `postgres` on the same server.
-    let mut admin = opts.clone().database("postgres").connect().await?;
-    // Only this tenant's tagged pool sessions, on any pod (#2291). Any other
-    // session (registry, another tenant, an operator) still blocks the drop.
-    crate::sql::sqlx::query(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-         WHERE datname = $1 AND application_name = $2",
-    )
-    .bind(&dbname)
-    .bind(tag)
-    .execute(&mut admin)
-    .await?;
-    // Postgres by construction — the caller checks `backend_kind`.
-    let sql = format!(
-        "DROP DATABASE IF EXISTS \"{}\"",
-        dbname.replace('"', "\"\"")
-    );
-    match crate::sql::sqlx::query(&sql).execute(&mut admin).await {
-        Ok(_) => Ok(()),
-        // 55006 object_in_use: a session this tenant's pools did not open.
-        Err(crate::sql::sqlx::Error::Database(e)) if e.code().as_deref() == Some("55006") => {
-            Err(TenancyError::Validation(format!(
-                "database `{dbname}` still has sessions this tenant's pools did not open \
-                 (another tenant, the registry or an operator); close them and purge again"
-            )))
+async fn database_claimed<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org_id: i64,
+    tenant: &crate::sql::sqlx::postgres::PgConnectOptions,
+) -> Result<Option<String>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let others: Vec<Org> = Org::objects()
+        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
+        .where_(Org::backend_kind.eq("postgres".to_owned()))
+        .fetch(registry)
+        .await?;
+    for other in others
+        .iter()
+        .filter(|o| o.id.get().copied() != Some(org_id))
+    {
+        // An unresolvable or unparsable URL may well be this database.
+        let url = pools.resolved_database_url(other).await.map_err(|_| {
+            TenancyError::Validation(format!(
+                "cannot resolve tenant `{}`'s database URL to rule out a shared database",
+                other.slug
+            ))
+        })?;
+        if same_pg_database(tenant, &parse_pg_url(&url)?) {
+            return Ok(Some(other.slug.clone()));
         }
-        Err(e) => Err(e.into()),
+    }
+    Ok(None)
+}
+
+/// An admin connection to the server holding a tenant database about to be
+/// dropped. Built and checked before the org is touched.
+#[cfg(feature = "postgres")]
+struct PgDropTarget {
+    admin: crate::sql::sqlx::PgConnection,
+    dbname: String,
+    /// The `application_name` this tenant's pools connect with.
+    tag: String,
+}
+
+#[cfg(feature = "postgres")]
+impl PgDropTarget {
+    async fn connect(
+        opts: &crate::sql::sqlx::postgres::PgConnectOptions,
+        tag: String,
+    ) -> Result<Self, TenancyError> {
+        use crate::sql::sqlx::ConnectOptions;
+        let dbname = opts.get_database().ok_or_else(|| {
+            TenancyError::Validation(
+                "the tenant's database URL names no database — nothing to drop".into(),
+            )
+        })?;
+        if matches!(
+            dbname.to_ascii_lowercase().as_str(),
+            "postgres" | "template0" | "template1"
+        ) {
+            return Err(TenancyError::Validation(format!(
+                "refusing to drop `{dbname}` — that is a Postgres system database"
+            )));
+        }
+        let dbname = dbname.to_owned();
+        // `DROP DATABASE` cannot run from inside the database being
+        // dropped, so this connects to `postgres` on the same server.
+        let admin = opts.clone().database("postgres").connect().await?;
+        Ok(Self { admin, dbname, tag })
+    }
+
+    fn in_use(&self) -> TenancyError {
+        TenancyError::Validation(format!(
+            "database `{}` has sessions this tenant's pools did not open \
+             (another tenant, the registry or an operator); close them and purge again",
+            self.dbname
+        ))
+    }
+
+    /// Refuse while any session not tagged as this tenant is open.
+    async fn refuse_foreign_sessions(&mut self) -> Result<(), TenancyError> {
+        let foreign: i64 = crate::sql::sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = $1 AND application_name IS DISTINCT FROM $2",
+        )
+        .bind(&self.dbname)
+        .bind(&self.tag)
+        .fetch_one(&mut self.admin)
+        .await?;
+        if foreign > 0 {
+            return Err(self.in_use());
+        }
+        Ok(())
+    }
+
+    /// End this tenant's own sessions, on any pod, then a plain drop: a
+    /// session that appeared since the check still blocks it (#2291).
+    async fn drop(mut self) -> Result<(), TenancyError> {
+        crate::sql::sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = $1 AND application_name = $2",
+        )
+        .bind(&self.dbname)
+        .bind(&self.tag)
+        .execute(&mut self.admin)
+        .await?;
+        // Postgres by construction — the caller checks `backend_kind`.
+        let sql = format!(
+            "DROP DATABASE IF EXISTS \"{}\"",
+            self.dbname.replace('"', "\"\"")
+        );
+        match crate::sql::sqlx::query(&sql).execute(&mut self.admin).await {
+            Ok(_) => Ok(()),
+            // 55006 object_in_use.
+            Err(crate::sql::sqlx::Error::Database(e)) if e.code().as_deref() == Some("55006") => {
+                Err(self.in_use())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 

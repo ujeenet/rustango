@@ -71,9 +71,26 @@ async fn purge_deletes_org_with_extra_host(pool: &Pool) {
     assert!(hosts.is_empty(), "host rows survived the purge");
 }
 
+/// A purge leaves no run linked to the org, so none can resume it (#2292).
+async fn purge_unlinks_its_unsucceeded_runs(pool: &Pool) {
+    use rustango::tenancy::provision_store as store;
+    let (slug, id) = tenant_with_host(pool, "runs").await;
+    let run = store::open_run(pool, &slug, "database", "sqlite", None, None, None)
+        .await
+        .unwrap();
+    let run_id = run.id.get().copied().unwrap();
+    store::attach_org(pool, run_id, id).await.unwrap();
+    purge_on(pool, &slug).await.expect("purge");
+    let run = store::run_by_id(pool, run_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.org_id, None,
+        "a running run still points at the purged org"
+    );
+}
+
 tri_dialect_test!(
     setup: setup,
-    scenarios: [purge_deletes_org_with_extra_host]
+    scenarios: [purge_deletes_org_with_extra_host, purge_unlinks_its_unsucceeded_runs]
 );
 
 /// Schema-mode purge drops the cached scoped pool too (#1930). PG-only.
@@ -313,40 +330,230 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         ..rustango::testkit::org()
     };
     legacy.save_pool(&pool).await.unwrap();
-    let mut reserved = Org {
-        slug: format!("purge-public-{}", std::process::id()),
-        display_name: "public".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some("public".into()),
-        ..rustango::testkit::org()
-    };
-    reserved.save_pool(&pool).await.unwrap();
 
     let err = purge_on(&pool, &legacy.slug)
         .await
         .expect_err("shared schema");
     assert!(err.to_string().contains("another tenant"), "{err}");
-    let err = purge_on(&pool, &reserved.slug).await.expect_err("public");
-    assert!(err.to_string().contains("public"), "{err}");
     let left: i64 =
         rustango::sql::sqlx::query_scalar(&format!("SELECT count(*) FROM \"{shared}\".marker"))
             .fetch_one(pg)
             .await
             .expect("the shared schema survived");
     assert_eq!(left, 0);
-    let rows: Vec<Org> = Org::objects().fetch(&pool).await.unwrap();
-    assert!(
-        rows.iter()
-            .filter(|o| [&legacy.slug, &reserved.slug].contains(&&o.slug))
-            .all(|o| o.active),
-        "a refused purge changed the org"
-    );
+    let rows: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq(legacy.slug.clone()))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the refused purge deleted the org");
+    assert!(rows[0].active, "the refused purge deactivated the org");
 
-    for org in [owner, legacy, reserved] {
+    for org in [owner, legacy] {
         org.delete_pool(&pool).await.unwrap();
     }
     rustango::sql::sqlx::query(&format!("DROP SCHEMA \"{shared}\" CASCADE"))
         .execute(pg)
         .await
         .unwrap();
+}
+
+/// A row naming `public` is refused (#2290). In a private database, so a
+/// missing guard would drop that database's `public`, not the suite's.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn schema_purge_refuses_a_reserved_schema() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let db = format!("rustango_purge_reserved_{}", std::process::id());
+    let _ = rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await;
+    rustango::sql::sqlx::query(&format!("CREATE DATABASE \"{db}\""))
+        .execute(pg)
+        .await
+        .unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let private =
+        rustango::sql::sqlx::PgPool::connect(&format!("{}/{db}", url.rsplit_once('/').unwrap().0))
+            .await
+            .unwrap();
+    let registry = Pool::from(private.clone());
+    setup(&registry).await;
+    let mut reserved = Org {
+        slug: "reserved".into(),
+        display_name: "public".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("public".into()),
+        ..rustango::testkit::org()
+    };
+    reserved.save_pool(&registry).await.unwrap();
+
+    let err = purge_on(&registry, "reserved").await.expect_err("public");
+    assert!(err.to_string().contains("public"), "{err}");
+    let rows: Vec<Org> = Org::objects()
+        .fetch(&registry)
+        .await
+        .expect("public survived");
+    assert!(rows[0].active, "the refused purge deactivated the org");
+
+    private.close().await;
+    rustango::sql::sqlx::query(&format!("DROP DATABASE \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await
+        .unwrap();
+}
+
+/// Two tenants on one database, the other idle (no session): refused (#2291).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_refuses_a_database_another_tenant_shares() {
+    use rustango::sql::sqlx::{Connection as _, PgConnection};
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let (a, db) = org_with_database(&pool, "sharea").await;
+    let url = a.database_url.clone().unwrap();
+    let mut b = Org {
+        slug: format!("{}-b", a.slug),
+        display_name: "b".into(),
+        backend_kind: "postgres".into(),
+        database_url: Some(url.clone()),
+        ..rustango::testkit::org()
+    };
+    b.save_pool(&pool).await.unwrap();
+    let mut seed = PgConnection::connect(&url).await.unwrap();
+    rustango::sql::sqlx::raw_sql("CREATE TABLE b_data (id INT); INSERT INTO b_data VALUES (1)")
+        .execute(&mut seed)
+        .await
+        .unwrap();
+    seed.close().await.unwrap();
+
+    let err = purge_on(&pool, &a.slug).await.expect_err("shared database");
+    assert!(err.to_string().contains(&b.slug), "{err}");
+    let mut check = PgConnection::connect(&url)
+        .await
+        .expect("the database survived");
+    let n: i64 = rustango::sql::sqlx::query_scalar("SELECT count(*) FROM b_data")
+        .fetch_one(&mut check)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "B's data was touched");
+    check.close().await.unwrap();
+    assert!(
+        org_active(&pool, &a.slug).await,
+        "the refused purge deactivated A"
+    );
+
+    b.delete_pool(&pool).await.unwrap();
+    purge_on(&pool, &a.slug)
+        .await
+        .expect("purge once A is alone");
+    assert!(!database_exists(&pool, &db).await);
+}
+
+/// The registry spelled `localhost` instead of `127.0.0.1` slips past the text
+/// guard; its own open sessions refuse it, before the org changes (#2291).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_refuses_the_registry_under_another_host_name() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let alias = if url.contains("127.0.0.1") {
+        url.replace("127.0.0.1", "localhost")
+    } else {
+        url.replace("localhost", "127.0.0.1")
+    };
+    assert_ne!(
+        alias, url,
+        "DATABASE_URL names neither localhost nor 127.0.0.1"
+    );
+    let slug = format!("purge-alias-{}", std::process::id());
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "postgres".into(),
+        database_url: Some(alias),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&pool).await.unwrap();
+
+    let err = purge_on(&pool, &slug).await.expect_err("registry by alias");
+    assert!(err.to_string().contains("did not open"), "{err}");
+    assert!(
+        org_active(&pool, &slug).await,
+        "the refused purge deactivated the org"
+    );
+    org.delete_pool(&pool).await.unwrap();
+}
+
+/// The org id is in the tag: another tenant's tagged session is foreign (#2291).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_does_not_end_another_tenants_tagged_session() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let (a, db) = org_with_database(&pool, "tagged").await;
+    // Not in this registry, so only its session can speak for it.
+    let b = Org {
+        id: Auto::Set(i64::from(i32::MAX) + i64::from(std::process::id())),
+        slug: format!("{}-b", a.slug),
+        database_url: a.database_url.clone(),
+        ..a.clone()
+    };
+    let other_pod = TenantPools::new(pg.clone());
+    let mut held = other_pod.database_acquire(&b).await.unwrap();
+
+    let err = purge_on(&pool, &a.slug)
+        .await
+        .expect_err("B's session is foreign");
+    assert!(err.to_string().contains("did not open"), "{err}");
+    let one: i32 = rustango::sql::sqlx::query_scalar("SELECT 1")
+        .fetch_one(&mut **held)
+        .await
+        .expect("B's session was killed");
+    assert_eq!(one, 1);
+
+    drop(held);
+    other_pod.invalidate(&b.slug).await;
+    a.delete_pool(&pool).await.unwrap();
+    rustango::sql::sqlx::query(&format!("DROP DATABASE \"{db}\" WITH (FORCE)"))
+        .execute(pg)
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "postgres")]
+async fn org_active(pool: &Pool, slug: &str) -> bool {
+    let rows: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch(pool)
+        .await
+        .unwrap();
+    rows[0].active
 }

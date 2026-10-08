@@ -10,7 +10,7 @@ Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, b
 
 ### Fixed — a database-mode purge no longer fails on other pods' connections (#2291)
 
-Tenant PG pools connect as `application_name = rustango-tenant:<org id>`; a purge ends only those sessions, on any pod. Any other session, or a URL naming the registry's database, refuses the purge.
+Tenant PG pools connect as `application_name = rustango-tenant:<org id>`; a purge ends only those sessions, on any pod. Any other session, a URL naming the registry's database, or another tenant on the same database refuses the purge before the org is touched.
 
 ### Fixed — a provisioning retry no longer revives a suspended tenant (#2292)
 
