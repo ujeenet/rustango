@@ -77,9 +77,53 @@ async fn an_empty_value_is_no_filter(pool: &Pool) {
     assert_eq!(names, ["alpha", "beta", "gamma"], "{body}");
 }
 
+/// #2227: a bad value or an unknown lookup used to drop the filter.
+async fn a_bad_filter_is_400_naming_the_param(pool: &Pool) {
+    for uri in [
+        "/items?category_id=abc",
+        "/items?category_id__in=1,abc",
+        "/items?category_id__frobulate=1",
+        "/items?name__regex=a",
+        "/items?created_at__gt=2024-01-31",
+        "/items?name__year=2024",
+    ] {
+        let (status, _, body) = get(pool, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        let param = uri.split(['?', '=']).nth(1).unwrap();
+        assert!(body.contains(param), "{uri}: {body}");
+    }
+}
+
+/// #2227: ORM lookups the ViewSet did not know.
+async fn orm_lookups_filter(pool: &Pool) {
+    for (uri, want) in [
+        ("/items?name__iexact=ALPHA", &["alpha"][..]),
+        ("/items?category_id__range=2,5", &["beta"]),
+        ("/items?created_at__date=2024-01-31", &["beta"]),
+        ("/items?created_at__month=1", &["alpha", "beta"]),
+        (
+            "/items?created_at__year__gte=2024",
+            &["alpha", "beta", "gamma"],
+        ),
+        (
+            "/items?created_at__date__gte=2024-01-31",
+            &["beta", "gamma"],
+        ),
+        // A plain date is the whole UTC day on a datetime.
+        ("/items?created_at__gte=2024-01-31", &["beta", "gamma"]),
+        ("/items?created_at__lte=2024-01-31", &["alpha", "beta"]),
+    ] {
+        let (status, names, body) = get(pool, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(names, want, "{uri}: {body}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         an_empty_value_is_no_filter,
+        a_bad_filter_is_400_naming_the_param,
+        orm_lookups_filter,
     ],
 }

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a bad ViewSet filter is a 400, not a dropped filter (#2227)
+
+An unparsable value or unknown lookup returned every row; it is now a `400` naming the param. `iexact`, `range` and the date parts (`year`, `date__gte`, ...) are accepted, and a plain date on a datetime `__gte`/`__lte` covers the whole UTC day.
+
 ### Fixed — an empty ViewSet filter value is no filter (#2226)
 
 `?category_id=` on a nullable field compared to NULL and returned no rows; empty values are now skipped, as in the admin.

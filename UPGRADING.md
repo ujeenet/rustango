@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet answers a bad filter with 400
+
+An unknown `__lookup` or a value that does not parse (`?id=abc`, `?id__in=1,x`, `?flag__isnull=maybe`) now returns `400` instead of being ignored (#2227).
+
 ### ViewSet skips empty filter values
 
 `?field=` with an empty value no longer filters, on any field (#2226). It used to match `''` on a string field and nothing on a nullable one.

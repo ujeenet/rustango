@@ -43,7 +43,7 @@
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
-//! | `{field}__{lookup}` | — | Lookup suffix (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
+//! | `{field}__{lookup}` | — | Lookup suffix (iexact/gt/gte/lt/lte/ne/in/not_in/range/contains/icontains/startswith/istartswith/endswith/iendswith/isnull, date parts such as year/date__gte). An unknown lookup or bad value is a `400` |
 //!
 //! Response: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`
 //!
@@ -2134,30 +2134,55 @@ fn no_content() -> Response {
         .unwrap()
 }
 
+/// Why a filter query param was refused, as a `400` (#2227).
+#[derive(Debug)]
+enum FilterError {
+    /// The `__lookup` suffix is not one the ViewSet supports.
+    UnknownLookup,
+    /// The value does not parse, or the lookup does not fit the field.
+    Invalid(String),
+    TooLong(crate::list_params::InListTooLong),
+}
+
+impl FilterError {
+    fn message(&self, param: &str) -> String {
+        match self {
+            Self::UnknownLookup => format!("filter `{param}`: unknown lookup"),
+            Self::Invalid(detail) => format!("filter `{param}`: {detail}"),
+            Self::TooLong(e) => e.to_string(),
+        }
+    }
+}
+
 /// Build a `WhereExpr` from one query-param `field[__lookup]=value` entry.
 ///
 /// Supported lookups:
-/// - (none) / `exact` — `Op::Eq`
+/// - (none) / `exact` — `Op::Eq`; `iexact` — case-insensitive
 /// - `gt`, `gte`, `lt`, `lte`, `ne`
-/// - `in` / `not_in` — comma-separated values
+/// - `in` / `not_in` — comma-separated values; `range` / `between` — `lo,hi`
 /// - `contains` (LIKE %v%) / `icontains` (ILIKE %v%)
 /// - `startswith` (LIKE v%) / `istartswith` (ILIKE v%)
 /// - `endswith` (LIKE %v) / `iendswith` (ILIKE %v)
 /// - `isnull` — value `"true"` / `"false"`
+/// - date parts as in `QuerySet::filter`: `year`, `month`, `day`, `hour`,
+///   `minute`, `second`, `quarter`, `week`, `week_day`, `date`, each
+///   optionally followed by `__gt`, `__gte`, `__lt`, `__lte` or `__ne`
 ///
 /// An empty value is no filter, as in the admin: on a nullable field
 /// it would parse to NULL and `col = NULL` matches nothing (#2226).
+/// An unknown lookup or a bad value is an error, never a dropped filter.
 fn build_lookup_filter(
     field: &'static crate::core::FieldSchema,
     lookup: Option<&str>,
     raw: &str,
-) -> Result<Option<WhereExpr>, crate::list_params::InListTooLong> {
+) -> Result<Option<WhereExpr>, FilterError> {
     if raw.is_empty() {
         return Ok(None);
     }
     let column = field.column;
-    let predicate =
-        |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
+    let predicate = |op: Op, value: SqlValue| WhereExpr::Predicate(Filter { column, op, value });
+    let parse =
+        |s: &str| parse_form_value(field, Some(s)).map_err(|e| FilterError::Invalid(e.to_string()));
     // Escapes the user value and pairs it with the matching
     // `*Escaped` op in one place, so no arm can combine an escaped
     // value with a plain `Op::Like`, or the reverse.
@@ -2170,41 +2195,56 @@ fn build_lookup_filter(
         };
         predicate(op, SqlValue::String(format!("{prefix}{escaped}{suffix}")))
     };
-    // The binary comparisons differ only in their `Op`, so map the
-    // lookup token to one, then parse and branch once.
-    let binary_op = match lookup.unwrap_or("exact") {
-        "exact" => Some(Op::Eq),
-        "ne" => Some(Op::Ne),
-        "gt" => Some(Op::Gt),
-        "gte" => Some(Op::Gte),
-        "lt" => Some(Op::Lt),
-        "lte" => Some(Op::Lte),
-        _ => None,
+    let lookup = lookup.unwrap_or("exact");
+    let (token, trailing) = match lookup.split_once("__") {
+        Some((token, trailing)) => (token, Some(trailing)),
+        None => (lookup, None),
     };
-    if let Some(op) = binary_op {
-        return Ok(parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(op, v)));
+    if let Some(transform) = crate::query::date_transform_fn(token) {
+        return date_part_filter(field, transform, trailing, raw).map(Some);
     }
-    Ok(match lookup.unwrap_or("exact") {
+    // The binary comparisons share the ORM's suffix table.
+    if let Some(op) = crate::query::date_compare_op(lookup) {
+        return match parse(raw) {
+            Ok(value) => Ok(Some(predicate(op, value))),
+            Err(e) => whole_day_bound(field, op, raw)
+                .map(|(op, value)| Some(predicate(op, value)))
+                .ok_or(e),
+        };
+    }
+    let parse_list = || -> Result<Vec<SqlValue>, FilterError> {
+        crate::list_params::split_in_list(raw)
+            .map_err(FilterError::TooLong)?
+            .into_iter()
+            .map(parse)
+            .collect()
+    };
+    Ok(Some(match lookup {
         "in" | "not_in" => {
-            let parts: Vec<SqlValue> = crate::list_params::split_in_list(raw)?
-                .into_iter()
-                .filter_map(|s| parse_form_value(field, Some(s)).ok())
-                .collect();
+            let parts = parse_list()?;
             if parts.is_empty() {
-                return Ok(None);
+                return Err(FilterError::Invalid(
+                    "expects comma-separated values".into(),
+                ));
             }
-            let op = if lookup == Some("not_in") {
+            let op = if lookup == "not_in" {
                 Op::NotIn
             } else {
                 Op::In
             };
             predicate(op, SqlValue::List(parts))
         }
+        "range" | "between" => {
+            let parts = parse_list()?;
+            if parts.len() != 2 {
+                return Err(FilterError::Invalid("expects two values, `lo,hi`".into()));
+            }
+            predicate(Op::Between, SqlValue::List(parts))
+        }
         // Escape LIKE metacharacters in the URL-supplied `raw`, so
         // `%` and `_` match literally, and use the `*Escaped` ops so
         // an ESCAPE clause is emitted. SQLite needs that clause.
+        "iexact" => escaped_like("", "", raw, true),
         "contains" => escaped_like("%", "%", raw, false),
         "icontains" => escaped_like("%", "%", raw, true),
         "startswith" => escaped_like("", "%", raw, false),
@@ -2212,11 +2252,81 @@ fn build_lookup_filter(
         "endswith" => escaped_like("%", "", raw, false),
         "iendswith" => escaped_like("%", "", raw, true),
         "isnull" => {
-            let is_null = matches!(raw.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+            let is_null = match raw.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => true,
+                "false" | "0" | "no" => false,
+                _ => return Err(FilterError::Invalid("expects `true` or `false`".into())),
+            };
             predicate(Op::IsNull, SqlValue::Bool(is_null))
         }
-        _ => None, // unknown lookup → silently ignore
-    })
+        _ => return Err(FilterError::UnknownLookup),
+    }))
+}
+
+/// `__year=2024`, `__date__gte=2024-01-01` and the other date parts.
+fn date_part_filter(
+    field: &'static crate::core::FieldSchema,
+    transform: crate::core::ScalarFn,
+    trailing: Option<&str>,
+    raw: &str,
+) -> Result<WhereExpr, FilterError> {
+    use crate::core::ScalarFn;
+    let op = match trailing {
+        None => Op::Eq,
+        Some(t) => crate::query::date_compare_op(t).ok_or(FilterError::UnknownLookup)?,
+    };
+    let time_part = matches!(
+        transform,
+        ScalarFn::ExtractHour | ScalarFn::ExtractMinute | ScalarFn::ExtractSecond
+    );
+    let fits = match field.ty {
+        FieldType::DateTime => true,
+        FieldType::Date => !time_part,
+        _ => false,
+    };
+    if !fits {
+        let needs = if time_part {
+            "a datetime"
+        } else {
+            "a date or datetime"
+        };
+        return Err(FilterError::Invalid(format!(
+            "this lookup needs {needs} field"
+        )));
+    }
+    let value = if transform == ScalarFn::TruncDate {
+        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map(SqlValue::Date)
+            .map_err(|_| FilterError::Invalid(format!("`{raw}` is not a date (YYYY-MM-DD)")))?
+    } else {
+        raw.parse::<i64>()
+            .map(SqlValue::I64)
+            .map_err(|_| FilterError::Invalid(format!("`{raw}` is not an integer")))?
+    };
+    Ok(crate::query::date_transform_where(
+        field.column,
+        transform,
+        op,
+        value,
+    ))
+}
+
+/// A plain date on a datetime `__gte` / `__lte` covers that whole UTC
+/// day. Other comparisons stay an error: `__gt=<day>` is ambiguous.
+fn whole_day_bound(field: &crate::core::FieldSchema, op: Op, raw: &str) -> Option<(Op, SqlValue)> {
+    if field.ty != FieldType::DateTime {
+        return None;
+    }
+    let day = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    let (op, day) = match op {
+        Op::Gte => (Op::Gte, day),
+        Op::Lte => (Op::Lt, day.succ_opt()?),
+        _ => return None,
+    };
+    Some((
+        op,
+        SqlValue::DateTime(day.and_time(chrono::NaiveTime::MIN).and_utc()),
+    ))
 }
 
 // ------------------------------------------------------------------ Handlers
@@ -2293,7 +2403,7 @@ async fn run_list(
                 filters.push(predicate);
             }
             Ok(None) => {}
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.message(param_key)),
         }
     }
     // Every list value is a bind, so the sum must fit the dialect too.
@@ -4146,16 +4256,73 @@ mod lookup_tests {
         }
     }
 
+    /// #2227: these used to drop the filter and widen the response.
     #[test]
-    fn unknown_lookup_returns_none() {
-        let r = build_lookup_filter(int_field(), Some("frobulate"), "x");
-        assert!(r.unwrap().is_none());
+    fn an_unknown_lookup_or_a_bad_value_is_an_error() {
+        static DATE: FieldSchema = FieldSchema::new("on", "on", FieldType::Date);
+        let date = &DATE;
+        for (field, lk, raw) in [
+            (int_field(), Some("frobulate"), "1"),
+            (int_field(), Some("gt"), "not-a-number"),
+            (int_field(), None, "abc"),
+            (int_field(), Some("in"), "1,abc"),
+            (int_field(), Some("in"), ","),
+            (int_field(), Some("range"), "1"),
+            (int_field(), Some("year"), "2024"),
+            (string_field(), Some("isnull"), "maybe"),
+            (date, Some("year"), "twenty"),
+            (date, Some("hour"), "1"),
+            (date, Some("year__contains"), "1"),
+        ] {
+            let r = build_lookup_filter(field, lk, raw);
+            assert!(r.is_err(), "{lk:?}={raw} must be refused: {r:?}");
+        }
     }
 
     #[test]
-    fn parse_failure_returns_none() {
-        let r = build_lookup_filter(int_field(), Some("gt"), "not-a-number");
-        assert!(r.unwrap().is_none());
+    fn date_parts_build_the_orm_shape() {
+        static DATE: FieldSchema = FieldSchema::new("on", "on", FieldType::Date);
+        let date = &DATE;
+        let r = build_lookup_filter(date, Some("year__gte"), "2024").unwrap();
+        assert!(
+            matches!(
+                r,
+                Some(WhereExpr::ExprCompare {
+                    op: Op::Gte,
+                    rhs: crate::core::Expr::Literal(SqlValue::I64(2024)),
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+    }
+
+    /// A plain date covers the whole day on a datetime `__gte` / `__lte`.
+    #[test]
+    fn a_plain_date_bounds_a_datetime_by_the_whole_day() {
+        static AT: FieldSchema = FieldSchema::new("at", "at", FieldType::DateTime);
+        let at = &AT;
+        let day = |d: u32| {
+            chrono::NaiveDate::from_ymd_opt(2024, 1, d)
+                .unwrap()
+                .and_time(chrono::NaiveTime::MIN)
+                .and_utc()
+        };
+        let f = extract_pred(
+            build_lookup_filter(at, Some("gte"), "2024-01-01")
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(f.op, Op::Gte);
+        assert!(matches!(f.value, SqlValue::DateTime(v) if v == day(1)));
+        let f = extract_pred(
+            build_lookup_filter(at, Some("lte"), "2024-01-01")
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(f.op, Op::Lt);
+        assert!(matches!(f.value, SqlValue::DateTime(v) if v == day(2)));
+        assert!(build_lookup_filter(at, Some("gt"), "2024-01-01").is_err());
     }
 }
 
