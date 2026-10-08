@@ -980,9 +980,14 @@ async fn compute_facets(
                         search: search.cloned(),
                         ..SelectQuery::new(model)
                     };
-                    facet_rows.extend(
-                        fetch_facet_counts(state, active_source, field, is_bool, Some(1)).await?,
-                    );
+                    let extra =
+                        fetch_facet_counts(state, active_source, field, is_bool, Some(1)).await?;
+                    // `?author=01` names a shown value in another spelling.
+                    let extra: Vec<FacetRow> = extra
+                        .into_iter()
+                        .filter(|e| facet_rows.iter().all(|r| r.raw != e.raw))
+                        .collect();
+                    facet_rows.extend(extra);
                 }
             }
         }

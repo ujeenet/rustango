@@ -597,6 +597,35 @@ async fn capped_facet_counts_null_as_a_value(pool: &Pool) {
     assert!(body.contains("+6 more"), "{body}");
 }
 
+/// `?owner_id=01` names a shown value; the facet lists it once (#2344).
+async fn noncanonical_active_value_is_listed_once(pool: &Pool) {
+    let _g = OWNERS_LOCK.lock().await;
+    let mut first = None;
+    for i in 0..20 {
+        let mut o = Owner {
+            id: Auto::default(),
+            name: format!("owner-{i:02}"),
+        };
+        o.insert_pool(pool).await.expect("insert owner");
+        let id = *o.id.get().expect("pk");
+        first.get_or_insert(id);
+        let mut p = Pet {
+            id: Auto::default(),
+            name: format!("pet-{i:02}"),
+            owner_id: id,
+        };
+        p.insert_pool(pool).await.expect("insert pet");
+    }
+    let first = first.unwrap();
+    let canonical = get(pool, &format!("/adminls_pet?owner_id={first}")).await;
+    let padded = get(pool, &format!("/adminls_pet?owner_id=0{first}")).await;
+    assert_eq!(
+        padded.matches("owner-00").count(),
+        canonical.matches("owner-00").count(),
+        "{padded}"
+    );
+}
+
 /// A bulk action past the bind-safe key cap is a 400 and writes nothing (#2049).
 async fn bulk_action_selection_is_capped(pool: &Pool) {
     let id = seed(pool, "kept-row", false).await;
@@ -630,6 +659,7 @@ tri_dialect_test! {
         empty_facet_lists_the_empty_rows,
         facet_reads_only_the_values_it_shows,
         capped_facet_counts_null_as_a_value,
+        noncanonical_active_value_is_listed_once,
         bulk_action_selection_is_capped,
     ],
 }
