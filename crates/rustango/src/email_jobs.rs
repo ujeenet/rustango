@@ -33,9 +33,8 @@
 //!   the queue backs off and retries; a rejected message is
 //!   [`crate::jobs::JobError::Fatal`]. A job that runs out of attempts
 //!   goes to the dead-letter callback.
-//! - The worker reads the [`crate::email::Mailer`] from a static
-//!   registry keyed by job name. Registering again replaces it, which
-//!   is handy in tests.
+//! - Each queue's handler holds the [`crate::email::Mailer`] it was
+//!   registered with, so two queues can send through two mailers.
 //!
 //! [`Email`]: crate::email::Email
 
@@ -97,24 +96,36 @@ impl Job for EmailJob {
                     "EmailJob: no mailer registered (call register_email_job at startup)".into(),
                 )
             })?;
-        mailer.send(&self.email).await.map_err(|e| {
-            if e.is_retryable() {
-                JobError::Retryable(format!("mailer: {e}"))
-            } else {
-                JobError::Fatal(format!("mailer: {e}"))
-            }
-        })
+        send(&mailer, &self.email).await
     }
 }
 
+async fn send(mailer: &BoxedMailer, email: &Email) -> Result<(), JobError> {
+    mailer.send(email).await.map_err(|e| {
+        if e.is_retryable() {
+            JobError::Retryable(format!("mailer: {e}"))
+        } else {
+            JobError::Fatal(format!("mailer: {e}"))
+        }
+    })
+}
+
 /// Register the email job and its mailer on `queue`, once at startup.
-/// Calling it again replaces the mailer.
+/// Calling it again on the same queue replaces the mailer; each queue
+/// keeps its own (#2334).
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
+    // Only for a custom queue that does not override `register_with`.
     mailer_registry()
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(EmailJob::NAME, cfg.mailer);
-    queue.register::<EmailJob>().await;
+        .insert(EmailJob::NAME, cfg.mailer.clone());
+    let mailer = cfg.mailer;
+    queue
+        .register_with(move |job: EmailJob| {
+            let mailer = mailer.clone();
+            async move { send(&mailer, &job.email).await }
+        })
+        .await;
 }
 
 /// Queue an email and return at once; a worker delivers it.
@@ -247,6 +258,37 @@ mod tests {
         assert_eq!(m2.count(), 1, "new mailer should receive");
 
         q.shutdown().await;
+    }
+
+    /// Two queues keep their own mailers; the second registration must
+    /// not reroute the first queue's mail (#2334).
+    #[tokio::test]
+    async fn two_queues_send_through_their_own_mailers() {
+        let _g = lock().lock().await;
+        reset_mailer_registry();
+        let (m1, m2) = (
+            StdArc::new(InMemoryMailer::new()),
+            StdArc::new(InMemoryMailer::new()),
+        );
+        let (q1, q2) = (
+            InMemoryJobQueue::with_workers(1),
+            InMemoryJobQueue::with_workers(1),
+        );
+        register_email_job(&q1, EmailJobConfig::new(m1.clone())).await;
+        register_email_job(&q2, EmailJobConfig::new(m2.clone())).await;
+        q1.start().await;
+        q2.start().await;
+
+        dispatch_email(&q1, &email()).await.unwrap();
+        for _ in 0..50 {
+            if m1.count() + m2.count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!((m1.count(), m2.count()), (1, 0), "sent by the wrong mailer");
+        q1.shutdown().await;
+        q2.shutdown().await;
     }
 
     /// Retries span minutes, so a short relay outage does not dead-letter

@@ -390,6 +390,15 @@ impl JobQueue for PgJobQueue {
         self.registry.lock().await.register::<T>();
     }
 
+    async fn register_with<T, F, Fut>(&self, run: F)
+    where
+        T: Job,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), JobError>> + Send + 'static,
+    {
+        self.registry.lock().await.register_with::<T, F, Fut>(run);
+    }
+
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;

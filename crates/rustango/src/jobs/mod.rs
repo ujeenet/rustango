@@ -129,6 +129,21 @@ pub trait JobQueue: Send + Sync + 'static {
     /// Register a job type. Must be called before `dispatch::<T>` or `start`.
     async fn register<T: Job>(&self);
 
+    /// Register `T` with `run` in place of [`Job::run`], so the handler
+    /// can hold state the payload cannot carry, such as a mailer.
+    ///
+    /// Both built-in queues override this. The default ignores `run`
+    /// and registers [`Job::run`], so a custom queue keeps compiling.
+    async fn register_with<T, F, Fut>(&self, run: F)
+    where
+        T: Job,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), JobError>> + Send + 'static,
+    {
+        drop(run);
+        self.register::<T>().await;
+    }
+
     /// Enqueue a job for asynchronous execution.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError>;
 
@@ -259,12 +274,24 @@ struct HandlerRegistry {
 
 impl HandlerRegistry {
     fn register<T: Job>(&mut self) {
+        self.register_with::<T, _, _>(|job: T| async move { job.run().await });
+    }
+
+    /// Register `T` with `run` standing in for [`Job::run`].
+    fn register_with<T, F, Fut>(&mut self, run: F)
+    where
+        T: Job,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), JobError>> + Send + 'static,
+    {
+        let run = Arc::new(run);
         let handler: HandlerFn = Arc::new(move |payload| {
+            let run = run.clone();
             Box::pin(async move {
                 let job: T =
                     serde_json::from_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
                 // A panic is a failed run, not a dead worker (#1843).
-                crate::panic_guard::catch_unwind(job.run())
+                crate::panic_guard::catch_unwind(run(job))
                     .await
                     .unwrap_or_else(|panic| {
                         let msg = crate::panic_guard::panic_message(&*panic);
@@ -439,6 +466,15 @@ pub fn inmemory_from_settings(s: &crate::config::JobsSettings) -> Arc<InMemoryJo
 impl JobQueue for InMemoryJobQueue {
     async fn register<T: Job>(&self) {
         self.registry.lock().await.register::<T>();
+    }
+
+    async fn register_with<T, F, Fut>(&self, run: F)
+    where
+        T: Job,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), JobError>> + Send + 'static,
+    {
+        self.registry.lock().await.register_with::<T, F, Fut>(run);
     }
 
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
