@@ -77,6 +77,8 @@ fn manage(root: &Path, args: &[&str]) -> String {
         .args(args)
         .env("CARGO_TARGET_DIR", shared_target())
         .env("CARGO_INCREMENTAL", "0")
+        // Pick deps the running toolchain supports; the repo pins 1.88 (#2310).
+        .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
         .output()
         .unwrap_or_else(|e| panic!("run manage {args:?}: {e}"));
     assert!(
@@ -100,6 +102,8 @@ fn check(root: &Path) -> (bool, usize, String) {
         ])
         .env("CARGO_TARGET_DIR", shared_target())
         .env("CARGO_INCREMENTAL", "0")
+        // Pick deps the running toolchain supports; the repo pins 1.88 (#2310).
+        .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
         .output()
         .expect("run cargo check");
     let stdout = String::from_utf8_lossy(&out.stdout);

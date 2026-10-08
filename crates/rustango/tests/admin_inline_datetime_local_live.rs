@@ -9,7 +9,7 @@
 //! Uses its own throwaway models so it can't perturb the other inline
 //! tests' inventory.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

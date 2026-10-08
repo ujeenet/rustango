@@ -343,7 +343,8 @@ impl RateLimitLayer {
         let retry = if rate > 0.0 {
             ((1.0 - tokens) / rate).ceil() as u64
         } else {
-            u64::MAX
+            // Capacity 0 never refills; one period is a sane header, not u64::MAX (#2299).
+            self.refill_period.as_secs()
         };
         retry.max(1)
     }
@@ -436,6 +437,13 @@ mod tests {
         assert!(result.is_err());
         let retry_after = result.unwrap_err();
         assert!(retry_after >= 1);
+    }
+
+    /// #2299 — a zero-capacity limiter must not send `Retry-After: u64::MAX`.
+    #[tokio::test]
+    async fn zero_capacity_retry_after_is_one_period() {
+        let l = RateLimitLayer::global(0, Duration::from_secs(60));
+        assert_eq!(l.take("k").await.unwrap_err(), 60);
     }
 
     #[tokio::test]

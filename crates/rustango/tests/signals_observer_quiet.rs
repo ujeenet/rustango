@@ -2,6 +2,8 @@
 //! lifecycle hooks under one struct, and the `without_signals` /
 //! `save_quietly` / `delete_quietly` task-local suppression scope.
 
+#![cfg(feature = "signals")]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
