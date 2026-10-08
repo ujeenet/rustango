@@ -116,21 +116,19 @@ impl Dialect for Postgres {
     }
 
     fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON COLUMN {}.{} IS '{}'",
+            "COMMENT ON COLUMN {}.{} IS {}",
             self.quote_ident(table),
             self.quote_ident(column),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 
     fn table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
         Some(format!(
-            "COMMENT ON TABLE {} IS '{}'",
+            "COMMENT ON TABLE {} IS {}",
             self.quote_ident(table),
-            escaped,
+            self.quote_literal(comment),
         ))
     }
 
@@ -224,6 +222,25 @@ impl Dialect for Postgres {
     /// `true` is correct; the explicit override documents intent.)
     fn supports_op(&self, _op: Op) -> bool {
         true
+    }
+
+    /// `bigint ILIKE text` has no operator, so a non-text column is
+    /// cast first (#2229).
+    fn write_ilike_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        match ty {
+            Some(ty) if ty != FieldType::String => {
+                let cast = format!("CAST({qualified_col} AS TEXT)");
+                self.write_ilike(sql, &cast, placeholder, negated);
+            }
+            _ => self.write_ilike(sql, qualified_col, placeholder, negated),
+        }
     }
 
     fn write_conflict_clause(

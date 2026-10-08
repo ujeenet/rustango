@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — search and ILIKE on non-text columns (#2229)
+
+On PostgreSQL, search and `Q::ilike` on an int, UUID or FK column cast it to text instead of failing with `bigint ~~* text`. SQLite matches a UUID by its text form.
+
+### Fixed — MySQL inline literals escape backslashes (#2232)
+
+The `string_agg` separator and DDL `COMMENT`s go through one `Dialect::quote_literal`; a `\` no longer breaks the statement or the value.
+
 ### Added — `server::catch_panics` (#2168)
 
 Wrap your routes in it before your own layers so they see a handler panic's 500; the default stack is unchanged.
