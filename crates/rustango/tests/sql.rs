@@ -627,10 +627,10 @@ fn search_alone_emits_or_chain_with_one_param_per_column() {
     // #438 — one param + placeholder per column instead of one shared
     // `$1` repeated. Lets MySQL/SQLite (positional `?`) round-trip
     // multi-column search; PG accepts either shape and the new one is
-    // a hair more explicit.
+    // a hair more explicit. #2229 — the bool column is cast to text.
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 ESCAPE '!' OR "is_active" ILIKE $2 ESCAPE '!')"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 ESCAPE '!' OR CAST("is_active" AS TEXT) ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
         stmt.params,

@@ -51,6 +51,10 @@
 //!   the cache, since its response probably depends on the caller.
 //!   Only [`CachePageLayer::cache_authenticated`] changes that, and
 //!   only for a route you know is public.
+//! - **The response's own `Vary` is honoured.** A response whose
+//!   `Vary` is `*` or names a request header outside the key (such as
+//!   `Accept-Encoding` from compression) is not cached; add that header
+//!   with [`CachePageLayer::vary_on`] to cache it per value.
 //! - **The body is buffered.** A response loses its streaming
 //!   behaviour under this layer. Use [`never_cache`] on streaming
 //!   handlers, or leave the layer off those routes.
@@ -69,6 +73,7 @@
 //! [`CachePageLayer::cache_query`]: crate::cache_page::CachePageLayer::cache_query
 //! [`CachePageLayer::cache_authenticated`]: crate::cache_page::CachePageLayer::cache_authenticated
 //! [`CachePageLayer::tenant_agnostic`]: crate::cache_page::CachePageLayer::tenant_agnostic
+//! [`CachePageLayer::vary_on`]: crate::cache_page::CachePageLayer::vary_on
 //! [`CacheControl`]: crate::cache_page::CacheControl
 //! [`never_cache`]: crate::cache_page::never_cache
 //! [`vary_on`]: crate::cache_page::vary_on
@@ -84,6 +89,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use tower::Service;
 
+use crate::body_limit::collect_capped;
 use crate::cache::BoxedCache;
 
 // ---------------------------------------------------------------- Wire format
@@ -154,7 +160,8 @@ impl CachePageLayer {
     }
 
     /// Add header names whose values go into the cache key. Names are
-    /// lowercased. Calling this again appends.
+    /// lowercased. Calling this again appends. A response that `Vary`s
+    /// on a header not listed here is not cached.
     ///
     /// # Panics
     /// Panics on a name that is not a valid header name. That is a
@@ -385,25 +392,34 @@ where
             if status != StatusCode::OK || sets_cookie || cache_control_opt_out {
                 return Ok(resp);
             }
+            if let Some(token) = unkeyed_vary(resp.headers(), &vary, cache_authenticated) {
+                warn_unkeyed_vary(&token);
+                let mut resp = resp;
+                resp.headers_mut()
+                    .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                return Ok(resp);
+            }
 
             // Buffer the body so it can be stored and replayed.
             let (parts, body) = resp.into_parts();
-            let bytes = match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
-                Ok(b) => b,
+            let bytes = match collect_capped(body, MAX_CACHEABLE_BODY_BYTES).await {
+                Ok(Ok(b)) => b,
+                Ok(Err(whole)) => {
+                    // Too large to store: send it all, uncached (#2218).
+                    let mut resp = Response::from_parts(parts, whole);
+                    resp.headers_mut()
+                        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                    return Ok(resp);
+                }
                 Err(e) => {
+                    // The stream broke; a 500 beats a truncated 200.
                     tracing::warn!(
                         target: "rustango::cache_page",
                         error = %e,
-                        max_bytes = MAX_CACHEABLE_BODY_BYTES,
-                        "response body exceeds cache size limit or failed to buffer; \
-                         passing through uncached"
+                        "response body failed to buffer"
                     );
-                    // `body` is already consumed, so the original
-                    // cannot be returned. Send an empty body marked
-                    // BYPASS so monitoring can see it.
-                    let mut resp = Response::from_parts(parts, Body::empty());
-                    resp.headers_mut()
-                        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                    let mut resp = Response::new(Body::empty());
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                     return Ok(resp);
                 }
             };
@@ -593,6 +609,43 @@ fn payload_too_large() -> Response<Body> {
     resp.headers_mut()
         .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
     resp
+}
+
+/// The first `Vary` token outside the key, if any (#2219).
+/// `Cookie` and `Authorization` count unless `cache_authenticated`: such
+/// requests skip this cache, so every entry was made without them.
+fn unkeyed_vary(
+    headers: &HeaderMap,
+    vary_on: &[HeaderName],
+    cache_authenticated: bool,
+) -> Option<String> {
+    headers
+        .get_all(axum::http::header::VARY)
+        .iter()
+        .flat_map(|v| v.to_str().unwrap_or("*").split(','))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .find(|t| {
+            !(t.eq_ignore_ascii_case("host")
+                || vary_on.iter().any(|n| t.eq_ignore_ascii_case(n.as_str()))
+                || (!cache_authenticated
+                    && (t.eq_ignore_ascii_case("cookie")
+                        || t.eq_ignore_ascii_case("authorization"))))
+        })
+        .map(str::to_owned)
+}
+
+/// Log once per process: an unkeyed `Vary` otherwise just stops caching.
+fn warn_unkeyed_vary(token: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            target: "rustango::cache_page",
+            vary = token,
+            "response varies on a header outside the cache key; not cached. \
+             Add it with CachePageLayer::vary_on to cache per value"
+        );
+    });
 }
 
 /// Append `<len>:<bytes>|` so parts can be joined without ambiguity.

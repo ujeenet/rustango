@@ -196,3 +196,36 @@ async fn m2m_changed_fires_on_add() {
     assert_eq!(events[0].through, "gm2m_taggables");
     assert_eq!(events[0].dst_pks, vec![rustango::core::SqlValue::I64(42)]);
 }
+
+/// A duplicate `add` or a missing `remove` changed nothing, so fires nothing (#2221).
+#[tokio::test]
+async fn m2m_changed_skips_noop_add_and_remove() {
+    let _g = suite_lock().lock().await;
+    clear_all();
+
+    let captured: Arc<Mutex<Vec<M2mChangedContext>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    connect_m2m_changed(move |ctx| {
+        let sink = sink.clone();
+        async move {
+            sink.lock().await.push(ctx);
+        }
+    });
+
+    let pool = fresh_pool().await;
+    let post = Post {
+        id: Auto::from(5),
+        title: "Sig".into(),
+    };
+    post.tags_m2m().add(42, &pool).await.unwrap();
+    post.tags_m2m().add(42, &pool).await.unwrap();
+    post.tags_m2m().remove(7, &pool).await.unwrap();
+
+    let events = captured.lock().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "expected one m2m_changed event: {events:?}"
+    );
+    assert!(matches!(events[0].action, M2mAction::Add));
+}

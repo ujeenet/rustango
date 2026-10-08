@@ -44,8 +44,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use super::error::ExecError;
 use super::{FlatScalar, Pool};
 use crate::core::{
-    BulkInsertQuery, ConflictClause, CountQuery, DeleteQuery, FieldSchema, FieldType, Filter,
-    InsertQuery, ModelSchema, Op, QueryError, SelectQuery, SqlValue, WhereExpr,
+    BulkInsertQuery, CountQuery, DeleteQuery, FieldSchema, FieldType, Filter, InsertQuery,
+    ModelSchema, Op, QueryError, SelectQuery, SqlValue, WhereExpr,
 };
 
 /// Manages the rows in a junction table for one source instance.
@@ -89,20 +89,22 @@ impl M2MManager {
     }
 
     /// Add `dst_id` to the junction table. No-op if already present.
-    /// Tri-dialect: an `InsertQuery` with [`ConflictClause::DoNothing`].
+    /// Tri-dialect: [`insert_or_ignore`](super::insert_or_ignore); a duplicate fires no signal.
     ///
     /// # Errors
     /// Driver failures, or a key outside the through model's field bounds.
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let src = self.src_key()?;
-        let mut query = InsertQuery::new(
+        let query = InsertQuery::new(
             self.junction(),
             vec![self.src_col, self.dst_col],
             vec![src.clone(), dst.clone()],
         );
-        query.on_conflict = Some(ConflictClause::DoNothing);
-        super::executor::insert_pool(pool, &query).await?;
+        // A skipped duplicate changed nothing, so it fires no signal (#2221).
+        if !super::executor::insert_or_ignore(pool, &query).await? {
+            return Ok(());
+        }
         // #410 — fire m2m_changed after successful junction-row write.
         // `signals` is an optional feature, so every emission below is gated
         // (#1208) — these statements were unconditional while the module is not.
@@ -128,7 +130,9 @@ impl M2MManager {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let src = self.src_key()?;
         let filters = vec![eq(self.src_col, src.clone()), eq(self.dst_col, dst.clone())];
-        delete(self.junction(), filters, pool).await?;
+        if delete(self.junction(), filters, pool).await? == 0 {
+            return Ok(());
+        }
         // #410 — fire m2m_changed after successful junction-row remove.
         #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
@@ -491,13 +495,14 @@ impl GenericM2MManager {
             .map(|f| f.value)
             .collect();
         values.push(dst.clone());
-        let mut query = InsertQuery::new(
+        let query = InsertQuery::new(
             self.junction(),
             vec![self.pk_col, self.ct_col, self.dst_col],
             values,
         );
-        query.on_conflict = Some(ConflictClause::DoNothing);
-        super::executor::insert_pool(pool, &query).await?;
+        if !super::executor::insert_or_ignore(pool, &query).await? {
+            return Ok(());
+        }
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Add, vec![dst])
             .await;
@@ -512,7 +517,9 @@ impl GenericM2MManager {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let mut filters = self.owner(pool).await?;
         filters.push(eq(self.dst_col, dst.clone()));
-        delete(self.junction(), filters, pool).await?;
+        if delete(self.junction(), filters, pool).await? == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst])
             .await;

@@ -3443,18 +3443,37 @@ where
     tera: Arc<Tera>,
 }
 
-async fn handle_form_view_get<F>(State(state): State<Arc<StandaloneFormViewState<F>>>) -> Response
+/// Render the form template with the CSRF token stamped in (#2234).
+fn render_standalone_form<F>(
+    state: &StandaloneFormViewState<F>,
+    mut ctx: Context,
+    csrf: &CsrfCookie,
+) -> Response
+where
+    F: crate::forms::Form,
+{
+    let set_cookie = stamp_csrf(csrf, &mut ctx);
+    let mut resp = render(&state.tera, &state.vs.template, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
+}
+
+async fn handle_form_view_get<F>(
+    State(state): State<Arc<StandaloneFormViewState<F>>>,
+    csrf: CsrfCookie,
+) -> Response
 where
     F: crate::forms::Form,
 {
     let mut ctx = Context::new();
     ctx.insert("errors", &HashMap::<String, Vec<String>>::new());
     ctx.insert("values", &HashMap::<String, String>::new());
-    render(&state.tera, &state.vs.template, &ctx)
+    render_standalone_form(&state, ctx, &csrf)
 }
 
 async fn handle_form_view_post<F>(
     State(state): State<Arc<StandaloneFormViewState<F>>>,
+    csrf: CsrfCookie,
     axum::extract::Form(payload): axum::extract::Form<HashMap<String, String>>,
 ) -> Response
 where
@@ -3482,14 +3501,14 @@ where
                 let mut ctx = Context::new();
                 ctx.insert("errors", &errors);
                 ctx.insert("values", &payload);
-                render(&state.tera, &state.vs.template, &ctx)
+                render_standalone_form(&state, ctx, &csrf)
             }
         },
         Err(form_errors) => {
             let mut ctx = Context::new();
             ctx.insert("errors", form_errors.fields());
             ctx.insert("values", &payload);
-            render(&state.tera, &state.vs.template, &ctx)
+            render_standalone_form(&state, ctx, &csrf)
         }
     }
 }
@@ -5934,6 +5953,86 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
+    }
+
+    /// A template that renders `{{ csrf_input | safe }}` gets the token on
+    /// GET, and posting it back with the GET's cookie passes the CSRF layer (#2234).
+    #[tokio::test]
+    async fn form_view_round_trips_the_rendered_csrf_token() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "<form>{{ csrf_input | safe }}</form>")
+            .unwrap();
+        let app = FormView::<OkForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .success_url("/done")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookies: Vec<String> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|c| c.split(';').next())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(cookies.len(), 1, "one CSRF cookie: {cookies:?}");
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        let token = body
+            .split(r#"name="_csrf" value=""#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| panic!("no rendered token: {body}"));
+
+        let post = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", &cookies[0])
+            .body(Body::from(format!("_csrf={token}")))
+            .unwrap();
+        let res = app.oneshot(post).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// The POST re-render carries the token too, so a fix-and-resubmit works (#2234).
+    #[tokio::test]
+    async fn form_view_rerender_keeps_the_csrf_token() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "{{ csrf_input | safe }}")
+            .unwrap();
+        let app = FormView::<AnyForm>::for_form(|_| async { Err("nope".to_owned()) })
+            .template("f.html")
+            .router("/", Arc::new(tera));
+        let res = app.oneshot(csrf_form_post("/", "")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        assert!(
+            std::str::from_utf8(&body).unwrap().contains(TEST_CSRF),
+            "re-render must carry the cookie's token"
+        );
+    }
+
+    struct AnyForm;
+    impl crate::forms::Form for AnyForm {
+        fn parse(_: &HashMap<String, String>) -> Result<Self, crate::forms::FormErrors> {
+            Ok(AnyForm)
+        }
     }
 
     const TEST_CSRF: &str = "existing-token-existing-token-existing-toke";

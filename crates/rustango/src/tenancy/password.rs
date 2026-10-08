@@ -161,6 +161,32 @@ pub(crate) async fn verify_dummy_async_in(
         .map_err(|_| TenancyError::Busy)
 }
 
+/// The first of `rows` whose hash `secret` verifies against. Lookup
+/// prefixes are random, not unique, so every row sharing one is tried
+/// (#2250). No rows still costs one verify, so an unknown prefix times
+/// like a wrong secret.
+///
+/// # Errors
+/// [`TenancyError::Busy`]. A hash that will not parse counts as a miss.
+pub(crate) async fn first_verified<T>(
+    rows: Vec<T>,
+    secret: &str,
+    hash: impl Fn(&T) -> &str,
+) -> Result<Option<T>, TenancyError> {
+    if rows.is_empty() {
+        verify_dummy_async_in(HashLane::Credential, secret).await?;
+        return Ok(None);
+    }
+    for row in rows {
+        match verify_async_in(HashLane::Credential, secret, hash(&row)).await {
+            Ok(true) => return Ok(Some(row)),
+            Err(TenancyError::Busy) => return Err(TenancyError::Busy),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

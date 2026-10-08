@@ -107,6 +107,17 @@ pub async fn verify_agent_token(
     token: &str,
     expected_tenant: &str,
 ) -> Option<McpAgent> {
+    verify_agent_claims(jwt, token, expected_tenant)
+        .await
+        .map(|(agent, _)| agent)
+}
+
+/// [`verify_agent_token`] plus the token's `exp`, in unix seconds.
+async fn verify_agent_claims(
+    jwt: &JwtLifecycle,
+    token: &str,
+    expected_tenant: &str,
+) -> Option<(McpAgent, i64)> {
     let claims = jwt.verify_access(token).await?;
     if claims.get_custom::<String>(CLAIM_KIND).as_deref() != Some(KIND_AGENT) {
         return None;
@@ -117,7 +128,7 @@ pub async fn verify_agent_token(
     }
     // A token from before the claim existed cannot be checked for rotation.
     let secret_prefix = claims.get_custom::<String>(CLAIM_KEY_PREFIX)?;
-    Some(McpAgent {
+    let agent = McpAgent {
         agent_id: claims.sub,
         tenant,
         skills: claims
@@ -129,7 +140,8 @@ pub async fn verify_agent_token(
         user_id: claims.get_custom::<i64>(CLAIM_UID),
         jti: claims.jti,
         secret_prefix,
-    })
+    };
+    Some((agent, claims.exp))
 }
 
 // --------------------------------------------------------------- HTTP layer
@@ -323,8 +335,20 @@ pub(crate) async fn authenticate_bearer(
     slug: &str,
     token: &str,
 ) -> Result<McpAgent, BearerRejection> {
-    match verify_agent_token(jwt, token, slug).await {
-        Some(mut agent) => {
+    authenticate_bearer_until(jwt, pool, slug, token)
+        .await
+        .map(|(agent, _)| agent)
+}
+
+/// [`authenticate_bearer`] plus the JWT's `exp` (unix seconds); a raw key has none.
+pub(crate) async fn authenticate_bearer_until(
+    jwt: &JwtLifecycle,
+    pool: &crate::sql::Pool,
+    slug: &str,
+    token: &str,
+) -> Result<(McpAgent, Option<i64>), BearerRejection> {
+    match verify_agent_claims(jwt, token, slug).await {
+        Some((mut agent, exp)) => {
             // The JWT holds no state, so check here that the agent,
             // and the owner of a user-owned key, still exist and are
             // active, and that its secret was not rotated. A revoked
@@ -353,10 +377,10 @@ pub(crate) async fn authenticate_bearer(
                 None => crate::tenancy::resolve_agent_grants_pool(pool, agent.agent_id).await,
             };
             (agent.skills, agent.tools) = grants?;
-            Ok(agent)
+            Ok((agent, Some(exp)))
         }
         None => match verify_raw_agent_credential(pool, slug, token).await {
-            Ok(Some(agent)) => Ok(agent),
+            Ok(Some(agent)) => Ok((agent, None)),
             Ok(None) => Err(BearerRejection::Unauthorized),
             Err(e) => Err(e.into()),
         },
