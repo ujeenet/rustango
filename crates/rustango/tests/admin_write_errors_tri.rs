@@ -1,6 +1,7 @@
 //! Admin write errors on every backend: a bad action is a 400 (#2346);
 //! a refused write shows a plain message, never the driver's text (#2345);
-//! deleting a referenced row is a 409 naming the referrer (#2340).
+//! deleting a referenced row is a 409 naming the referrer (#2340); a bad
+//! inline row re-renders the form and saves no inline row (#2339).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -40,6 +41,14 @@ pub struct Child {
     #[rustango(max_length = 32, unique)]
     pub note: String,
 }
+
+rustango::register_admin_inline!(
+    parent = "wrerr_parent",
+    child = "wrerr_child",
+    fk = "parent_id",
+    fields = &["qty", "note"],
+    extra = 2,
+);
 
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
@@ -161,6 +170,62 @@ async fn deleting_a_referenced_row_is_a_409(pool: &Pool) {
     assert_eq!(parent_count(pool).await, 1);
 }
 
+async fn notes(pool: &Pool) -> Vec<String> {
+    let mut v: Vec<String> = Child::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|c| c.note)
+        .collect();
+    v.sort();
+    v
+}
+
+fn inline_form(rows: &[(&str, &str)]) -> String {
+    let mut form = format!(
+        "name=renamed&wrerr_child-TOTAL_FORMS={}&wrerr_child-INITIAL_FORMS=0",
+        rows.len()
+    );
+    for (i, (qty, note)) in rows.iter().enumerate() {
+        form.push_str(&format!(
+            "&wrerr_child-{i}-qty={qty}&wrerr_child-{i}-note={note}"
+        ));
+    }
+    form
+}
+
+/// An unparsable inline value refuses the POST, parent included (#2339).
+async fn bad_inline_value_rerenders_the_form(pool: &Pool) {
+    let p = seed_parent(pool, "p").await;
+    let form = inline_form(&[("1", "ok"), ("abc", "bad")]);
+    let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("wrerr_child row 2"), "{body}");
+    assert!(notes(pool).await.is_empty(), "inline rows saved");
+    let names: Vec<String> = Parent::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, ["p"]);
+}
+
+/// A refused inline write rolls back every inline row and says so (#2339).
+async fn refused_inline_write_rolls_back(pool: &Pool) {
+    let p = seed_parent(pool, "p").await;
+    seed_child(pool, p, "taken").await;
+    let form = inline_form(&[("1", "fresh"), ("2", "taken")]);
+    let (status, body) = post(pool, &format!("/wrerr_parent/{p}"), &form).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_driver_text(&body);
+    assert!(body.contains("no inline row was"), "{body}");
+    assert!(body.contains("already exists"), "{body}");
+    assert_eq!(notes(pool).await, ["taken"], "partial inline write kept");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -168,5 +233,7 @@ tri_dialect_test! {
         unique_refusal_is_a_plain_message,
         fk_refusal_is_a_plain_message,
         deleting_a_referenced_row_is_a_409,
+        bad_inline_value_rerenders_the_form,
+        refused_inline_write_rolls_back,
     ],
 }

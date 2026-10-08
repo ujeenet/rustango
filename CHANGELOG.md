@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
+
+A bad inline value re-renders the form before anything is written. Inline writes now share one transaction: a refused row rolls them all back and the form says so. `InlineApplyOutcome::failed` is always 0.
+
 ### Fixed — admin: deleting a still-referenced row is a 409, not a 500 (#2340)
 
 Single delete and `delete_selected` name the referencing table. `pre_delete` signals have already fired by then; `post_delete` does not.

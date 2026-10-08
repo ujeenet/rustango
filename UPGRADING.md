@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin write errors
+
+A bad inline row now refuses the edit and rolls all inline writes back (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346).
+
 ### Custom `Cache` backends: override `touch`
 
 `SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).

@@ -2343,9 +2343,19 @@ pub(crate) async fn update_submit(
     })
     .await;
 
-    // Apply the inline writes. There is no transaction across rows: a
-    // per-row write failure is counted, not rolled back.
-    let _ = super::inlines::apply_plan(&state.pool, inline_plan).await;
+    // The inline writes share one transaction, after the parent's. A
+    // failure rolls them all back and re-renders the form (#2339).
+    if let Err(e) = super::inlines::apply_plan(&state.pool, inline_plan).await {
+        use super::inlines::InlineApplyError as E;
+        let why = match e {
+            E::Write { child, error } => write_error(child, &error),
+            E::MaxNum { table } => format!("{table} allows no more rows here."),
+            E::Tx(error) => write_error(model, &error),
+        };
+        let msg = format!("{} was saved, but no inline row was: {why}", model.name);
+        let html = render_form(&state, model, Some(&form), true, Some(&msg));
+        return Ok(Html(html).into_response());
+    }
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())

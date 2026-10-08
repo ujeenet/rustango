@@ -930,7 +930,8 @@ pub struct InlineApplyOutcome {
     pub deleted: usize,
     /// New rows successfully inserted (extra/empty slots with content).
     pub inserted: usize,
-    /// Rows that failed to validate or write — counted but skipped.
+    /// Always 0: a row that fails to parse or write now refuses the
+    /// whole POST and rolls the inline writes back (#2339).
     pub failed: usize,
 }
 
@@ -1131,8 +1132,9 @@ impl InlineTarget {
 pub(crate) enum InlinePlanError {
     /// A gate or lookup error: the response is the error's own.
     Admin(AdminError),
-    /// An edited child row was deleted after the page loaded, or the
-    /// rows would pass `max_num`. The form re-renders with this message.
+    /// An edited child row was deleted after the page loaded, a row
+    /// failed to parse (#2339), or the rows would pass `max_num`. The
+    /// form re-renders with this message.
     Rejected(String),
     /// A malformed or oversized management form (#1892). The form re-renders.
     BadFormset(crate::forms::formset::FormSetError),
@@ -1154,12 +1156,11 @@ impl From<ExecError> for InlinePlanError {
 /// UPDATE and DELETE is keyed on the parent; every INSERT pins it.
 pub(crate) struct InlinePlan {
     targets: Vec<TargetPlan>,
-    failed: usize,
 }
 
 /// One inline's writes: existing rows first, then inserts.
-#[derive(Default)]
 struct TargetPlan {
+    child: &'static ModelSchema,
     existing: Vec<InlineWrite>,
     inserts: Vec<crate::core::InsertQuery>,
     /// Deletes the inserts rely on to stay within `max_num`.
@@ -1176,8 +1177,8 @@ enum InlineWrite {
 ///
 /// A row per FormSet slot: a slot past `INITIAL_FORMS` (or, without it, an
 /// empty PK) with content → INSERT; an existing row with the DELETE box →
-/// DELETE, without it → UPDATE. A row whose values fail
-/// to parse is counted in `failed` and skipped.
+/// DELETE, without it → UPDATE. A row whose values fail to parse
+/// refuses the whole POST.
 ///
 /// An unchanged existing row is skipped: no gate, no write. Deleting a
 /// row that is already gone counts as done.
@@ -1186,7 +1187,7 @@ enum InlineWrite {
 /// [`AdminError::ReadOnly`] or [`AdminError::Forbidden`] when a child
 /// gate refuses a row; [`AdminError::RowNotFound`] when a submitted child
 /// PK is under another parent or hidden by its `view` hook; [`InlinePlanError::Rejected`] when an edited
-/// row no longer exists or the rows would pass `max_num`.
+/// row no longer exists, a row fails to parse, or the rows would pass `max_num`.
 pub(crate) async fn plan_post(
     state: &AppState,
     parts: &Parts,
@@ -1196,7 +1197,6 @@ pub(crate) async fn plan_post(
 ) -> Result<InlinePlan, InlinePlanError> {
     let mut plan = InlinePlan {
         targets: Vec::new(),
-        failed: 0,
     };
     for target in inline_targets(state, parts, parent_model, parent_pk).await? {
         plan_target(state, parts, &target, form, &mut plan).await?;
@@ -1291,12 +1291,21 @@ async fn plan_target(
     let read_only = || AdminError::ReadOnly {
         table: table.to_owned(),
     };
+    // Never skipped quietly: the user must see the row is not saved (#2339).
+    let bad_row = |idx: usize, e: crate::forms::FormError| {
+        InlinePlanError::Rejected(format!("{table} row {}: {e}", idx + 1))
+    };
 
     // Slots past INITIAL_FORMS are new rows, so a typed natural PK
     // inserts rather than updates (#1717).
     let initial = crate::forms::formset::initial_forms(form, table);
     let natural_pk = (!target.pk.auto).then_some(target.pk);
-    let mut out = TargetPlan::default();
+    let mut out = TargetPlan {
+        child: target.child,
+        existing: Vec::new(),
+        inserts: Vec::new(),
+        deletes_needed: 0,
+    };
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
     for idx in 0..total_forms {
@@ -1322,15 +1331,10 @@ async fn plan_target(
             if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
                 return Err(refused("add").into());
             }
-            let Ok(mut values) = target.values(&row, false) else {
-                plan.failed += 1;
-                continue;
-            };
+            let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
             if let Some(pk) = natural_pk {
-                let Ok(value) = crate::forms::parse_pk_string(pk, &raw_pk) else {
-                    plan.failed += 1;
-                    continue;
-                };
+                let value =
+                    crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
                 values.push((pk.column, value));
             }
             let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
@@ -1349,10 +1353,7 @@ async fn plan_target(
             continue;
         }
 
-        let Ok(pk) = crate::forms::parse_pk_string(target.pk, &raw_pk) else {
-            plan.failed += 1;
-            continue;
-        };
+        let pk = crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
 
         if delete_flag {
             if !state.can_delete(table) {
@@ -1376,10 +1377,7 @@ async fn plan_target(
             continue;
         }
 
-        let Ok(values) = target.values(&row, true) else {
-            plan.failed += 1;
-            continue;
-        };
+        let values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
         if values.is_empty() {
             continue;
         }
@@ -1437,41 +1435,60 @@ async fn plan_target(
     Ok(())
 }
 
-/// Run a checked plan. Best-effort: a failed write is counted, the
-/// rest still run.
-pub(crate) async fn apply_plan(pool: &Pool, plan: InlinePlan) -> InlineApplyOutcome {
-    let mut outcome = InlineApplyOutcome {
-        failed: plan.failed,
-        ..InlineApplyOutcome::default()
-    };
+/// Why [`apply_plan`] rolled every inline write back (#2339).
+pub(crate) enum InlineApplyError {
+    /// The database refused a write to `child`.
+    Write {
+        child: &'static ModelSchema,
+        error: ExecError,
+    },
+    /// A delete the inserts needed to stay within `max_num` removed nothing.
+    MaxNum { table: &'static str },
+    /// `BEGIN` or `COMMIT` failed.
+    Tx(ExecError),
+}
+
+/// Run a checked plan in one transaction: any failure rolls all of it back.
+pub(crate) async fn apply_plan(
+    pool: &Pool,
+    plan: InlinePlan,
+) -> Result<InlineApplyOutcome, InlineApplyError> {
+    let mut tx = crate::sql::write_transaction_pool(pool)
+        .await
+        .map_err(InlineApplyError::Tx)?;
+    let mut outcome = InlineApplyOutcome::default();
     for target in plan.targets {
+        let child = target.child;
+        let refused = |error| InlineApplyError::Write { child, error };
         let mut deleted = 0usize;
         for write in target.existing {
             match write {
-                InlineWrite::Update(q) => match crate::sql::update_pool(pool, &q).await {
-                    Ok(_) => outcome.updated += 1,
-                    Err(_) => outcome.failed += 1,
-                },
+                InlineWrite::Update(q) => {
+                    crate::sql::update_tx(&mut tx, &q).await.map_err(refused)?;
+                    outcome.updated += 1;
+                }
                 // 0 rows: deleted or moved since the plan was checked.
-                InlineWrite::Delete(q) => match crate::sql::delete_pool(pool, &q).await {
-                    Ok(0) | Err(_) => outcome.failed += 1,
-                    Ok(_) => deleted += 1,
-                },
+                InlineWrite::Delete(q) => {
+                    if crate::sql::delete_tx(&mut tx, &q).await.map_err(refused)? > 0 {
+                        deleted += 1;
+                    }
+                }
             }
         }
         outcome.deleted += deleted;
         // A delete that removed nothing frees no room under `max_num`.
-        let skip = target.deletes_needed.saturating_sub(deleted);
-        let run = target.inserts.len().saturating_sub(skip);
-        outcome.failed += target.inserts.len() - run;
-        for q in target.inserts.into_iter().take(run) {
-            match crate::sql::insert_pool(pool, &q).await {
-                Ok(()) => outcome.inserted += 1,
-                Err(_) => outcome.failed += 1,
-            }
+        if deleted < target.deletes_needed {
+            return Err(InlineApplyError::MaxNum { table: child.table });
+        }
+        for q in target.inserts {
+            crate::sql::insert_tx(&mut tx, &q).await.map_err(refused)?;
+            outcome.inserted += 1;
         }
     }
-    outcome
+    tx.commit()
+        .await
+        .map_err(|e| InlineApplyError::Tx(e.into()))?;
+    Ok(outcome)
 }
 
 // ============================================================ Editable generic rendering (issue #243)
