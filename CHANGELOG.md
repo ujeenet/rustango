@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `FormView` renders the CSRF token (#2234)
+
+GET and the POST re-render stamp `csrf_token` / `csrf_input` and set the cookie, like the model CBVs; a `{{ csrf_input | safe }}` template no longer 500s.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
