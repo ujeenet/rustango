@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `Cli` behind a reverse proxy
+
+Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).
+
+### Mistyped env overrides now warn
+
+A var with one `_` after `RUSTANGO` and `__` later is ignored, as before, but config loading now prints a warning. Rename it to `RUSTANGO__SECTION__KEY` (#2257).
+
+### MCP 401 body is JSON
+
+A missing or invalid agent token now gets a JSON-RPC error (code `-32001`), not plain text. Status and `WWW-Authenticate` are the same (#2259).
+
 ### Webhook headers are checked
 
 `WebhookSubscription::header` with an invalid name or value makes `dispatch` return `JobError::Fatal` (#2236).

@@ -463,7 +463,7 @@ pub struct MailSettings {
     /// LOGIN auth. Without both, the transport connects anonymously.
     pub smtp_username: Option<String>,
     /// SMTP password. Set it through an env var such as
-    /// `RUSTANGO_MAIL__SMTP_PASSWORD` rather than committing it.
+    /// `RUSTANGO__MAIL__SMTP_PASSWORD` rather than committing it.
     pub smtp_password: Option<String>,
     /// TLS mode: `"none"`, `"starttls"` (the default, an upgrade on
     /// port 587) or `"implicit"` (TLS from the first byte, port 465).

@@ -103,7 +103,7 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     ssl_redirect: Option<crate::ssl_redirect::SslRedirectLayer>,
     /// Outermost, so the access log and every throttle see its
     /// `TrustedRealIp` (#1745).
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     real_ip: Option<crate::real_ip::RealIpLayer>,
     /// Opt-in `X-Org`-style fallback after the host resolvers (#1856).
     header_resolver: Option<HeaderResolver>,
@@ -180,7 +180,7 @@ impl<DB: Database> Builder<DB> {
             allowed_hosts: None,
             #[cfg(feature = "admin")]
             ssl_redirect: None,
-            #[cfg(feature = "admin")]
+            #[cfg(feature = "_http_layers")]
             real_ip: None,
             header_resolver: None,
             _phantom: PhantomData,
@@ -220,7 +220,7 @@ impl<DB: Database> Builder<DB> {
 
     /// Resolve the client IP from a trusted proxy on every route. A
     /// `RealIpLayer` on the api router runs after the access log reads it.
-    #[cfg(feature = "admin")]
+    #[cfg(feature = "_http_layers")]
     #[must_use]
     pub fn real_ip(mut self, layer: crate::real_ip::RealIpLayer) -> Self {
         self.real_ip = Some(layer);
@@ -926,7 +926,7 @@ impl<DB: Database> Builder<DB> {
         } else {
             app
         };
-        #[cfg(feature = "admin")]
+        #[cfg(feature = "_http_layers")]
         let app = match self.real_ip {
             Some(layer) => {
                 use crate::real_ip::RealIpRouterExt as _;
@@ -1025,7 +1025,7 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
                 {
                     ext.insert(*ci);
                 }
-                #[cfg(feature = "admin")]
+                #[cfg(feature = "_http_layers")]
                 if let Some(ip) = parts.extensions.get::<crate::real_ip::TrustedRealIp>() {
                     ext.insert(*ip);
                 }

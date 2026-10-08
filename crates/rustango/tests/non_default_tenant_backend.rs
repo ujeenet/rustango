@@ -277,10 +277,55 @@ async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router) {
                 .unwrap(),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "POST without bearer");
+        assert_unauthorized_json(r, "POST without bearer").await;
         let r = send(app, Request::get("/mcp").body(Body::empty()).unwrap()).await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "GET without bearer");
+        assert_unauthorized_json(r, "GET without bearer").await;
     }
+
+    // A rotated secret revokes both the minted JWT and the raw key (#2259).
+    rustango::tenancy::rotate_agent_secret_pool(&env.tenant, "bot")
+        .await
+        .expect("rotate");
+    for (bearer, what) in [(&access, "revoked JWT"), (&issued.token, "revoked raw key")] {
+        let r = send(
+            &app,
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_unauthorized_json(r, what).await;
+    }
+}
+
+/// A 401 with the OAuth challenge and a JSON-RPC error body (#2259).
+#[cfg(feature = "mcp")]
+async fn assert_unauthorized_json(r: axum::response::Response, what: &str) {
+    assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED, "{what}");
+    assert!(
+        r.headers().contains_key(header::WWW_AUTHENTICATE),
+        "{what}: challenge"
+    );
+    assert_eq!(
+        r.headers()[header::CONTENT_TYPE],
+        "application/json",
+        "{what}: content-type"
+    );
+    let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&b).expect("JSON body");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": { "code": -32001, "message": "missing or invalid agent token" },
+            "id": null
+        }),
+        "{what}"
+    );
 }
 
 #[cfg(feature = "sso")]

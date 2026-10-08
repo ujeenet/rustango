@@ -395,7 +395,7 @@ cargo test -p rustango --features sqlite,mcp,config --test 'mcp_*'
 ### (b) curl the JSON-RPC
 
 Boot the demo (next section) and talk to it directly. The demo guards **every**
-method behind an agent token (an unauthed call returns `401`), so mint one first
+method behind an agent token (an unauthed call returns `401` with a JSON-RPC error body, code `-32001`), so mint one first
 — the demo prints the agent secret on boot:
 
 ```bash

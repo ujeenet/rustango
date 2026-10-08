@@ -298,6 +298,7 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
+            --test env_override_spelling \
             --test every_example_crate_is_built \
             --test every_live_suite_runs_in_ci \
             --test every_serve_shuts_down_gracefully \

@@ -896,7 +896,7 @@ cargo build --release
 
 Stelle sicher, dass dein Reverse-Proxy:
 - HTTPS terminiert
-- `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))
+- `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`Cli::with_trusted_proxies([...])?` oder `server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))
 - `X-Forwarded-Host`, `X-Forwarded-Proto` weiterleitet
 - `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` verwendet, damit `ConnectInfo` für Rate-Limiting + IP-Filterung befüllt ist
 

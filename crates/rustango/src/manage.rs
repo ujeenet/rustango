@@ -136,6 +136,9 @@ pub struct Cli {
     /// `template_views` routers carry their own layer.
     #[cfg(feature = "csrf")]
     csrf: Option<crate::forms::csrf::CsrfConfig>,
+    /// Set by [`Cli::with_trusted_proxies`]. Mounted outermost, so the
+    /// access log and every per-IP limit see the client.
+    real_ip: Option<crate::real_ip::RealIpLayer>,
     /// When `true`, mounts [`crate::welcome::welcome_router`] at `/`
     /// at runserver time. Default off — projects that already have a
     /// root handler (or want a 404 on `/`) shouldn't have their route
@@ -184,6 +187,7 @@ impl Cli {
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
             csrf: None,
+            real_ip: None,
             welcome_page: false,
             #[cfg(all(feature = "config", feature = "runtime"))]
             install_logging: false,
@@ -484,6 +488,30 @@ impl Cli {
     pub fn with_csrf_config(mut self, cfg: crate::forms::csrf::CsrfConfig) -> Self {
         self.csrf = Some(cfg);
         self
+    }
+
+    /// Believe `X-Forwarded-For` from these proxies (IPs or CIDR blocks),
+    /// so the access log and every per-IP limit, login throttling
+    /// included, see the real client. Other peers' headers stay ignored.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .with_trusted_proxies(["127.0.0.1/32", "10.0.0.0/8"])?
+    ///     .run().await
+    /// ```
+    ///
+    /// # Errors
+    /// An entry that is not an IP or CIDR block.
+    pub fn with_trusted_proxies<I, S>(
+        mut self,
+        nets: I,
+    ) -> Result<Self, crate::ip_filter::IpFilterError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.real_ip = Some(crate::real_ip::RealIpLayer::default().trust_proxies(nets)?);
+        Ok(self)
     }
 
     /// Auto-mount [`crate::welcome::welcome_router`] at `/` so a fresh
@@ -1065,6 +1093,13 @@ impl Cli {
         #[cfg(feature = "config")]
         let api = wrap_outer(apply_settings_layers_or_warn(api, settings));
         let api = self.mount_observability(api);
+        let api = match self.real_ip.clone() {
+            Some(layer) => {
+                use crate::real_ip::RealIpRouterExt as _;
+                api.real_ip(layer)
+            }
+            None => api,
+        };
         api.layer(axum::Extension(pool))
     }
 
@@ -1083,6 +1118,9 @@ impl Cli {
             .span_redact(self.span_redact_params());
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
+        }
+        if let Some(layer) = &self.real_ip {
+            builder = builder.real_ip(layer.clone());
         }
         match outer {
             Some(o) => o.apply_to(builder),
@@ -1113,7 +1151,9 @@ impl Cli {
     /// the same redact list even when the log is off, and building it
     /// a second way is how the two drifted apart (#1610).
     fn configured_access_log(&self) -> crate::access_log::AccessLogLayer {
-        let log_layer = crate::access_log::AccessLogLayer::default();
+        // Only a `TrustedRealIp` is logged, never a raw header.
+        let log_layer =
+            crate::access_log::AccessLogLayer::default().use_real_ip(self.real_ip.is_some());
         #[cfg(feature = "config")]
         let log_layer = match self.settings_for_layers.as_ref() {
             Some(s) => log_layer.with_audit_settings(&s.audit),
@@ -2264,6 +2304,66 @@ mod tests {
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
     }
 
+    /// #2255 — `with_trusted_proxies` reaches the tenancy builder: the
+    /// access log names the client behind the proxy, not the proxy.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[test]
+    fn tenancy_builder_hands_over_the_trusted_proxies() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = super::tracing_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_iso, app) = rt.block_on(async {
+            let iso = crate::tenancy::isolated_resolver().await;
+            let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+            let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+            let builder = crate::server::Builder::from_pool(pool, url, "localhost");
+            let app = Cli::new()
+                .with_trusted_proxies(["10.0.0.0/8"])
+                .expect("valid CIDR")
+                .tenancy_builder(builder, None)
+                .into_router()
+                .await
+                .expect("assemble");
+            (iso, app)
+        });
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut req = Request::builder()
+                .uri("/whoami")
+                .header("host", "localhost")
+                .header("x-forwarded-for", "203.0.113.9")
+                .body(Body::empty())
+                .unwrap();
+            let peer: std::net::SocketAddr = "10.0.0.5:4000".parse().unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            rt.block_on(app.oneshot(req)).expect("request");
+        });
+        let out = buf.contents();
+        let line = out
+            .lines()
+            .find(|l| l.contains("rustango::access_log") && l.contains("/whoami"));
+        assert!(
+            line.is_some_and(|l| l.contains("203.0.113.9") && !l.contains("10.0.0.5")),
+            "access log does not name the client: {out}"
+        );
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn apply_settings_layers_smoke() {
@@ -2848,6 +2948,72 @@ mod observability_without_admin_tests {
                 .any(|l| l.contains("rustango::access_log") && l.contains("/x")),
             "no access-log line: {out}"
         );
+    }
+
+    /// #2255 — behind a trusted proxy the per-IP limit and the access log
+    /// key on the client; a forwarded header from any other peer is ignored.
+    #[test]
+    fn trusted_proxies_resolve_the_client_for_limits_and_the_log() {
+        use crate::rate_limit::{RateLimitLayer, RateLimitRouterExt as _};
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _serial = serialized();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
+            .expect("sqlite");
+        let api = Router::new()
+            .route("/x", axum::routing::get(|| async { "ok" }))
+            .rate_limit(RateLimitLayer::per_ip(
+                1,
+                std::time::Duration::from_secs(60),
+            ));
+        let app = Cli::new()
+            .with_trusted_proxies(["10.0.0.0/8"])
+            .expect("valid CIDR")
+            .api(api)
+            .assemble_app(pool);
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+        let send = |peer: &str, xff: &str| {
+            let mut req = Request::builder()
+                .uri("/x")
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap();
+            let addr: std::net::SocketAddr = format!("{peer}:4000").parse().unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
+            let res = rt.block_on(app.clone().oneshot(req)).expect("request");
+            res.status().as_u16()
+        };
+        let statuses = tracing::subscriber::with_default(subscriber, || {
+            [
+                // Two clients behind one trusted proxy: one bucket each.
+                send("10.0.0.5", "203.0.113.1"),
+                send("10.0.0.5", "203.0.113.2"),
+                send("10.0.0.5", "203.0.113.1"),
+                // An untrusted peer's header is ignored: it keys on the peer.
+                send("198.51.100.9", "203.0.113.3"),
+                send("198.51.100.9", "203.0.113.4"),
+            ]
+        });
+        assert_eq!(statuses, [200, 200, 429, 200, 429]);
+        let out = buf.contents();
+        let logged = |ip: &str| {
+            out.lines()
+                .any(|l| l.contains("rustango::access_log") && l.contains(ip))
+        };
+        assert!(logged("203.0.113.1"), "client IP not logged: {out}");
+        assert!(logged("198.51.100.9"), "untrusted peer not logged: {out}");
+        assert!(!logged("203.0.113.3"), "spoofed header logged: {out}");
     }
 
     /// `check --deploy` sees an ungated admin mounted by `nest_with`.

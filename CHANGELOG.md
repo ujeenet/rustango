@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `Cli::with_trusted_proxies` (#2255)
+
+A `Cli` app behind a reverse proxy names its proxies, and the access log and per-IP limits, login throttling included, see the client. `X-Forwarded-For` from other peers is still ignored.
+
+### Fixed — `[mail]` docs name the env override that works (#2257)
+
+It is `RUSTANGO__MAIL__SMTP_PASSWORD`. Loading config now warns about a `RUSTANGO_` var with `__` later, which is never read; a guard test keeps docs and comments on the double underscore.
+
+### Fixed — MCP 401 has a JSON-RPC body (#2259)
+
+A missing, invalid or revoked token gets `application/json` with error code `-32001`; status and `WWW-Authenticate` are unchanged.
+
 ### Fixed — `FormView` renders the CSRF token (#2234)
 
 GET and the POST re-render stamp `csrf_token` / `csrf_input` and set the cookie, like the model CBVs; a `{{ csrf_input | safe }}` template no longer 500s.
