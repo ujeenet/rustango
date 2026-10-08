@@ -2333,17 +2333,17 @@ pub(crate) async fn update_submit(
     let deferred = match written {
         Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
         Ok(crate::audit::RowDiffWrite::Gone) => {
-            tx.rollback().await?;
+            rollback_quietly(tx, model.table).await;
             return Err(AdminError::RowNotFound { table, pk: pk_raw });
         }
         Err(e) => {
-            tx.rollback().await?;
+            rollback_quietly(tx, model.table).await;
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
     if let Err(e) = super::inlines::apply_plan_tx(&mut tx, inline_plan).await {
         use super::inlines::InlineApplyError as E;
-        tx.rollback().await?;
+        rollback_quietly(tx, model.table).await;
         let why = match e {
             E::Write { child, error } => write_error(child, &error),
             E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
@@ -2367,6 +2367,14 @@ pub(crate) async fn update_submit(
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// A failed ROLLBACK must not replace the refusal with a 500; dropping
+/// the connection discards the tx anyway.
+async fn rollback_quietly(tx: crate::sql::PoolTx<'_>, table: &str) {
+    if let Err(e) = tx.rollback().await {
+        tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
+    }
 }
 
 // ============================================================== DELETE
