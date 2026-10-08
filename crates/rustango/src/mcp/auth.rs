@@ -612,6 +612,13 @@ fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     cache.insert(key, (agent_id, std::time::Instant::now()));
 }
 
+/// One lock for every crate test that reads or writes the shared raw-key cache.
+#[cfg(test)]
+pub(crate) fn raw_key_cache_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
+}
+
 // There is deliberately no `invalidate_raw_key_cache(agent_id)`.
 // This cache is per-process, and every caller that would want it
 // runs in the `manage` CLI, so it could never reach a serving
@@ -930,12 +937,9 @@ mod tests {
         );
     }
 
-    /// The raw-key cache is shared, so these tests take turns.
-    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+    /// The raw-key cache is shared with the transport tests, so all take turns.
+    fn cache_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        super::raw_key_cache_test_lock().blocking_lock()
     }
 
     // Rotation and cross-tenant redemption are checked in
@@ -982,8 +986,13 @@ mod tests {
             assert_eq!(raw_key_cache_get(key), Some(i as i64), "entry {i} evicted");
         }
         // Re-putting a cached key at the cap evicts nothing.
-        raw_key_cache_put(keys[1], 1);
-        assert_eq!(raw_key_cache_get(&keys[2]), Some(2));
+        let newest = keys.len() - 1;
+        raw_key_cache_put(keys[newest], newest as i64);
+        assert_eq!(
+            raw_key_cache_get(&keys[1]),
+            Some(1),
+            "re-put evicted the oldest"
+        );
         raw_key_cache().lock().unwrap().clear();
     }
 

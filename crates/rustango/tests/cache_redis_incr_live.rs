@@ -208,3 +208,23 @@ async fn touch_extends_only_live_keys() {
     redis.set("forever", "v", None).await.unwrap();
     assert!(redis.touch("forever", None).await.unwrap());
 }
+
+/// A huge TTL is clamped, so `PX` / `PEXPIRE` never get an invalid expire time.
+#[tokio::test]
+async fn a_max_ttl_is_accepted() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+
+    redis
+        .set("huge", "v", Some(Duration::MAX))
+        .await
+        .expect("set with Duration::MAX");
+    assert!(redis
+        .touch("huge", Some(Duration::MAX))
+        .await
+        .expect("touch with Duration::MAX"));
+    assert_eq!(redis.get("huge").await.unwrap().as_deref(), Some("v"));
+}

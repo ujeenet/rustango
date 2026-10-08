@@ -182,17 +182,23 @@ async fn touch_extends_only_live_rows(pool: &Pool) {
         "touch created a row"
     );
 
-    let short = Some(Duration::from_millis(300));
-    cache.set("live", "v", short).await.unwrap();
+    // Wide window: the touch must land before 1.5s even on a slow CI MySQL.
+    cache
+        .set("live", "v", Some(Duration::from_millis(1500)))
+        .await
+        .unwrap();
     assert!(cache
         .touch("live", Some(Duration::from_secs(60)))
         .await
         .unwrap());
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(2000)).await;
     assert_eq!(cache.get("live").await.unwrap().as_deref(), Some("v"));
 
-    cache.set("old", "v", short).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    cache
+        .set("old", "v", Some(Duration::from_millis(50)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         !cache.touch("old", None).await.unwrap(),
         "expired row touched"

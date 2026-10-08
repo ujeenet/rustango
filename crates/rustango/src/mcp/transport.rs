@@ -339,6 +339,8 @@ mod tests {
     /// A raw-key stream has no `exp`; the re-check alone ends it.
     #[tokio::test]
     async fn a_raw_key_stream_ends_when_the_agent_is_revoked() {
+        // The raw-key path writes the shared verify cache.
+        let _g = super::super::auth::raw_key_cache_test_lock().lock().await;
         let (pool, agent, token, _) = world(jwt(), true).await;
         assert!(token.is_none());
         assert_ends_on_revoke(pool, agent, token).await;
