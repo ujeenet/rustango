@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin search never covers a secret field
+
+A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

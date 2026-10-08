@@ -312,6 +312,29 @@ pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) 
         .any(|(f, w)| *f == name && *w == "password")
 }
 
+/// Columns `?q=` searches, for the list and autocomplete alike:
+/// `search_fields` when set, else the searchable fields. Never a secret (#2228).
+#[must_use]
+pub(crate) fn search_columns(
+    model: &'static ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+) -> Vec<&'static str> {
+    let fields: Vec<&'static FieldSchema> = if admin_cfg.search_fields.is_empty() {
+        model.searchable_fields().collect()
+    } else {
+        admin_cfg
+            .search_fields
+            .iter()
+            .filter_map(|name| model.field(name))
+            .collect()
+    };
+    fields
+        .into_iter()
+        .filter(|f| !is_secret_field(admin_cfg, f.name))
+        .map(|f| f.column)
+        .collect()
+}
+
 /// `true` when the list may filter on `field` from the URL: a
 /// `list_filter`, displayed or FK column, or an inline's parent pin.
 /// Never a secret, so a URL cannot probe its value (#2031).

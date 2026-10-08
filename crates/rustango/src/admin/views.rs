@@ -18,7 +18,8 @@ use super::forms;
 use super::helpers::{
     admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
     is_secret_field, lookup_model, primary_key_or_internal, render_cell_json, render_form,
-    render_secret_cell, resolve_model, resolve_model_and_pk, url_filterable, FormLayout, ListQuery,
+    render_secret_cell, resolve_model, resolve_model_and_pk, search_columns, url_filterable,
+    FormLayout, ListQuery,
 };
 use super::queryset_hooks::RowScope;
 use super::render;
@@ -403,17 +404,7 @@ pub(crate) async fn table_view(
         ));
     }
 
-    // Build the search clause. `admin.search_fields` wins when set.
-    // Otherwise use every field whose `searchable` flag is true.
-    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
-        model.searchable_fields().map(|f| f.column).collect()
-    } else {
-        admin_cfg
-            .search_fields
-            .iter()
-            .filter_map(|name| model.field(name).map(|f| f.column))
-            .collect()
-    };
+    let search_columns = search_columns(model, &admin_cfg);
     let search = q.as_ref().and_then(|qstr| {
         if search_columns.is_empty() {
             None
@@ -1497,16 +1488,7 @@ pub(crate) async fn autocomplete_view(
     };
     let display_field = model.display_field().unwrap_or(pk_field);
 
-    // `admin.search_fields` when set, else the auto-searchable set.
-    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
-        model.searchable_fields().map(|f| f.column).collect()
-    } else {
-        admin_cfg
-            .search_fields
-            .iter()
-            .filter_map(|name| model.field(name).map(|f| f.column))
-            .collect()
-    };
+    let search_columns = search_columns(model, &admin_cfg);
     let search = if q.is_empty() || search_columns.is_empty() {
         None
     } else {

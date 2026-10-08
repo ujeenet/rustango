@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin search skips secret fields (#2228)
+
+`?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

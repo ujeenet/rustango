@@ -163,3 +163,40 @@ async fn url_email_hidden_widgets_render_correctly() {
     assert!(body.contains(r#"<input type="email" name="contact""#));
     assert!(body.contains(r#"<input type="hidden" name="anything""#));
 }
+
+async fn get_text(pool: Pool, uri: &str) -> String {
+    let resp = build_app(pool)
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+// #2228: `?q=` must not probe a secret column, in the list or autocomplete.
+#[tokio::test]
+async fn search_skips_secret_fields() {
+    let pool = fresh_pool().await;
+    rustango::sql::raw_execute_pool(
+        &pool,
+        r#"INSERT INTO "ffo_account" ("username", "secret", "color", "bio", "age", "homepage", "contact", "anything")
+           VALUES ('alice', 'hunter2', '#000000', '', 1, '', '', '')"#,
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+
+    let hit = get_text(pool.clone(), "/ffo_account?q=alice").await;
+    assert!(hit.contains("alice"), "control: a normal column matches");
+    let list = get_text(pool.clone(), "/ffo_account?q=hunter").await;
+    assert!(!list.contains("alice"), "the list matched the secret");
+
+    let hit = get_text(pool.clone(), "/ffo_account/__autocomplete?q=ali").await;
+    assert!(hit.contains("alice"), "control: autocomplete matches");
+    let ac = get_text(pool, "/ffo_account/__autocomplete?q=hunter").await;
+    assert!(
+        !ac.contains("alice"),
+        "autocomplete matched the secret: {ac}"
+    );
+}
