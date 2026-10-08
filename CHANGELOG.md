@@ -12,6 +12,10 @@ GET and the POST re-render stamp `csrf_token` / `csrf_input` and set the cookie,
 
 `WebhookSubscription::header` checks the name and value; `dispatch` then returns `JobError::Fatal`, and a request that will not build is dead-lettered instead of retried 8 times.
 
+### Fixed — the MCP SSE stream ends at token expiry or revoke (#2237)
+
+It closes at the JWT's `exp`, and re-checks the agent every 4 keep-alives (once a minute), so a revoked or rotated agent stops getting frames.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)

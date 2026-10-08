@@ -3,6 +3,8 @@
 //! stream that carries `progress` and `list_changed` notifications
 //! back.
 
+use std::time::Duration;
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -106,7 +108,8 @@ pub(crate) async fn handle_message(
 ///
 /// It needs the same agent bearer token as the JSON-RPC endpoint, and
 /// then filters the shared bus, so an agent never sees another
-/// agent's or another tenant's frames.
+/// agent's or another tenant's frames. It ends at the JWT's `exp`, or
+/// within a minute of a revoke.
 pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
     t: crate::extractors::Tenant<DB>,
     axum::extract::State(state): axum::extract::State<AuthedMcpState>,
@@ -131,33 +134,83 @@ async fn sse_in(
     // Accept both bearer shapes the JSON-RPC POST accepts. See
     // `auth::authenticate_bearer` for why this stream must not be
     // stricter than the endpoint next to it.
-    let agent = match super::auth::authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
-        Ok(agent) => agent,
-        Err(e) => return e.into_response(&headers, &extensions, &uri),
-    };
-    let tenant = agent.tenant.clone();
-    let agent_id = agent.agent_id;
+    let (agent, exp) =
+        match super::auth::authenticate_bearer_until(jwt, t.pool(), &t.org.slug, token).await {
+            Ok(v) => v,
+            Err(e) => return e.into_response(&headers, &extensions, &uri),
+        };
+    agent_sse(
+        t.pool().clone(),
+        agent,
+        exp,
+        KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
+    )
+}
 
+const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// The stream re-checks the agent row every 4 keep-alives (once a minute):
+/// one indexed lookup per open stream, and a revoke ends it within 60s (#2237).
+const RECHECK_EVERY_KEEP_ALIVES: u32 = 4;
+
+/// The agent's frames until the JWT's `exp`, a failed liveness re-check
+/// (revoked, deactivated, rotated) or the bus closing.
+fn agent_sse(
+    pool: crate::sql::Pool,
+    agent: super::McpAgent,
+    exp: Option<i64>,
+    recheck_every: Duration,
+) -> Response {
+    use tokio::sync::broadcast::error::RecvError;
     let mut rx = super::notifications::bus().subscribe();
     let stream = async_stream::stream! {
+        let expired = async move {
+            match exp {
+                Some(exp) => {
+                    let left = exp.saturating_mul(1000) - chrono::Utc::now().timestamp_millis();
+                    tokio::time::sleep(Duration::from_millis(u64::try_from(left).unwrap_or(0))).await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(expired);
+        let start = tokio::time::Instant::now() + recheck_every;
+        let mut recheck = tokio::time::interval_at(start, recheck_every);
         loop {
-            match rx.recv().await {
+            let received = tokio::select! {
+                () = &mut expired => break,
+                _ = recheck.tick() => {
+                    let live = crate::tenancy::agent_token_still_valid_pool(
+                        &pool,
+                        agent.agent_id,
+                        agent.user_id,
+                        &agent.secret_prefix,
+                    )
+                    .await;
+                    // Fail closed: the client reconnects and re-authenticates.
+                    if !matches!(live, Ok(true)) {
+                        break;
+                    }
+                    continue;
+                }
+                r = rx.recv() => r,
+            };
+            match received {
                 Ok(frame) => {
-                    if super::notifications::frame_visible(&frame, &tenant, agent_id) {
+                    if super::notifications::frame_visible(&frame, &agent.tenant, agent.agent_id) {
                         yield Ok::<Event, std::convert::Infallible>(Event::default().data(frame.body));
                     }
                     // Frames for anyone else are dropped.
                 }
                 // This client fell behind the buffer. Skip what it
                 // missed rather than closing the connection.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(RecvError::Lagged(_)) => continue,
                 // Every sender is gone, so end the stream.
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(RecvError::Closed) => break,
             }
         }
     };
     Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
         .into_response()
 }
 
@@ -171,5 +224,65 @@ fn jsonrpc_id_string(id: &Value) -> String {
     match id {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "testkit"))]
+mod tests {
+    use super::*;
+    use crate::tenancy::{create_agent_pool, rotate_agent_secret_pool};
+
+    /// A pool with agent `bot`, and a bearer for it from `jwt`.
+    async fn world(jwt: &JwtLifecycle) -> (crate::sql::Pool, super::super::McpAgent, Option<i64>) {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        let bot = create_agent_pool(&pool, "bot").await.unwrap();
+        let Ok(minted) =
+            super::super::auth::mint_agent_jwt(jwt, &pool, "acme", "bot", &bot.token).await
+        else {
+            panic!("mint");
+        };
+        let Ok((agent, exp)) =
+            super::super::auth::authenticate_bearer_until(jwt, &pool, "acme", &minted.token).await
+        else {
+            panic!("authenticate");
+        };
+        (pool, agent, exp)
+    }
+
+    fn drain(resp: Response) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+        })
+    }
+
+    /// #2237 — the stream ends at the JWT's `exp`.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_jwt_expires() {
+        let jwt =
+            JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec()).with_access_ttl(2);
+        let (pool, agent, exp) = world(&jwt).await;
+        assert!(exp.is_some());
+        let body = drain(agent_sse(pool, agent, exp, Duration::from_secs(3600)));
+        let ended = tokio::time::timeout(Duration::from_secs(6), body).await;
+        assert!(ended.is_ok(), "the stream outlived its token");
+    }
+
+    /// #2237 — a rotated (revoked) agent's stream ends at the next re-check.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_agent_is_revoked() {
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let (pool, agent, exp) = world(&jwt).await;
+        let body = drain(agent_sse(
+            pool.clone(),
+            agent,
+            exp,
+            Duration::from_millis(50),
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!body.is_finished(), "a live agent's stream must stay open");
+        rotate_agent_secret_pool(&pool, "bot").await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
+        assert!(ended.is_ok(), "the stream outlived the revoke");
     }
 }
