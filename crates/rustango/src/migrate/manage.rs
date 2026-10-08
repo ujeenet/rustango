@@ -5337,10 +5337,8 @@ mod gen_tests {
             .expect("snippet");
         let snippet = &docs[start..start + docs[start..].find("```").expect("fence")];
         let rendered = serializer_template("PostSerializer", "Post", "rustango");
-        for line in snippet
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-        {
+        // Comments are abridged in the docs, so compare code lines only.
+        for line in snippet.lines().filter(|l| !l.trim_start().starts_with('/')) {
             assert!(
                 rendered.contains(line),
                 "docs line not in template: `{line}`"
