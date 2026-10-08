@@ -12,6 +12,44 @@ The org/host caches, fingerprint polls and breakers are keyed by registry pool, 
 
 All its file I/O now runs on tokio's blocking pool.
 
+### Fixed — role, operator and user verbs refuse extra arguments (#1952)
+
+`assign-role`, `revoke-role`, `list-roles`, `create-role`, `set-operator-active`, `set-superuser`, `reset-password`, `list-operators` and `prewarm-pools` reject stray arguments and take flags anywhere. `set-superuser --on --off` is refused.
+
+### Fixed — `set-superuser` and `reset-password` write through the ORM (#1952)
+
+### Fixed — `startapp` refuses Rust keywords as app names (#1952)
+
+### Fixed — `make:serializer` docs show `Auto<i64>`, as the template writes (#1952)
+
+### Fixed — `[tenancy] apex_domain` is read (#1379)
+
+`Cli::with_settings` applies it; `RUSTANGO_APEX_DOMAIN` still wins.
+
+### Changed — settings that do nothing are documented and warned about (#1379)
+
+`[sso]`, `[auth.jwt] issuer`/`audience` and three `[admin]` keys log a boot warning when set. `[database] url` and the user-wired sections are documented as such.
+
+### Fixed — stale admin comment and source reference in docs
+
+The fullstack `urls.rs` comment names `nest_with`, as `main.rs` does; manage.md names `provision_tenant` instead of a line number.
+
+### Fixed — de/fr/es scaffolding, migrations, manage and getting-started match English (#2015)
+
+They now cover the committed `system/migrations/`, the scaffolded login-gated `admin_router` and `with_session_auth`. de/es `create-tenant` no longer says it is safe to re-run.
+
+### Fixed — README links work on crates.io (#1405)
+
+crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+
+### Fixed — admin search skips secret fields (#2228)
+
+`?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
+
+### Fixed — admin list, autocomplete and FK facets apply the "view" hook (#2231)
+
+A row a `register_admin_object_permission!(_, "view", _)` hook denies is dropped; totals still count it. A denied FK target shows its raw key in list and detail cells (#2267). Autocomplete reads up to 5 pages to fill its limit past denied rows. A password-widget field in `list_filter` gets no facet.
+
 ## [0.60.2] — 2026-10-07
 
 ### Fixed — `migrate-tenant-storage` moves tenants that use extension types (#2210)

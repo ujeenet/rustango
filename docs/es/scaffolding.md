@@ -201,7 +201,7 @@ Así que `cargo run` arranca el servidor, y `cargo run -- <verb>` ejecuta migrac
 Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 - **api** — sin admin; `urls::api()` simplemente agrega tus propias rutas.
-- **fullstack** — el mismo `urls.rs`, más la funcionalidad de admin compilada dentro. El admin **no** queda cableado por ti: nada de lo generado lo llamaría, así que el generador no emite ningún `admin_router`. Añade uno tú mismo y anídalo — [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin) lo explica con detalle. Recibe un `rustango::sql::Pool` para que el ayudante no nombre ningún driver.
+- **fullstack** — el mismo `urls.rs`, más un ayudante `admin_router(pool)` que `main.rs` monta con `Cli::nest_with("/admin", …)`, construido a partir del pool del servidor. Recibe un `rustango::sql::Pool`, así que no nombra ningún driver, y queda detrás de un inicio de sesión: crea la cuenta con `cargo run -- create-admin <username>` (consulta [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin)).
 - **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio. Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
 
 ### Configuración por capas
