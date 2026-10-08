@@ -5,7 +5,8 @@
 
 use rustango::core::joins::aliased;
 use rustango::core::{
-    AggregateExpr, ConflictClause, InsertQuery, Model as _, Op, SearchClause, SqlValue, WhereExpr,
+    AggregateExpr, ConflictClause, Filter, InsertQuery, Model as _, Op, SearchClause, SqlValue,
+    WhereExpr,
 };
 use rustango::sql::{
     Auto, CounterPool as _, FetcherPool as _, InsertReturningPool, Pool, UpdaterPool as _,
@@ -516,6 +517,44 @@ async fn values_decode_uuid_and_bytes(pool: &Pool) {
     assert_eq!(agg[0]["token"], want[0]);
 }
 
+/// #2229: search and `__icontains` on an int or UUID column failed on PG.
+async fn ilike_on_int_and_uuid_columns(pool: &Pool) {
+    let mut ids = Vec::new();
+    for tok in [
+        uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89"),
+        uuid::uuid!("00000000-0000-4000-8000-000000000000"),
+    ] {
+        let mut b = Blob {
+            id: Auto::default(),
+            token: tok,
+            data: vec![],
+        };
+        b.insert_pool(pool).await.expect("seed");
+        ids.push(*b.id.get().expect("id"));
+    }
+    let got = |rows: Vec<Blob>| -> Vec<i64> { rows.iter().map(|b| *b.id.get().unwrap()).collect() };
+
+    for (col, query, want) in [
+        ("id", ids[1].to_string(), ids[1]),
+        ("token", "2A4E-9B7D".to_owned(), ids[0]),
+    ] {
+        let mut q = Blob::objects().compile().expect("compile");
+        q.search = Some(SearchClause {
+            columns: vec![col],
+            query: query.clone(),
+        });
+        let rows = rustango::sql::select_rows_pool(pool, &q).await;
+        assert_eq!(got(rows.expect("search")), [want], "search {col}");
+
+        // The lookup builder rejects a string on these fields; the IR does not.
+        let mut q = Blob::objects().compile().expect("compile");
+        q.where_clause =
+            WhereExpr::Predicate(Filter::new(col, Op::ILikeEscaped, format!("%{query}%")));
+        let rows = rustango::sql::select_rows_pool(pool, &q).await;
+        assert_eq!(got(rows.expect("ilike")), [want], "ilike {col}");
+    }
+}
+
 /// #2004: `values()` read date and timestamp cells as Null on PG and MySQL.
 async fn values_decode_dates_and_timestamps(pool: &Pool) {
     if pool.dialect().name() == "sqlite" {
@@ -593,6 +632,7 @@ tri_dialect_test! {
         paginate_orders_by_pk,
         paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
+        ilike_on_int_and_uuid_columns,
         values_decode_dates_and_timestamps,
         integer_division_truncates,
         second_lookup_truncates,

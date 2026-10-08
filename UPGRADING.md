@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `Dialect::write_ilike_typed`
+
+New provided method; the writers call it with the column's field type. A custom dialect that needs a cast before `ILIKE` overrides it (#2229).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

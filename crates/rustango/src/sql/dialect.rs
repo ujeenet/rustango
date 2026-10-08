@@ -562,6 +562,21 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
+    /// [`Self::write_ilike`] on a column whose field type is known
+    /// (`None` when it is not). Postgres overrides it to cast a
+    /// non-text column, which has no `ILIKE` operator (#2229).
+    fn write_ilike_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        let _ = ty;
+        self.write_ilike(sql, qualified_col, placeholder, negated);
+    }
+
     /// POSIX regex match, for the `__regex` and `__iregex` lookups.
     ///
     /// The default is Postgres' `~`, `!~`, `~*` and `!~*`. MySQL and

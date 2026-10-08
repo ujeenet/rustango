@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — search and ILIKE on non-text columns (#2229)
+
+On PostgreSQL, search and `Q::ilike` on an int, UUID or FK column cast it to text instead of failing with `bigint ~~* text`. SQLite matches a UUID by its text form.
+
 ## [0.60.1] — 2026-10-07
 
 ### Fixed — `seed-permissions` seeds every tenant (#2156)
