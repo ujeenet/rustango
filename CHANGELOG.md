@@ -33,6 +33,7 @@ They now cover the committed `system/migrations/`, the scaffolded login-gated `a
 ### Fixed — README links work on crates.io (#1405)
 
 crates.io resolves relative links against `crates/rustango/`, where `docs/` and `UPGRADING.md` 404. They are absolute GitHub links now, and a test keeps them so.
+
 ### Fixed — admin search skips secret fields (#2228)
 
 `?q=` on the list and autocomplete no longer matches a `password`-widget column, so it cannot probe the value.
