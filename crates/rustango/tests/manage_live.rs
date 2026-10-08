@@ -1082,6 +1082,28 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     .0;
     assert_eq!(user_count, 0, "flush --tenant left the tenant's users");
 
+    // 6d. A registry model is filtered out, and the org row survives.
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "Org"],
+    )
+    .await;
+    res.unwrap();
+    assert!(out.contains("no tables match"), "{out}");
+    let org_left: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    assert_eq!(
+        org_left, 1,
+        "flush --tenant --model Org touched the registry"
+    );
+
     // 6e. A table missing from the tenant schema never falls through to `public`.
     let (_out, res) = run(
         &pools,
