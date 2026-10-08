@@ -1,6 +1,6 @@
 //! Admin write errors on every backend: a bad action is a 400 (#2346);
 //! a refused write shows a plain message, never the driver's text (#2345);
-//! deleting a referenced row is a 409 naming the referrer (#2340); a bad
+//! deleting a referenced row is a 409 naming a visible referrer (#2340); a bad
 //! inline row re-renders the form and saves no inline row (#2339).
 
 #![cfg(all(
@@ -58,9 +58,11 @@ async fn setup(pool: &Pool) {
 }
 
 async fn post(pool: &Pool, uri: &str, form: &str) -> (StatusCode, String) {
-    let app = rustango::admin::Builder::new(pool.clone())
-        .admin_prefix("")
-        .build();
+    post_to(rustango::admin::Builder::new(pool.clone()), uri, form).await
+}
+
+async fn post_to(admin: rustango::admin::Builder, uri: &str, form: &str) -> (StatusCode, String) {
+    let app = admin.admin_prefix("").build();
     let req = Request::builder()
         .method("POST")
         .uri(uri)
@@ -163,6 +165,12 @@ async fn deleting_a_referenced_row_is_a_409(pool: &Pool) {
         assert!(body.contains("wrerr_child"), "{uri}: {body}");
         assert_eq!(parent_count(pool).await, 1, "{uri}");
     }
+    // A table the user cannot open in the admin is not named.
+    let hidden = rustango::admin::Builder::new(pool.clone()).show_only(["wrerr_parent"]);
+    let (status, body) = post_to(hidden, &format!("/wrerr_parent/{p}/delete"), "").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(!body.contains("wrerr_child"), "{body}");
+    assert!(body.contains("other rows"), "{body}");
     // Control: an unreferenced row still goes.
     let q = seed_parent(pool, "q").await;
     let (status, body) = post(pool, &format!("/wrerr_parent/{q}/delete"), "").await;

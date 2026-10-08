@@ -2440,7 +2440,7 @@ pub(crate) async fn delete_submit(
         .await;
         match deleted {
             Ok(n) => n,
-            Err(e) => return refused_delete(model, e),
+            Err(e) => return refused_delete(&state, model, e),
         }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
@@ -2488,17 +2488,20 @@ pub(crate) async fn delete_submit(
 /// A failed hard delete: a 409 naming who still points at the row when
 /// the database refused on an FK (#2340), else the usual error.
 fn refused_delete(
+    state: &AppState,
     model: &'static crate::core::ModelSchema,
     e: crate::sql::ExecError,
 ) -> Result<Response, AdminError> {
     if e.refusal() != Some(crate::sql::Refusal::ForeignKey) {
         return Err(e.into());
     }
-    let id = super::errors::log_with_id("admin delete refused", &e);
     // PG names the table; elsewhere list the models whose FK would block.
-    let tables: Vec<String> = e
+    let mut tables: Vec<String> = e
         .fk_referencing_table()
         .map_or_else(|| blocking_referrers(model.table), |t| vec![t.to_owned()]);
+    let id = super::errors::log_with_id(&format!("admin delete refused; referrers {tables:?}"), &e);
+    // Name only tables this user may open in the admin.
+    tables.retain(|t| lookup_model(state, t).is_some());
     let by = if tables.is_empty() {
         "other rows".to_owned()
     } else {
@@ -2692,7 +2695,7 @@ pub(crate) async fn action_submit(
             None => {
                 let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
                 if let Err(e) = crate::sql::delete_pool(&state.pool, &query).await {
-                    return refused_delete(model, e);
+                    return refused_delete(&state, model, e);
                 }
                 None
             }
