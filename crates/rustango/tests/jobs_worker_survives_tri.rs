@@ -150,6 +150,22 @@ impl Job for Orphan {
     }
 }
 
+/// `MAX_ATTEMPTS = 0` must still run once (#2333).
+#[derive(Serialize, Deserialize)]
+struct NoAttempts {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for NoAttempts {
+    const NAME: &'static str = "tri2333:no_attempts";
+    const MAX_ATTEMPTS: u32 = 0;
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("again".into()))
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -158,7 +174,37 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<Tick>().await;
     q.register::<Slow>().await;
     q.register::<FailFirst>().await;
+    q.register::<NoAttempts>().await;
     q
+}
+
+async fn zero_max_attempts_runs_once(pool: &Pool) {
+    let tok = token(pool, "zero");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let dead = dead_letters(&q).await;
+    q.dispatch(&NoAttempts { token: tok.clone() })
+        .await
+        .unwrap();
+    let rows: Vec<(i32,)> =
+        rustango::sql::raw_query_pool("SELECT max_attempts FROM rustango_jobs", Vec::new(), pool)
+            .await
+            .expect("max_attempts");
+    assert_eq!(rows[0].0, 1, "stored as one run");
+    // A row queued before the fix still holds 0.
+    rustango::sql::raw_execute_pool(
+        pool,
+        "UPDATE rustango_jobs SET max_attempts = 0",
+        Vec::new(),
+    )
+    .await
+    .expect("old row");
+    q.start().await;
+    wait_for("the dead letter", || !dead.lock().unwrap().is_empty()).await;
+    q.shutdown().await;
+    assert_eq!(counts(&tok).0, 1, "ran once, no retry");
+    let dl = dead.lock().unwrap();
+    assert_eq!(dl[0].attempts, 1);
+    assert_eq!(dl[0].error, "again");
 }
 
 /// `(attempt, locked)` of the only row.
@@ -681,5 +727,6 @@ tri_dialect_test! {
         shutdown_releases_an_aborted_job,
         start_after_shutdown_runs_jobs,
         a_dropped_queue_stops_its_workers,
+        zero_max_attempts_runs_once,
     ],
 }

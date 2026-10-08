@@ -91,7 +91,7 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     const NAME: &'static str;
 
     /// Cap on **total** runs, not extra retries. The default of 5 is
-    /// one run plus four retries; 3 gives two retries.
+    /// one run plus four retries; 3 gives two retries. 0 counts as 1.
     const MAX_ATTEMPTS: u32 = 5;
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
@@ -249,7 +249,8 @@ impl HandlerRegistry {
                     })
             })
         });
-        self.handlers.insert(T::NAME, (handler, T::MAX_ATTEMPTS));
+        self.handlers
+            .insert(T::NAME, (handler, max_attempts::<T>()));
     }
 
     fn lookup(&self, name: &str) -> Option<(HandlerFn, u32)> {
@@ -278,6 +279,11 @@ pub(crate) async fn deliver_dead_letter(cb: DeadLetterFn, dl: JobDeadLetter) {
         let msg = crate::panic_guard::panic_message(&*panic);
         tracing::error!(job = name, panic = msg, "dead-letter callback panicked");
     }
+}
+
+/// [`Job::MAX_ATTEMPTS`] as the queues read it: 0 would never run (#2333).
+pub(crate) fn max_attempts<T: Job>() -> u32 {
+    T::MAX_ATTEMPTS.max(1)
 }
 
 /// Milliseconds to wait before the retry that follows `failed_attempt`:
@@ -417,7 +423,7 @@ impl JobQueue for InMemoryJobQueue {
             name: T::NAME,
             payload: value,
             attempt: 0,
-            max_attempts: T::MAX_ATTEMPTS,
+            max_attempts: max_attempts::<T>(),
             // Captured here, at the hand-off. A worker is spawned at
             // boot and has no caller to inherit from.
             context: crate::task_context::TaskContext::capture(),
@@ -824,6 +830,39 @@ mod tests {
         assert_eq!(captured.lock().await.len(), 1);
         assert!(captured.lock().await[0].error.contains("dead now"));
         q.shutdown().await;
+    }
+
+    /// `MAX_ATTEMPTS = 0` runs once, then dead-letters its error (#2333).
+    #[tokio::test]
+    async fn zero_max_attempts_runs_once() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Serialize, Deserialize)]
+        struct NoAttempts;
+        #[async_trait::async_trait]
+        impl Job for NoAttempts {
+            const NAME: &'static str = "test:no_attempts";
+            const MAX_ATTEMPTS: u32 = 0;
+            async fn run(&self) -> Result<(), JobError> {
+                RUNS.fetch_add(1, Ordering::SeqCst);
+                Err(JobError::Retryable("again".into()))
+            }
+        }
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<NoAttempts>().await;
+        let captured: Arc<std::sync::Mutex<Vec<JobDeadLetter>>> = Arc::default();
+        let cap = captured.clone();
+        q.on_dead_letter(move |dl| {
+            cap.lock().unwrap().push(dl);
+            async {}
+        })
+        .await;
+        q.start().await;
+        q.dispatch(&NoAttempts).await.unwrap();
+        wait_until("the dead letter", || !captured.lock().unwrap().is_empty()).await;
+        q.shutdown().await;
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+        let dl = captured.lock().unwrap();
+        assert_eq!((dl[0].attempts, dl[0].error.as_str()), (1, "again"));
     }
 
     /// #1229 — the dead-letter callback runs as the job's enqueuer.

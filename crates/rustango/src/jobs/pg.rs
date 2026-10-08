@@ -393,7 +393,7 @@ impl JobQueue for PgJobQueue {
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
-        let max_attempts = i32::try_from(T::MAX_ATTEMPTS).unwrap_or(i32::MAX);
+        let max_attempts = i32::try_from(super::max_attempts::<T>()).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
         let (p1, p2, p3, p4, p5) = (
             dialect.placeholder(1),
@@ -719,7 +719,9 @@ async fn run_one(
 
     // `attempt` already counts this run. Past the cap means earlier runs
     // died with their worker; running it again could crash the next one.
-    if job.attempt > job.max_attempts {
+    // Rows queued before #2333 may still hold 0.
+    let max_attempts = job.max_attempts.max(1);
+    if job.attempt > max_attempts {
         let msg = "no attempts left: an earlier run stopped without finishing";
         handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
         return;
@@ -739,7 +741,7 @@ async fn run_one(
             finish_job(pool, worker, job.id).await;
         }
         Err(JobError::Retryable(msg)) => {
-            if job.attempt >= job.max_attempts {
+            if job.attempt >= max_attempts {
                 handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
             } else {
                 let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
