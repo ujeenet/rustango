@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `cursor_pagination` needs a NOT NULL column
+
+A nullable cursor field now panics when the ViewSet is built (#2230). Paginate on a NOT NULL column such as the primary key.
+
 ### ViewSet answers a bad filter with 400
 
 An unknown `__lookup` or a value that does not parse (`?id=abc`, `?id__in=1,x`, `?flag__isnull=maybe`) now returns `400` instead of being ignored (#2227).

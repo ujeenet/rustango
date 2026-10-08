@@ -784,8 +784,8 @@ impl ViewSet {
     ///
     /// # Panics
     ///
-    /// If `field` is not on the model, or has a type that cannot be a
-    /// cursor (float, bool, json or blob). Caught at mount time, not
+    /// If `field` is not on the model, is nullable, or has a type that
+    /// cannot be a cursor (float, bool, json or blob). Caught at mount time, not
     /// per request, so a misconfigured ViewSet fails where the
     /// mistake is instead of returning 500 to every caller.
     #[must_use]
@@ -814,7 +814,7 @@ impl ViewSet {
                 .schema
                 .fields
                 .iter()
-                .filter(|f| cursor_field_supported(f.ty))
+                .filter(|f| cursor_field_supported(f.ty) && !f.nullable)
                 .map(|f| f.name)
                 .collect();
             panic!(
@@ -828,6 +828,12 @@ impl ViewSet {
              be a cursor — the value has to round-trip through a token and order \
              totally. Use an integer, timestamp, date, uuid or string column.",
             f.ty
+        );
+        // NULL has no place in `col > v`: rows go missing, or the token fails (#2230).
+        assert!(
+            !f.nullable,
+            "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable, and a NULL \
+             cannot be a cursor position. Use a NOT NULL column."
         );
     }
 
@@ -2720,6 +2726,12 @@ async fn handle_list_cursor(
                  integer, timestamp, date, uuid or string column.",
                 cursor_schema.ty
             ),
+        );
+    }
+    if cursor_schema.nullable {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("cursor pagination needs a NOT NULL column; `{cursor_field}` is nullable."),
         );
     }
 

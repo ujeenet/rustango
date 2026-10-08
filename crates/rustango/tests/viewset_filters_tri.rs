@@ -1,4 +1,5 @@
-//! `ViewSet` `filter_fields` query params on every backend.
+//! `ViewSet` `filter_fields` query params on every backend, and the
+//! build-time cursor check.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -126,4 +127,11 @@ tri_dialect_test! {
         a_bad_filter_is_400_naming_the_param,
         orm_lookups_filter,
     ],
+}
+
+/// #2230: a NULL cursor value made a 500 on MySQL/SQLite and lost rows on PG.
+#[test]
+#[should_panic(expected = "is nullable")]
+fn a_nullable_cursor_column_is_refused_at_build_time() {
+    let _ = rustango::viewset::ViewSet::for_model(Item::SCHEMA).cursor_pagination("category_id");
 }
