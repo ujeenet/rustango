@@ -1115,12 +1115,17 @@ pub(crate) async fn checked_request(
     Ok(normalized)
 }
 
-/// The host, path prefix or port of `request` another tenant routes on.
+/// The schema, host, path prefix or port of `request` another tenant uses.
 async fn routing_clash(
     registry: &crate::sql::Pool,
     request: &ProvisionRequest,
 ) -> Result<Option<String>, crate::sql::ExecError> {
-    use super::org_host::{host_claimed, port_claimed, prefix_claimed};
+    use super::org_host::{host_claimed, port_claimed, prefix_claimed, schema_claimed};
+    if let Some(schema) = schema_name_for(request) {
+        if schema_claimed(registry, &schema, None).await? {
+            return Ok(Some(format!("schema `{schema}`")));
+        }
+    }
     if let Some(host) = &request.host_pattern {
         if host_claimed(registry, host, None).await? {
             return Ok(Some(format!("host `{host}`")));
@@ -1277,7 +1282,7 @@ fn endpoint_identity(url: &str) -> String {
 
 /// The schema a schema-mode tenant lives in: whatever the request
 /// named, or the slug. `None` in database-mode, which has no schema.
-fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
+pub(crate) fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
     match request.mode {
         StorageMode::Schema => Some(
             request

@@ -129,9 +129,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         })?,
     };
     let source_schema = match current {
-        StorageMode::Schema => Some(SchemaName::parse(
-            org.schema_name.as_deref().unwrap_or(&parsed.slug),
-        )?),
+        StorageMode::Schema => Some(SchemaName::parse(org.effective_schema())?),
         StorageMode::Database => None,
     };
     let target_schema = match parsed.target {
@@ -140,6 +138,16 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         )?),
         StorageMode::Database => None,
     };
+    if let Some(schema) = &target_schema {
+        let registry = pools.registry_pool();
+        if crate::tenancy::org_host::schema_claimed(&registry, &schema.0, org.id.get().copied())
+            .await?
+        {
+            return Err(TenancyError::Validation(format!(
+                "schema `{schema}` is already used by another tenant"
+            )));
+        }
+    }
     let target_url = match parsed.target {
         StorageMode::Schema => registry_url.to_owned(),
         StorageMode::Database => parsed.database_url.clone().expect("validated above"),

@@ -1042,7 +1042,7 @@ impl TenantPools<sqlx::Postgres> {
         })?;
         match mode {
             StorageMode::Schema => {
-                let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
+                let schema = org.effective_schema().to_owned();
                 Ok(TenantPool::Schema {
                     schema,
                     registry: self.registry.clone(),

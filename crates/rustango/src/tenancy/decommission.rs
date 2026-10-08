@@ -158,7 +158,7 @@ where
     // Every drop is `IF EXISTS`, so a retry after a partial purge is safe.
     match mode {
         StorageMode::Schema => {
-            let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
+            let schema = org.effective_schema().to_owned();
             // Quoted: the name is an identifier, and validation only
             // started covering it recently — older rows may hold
             // anything.

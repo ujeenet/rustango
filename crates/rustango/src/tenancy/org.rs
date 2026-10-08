@@ -143,6 +143,13 @@ pub struct Org {
     // `crate::tenancy::sso::SharedSsoProvider`.
 }
 
+impl Org {
+    /// The schema a schema-mode tenant lives in: `schema_name`, else the slug.
+    pub(crate) fn effective_schema(&self) -> &str {
+        self.schema_name.as_deref().unwrap_or(&self.slug)
+    }
+}
+
 /// Convenience enum for [`Org::storage_mode`]. The model field stays
 /// a raw `String` because rustango doesn't yet carry custom enums in
 /// the schema layer; this wrapper bridges to/from `&str`.
