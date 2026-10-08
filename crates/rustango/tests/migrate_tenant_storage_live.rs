@@ -397,7 +397,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     assert_eq!(moved[0].schema_name.as_deref(), Some("t1864_moved"));
 
     sqlx_exec(&pool, "DROP SCHEMA t1864_moved CASCADE").await;
-    sqlx_exec(&pool, "DROP EXTENSION citext, pg_trgm").await;
+    drop_extensions(&pool, &["citext", "pg_trgm"]).await;
     sqlx_exec(&pool, drop_src).await;
     rustango::migrate::drop_all(&pool).await.unwrap();
 }
@@ -529,13 +529,22 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
 
     sqlx_exec(&pool, "DROP SCHEMA t2189_src CASCADE").await;
-    sqlx_exec(&pool, "DROP EXTENSION citext, pg_trgm, hstore").await;
+    drop_extensions(&pool, &["citext", "pg_trgm", "hstore"]).await;
     sqlx_exec(&pool, drop_dst).await;
     rustango::migrate::drop_all(&pool).await.unwrap();
 }
 
 async fn sqlx_exec(pool: &PgPool, sql: &str) {
     rustango::sql::sqlx::query(sql).execute(pool).await.unwrap();
+}
+
+/// Drop extensions this test installed, unless another suite on the
+/// shared test DB still uses them (e.g. `hstore_field_pg_live`).
+async fn drop_extensions(pool: &PgPool, exts: &[&str]) {
+    for ext in exts {
+        let sql = format!("DROP EXTENSION IF EXISTS {ext}");
+        let _ = rustango::sql::sqlx::query(&sql).execute(pool).await;
+    }
 }
 
 // Suppress unused-import warning when the file's only consumer
