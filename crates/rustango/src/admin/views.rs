@@ -1973,7 +1973,7 @@ pub(crate) async fn create_submit(
 /// The form error for a failed write. Never the driver's text: it holds
 /// table, constraint and SQL (#2345); that goes to the log under an id.
 fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecError) -> String {
-    use super::errors::Refusal;
+    use crate::sql::Refusal;
     if super::errors::missing_table(e).is_some_and(|t| t == crate::audit::AUDIT_TABLE) {
         return "audit table missing — run `manage migrate`".to_owned();
     }
@@ -1982,7 +1982,7 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
         return q.to_string();
     }
     let id = super::errors::log_with_id("admin write refused", e);
-    let msg = match Refusal::of(e) {
+    let msg = match e.refusal() {
         Some(Refusal::Unique) => {
             let unique: Vec<&str> = model
                 .scalar_fields()
@@ -2491,13 +2491,14 @@ fn refused_delete(
     model: &'static crate::core::ModelSchema,
     e: crate::sql::ExecError,
 ) -> Result<Response, AdminError> {
-    if super::errors::Refusal::of(&e) != Some(super::errors::Refusal::ForeignKey) {
+    if e.refusal() != Some(crate::sql::Refusal::ForeignKey) {
         return Err(e.into());
     }
     let id = super::errors::log_with_id("admin delete refused", &e);
     // PG names the table; elsewhere list the models whose FK would block.
-    let tables: Vec<String> = super::errors::fk_referencing_table(&e)
-        .map_or_else(|| blocking_referrers(model.table), |t| vec![t]);
+    let tables: Vec<String> = e
+        .fk_referencing_table()
+        .map_or_else(|| blocking_referrers(model.table), |t| vec![t.to_owned()]);
     let by = if tables.is_empty() {
         "other rows".to_owned()
     } else {

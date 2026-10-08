@@ -142,42 +142,6 @@ pub(crate) fn missing_table(e: &crate::sql::ExecError) -> Option<String> {
     }
 }
 
-/// A write the database refused on a declared constraint (#2345).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    Unique,
-    ForeignKey,
-    NotNull,
-    Check,
-}
-
-impl Refusal {
-    /// Read from the driver's error kind: PG 23503, MySQL 1451, SQLite 787, ...
-    pub(crate) fn of(e: &crate::sql::ExecError) -> Option<Self> {
-        use sqlx::error::ErrorKind;
-        let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e else {
-            return None;
-        };
-        match db.kind() {
-            ErrorKind::UniqueViolation => Some(Self::Unique),
-            ErrorKind::ForeignKeyViolation => Some(Self::ForeignKey),
-            ErrorKind::NotNullViolation => Some(Self::NotNull),
-            ErrorKind::CheckViolation => Some(Self::Check),
-            _ => None,
-        }
-    }
-}
-
-/// The referencing table of an FK refusal, where the driver names it (PG).
-pub(crate) fn fk_referencing_table(e: &crate::sql::ExecError) -> Option<String> {
-    let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e else {
-        return None;
-    };
-    db.is_foreign_key_violation()
-        .then(|| db.table().map(str::to_owned))
-        .flatten()
-}
-
 /// Log `raw` under a fresh correlation id and return the id, so a page
 /// can show the id and never the raw text.
 pub(crate) fn log_with_id(context: &str, raw: &dyn std::fmt::Display) -> String {
