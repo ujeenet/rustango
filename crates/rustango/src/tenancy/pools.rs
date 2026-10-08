@@ -837,6 +837,8 @@ impl<DB: Database> TenantPools<DB> {
                 "secrets resolver resolved tenant URL",
             );
             let connect_start = std::time::Instant::now();
+            let tag = org.id.get().map(|id| tenant_session_tag(*id));
+            let url = tag_postgres_url(&url, tag.as_deref());
             let pool = build_database_pool::<DB>(&url, &self.config).await?;
             tracing::info!(
                 target: "rustango::tenancy::pools",
@@ -1232,6 +1234,25 @@ async fn build_database_pool<DB: Database>(
     Ok(opts.connect(&url).await?)
 }
 
+/// The `application_name` a tenant's PG pool connects with. A purge ends
+/// only sessions carrying it (#2291). The id keeps it under PG's 63 bytes.
+pub(crate) fn tenant_session_tag(org_id: i64) -> String {
+    format!("rustango-tenant:{org_id}")
+}
+
+/// Add `application_name=<tag>` to a Postgres URL: a startup parameter, not
+/// a session `SET`, so it never leaks. Last in the query, so it wins.
+fn tag_postgres_url<'a>(url: &'a str, tag: Option<&str>) -> std::borrow::Cow<'a, str> {
+    let pg = url.starts_with("postgres:") || url.starts_with("postgresql:");
+    match tag {
+        Some(tag) if pg => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            std::borrow::Cow::Owned(format!("{url}{sep}application_name={tag}"))
+        }
+        _ => std::borrow::Cow::Borrowed(url),
+    }
+}
+
 /// #560 — provisioning a database-mode SQLite tenant against a URL
 /// like `sqlite:///var/data/<slug>.db` failed because the generic
 /// `PoolOptions<DB>::connect` path has no hook to set
@@ -1263,6 +1284,25 @@ fn ensure_sqlite_creates(url: &str) -> std::borrow::Cow<'_, str> {
     }
     let sep = if url.contains('?') { '&' } else { '?' };
     std::borrow::Cow::Owned(format!("{url}{sep}mode=rwc"))
+}
+
+#[cfg(test)]
+mod tag_postgres_url_tests {
+    use super::tag_postgres_url;
+
+    #[test]
+    fn tags_only_postgres_urls() {
+        assert_eq!(
+            tag_postgres_url("postgres://h/db?sslmode=require", Some("t")),
+            "postgres://h/db?sslmode=require&application_name=t"
+        );
+        assert_eq!(
+            tag_postgres_url("postgresql://h/db", Some("t")),
+            "postgresql://h/db?application_name=t"
+        );
+        assert_eq!(tag_postgres_url("mysql://h/db", Some("t")), "mysql://h/db");
+        assert_eq!(tag_postgres_url("postgres://h/db", None), "postgres://h/db");
+    }
 }
 
 #[cfg(test)]

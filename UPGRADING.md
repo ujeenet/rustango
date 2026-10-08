@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Tenant PG pools set `application_name`
+
+Database-mode tenant pools connect as `rustango-tenant:<org id>`, overriding one in the URL. A purge ends those sessions; any other session open on the database makes it fail (#2291).
+
 ### Tenant schemas are no longer shared
 
 `create-tenant`, the console, the webhook and `migrate-tenant-storage` refuse a schema another tenant uses (#2290). Rows that already share one are not touched: find them before a purge.
