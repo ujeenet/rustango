@@ -1272,6 +1272,39 @@ pub mod __private_runtime {
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
+
+    /// `#[rustango::main]`'s default filter: `RUST_LOG` from `./.env`, else
+    /// `info,sqlx=warn` (#2204). Sets no env vars, searches no parent dirs.
+    pub fn main_default_filter() -> String {
+        dotenv_rust_log()
+            .filter(|v| tracing_subscriber::EnvFilter::try_new(v).is_ok())
+            .unwrap_or_else(|| crate::logging::DEFAULT_FILTER.to_owned())
+    }
+
+    /// First `RUST_LOG` in `./.env`; none if the file is missing or has a
+    /// bad line, so a broken `.env` never stops startup.
+    fn dotenv_rust_log() -> Option<String> {
+        let iter = match dotenvy::from_path_iter(".env") {
+            Ok(iter) => iter,
+            Err(e) if e.not_found() => return None,
+            Err(e) => {
+                eprintln!("rustango: ignoring RUST_LOG in .env: {e}");
+                return None;
+            }
+        };
+        let mut found = None;
+        for item in iter {
+            match item {
+                Ok((key, value)) if key == "RUST_LOG" && found.is_none() => found = Some(value),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("rustango: ignoring RUST_LOG in .env: {e}");
+                    return None;
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Proc-macros crate, re-exported. End users normally reach

@@ -594,7 +594,7 @@ const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unifie
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
@@ -634,7 +634,7 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
@@ -665,7 +665,7 @@ const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server s
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 

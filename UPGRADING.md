@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### `server::catch_panics` is public
+
+Additive: `catch_panics(routes).layer(your_layer)` lets your layers see a panic 500 (#2168).
+
+### `#[rustango::main]` reads `RUST_LOG` from `./.env`
+
+With default logging it uses that value when the real `RUST_LOG` is unset. It sets no env vars; a bad `.env` is ignored (#2204).
+
 ### New `SchemaChange::AlterColumnComment`; `generated_as` changes are refused
 
 makemigrations writes `AlterColumnComment` for a `db_comment` change and stops on a `generated_as` change; drop and re-add that column by hand. On PG a type change into a string now writes the field's whole type with no `USING` (#2239).
@@ -1764,6 +1772,7 @@ migration, the callback alone in the next.
 (#1661). A match without a `_ =>` arm now fails with
 `error[E0004]: non-exhaustive patterns`; add the arm. `Weight` and
 `NullsOrder` stay exhaustive.
+
 ### Every framework JSON error is now an `ApiError` body
 
 Only affects clients that parse error bodies (#1193). The shape is

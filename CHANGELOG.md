@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `server::catch_panics` (#2168)
+
+Wrap your routes in it before your own layers so they see a handler panic's 500; the default stack is unchanged.
+
+### Fixed — `#[rustango::main]` reads `RUST_LOG` from `.env` (#2204)
+
+The default filter is the real `RUST_LOG`, else `RUST_LOG` from `./.env`, else `info,sqlx=warn`. Only that key is read; no env var is set and parent directories are not searched.
+
 ### Fixed — PG type change on a column with a DEFAULT (#2242)
 
 `AlterColumnType` drops the default before `TYPE` and sets the field's default after, so bool → int or text → uuid no longer fails with "default cannot be cast automatically". A type change no longer writes a separate `AlterColumnDefault`, so it undoes on PG too.
@@ -2196,6 +2204,7 @@ literal outside the crate. Use `X::new(..)` and the builders
 `.projection`). Fields stay `pub`, so a new field is no longer a break.
 `Filter::new` takes `impl Into<SqlValue>`. A `compile_fail` doctest per
 struct fails if the marker is dropped. See UPGRADING.
+
 ### Fixed — two HTML escapers skipped `'` (#1663)
 
 The operator console's provisioning page and the admin's error page
@@ -2203,12 +2212,14 @@ escaped `& < > "` but not `'`. Twelve private escapers (and the
 cookbook example's) now import `text::html_escape` or the shared XML
 one, so `'` is `&#x27;` everywhere, `csrf_input_html` included (was
 `&#39;`). The `one_html_escaper` guard fails on a new copy.
+
 ### Changed — `rustango::core` enums are `#[non_exhaustive]` (#1661)
 
 **Breaking** only for exhaustive matches; see UPGRADING. 29 enums can
 now gain a variant without a breaking release, and
 `clippy::exhaustive_enums` is denied in `core` so a new one cannot
 slip in exhaustive.
+
 ### Changed — one error envelope across the framework (#1193)
 
 **Breaking** for clients parsing error bodies. See UPGRADING.
