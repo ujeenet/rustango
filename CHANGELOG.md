@@ -4,13 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `DistributedLock::once_per_period`, `Job::retry_backoff`, `jobs::exponential_backoff`, `JobQueue::register_with` (#2330, #2332, #2334)
+
+`once_per_period` runs a body once per window counted from the Unix epoch (daily = 00:00 UTC); `register_with` registers a job with its own handler.
+
 ### Fixed — a locked scheduler job ran once per pod (#2330)
 
-New `DistributedLock::once_per_period` keys the lock by wall-clock window and keeps it until the TTL, so staggered pods run a job once per period.
+Tick often and wrap the body in `once_per_period`. A failed or panicking run frees its window for a later tick.
 
-### Fixed — job retries gave up after ~15s (#2332)
+### Changed — `EmailJob` retries for about ten minutes (#2332)
 
-New `Job::retry_backoff` hook and `jobs::exponential_backoff`; `EmailJob` now retries 8 times over about ten minutes.
+`MAX_ATTEMPTS` 5 → 8, backoff 5s doubling; before, mail dead-lettered after ~15s.
 
 ### Fixed — `MAX_ATTEMPTS = 0` never ran the job (#2333)
 
@@ -22,7 +26,7 @@ Each in-memory queue's handler holds its own mailer. Database queues share `rust
 
 ### Fixed — `FileMailer` processes overwrote each other's files (#2335)
 
-Names carry the pid and are opened with `create_new`, moving to the next number on a clash.
+Names carry the pid and are opened with `create_new`, moving to the next number on a clash. On unix the files are 0600 and a new directory 0700.
 
 ### Fixed — `cargo rustango new -i` keeps `--template` / `--backend` (#2286)
 
