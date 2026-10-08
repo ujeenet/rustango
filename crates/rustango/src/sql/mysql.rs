@@ -67,6 +67,7 @@ impl Dialect for MySql {
 
     /// MySQL reads `\` as an escape inside a string literal under the
     /// default `sql_mode`, so it is doubled along with `'` (#2232).
+    /// On a `NO_BACKSLASH_ESCAPES` server the `\` is stored doubled.
     fn quote_literal(&self, text: &str) -> String {
         format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
     }

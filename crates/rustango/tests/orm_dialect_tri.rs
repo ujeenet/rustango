@@ -67,7 +67,6 @@ pub struct Reading {
     pub meas: rustango::sql::ForeignKey<Meas>,
 }
 
-/// Seed one `Meas` row at the RFC 3339 instant `at`.
 /// Comments ending in `\`, which closed nothing on MySQL (#2232).
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "orm_dialect_tri_noted")]
