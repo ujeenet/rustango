@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `server::catch_panics` (#2168)
+
+Wrap your routes in it before your own layers so they see a handler panic's 500; the default stack is unchanged.
+
 ### Fixed — `#[rustango::main]` reads `RUST_LOG` from `.env` (#2204)
 
 The macro loads `.env` before installing its subscriber; real environment variables still win.

@@ -27,13 +27,17 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 }
 
 /// Turn a panicking handler into a logged, opaque 500 instead of a
-/// dropped connection (#1541). Mount it inside the request-id and
-/// access-log layers so both see the 500, and inside CORS and the
-/// security headers so the 500 carries them.
+/// dropped connection (#1541). Layers added after this one see that 500,
+/// so call it before your own header or request-id layers (#2168):
+///
+/// ```ignore
+/// let api = rustango::server::catch_panics(routes).layer(my_headers);
+/// ```
+///
 /// A panic inside a streaming body, after the headers are sent, is not caught.
 #[cfg(any(feature = "manage", feature = "tenancy", feature = "runserver"))]
 #[must_use]
-pub(crate) fn catch_panics(router: axum::Router) -> axum::Router {
+pub fn catch_panics(router: axum::Router) -> axum::Router {
     router.layer(axum::middleware::from_fn(
         |req: axum::extract::Request, next: axum::middleware::Next| async move {
             // A `runserver`-only build has no request-id layer.

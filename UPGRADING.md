@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `server::catch_panics` is public
+
+Additive: `catch_panics(routes).layer(your_layer)` lets your layers see a panic 500 (#2168).
+
 ### `#[rustango::main]` loads `.env`
 
 With default logging the macro now calls `dotenvy::dotenv()` before `main` runs; your own call stays harmless (#2204).

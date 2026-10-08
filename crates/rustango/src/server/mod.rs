@@ -33,6 +33,8 @@ mod app;
 #[cfg(feature = "tenancy")]
 mod builder;
 
+#[cfg(any(feature = "manage", feature = "tenancy", feature = "runserver"))]
+pub use crate::panic_guard::catch_panics;
 #[cfg(feature = "runserver")]
 pub use app::AppBuilder;
 #[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
