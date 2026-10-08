@@ -162,6 +162,80 @@ An unknown `__lookup` or a value that does not parse (`?id=abc`, `?id__in=1,x`, 
 
 `?field=` with an empty value no longer filters, on any field (#2226). It used to match `''` on a string field and nothing on a nullable one.
 
+## 0.60.2
+
+### `migrate-tenant-storage --to database` replaces the target's `public`
+
+The target database's `public` must be empty, extensions included (the tenant's own are created there by the move, #2210), and droppable by the user: the database owner on PG 15+, else a superuser. Both are checked before anything moves. The new `public` is owned by that user, with `USAGE` granted to `PUBLIC` (#2189).
+
+### `migrate-tenant-storage --to schema` needs PG 15+ with `CREATEDB`, or a superuser
+
+It restores through a staging database (`rustango_stage_*`) on the registry server, which needs PG 13+ and, before PG 15, a superuser to rename `public`. The target schema must not exist yet. The extensions the tenant's objects use (`citext`, `pg_trgm`…) are created in the registry's `public` if it lacks them, but only trusted ones or those named with `--allow-extension <name>`; others, and a non-relocatable one (PostGIS), are refused up front. `--to database` applies the same rule on the target (#1864, #2210).
+
+### The console connection probe returns JSON (#2144)
+
+`POST <console>/orgs/test-connection` and `/orgs/{slug}/test-connection` now answer `{"status": "ok"|"bad", "message", "endpoint"?}` instead of an HTML fragment.
+
+### Custom admin actions can require `delete` (#1818)
+
+Register an action that deletes with `register_action_with_perm(.., ActionPerm::Delete, ..)`; `register_action` still checks `change`.
+
+### Login limits warn when they count per process (#1809)
+
+The first login logs a warning while the per-IP and global limits live in process memory; install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))` to share them.
+
+### Error text no longer echoes secrets
+
+`PoolError::UnsupportedScheme` holds just the scheme (empty if none), not the URL (#2172). `ConfigError::Shape` reads `` `section.key`: expected <type> `` and no longer quotes the value (#2159). Update any test that matched the old text.
+
+### Admin CSRF cookie follows an outer `csrf::with_config` layer
+
+The admin and tenant login forms now set and check that layer's cookie name, not always `rustango_csrf` (#2160).
+
+### Provisioning runs store operator-safe failure text
+
+New failed steps and runs store validation text or "Step failed (internal server error)"; the cause goes to the log (#2198). Rows already in `rustango_provisioning_events` and `rustango_provisioning_runs` keep their old text; clear them if they hold driver errors.
+
+### Translations editor: an emptied cell deletes its override
+
+The grid posts each shown value as a hidden `orig:<locale>:<key>` field; a cell shown non-empty and posted blank is deleted. A custom editor form must post those fields too, and can call `i18n::admin::apply_form` (#2091).
+
+### SQLite: defaulted integer PKs are `BIGINT`
+
+New tables and migrations create a non-`Auto` integer PK with a `default` as `BIGINT`, so the default applies. Existing tables keep the rowid column until rebuilt (#2137).
+
+### ViewSet serializer PATCH runs in one transaction
+
+The row is read with `FOR UPDATE` (SQLite: `BEGIN IMMEDIATE`), so a concurrent PATCH on the same row waits (#2010). A hand-written `ModelEntry` with an audited update runner but no `with_audited_update_record` keeps the old unlocked update, so its audit entry is still written.
+
+### Host claims are transactional
+
+Tenant edit and create now insert and delete a claim row in `rustango_org_hosts` inside their transaction (#2099).
+
+### `GET /collections` returns at most 1000 rows
+
+It used to return every collection. Page with `?limit=&offset=`; with no `?limit` it returns 1000 now and 100 from 0.61.0. `MediaManager::list_collections` is deprecated in favour of `list_collections_paged` (#1570).
+
+### `GET /tags` is ordered by slug and paged
+
+It used to return up to 1000 tags by usage; it now returns them by slug, with `?limit=&offset=` (default 1000 now, 100 from 0.61.0). `GET /tags/popular` still orders by usage (#1570).
+
+### Wide recursive listings cap the offset
+
+When a subtree has more collections than the backend's bind limit, `list_in_collection_paged` and `GET /collections/{id}/contents?recursive=true` refuse an `offset` above 10 000 with 400 (#1570).
+
+### `tag` / `set_tags` take at most 1000 distinct slugs
+
+More returns `MediaError::Other` (HTTP 400) and changes nothing (#1570).
+
+### `#[rustango::main]` installs through `logging::Setup`
+
+Same output as before. If a subscriber is already installed, it now warns on stderr instead of staying silent (#1493).
+
+### MySQL batch upserts merge rows that collide in one statement
+
+A `DoUpdate` batch with two rows on the same unique key now keeps the last one, as SQLite does; Postgres still rejects it (#2200).
+
 ## 0.60.1
 
 ### `seed-permissions` reports each failed tenant

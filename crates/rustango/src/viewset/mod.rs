@@ -302,11 +302,11 @@ trait SerializerBridge: Send + Sync {
     /// per-field errors for a 400 response.
     fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors>;
 
-    /// PATCH: validate `body` over the row `q` loads (#1995). No row
-    /// skips the check; the UPDATE then answers 404.
+    /// PATCH: validate `body` over the row `q` locks in `tx` (#1995,
+    /// #2010). No row skips the check; the UPDATE then answers 404.
     fn validate_patch<'a>(
         &'a self,
-        acq: &'a mut AcquiredConn,
+        tx: &'a mut crate::sql::PoolTx<'static>,
         q: &'a SelectQuery,
         body: &'a Value,
     ) -> PatchCheck<'a>;
@@ -377,12 +377,12 @@ where
 
     fn validate_patch<'a>(
         &'a self,
-        acq: &'a mut AcquiredConn,
+        tx: &'a mut crate::sql::PoolTx<'static>,
         q: &'a SelectQuery,
         body: &'a Value,
     ) -> PatchCheck<'a> {
         Box::pin(async move {
-            let models = acq.select_rows_typed::<S::Model>(q).await?;
+            let models = crate::sql::select_rows_tx_with_related::<S::Model>(tx, q).await?;
             Ok(models
                 .first()
                 .map_or(Ok(()), |m| S::validate_patch(m, body)))
@@ -3366,16 +3366,30 @@ async fn update_inner(
     };
     let json = write_json(&state, &form, json);
 
-    // PATCH checks only the sent fields, over the stored row (#1995).
+    // PATCH checks only the sent fields, over the stored row (#1995),
+    // locked until the UPDATE in the same transaction commits (#2010).
+    let mut locked = None;
     let validated = match &state.vs.serializer {
         Some(bridge) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());
             q.where_clause = narrow(q.where_clause, scope.clone());
+            q.lock_mode = Some(crate::core::LockMode {
+                silent_on_sqlite: true,
+                ..crate::core::LockMode::default()
+            });
+            let mut tx = match crate::sql::write_transaction_pool(&acq.pool).await {
+                Ok(tx) => tx,
+                Err(e) => return json_server_error("viewset::update::begin", &e),
+            };
             let body = write_set.patch_body(bridge.as_ref(), &json);
-            match bridge.validate_patch(&mut acq, &q, &body).await {
+            let checked = match bridge.validate_patch(&mut tx, &q, &body).await {
                 Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
                 Err(e) => return json_server_error("viewset::update::validate", &e),
-            }
+            };
+            // A model audited only on a pool updates there, unlocked,
+            // rather than lose its audit entry.
+            locked = crate::audit::TxUpdate::for_model(state.vs.schema).map(|u| (u, tx));
+            checked
         }
         _ => serializer_validate(&state, &json),
     };
@@ -3415,7 +3429,11 @@ async fn update_inner(
         ),
     };
 
-    match acq.update(&query).await {
+    let updated = match locked.as_mut() {
+        Some((u, tx)) => u.run(tx, &acq.pool, &query, pk_val.clone()).await,
+        None => acq.update(&query).await,
+    };
+    match updated {
         // Nothing matched: either no such row, or one this principal is
         // scoped out of. Both are a 404 — see `handle_retrieve`.
         Ok(0) => return json_error(StatusCode::NOT_FOUND, "not found"),
@@ -3423,6 +3441,11 @@ async fn update_inner(
         Err(e) => {
             let (status, msg) = write_failure("viewset::update", &e);
             return json_error(status, &msg);
+        }
+    }
+    if let Some((_, tx)) = locked {
+        if let Err(e) = tx.commit().await {
+            return json_server_error("viewset::update::commit", &e);
         }
     }
 

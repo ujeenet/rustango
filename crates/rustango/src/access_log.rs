@@ -272,12 +272,14 @@ impl<S: Clone + Send + Sync + 'static> AccessLogRouterExt for Router<S> {
 async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let started = Instant::now();
     let method = req.method().clone();
-    let raw_query = req.uri().query();
+    // `next.run` takes the request; path and query borrow this copy.
+    let uri = req.uri().clone();
     // Path and query stay separate fields: OpenTelemetry defines
     // `url.path` as the path alone. Joining them would make a
     // collector treat every query string as its own path.
-    let path = req.uri().path().to_owned();
-    let query = raw_query
+    let path = uri.path();
+    let query = uri
+        .query()
         .map(|q| redact_query(q, &cfg.redact_query_params))
         .unwrap_or_default();
     let ip = if cfg.include_ip {
@@ -326,35 +328,22 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
 
     // `url.query` goes out only when the request had one. OTel says
     // to omit it otherwise, `tracing_layer` does the same, and a
-    // collector may reject an empty keyword field.
-    //
-    // One event callsite cannot drop a field, so the branch has to
-    // wrap the whole macro call. The macro keeps that from turning
-    // into six copies that drift apart.
+    // collector may reject an empty keyword field. A `None` field is
+    // not recorded, so one field list covers both shapes (#1493).
+    let url_query = (!query.is_empty()).then(|| tracing::field::display(&query));
+    // The level is part of the static callsite, hence the macro.
     macro_rules! emit {
         ($level:ident $(, $msg:literal)?) => {
-            if query.is_empty() {
-                tracing::$level!(
-                    "http.request.method" = %method,
-                    "url.path" = %path,
-                    "http.response.status_code" = status,
-                    duration_ms,
-                    "client.address" = %client_address,
-                    tenant = %tenant,
-                    $($msg,)?
-                );
-            } else {
-                tracing::$level!(
-                    "http.request.method" = %method,
-                    "url.path" = %path,
-                    "url.query" = %query,
-                    "http.response.status_code" = status,
-                    duration_ms,
-                    "client.address" = %client_address,
-                    tenant = %tenant,
-                    $($msg,)?
-                );
-            }
+            tracing::$level!(
+                "http.request.method" = %method,
+                "url.path" = %path,
+                "url.query" = url_query,
+                "http.response.status_code" = status,
+                duration_ms,
+                "client.address" = %client_address,
+                tenant = %tenant,
+                $($msg,)?
+            )
         };
     }
 
@@ -441,13 +430,25 @@ const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
 /// `url.query` the same way. The span renders next to the event
 /// fields, so a raw span value would put the secrets back on the line
 /// this function just cleaned.
-pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+///
+/// Borrows when nothing needs hiding: it runs twice on every request.
+pub(crate) fn redact_query<'a>(raw: &'a str, redact_keys: &[String]) -> std::borrow::Cow<'a, str> {
     // Decode the key: `pass%77ord=` is `password=` to the handler (#1957).
     let hidden = |k: &str| {
-        let key = crate::url_codec::url_decode(k);
+        let key: std::borrow::Cow<'_, str> = if k.contains(['%', '+']) {
+            crate::url_codec::url_decode(k).into()
+        } else {
+            k.into()
+        };
         ALWAYS_REDACTED.iter().any(|r| r.eq_ignore_ascii_case(&key))
             || redact_keys.iter().any(|r| r.eq_ignore_ascii_case(&key))
     };
+    let any_hidden = raw
+        .split('&')
+        .any(|pair| pair.split_once('=').is_some_and(|(k, _)| hidden(k)));
+    if !any_hidden {
+        return std::borrow::Cow::Borrowed(raw);
+    }
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
             Some((k, _)) if hidden(k) => {
@@ -457,6 +458,7 @@ pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("&")
+        .into()
 }
 
 #[cfg(test)]
@@ -592,6 +594,13 @@ mod tests {
     fn redact_query_passes_through_when_no_match() {
         let r = redact_query("a=1&b=2", &["password".to_owned()]);
         assert_eq!(r, "a=1&b=2");
+    }
+
+    /// Runs twice per request, so a clean query is not copied (#1493).
+    #[test]
+    fn redact_query_borrows_a_clean_query() {
+        let r = redact_query("page=2&sort=name&q=a%20b", &default_redact_params());
+        assert!(matches!(r, std::borrow::Cow::Borrowed(_)), "{r:?}");
     }
 
     /// #1818 — a custom list without `token` still hides the handoff token.
@@ -827,6 +836,79 @@ mod observability_mount_tests {
                 && out.contains("rid-1541"),
             "the panic was not logged with its request id:\n{out}"
         );
+    }
+
+    /// The access-log field names of one request, read from a JSON line.
+    async fn access_log_field_names(uri: &str) -> std::collections::BTreeSet<String> {
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(buf.clone())
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = mount_observability(
+            Router::new().route("/", get(|| async { "ok" })),
+            Some(AccessLogLayer::default()),
+            default_redact_params(),
+        );
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        let out = buf.contents();
+        let line = out
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json line"))
+            .find(|v| v["target"] == "rustango::access_log")
+            .unwrap_or_else(|| panic!("no access-log line:\n{out}"));
+        line["fields"]
+            .as_object()
+            .expect("fields object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A query string adds `url.query` and changes nothing else (#1493).
+    #[tokio::test]
+    async fn a_query_adds_url_query_and_nothing_else() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let bare = access_log_field_names("/").await;
+        let mut with_query = access_log_field_names("/?page=2").await;
+        assert!(!bare.contains("url.query"), "{bare:?}");
+        assert!(with_query.remove("url.query"), "{with_query:?}");
+        assert_eq!(bare, with_query, "the two access-log shapes drifted apart");
+    }
+
+    /// Backs `docs/logging.md`: plain `fmt` never prints the span's
+    /// response fields; only a span-close reader sees them (#1493).
+    #[tokio::test]
+    async fn fmt_shows_span_response_fields_only_on_close() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let span_status_rendered = |close: bool| async move {
+            use tracing_subscriber::fmt::format::FmtSpan;
+            let buf = crate::testkit::CaptureWriter::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buf.clone())
+                .with_ansi(false)
+                .with_span_events(if close { FmtSpan::CLOSE } else { FmtSpan::NONE })
+                .finish();
+            let _g = tracing::subscriber::set_default(subscriber);
+            let app = mount_observability(
+                Router::new().route("/", get(|| async { "ok" })),
+                Some(AccessLogLayer::default()),
+                default_redact_params(),
+            );
+            app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .expect("router answers");
+            let out = buf.contents();
+            assert!(out.contains("http.request{"), "no span context:\n{out}");
+            out.split("http.request{")
+                .skip(1)
+                .any(|s| s.split('}').next().unwrap_or("").contains("status_code"))
+        };
+        assert!(!span_status_rendered(false).await);
+        assert!(span_status_rendered(true).await, "the control saw nothing");
     }
 
     /// The control: with a log configured, the span is there too.
