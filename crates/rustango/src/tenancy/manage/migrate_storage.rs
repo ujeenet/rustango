@@ -50,9 +50,9 @@
 //! ## What this verb does NOT do
 //!
 //! * It does NOT drop the source data after a successful move. The
-//!   operator can `purge-tenant --purge-database` (database-mode
-//!   source) or manually `DROP SCHEMA` (schema-mode source) when
-//!   they're confident the new side is healthy.
+//!   final message names the old schema or database; drop it by hand
+//!   once the new side is healthy. Not with `purge-tenant`: that drops
+//!   the tenant's *new* storage and its Org row (#2382).
 //! * It does NOT create the target database. Database-mode targets
 //!   need `createdb` / `CREATE DATABASE` to have run already.
 //! * It does NOT verify the data row counts match between source
@@ -267,10 +267,36 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     )?;
     writeln!(
         writer,
-        "  ✓ migrated `{}` to {} mode. Source data still at the old location — `purge-tenant --purge-database` or DROP SCHEMA when ready.",
+        "  ✓ migrated `{}` to {} mode.",
         parsed.slug, parsed.target,
     )?;
+    writeln!(
+        writer,
+        "  {}",
+        old_copy_advice(source_schema.as_ref(), &source_url)
+    )?;
     Ok(())
+}
+
+/// Where the old copy is and how to drop it. Never `purge-tenant`: it
+/// drops the tenant's current (new) storage and its Org row (#2382).
+fn old_copy_advice(source_schema: Option<&SchemaName>, source_url: &str) -> String {
+    let what = match source_schema {
+        Some(s) => format!(
+            "schema `{s}` on the registry database ({}); once the new location is \
+             healthy, run `DROP SCHEMA {} CASCADE` there",
+            redact_url(source_url),
+            quote_ident(&s.0)
+        ),
+        None => format!(
+            "the database at {}; once the new location is healthy, drop that database",
+            redact_url(source_url)
+        ),
+    };
+    format!(
+        "The old copy is still in {what} by hand. Not with `purge-tenant`: it would drop \
+         the new location and the Org row."
+    )
 }
 
 fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {

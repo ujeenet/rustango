@@ -296,6 +296,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
 
     let pools = TenantPools::new(pool.clone());
     let migrate = || async {
+        let mut out = Vec::<u8>::new();
         run_with_writer(
             &pools,
             &registry_url,
@@ -308,9 +309,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
                 "--schema-name",
                 "t1864_moved",
             ]),
-            &mut Vec::<u8>::new(),
+            &mut out,
         )
         .await
+        .map(|()| String::from_utf8(out).unwrap())
     };
     let extension = |name: &'static str| {
         let pool = pool.clone();
@@ -371,7 +373,14 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         sqlx_exec(&src, stmt).await;
     }
     src.close().await;
-    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    let out = migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    // Names the old database, never `purge-tenant` (#2382).
+    let src_name = src_url.rsplit('/').next().unwrap();
+    assert!(
+        out.contains(&format!("{src_name}; once")) && out.contains("drop that database by hand"),
+        "{out}"
+    );
+    assert!(!out.contains("--purge-database"), "{out}");
     assert!(extension("citext").await && extension("pg_trgm").await);
     assert!(
         !extension("dblink").await && !extension("cube").await,
@@ -465,6 +474,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
 
     let pools = TenantPools::new(pool.clone());
     let migrate = || async {
+        let mut out = Vec::<u8>::new();
         run_with_writer(
             &pools,
             &registry_url,
@@ -477,9 +487,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
                 "--database-url",
                 &dst_url,
             ]),
-            &mut Vec::<u8>::new(),
+            &mut out,
         )
         .await
+        .map(|()| String::from_utf8(out).unwrap())
     };
     // A non-empty `public` is refused before anything moves.
     let dst = PgPool::connect(&dst_url).await.unwrap();
@@ -498,7 +509,14 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     assert_eq!(left, 0, "a refused move restored something");
     sqlx_exec(&dst, "DROP TABLE public.junk").await;
     dst.close().await;
-    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    let out = migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    // Names the old schema, never `purge-tenant` (#2382).
+    assert!(
+        out.contains("schema `t2189_src` on the registry")
+            && out.contains("`DROP SCHEMA \"t2189_src\" CASCADE` there by hand"),
+        "{out}"
+    );
+    assert!(!out.contains("--purge-database"), "{out}");
 
     let dst = PgPool::connect(&dst_url).await.unwrap();
     let granted: bool = rustango::sql::sqlx::query_scalar(
