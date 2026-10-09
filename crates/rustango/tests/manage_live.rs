@@ -1485,6 +1485,8 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
+    // The provider's client secret is encrypted with it; the lock covers the env.
+    std::env::set_var("RUSTANGO_SECRET_KEY", "manage-live-sso-key");
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
     // A probe that looked in `public` would find no provider table there.
