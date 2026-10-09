@@ -28,6 +28,8 @@ MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I
 
 A NULL FK now leaves the relation unloaded instead of failing the whole fetch; a set FK whose row is missing fails clearly on every backend.
 
+## [0.60.3] — 2026-10-08
+
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
 
 On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.

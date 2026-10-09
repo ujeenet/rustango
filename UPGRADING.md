@@ -154,6 +154,8 @@ untouched.
 
 A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Code matching `I64` / `String` for these columns must match `Bool` / `Json` now, as on Postgres. Aggregate aliases keep their own type (#2296).
 
+## 0.60.3
+
 ### `makemigrations` renames an M2M junction's column
 
 Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
