@@ -1448,14 +1448,16 @@ fn render_changes_split_inner(
                 if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
                     // A tagged body, so a `$$` in a name cannot end it.
                     const TAG: &str = "$rustango_seq$";
-                    if table.contains(TAG) || column.contains(TAG) {
+                    // In `schema`, not whatever `search_path` finds (#2308).
+                    let target = fk_target(dialect, schema, table);
+                    if target.contains(TAG) || column.contains(TAG) {
                         return Err(format!("`{table}.{column}`: a name cannot contain `{TAG}`"));
                     }
                     out.immediate.push(format!(
                         "DO {TAG} DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
                          IF s IS NOT NULL THEN EXECUTE format('ALTER SEQUENCE %s AS {}', s); \
                          END IF; END {TAG}",
-                        dialect.quote_literal(&dialect.quote_ident(table)),
+                        dialect.quote_literal(&target),
                         dialect.quote_literal(column),
                         pg_type_for_ty_name(to),
                     ));
@@ -3217,6 +3219,33 @@ mod sql_type_tests {
         assert!(out.deferred_fks[0].contains(r#"REFERENCES "t1"."posts" ("id")"#));
         assert!(out.deferred_fks[1].contains(r#"REFERENCES "t1"."tags" ("id")"#));
         assert!(out.deferred_fks[2].contains(r#"REFERENCES "t1"."parent" ("a_id", "b_id")"#));
+    }
+
+    /// #2308 — the widened PK's sequence is looked up in the schema.
+    #[test]
+    fn in_schema_render_qualifies_the_sequence_widen() {
+        let snap: SchemaSnapshot = serde_json::from_value(serde_json::json!({ "tables": [{
+            "name": "item", "model": "Item", "fields": [{
+                "name": "id", "column": "id", "ty": "i64", "nullable": false,
+                "primary_key": true, "auto": true }] }] }))
+        .unwrap();
+        let widen = [SchemaChange::AlterColumnType {
+            table: "item".into(),
+            column: "id".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let out = render_changes_split_in_schema(&widen, &snap, &crate::sql::Postgres, Some("t1"))
+            .unwrap();
+        let seq = out
+            .immediate
+            .iter()
+            .find(|s| s.contains("pg_get_serial_sequence"));
+        assert!(
+            seq.is_some_and(|s| s.contains(r#"pg_get_serial_sequence('"t1"."item"', 'id')"#)),
+            "{:?}",
+            out.immediate
+        );
     }
 
     /// #1645 — the plain per-field FK arm qualifies its target.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
+
+The sequence lookup used the bare table name, so outside `search_path` it failed.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
