@@ -781,14 +781,19 @@ impl Builder {
     }
 }
 
-/// The bare admin's own login tables, used only with session auth.
-fn is_session_auth_table(table: &str) -> bool {
-    use crate::core::Model as _;
+/// Tables the generic admin never serves: the TOTP store holds raw
+/// secrets, and enrollment has its own pages.
+fn is_never_served(table: &str) -> bool {
     #[cfg(feature = "totp")]
-    if table == super::totp_store::AdminTotp::SCHEMA.table {
-        return true;
+    {
+        use crate::core::Model as _;
+        table == super::totp_store::AdminTotp::SCHEMA.table
     }
-    table == super::user::AdminUser::SCHEMA.table
+    #[cfg(not(feature = "totp"))]
+    {
+        let _ = table;
+        false
+    }
 }
 
 /// Per-request state: the pool plus the resolved `Config`. It is
@@ -804,19 +809,22 @@ impl AppState {
     /// Whether this admin serves `table` at all. Index, sidebar, routes,
     /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {
+        use crate::core::Model as _;
         // A schema-mode tenant's `search_path` reaches the registry's
         // copy, so registry tables must not be served there (#2360).
         if super::helpers::served_entry(table).is_some_and(|e| !self.scope_visible(e.schema.scope))
         {
             return false;
         }
+        if is_never_served(table) {
+            return false;
+        }
         // `rustango_admin_users` is the bare admin's credential
         // store, and its table exists only when the host opts into
         // `Builder::with_session_auth`. The derive on `AdminUser`
         // registers it either way, so a tenancy host would see a
-        // dead surface in the model index. Hide it instead, and its TOTP
-        // store with it: a tenant admin has neither table (#2360).
-        if self.config.session_secret.is_none() && is_session_auth_table(table) {
+        // dead surface in the model index. Hide it instead.
+        if self.config.session_secret.is_none() && table == super::user::AdminUser::SCHEMA.table {
             return false;
         }
         let allowlist_ok = self
@@ -1093,8 +1101,9 @@ mod scope_filter_tests {
             config: Arc::new(cfg),
         };
         assert!(state.is_visible("rustango_admin_users"));
+        // Raw TOTP secrets never show in the generic admin.
         #[cfg(feature = "totp")]
-        assert!(state.is_visible("rustango_admin_totp"));
+        assert!(!state.is_visible("rustango_admin_totp"));
     }
 
     // `admin_prefix`: the default is `/__admin`, the setter trims a
