@@ -160,6 +160,8 @@ Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables wi
 
 Custom `MediaAuthorizer`s: `POST /media/{id}/move` now arrives as `Change(MediaMove { id, collection_id, .. })`, not `Change(Media(id))`; a policy ending in `_ => false` refuses moves until it gets an arm. `NewCollection` carries `parent_id`.
 
+## 0.60.3
+
 ### `makemigrations` renames an M2M junction's column
 
 Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).

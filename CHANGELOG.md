@@ -20,6 +20,8 @@ A move into a collection and a collection nested under a parent need `rustango_m
 
 It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.
 
+## [0.60.3] — 2026-10-08
+
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
 
 On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.
