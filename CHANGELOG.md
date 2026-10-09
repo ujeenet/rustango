@@ -16,6 +16,8 @@ It fell through to the single-tenant flush on the registry pool and deleted orgs
 
 It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail. Postgres also drops `CASCADE`, so a table outside the targets that references one makes the flush fail instead of being emptied. MySQL and SQLite delete in one transaction, children first, so a failure clears nothing and self-referencing tables flush on MySQL.
 
+## [0.60.3] — 2026-10-08
+
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
 
 On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.

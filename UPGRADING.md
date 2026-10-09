@@ -162,6 +162,8 @@ If a table outside the filter references a flushed one, the flush now fails and 
 
 In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
 
+## 0.60.3
+
 ### `makemigrations` renames an M2M junction's column
 
 Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
