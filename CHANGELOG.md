@@ -16,6 +16,10 @@ With `tenancy` compiled in, a plain admin listed `Org`, `Operator` and other tab
 
 A missing `rustango_sso_providers` reads as no providers, at sign-in and in `check --deploy`.
 
+### Fixed — admin FK facets past the cut are reachable (#2350)
+
+An FK facet's dropdown now has a "+N more" link, like the other facets.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
