@@ -1326,30 +1326,27 @@ fn sqlite_file(name: &Path) -> std::path::PathBuf {
     file_identity(Path::new(&crate::url_codec::percent_decode_path(path)))
 }
 
-/// `path` with its deepest existing ancestor canonicalized; the missing rest,
-/// `..` included, is resolved by text.
+/// The file `path` opens, walked as SQLite's unix VFS does: `..` pops by
+/// text, and each component that exists has its symlinks resolved.
 fn file_identity(path: &Path) -> std::path::PathBuf {
     use std::path::Component;
     let abs = std::env::current_dir().map_or_else(|_| path.to_owned(), |d| d.join(path));
-    let parts: Vec<Component<'_>> = abs.components().collect();
-    for n in (1..=parts.len()).rev() {
-        let Ok(mut resolved) =
-            std::fs::canonicalize(parts[..n].iter().collect::<std::path::PathBuf>())
-        else {
-            continue;
-        };
-        for part in &parts[n..] {
-            match part {
-                Component::ParentDir => {
-                    resolved.pop();
+    let mut resolved = std::path::PathBuf::new();
+    for part in abs.components() {
+        match part {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => {
+                resolved.push(other);
+                if let Ok(real) = std::fs::canonicalize(&resolved) {
+                    resolved = real;
                 }
-                Component::CurDir => {}
-                other => resolved.push(other),
             }
         }
-        return resolved;
     }
-    abs
+    resolved
 }
 
 /// Build a tenant URL on the same server as the registry, naming
@@ -2321,5 +2318,29 @@ mod registry_endpoint_tests {
         ] {
             assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
         }
+    }
+
+    /// SQLite pops `..` by text, then follows a symlink in any later component.
+    #[cfg(all(feature = "sqlite", unix))]
+    #[tokio::test]
+    async fn a_symlink_after_a_missing_dir_is_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("reg.db"), b"").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let pool = crate::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy(&format!("sqlite://{}", real.join("reg.db").display()))
+                .expect("lazy"),
+        );
+        let d = dir.path().display();
+        for same in [
+            format!("sqlite:{d}/nope/../link/reg.db"),
+            format!("sqlite:{d}/link/nope/../reg.db"),
+        ] {
+            assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
+        }
+        let other = format!("sqlite:{d}/nope/../link/t.db");
+        assert!(refuse_registry_pool(&other, &pool).is_ok());
     }
 }
