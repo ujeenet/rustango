@@ -216,7 +216,12 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             .await;
             pool.close().await;
             refused?;
-            let before: Vec<String> = used.iter().flat_map(|e| e.create_in(&e.schema)).collect();
+            // One in the tenant's schema comes with the dump, which creates
+            // that schema; `before` cannot (#2386).
+            let (own, other): (Vec<&Extension>, _) =
+                used.iter().partition(|e| e.schema == schema.0);
+            let extensions = own.iter().map(|e| e.name.clone()).collect();
+            let before = other.iter().flat_map(|e| e.create_in(&e.schema)).collect();
             let mut after: Vec<String> = used.iter().flat_map(|e| e.move_to(&schema.0)).collect();
             // `--no-acl` drops the default grant, which other app roles need.
             after.extend([
@@ -224,9 +229,14 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
                 format!("ALTER SCHEMA {} RENAME TO public", quote_ident(&schema.0)),
                 "GRANT USAGE ON SCHEMA public TO PUBLIC".to_owned(),
             ]);
-            Restore::Dump { before, after }
+            Restore::Dump {
+                extensions,
+                before,
+                after,
+            }
         }
         (None, None) => Restore::Dump {
+            extensions: Vec::new(),
             before: Vec::new(),
             after: Vec::new(),
         },
@@ -295,6 +305,8 @@ enum Restore {
     IntoSchema(SchemaPlan),
     /// One `pg_dump | psql`, with statements around the dump.
     Dump {
+        /// Extensions the dump itself creates (`pg_dump --extension`).
+        extensions: Vec<String>,
         before: Vec<String>,
         after: Vec<String>,
     },
@@ -327,8 +339,13 @@ impl MoveCtx<'_> {
             Restore::IntoSchema(plan) => {
                 run_into_schema(self.pools.registry(), &source, &target, plan).await?;
             }
-            Restore::Dump { before, after } => {
-                pg_dump_to_psql(&source, self.source_schema, &target, &before, &after)?;
+            Restore::Dump {
+                extensions,
+                before,
+                after,
+            } => {
+                let scope = self.source_schema;
+                pg_dump_to_psql(&source, scope, &extensions, &target, &before, &after)?;
             }
         }
         writeln!(writer, "  data move OK")?;
@@ -833,8 +850,8 @@ async fn run_into_schema(
         .execute(registry)
         .await?;
     let stage = target.database(&staging);
-    let moved = pg_dump_to_psql(source, None, &stage, &[], &plan.moves)
-        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), target, &plan.create, &[]));
+    let moved = pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves)
+        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &plan.create, &[]));
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;
@@ -844,10 +861,12 @@ async fn run_into_schema(
 }
 
 /// Pipe `pg_dump <source>` into `psql <target>` in one transaction. When
-/// the source is schema-scoped, pass `--schema=<name>` to pg_dump.
+/// the source is schema-scoped, pass `--schema=<name>` to pg_dump, and
+/// `--extension` (pg_dump 14+) for each of `extensions`.
 fn pg_dump_to_psql(
     source: &Conn,
     source_schema: Option<&SchemaName>,
+    extensions: &[String],
     target: &Conn,
     before: &[String],
     after: &[String],
@@ -861,6 +880,10 @@ fn pg_dump_to_psql(
         .arg("--no-subscriptions");
     if let Some(s) = source_schema {
         dump_cmd.arg(format!("--schema={}", s.0));
+    }
+    // Quoted, so the pattern is the literal name.
+    for e in extensions {
+        dump_cmd.arg(format!("--extension={}", quote_ident(e)));
     }
     dump_cmd.stdout(Stdio::piped());
     dump_cmd.stderr(Stdio::piped());

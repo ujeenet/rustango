@@ -20,6 +20,10 @@ An untrusted extension pre-installed on the target, in the schema the registry h
 
 The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The row update writes only the storage columns.
 
+### Fixed — `migrate-tenant-storage --to database` moves an extension in the tenant's own schema (#2386)
+
+The restore failed on `CREATE SCHEMA` (42P06). The dump now creates that extension itself, which needs pg_dump 14+.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.

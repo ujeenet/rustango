@@ -454,13 +454,14 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     for stmt in [
         "CREATE EXTENSION IF NOT EXISTS citext",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-        "CREATE EXTENSION IF NOT EXISTS hstore",
         "CREATE SCHEMA t2189_ext",
         "CREATE EXTENSION earthdistance WITH SCHEMA t2189_ext CASCADE",
         "CREATE SCHEMA t2189_src",
+        // In the tenant's own schema: the dump creates it (#2386).
+        "CREATE EXTENSION hstore WITH SCHEMA t2189_src",
         "CREATE TABLE t2189_src.places (id INT, at t2189_ext.earth)",
         // Only an array of it: the extension is found through the element.
-        "CREATE TABLE t2189_src.notes (id INT, kv hstore[])",
+        "CREATE TABLE t2189_src.notes (id INT, kv t2189_src.hstore[])",
         "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
         "CREATE INDEX users_trgm ON t2189_src.rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO t2189_src.rustango_users (username) VALUES ('ann'), ('bob')",
@@ -575,6 +576,13 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     .await
     .unwrap();
     assert!(granted, "other roles lost USAGE on public");
+    let hstore_at: String = rustango::sql::sqlx::query_scalar(
+        "SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'hstore'",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert_eq!(hstore_at, "public");
     let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
         "SELECT username::text FROM rustango_users WHERE username = 'ANN' \
              OR username = 'Bob' ORDER BY id",
