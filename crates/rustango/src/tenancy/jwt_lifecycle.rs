@@ -453,6 +453,12 @@ impl JwtLifecycle {
             .filter(|c| c.typ == REFRESH_TYP)
     }
 
+    /// Claims by signature alone, expired or revoked included: enough to
+    /// end a token's family at logout (#2419).
+    pub(crate) fn decode_signed(&self, token: &str) -> Option<JwtClaims> {
+        self.decode_unchecked(token)
+    }
+
     /// Mark a refresh-token family dead until `exp` (#1854). Only as
     /// strong as the JTI store: a process-local one forgets on restart.
     pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {

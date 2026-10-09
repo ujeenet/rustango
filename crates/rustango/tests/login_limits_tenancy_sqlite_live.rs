@@ -810,6 +810,40 @@ async fn logout_ends_every_access_token_of_the_login() {
         .await;
 }
 
+/// #2419 — logout with a dead access token and a rotated refresh still
+/// ends the refresh family, so a thief's rotated token stops refreshing.
+#[tokio::test]
+async fn logout_with_a_rotated_refresh_ends_the_family() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("fam");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let stolen = login["refresh"].as_str().unwrap().to_owned();
+    // The thief rotates the stolen token first.
+    let r = env.refresh(&stolen).await;
+    assert_eq!(r.status(), StatusCode::OK, "thief rotates");
+    let thief = json_body(r).await["refresh"].as_str().unwrap().to_owned();
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, "Bearer expired.access.token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "refresh": stolen }).to_string(),
+        ))
+        .unwrap();
+    let r = send(&env.api, &next_ip(), logout).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    let r = env.refresh(&thief).await;
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "thief's token still refreshes"
+    );
+}
+
 async fn json_body(r: axum::response::Response) -> serde_json::Value {
     let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     serde_json::from_slice(&b).unwrap()

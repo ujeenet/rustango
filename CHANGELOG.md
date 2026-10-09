@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — logout ends the refresh family even with an expired access token (#2419)
+
+The family is read from any token signed for the tenant, expired or already rotated, so a thief's rotated refresh token stops working at logout.
+
 ### Fixed — operator console audits shared SSO changes and password changes (#2424)
 
 Creating, re-linking and deleting a shared SSO provider, and an operator's own password change, now write audit rows; a failed delete reports the error instead of a success redirect.
