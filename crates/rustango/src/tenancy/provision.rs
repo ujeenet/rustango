@@ -1329,7 +1329,7 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
 /// do not exist on SQLite or MySQL. There are two separate refusals:
 /// the build has no `postgres` feature, or it does but these pools are
 /// not Postgres, which only a runtime downcast can tell.
-async fn provision_schema<DB: Database>(
+pub(crate) async fn provision_schema<DB: Database>(
     pools: &TenantPools<DB>,
     schema: &str,
 ) -> Result<(), TenancyError> {
@@ -1366,7 +1366,7 @@ async fn provision_schema<DB: Database>(
 }
 
 /// Flip the tenant live.
-async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result<(), TenancyError> {
+pub(crate) async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result<(), TenancyError> {
     use crate::sql::UpdaterPool as _;
     let updated = Org::objects()
         .where_(Org::id.eq(org_id))

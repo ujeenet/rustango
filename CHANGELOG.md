@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `api::create_tenant` returns a failed migration (#2392)
+
+It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.

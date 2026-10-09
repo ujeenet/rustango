@@ -88,7 +88,7 @@ where
 /// * `TenancyError::Validation` for duplicate slug or bad
 ///   schema/database options.
 /// * Driver / SQL failures during schema creation, the Org INSERT, or
-///   the tenant migration pass.
+///   the tenant migration pass. A failed migration leaves the Org inactive.
 pub async fn create_tenant<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -139,31 +139,8 @@ where
     let host_pattern = checked.host_pattern;
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
 
-    if let StorageMode::Schema = opts.mode {
-        #[cfg(feature = "postgres")]
-        {
-            let pg_pools = (pools as &dyn std::any::Any)
-                .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "schema-mode tenants require a Postgres registry".into(),
-                    )
-                })?;
-            let schema = schema_name.as_deref().unwrap_or(slug);
-            let sql = format!(
-                "CREATE SCHEMA IF NOT EXISTS {}",
-                super::args::quote_ident(schema)
-            );
-            rustango::sql::sqlx::query(&sql)
-                .execute(pg_pools.registry())
-                .await?;
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            return Err(TenancyError::Validation(
-                "schema-mode tenants require the `postgres` feature".into(),
-            ));
-        }
+    if let Some(schema) = schema_name.as_deref() {
+        crate::tenancy::provision::provision_schema(pools, schema).await?;
     }
 
     let mut org = Org {
@@ -177,7 +154,8 @@ where
         host_pattern,
         port: opts.port,
         path_prefix: opts.path_prefix.clone(),
-        active: true,
+        // Activated only once its migrations applied (#2392).
+        active: false,
         created_at: chrono::Utc::now(),
         brand_name: None,
         brand_tagline: None,
@@ -189,25 +167,14 @@ where
     crate::tenancy::org_host::insert_org(&pools.registry_pool(), &mut org).await?;
 
     if !opts.no_migrate {
+        // This tenant only, and a failure is the caller's error (#2392).
         for dir in resolve_migration_dirs(migrations_dir) {
-            // PG path runs schema-mode + database-mode; non-PG runs
-            // database-mode only via migrate_tenants_db.
-            #[cfg(feature = "postgres")]
-            {
-                if let Some(pg_pools) =
-                    (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-                {
-                    let _ = tenant_migrate::migrate_tenants(pg_pools, &dir, registry_url).await?;
-                } else {
-                    let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
-                }
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
-            }
+            tenant_migrate::migrate_one_tenant(pools, &org, &dir, registry_url, None).await?;
         }
     }
+    let org_id = org.id.get().copied().unwrap_or_default();
+    crate::tenancy::provision::activate(&pools.registry_pool(), org_id).await?;
+    crate::tenancy::invalidate_org_cache();
 
     // Re-fetch so the returned Org has whatever the runner / triggers
     // wrote back; cheap, and lets callers chain `pools.acquire(&org)`
