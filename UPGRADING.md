@@ -152,7 +152,7 @@ untouched.
 
 ### Migrations re-add some FKs
 
-On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326).
+On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326). On PG and MySQL, renaming an FK or M2M junction column re-adds its FK under the new column's name, which re-checks every row (#2307).
 
 ## 0.60.4
 

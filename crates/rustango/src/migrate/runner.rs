@@ -929,10 +929,8 @@ fn preview_schema_op(
     let step = render_step(change, ops, after, dialect, None)?;
     // The runner looks these names up live; a migrate-built FK has this one.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-        let has_fk = before
-            .table(&fk.table)
-            .and_then(|t| t.field(&fk.column))
-            .is_some_and(|f| f.fk.is_some());
+        let has_fk = super::diff::column_fk_sql(before, &fk.table, &fk.column, dialect, None)
+            .is_ok_and(|sql| sql.is_some());
         if has_fk {
             let name = ddl::fk_constraint_name(&fk.table, &fk.column);
             statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
@@ -2906,6 +2904,11 @@ fn fk_deferred_earlier(table: &str, column: &str, earlier: &[Operation]) -> bool
                 column: c,
                 ..
             }
+            | SC::RenameColumn {
+                table: t,
+                new_column: c,
+                ..
+            }
             | SC::AlterColumnUnique {
                 table: t,
                 column: c,
@@ -3140,10 +3143,28 @@ fn render_step(
             .and_then(|t| t.field(column))
             .is_some_and(|f| f.fk.is_some())
     };
+    // A rename keeps the FK's old name, so it comes back under the new one,
+    // with the names at the end, once its last rename ran (#2307).
+    let renamed_fk = match change {
+        SC::RenameColumn {
+            table, new_column, ..
+        } if !dialect.inline_fks_in_create_table() => {
+            let end = super::rebuild::name_at_end(table, later);
+            let at_end =
+                super::rebuild::columns_at_end(table, std::slice::from_ref(new_column), later);
+            super::diff::column_fk_sql(after, &end, &at_end[0], dialect, schema)
+                .map_err(MigrateError::Validation)?
+                .map(|sql| (at_end[0] == *new_column, sql))
+        }
+        _ => None,
+    };
     let drop_fks = match change {
         SC::DropColumn { table, column } | SC::AlterFkOnDelete { table, column, .. } => {
             Some(at_column(table, column))
         }
+        SC::RenameColumn {
+            table, old_column, ..
+        } if renamed_fk.is_some() => Some(at_column(table, old_column)),
         // MySQL re-adds it after the MODIFY or the index drop (3780, 1553).
         SC::AlterColumnType { table, column, .. }
         | SC::AlterColumnMaxLength { table, column, .. }
@@ -3173,6 +3194,9 @@ fn render_step(
         _ => None,
     };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
+    if let Some((true, sql)) = renamed_fk {
+        batch.deferred_fks.push(sql);
+    }
     // Its FKs carry the names at this op, which a later rename changes.
     if renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);

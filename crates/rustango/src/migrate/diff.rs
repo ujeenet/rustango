@@ -1826,14 +1826,10 @@ fn render_changes_split_inner(
                         "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}))",
                     ));
-                    out.deferred_fks.push(format!(
-                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_src_fk} \
-                         FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE",
-                    ));
-                    out.deferred_fks.push(format!(
-                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_dst_fk} \
-                         FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE",
-                    ));
+                    out.deferred_fks
+                        .push(m2m_fk_sql(through, src_col, src_table, dialect, schema));
+                    out.deferred_fks
+                        .push(m2m_fk_sql(through, dst_col, dst_table, dialect, schema));
                 }
             }
             SchemaChange::DropM2MTable { through } => {
@@ -2128,6 +2124,44 @@ pub(crate) fn column_fks(
             Ok((f.column.clone(), sql))
         })
         .collect()
+}
+
+/// The `ADD CONSTRAINT … FOREIGN KEY` of `table.column` in `snap`, a model's or a junction's.
+pub(crate) fn column_fk_sql(
+    snap: &SchemaSnapshot,
+    table: &str,
+    column: &str,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<Option<String>, String> {
+    let field = snap.table(table).and_then(|t| t.field(column));
+    if let Some(rel) = field.and_then(|f| f.fk.as_ref()) {
+        return field_fk_sql(table, column, rel, dialect, schema).map(Some);
+    }
+    let to = snap.m2m_table(table).and_then(|m| {
+        [(&m.src_col, &m.src_table), (&m.dst_col, &m.dst_table)]
+            .into_iter()
+            .find_map(|(c, to)| (c == column).then_some(to))
+    });
+    Ok(to.map(|to| m2m_fk_sql(table, column, to, dialect, schema)))
+}
+
+/// A junction column's FK, which cascades.
+fn m2m_fk_sql(
+    through: &str,
+    column: &str,
+    to: &str,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE CASCADE",
+        dialect.quote_ident(through),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(through, column)),
+        dialect.quote_ident(column),
+        fk_target(dialect, schema, to),
+        dialect.quote_ident("id"),
+    )
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.

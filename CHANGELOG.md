@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.
 
+### Fixed — a renamed FK or junction column's FK takes the new column's name (#2307)
+
+PG and MySQL kept `<table>_<old>_fkey`. The runner drops the live FK by its catalog name and re-adds it at the end of the migration.
+
 ### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
 
 The sequence lookup used the bare table name, so outside `search_path` it failed.

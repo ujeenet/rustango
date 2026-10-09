@@ -3043,6 +3043,90 @@ async fn m2m_column_rename_keeps_rows(pool: &Pool) {
     assert_eq!(got, [(7,)], "and the unapply");
 }
 
+/// The live FK names of `t`, sorted; `None` on SQLite, whose names are never looked up.
+async fn fk_names(pool: &Pool, t: &str) -> Option<Vec<String>> {
+    let sql = match pool.dialect().name() {
+        "postgres" => format!(
+            "SELECT conname::text FROM pg_constraint \
+             WHERE conrelid = '{t}'::regclass AND contype = 'f' ORDER BY 1"
+        ),
+        "mysql" => format!(
+            "SELECT CAST(CONSTRAINT_NAME AS CHAR) FROM information_schema.TABLE_CONSTRAINTS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}' \
+             AND CONSTRAINT_TYPE = 'FOREIGN KEY' ORDER BY 1"
+        ),
+        _ => return None,
+    };
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    Some(got.into_iter().map(|(n,)| n).collect())
+}
+
+/// A renamed junction column's FK takes the new column's name, through a
+/// swap and an unapply; it kept the old one (#2307).
+async fn m2m_column_rename_renames_its_fk(pool: &Pool) {
+    let (post, tag, through) = ("mad_mf_post", "mad_mf_tag", "mad_mf_post_tags");
+    let chain = Chain::new(pool, "mf", &[through, post, tag]).await;
+    let with = |src_col: &str, dst_col: &str| {
+        json!({
+            "tables": [table(post, vec![id()]), table(tag, vec![id()])],
+            "m2m_tables": [{"through": through, "src_table": post, "src_col": src_col,
+                            "dst_table": tag, "dst_col": dst_col}],
+        })
+    };
+    let names = |cols: &[&str]| {
+        let mut v: Vec<String> = cols
+            .iter()
+            .map(|c| rustango::migrate::ddl::fk_constraint_name(through, c))
+            .collect();
+        v.sort();
+        (pool.dialect().name() != "sqlite").then_some(v)
+    };
+    chain
+        .step(pool, with("post_id", "tag_id"))
+        .await
+        .expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[tag, "id"])
+        .await
+        .unwrap();
+    let renamed = chain
+        .step(pool, with("post_id", "label_id"))
+        .await
+        .expect("the rename applies");
+    assert_eq!(
+        fk_names(pool, through).await,
+        names(&["post_id", "label_id"])
+    );
+    chain.undo(pool, &renamed).await.expect("unapply");
+    assert_eq!(fk_names(pool, through).await, names(&["post_id", "tag_id"]));
+    chain.discard_head();
+    // A swap goes through a spare name; each FK follows its column.
+    chain
+        .step(pool, with("tag_id", "post_id"))
+        .await
+        .expect("the swap applies");
+    assert_eq!(fk_names(pool, through).await, names(&["post_id", "tag_id"]));
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[through, "tag_id", "post_id"],
+    )
+    .await
+    .expect("tag_id now points at the post, post_id at the tag");
+    let orphan = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (7, 1)",
+        &[through, "tag_id", "post_id"],
+    )
+    .await;
+    let err = orphan.expect_err("each FK is enforced");
+    assert!(err.to_lowercase().contains("foreign key"), "{err}");
+}
+
 /// A `db_comment` lands with CreateTable and AddColumn too (#2270).
 async fn db_comment_on_create_and_add_column(pool: &Pool) {
     let t = "mad_cc_item";
@@ -3189,6 +3273,7 @@ tri_dialect_test!(
         auto_pk_widens_its_sequence,
         fk_name_collision_is_refused,
         m2m_column_rename_keeps_rows,
+        m2m_column_rename_renames_its_fk,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,
