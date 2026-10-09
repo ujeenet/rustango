@@ -1058,11 +1058,11 @@ mod tests {
             crate::cache::InMemoryCache::new(),
             tokio::sync::Barrier::new(2),
         ));
-        let url = link();
+        let (url, scope) = (link(), scope());
         let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
-                MagicLink::verify_single_use(&url, &scope(), SECRET, &cache),
-                MagicLink::verify_single_use(&url, &scope(), SECRET, &cache),
+                MagicLink::verify_single_use(&url, &scope, SECRET, &cache),
+                MagicLink::verify_single_use(&url, &scope, SECRET, &cache),
             )
         })
         .await
