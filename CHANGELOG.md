@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
-A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or the registry.
+A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.
 
 ### Fixed — a single-database admin no longer lists registry-only tables (#2365)
 

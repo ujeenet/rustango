@@ -201,6 +201,7 @@ async fn database_mode_tenant_admin(backend: Backend) {
             pools.scoped_pool_dyn(&org).await.unwrap()
         }
     };
+    assert_passkeys_on_tenant_only(&tenant, &registry).await;
     let router = tenant_admin(tenant);
     let listed = assert_listed_tables_exist(&router, "tenant admin").await;
     assert!(listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
@@ -254,6 +255,21 @@ async fn single_database_admin(backend: Backend) {
     rustango::passkey::for_user(&pool, 1)
         .await
         .expect("passkey table");
+}
+
+/// Tenancy `migrate` creates the passkey store on the tenant, never the registry (#2364).
+#[allow(unused_variables)]
+async fn assert_passkeys_on_tenant_only(tenant: &Pool, registry: &Pool) {
+    #[cfg(feature = "passkey")]
+    {
+        rustango::passkey::for_user(tenant, 1)
+            .await
+            .expect("tenant passkey table");
+        assert!(
+            rustango::passkey::for_user(registry, 1).await.is_err(),
+            "the registry holds a passkey table"
+        );
+    }
 }
 
 /// No admin serves passkeys: a row signs in as its `user_id` (#2364).
@@ -324,6 +340,7 @@ async fn schema_mode_tenant_admin() {
         .expect("tenants");
     assert!(report.all_ok(), "{report:?}");
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
+    assert_passkeys_on_tenant_only(&tenant, &registry).await;
     let router = tenant_admin(tenant);
     let listed = assert_listed_tables_exist(&router, "schema-mode tenant admin").await;
     assert_no_registry_tables(&listed);
@@ -342,5 +359,59 @@ async fn schema_mode_tenant_admin() {
     assert!(
         foreign.is_empty(),
         "listed but not in schema t1: {foreign:?}"
+    );
+}
+
+/// A passkey enrolled on one schema-mode tenant is not found on another (#2364).
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+#[tokio::test]
+async fn schema_mode_passkeys_stay_per_tenant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url, _db)) = fresh(Backend::Postgres, tmp.path(), "pk").await
+    else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let dir = tmp.path().join("app/migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry migrate");
+    let mut orgs = Vec::new();
+    for slug in ["pa", "pb"] {
+        let mut org = rustango::tenancy::Org {
+            slug: slug.into(),
+            display_name: slug.into(),
+            storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+            backend_kind: "postgres".into(),
+            schema_name: Some(slug.into()),
+            database_url: None,
+            ..rustango::testkit::org()
+        };
+        org.insert_pool(&registry).await.unwrap();
+        orgs.push(org);
+    }
+    let pools = rustango::tenancy::TenantPools::new(registry.as_postgres().unwrap().clone());
+    let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
+        .await
+        .expect("tenants");
+    assert!(report.all_ok(), "{report:?}");
+    let a = pools.scoped_pool_dyn(&orgs[0]).await.unwrap();
+    let b = pools.scoped_pool_dyn(&orgs[1]).await.unwrap();
+    rustango::passkey::register(&a, 7, "cred-a", vec![1, 2, 3], 0, "laptop")
+        .await
+        .expect("enroll on tenant a");
+    assert!(rustango::passkey::by_credential_id(&a, "cred-a")
+        .await
+        .unwrap()
+        .is_some());
+    let on_b = rustango::passkey::by_credential_id(&b, "cred-a").await;
+    assert!(
+        matches!(on_b, Ok(None)),
+        "tenant b sees a's passkey: {on_b:?}"
+    );
+    assert!(
+        rustango::passkey::for_user(&registry, 7).await.is_err(),
+        "the registry holds a passkey table"
     );
 }
