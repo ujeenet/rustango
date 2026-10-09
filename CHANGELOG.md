@@ -20,6 +20,14 @@ A missing `rustango_sso_providers` reads as no providers, at sign-in and in `che
 
 An FK facet's dropdown now has a "+N more" link, like the other facets.
 
+### Fixed — `prefetch_reverse_generic_for` splits a large parent list across queries (#2318)
+
+It bound every parent id in one `IN` list and failed past the backend's bind limit.
+
+### Fixed — `values().annotate()` grouped by a joined bool reads as `Bool` on MySQL and SQLite (#2322)
+
+A `values(&["a.flag"])` group column, or a join's `project` column in `values_dict` / `values_list`, took no model type and came back as `I64`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
