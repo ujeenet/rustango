@@ -464,7 +464,6 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
 /// The `check --deploy` scan: linking off, no link rows, existing users (#2359).
 async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
     use rustango::sql::FetcherPool as _;
-    use rustango::testkit::sso_check as check;
     // Unique per run: the shared user tables keep earlier runs' rows.
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -498,6 +497,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
 
     #[cfg(feature = "admin-sso")]
     {
+        use rustango::testkit::sso_check as check;
         // The admin never links by email, so `open` counts too.
         let mut root =
             rustango::admin::AdminUser::new_with_password(&format!("chk{n}"), "pw-123456789", true)
