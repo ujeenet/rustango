@@ -1419,3 +1419,194 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `check --deploy` reports tenants whose database never answers, in slug
+/// order, checking them at once rather than waiting out each (#2359).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn check_deploy_does_not_wait_on_silent_tenants() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    // Accepts connections and never answers.
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((s, _)) = silent.accept().await {
+            open.push(s);
+        }
+    });
+    // Saved out of slug order, so the report's order is the sort's doing.
+    let slugs: Vec<String> = ["silent-c", "silent-b", "silent-a"]
+        .into_iter()
+        .map(unique)
+        .collect();
+    for slug in &slugs {
+        let mut org = Org {
+            slug: slug.clone(),
+            display_name: slug.clone(),
+            database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
+            ..rustango::testkit::org()
+        };
+        org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+            .await
+            .unwrap();
+    }
+
+    let pools = TenantPools::new(pool.clone());
+    let dir = fresh_dir("sso_silent");
+    let start = std::time::Instant::now();
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    held.abort();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+    let at = |slug: &String| {
+        out.find(&format!(
+            "[sso] tenant `{slug}`: could not check SSO providers: timed out"
+        ))
+        .unwrap_or_else(|| panic!("{slug}: {out}"))
+    };
+    let (c, b, a) = (at(&slugs[0]), at(&slugs[1]), at(&slugs[2]));
+    assert!(a < b && b < c, "{out}");
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `check --deploy` reads a schema-mode tenant in its own schema, never
+/// `public` (#2359).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
+    use rustango::sql::Auto;
+    use rustango::sso::{link::create_link, resolve_by_slug, LinkSource, SsoProvider};
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    // The provider's client secret is encrypted with it; the lock covers the env.
+    std::env::set_var("RUSTANGO_SECRET_KEY", "manage-live-sso-key");
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    // A probe that looked in `public` would find no provider table there.
+    sqlx::query("DROP TABLE IF EXISTS public.rustango_sso_providers CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let slug = unique("ssoschema");
+    drop_schema(&pool, &slug).await;
+    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        storage_mode: "schema".into(),
+        schema_name: Some(slug.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+    let pools = TenantPools::new(pool.clone());
+    let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
+        .await
+        .unwrap();
+    rustango::testkit::create_tables_for::<SsoProvider>(&tenant)
+        .await
+        .unwrap();
+    rustango::sso::link::ensure_table(&tenant).await.unwrap();
+    let mut user = rustango::tenancy::User {
+        username: "ann".into(),
+        email: Some("ann@example.com".into()),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&tenant).await.unwrap();
+    SsoProvider {
+        id: Auto::default(),
+        slug: "corp".into(),
+        label: "corp".into(),
+        kind: "oidc".into(),
+        issuer_url: Some("https://idp.example".into()),
+        client_id: "cid".into(),
+        client_secret: rustango::casts::Cast::new("s3cret".into()),
+        enabled: true,
+        sort_order: 0,
+        scopes: None,
+        allow_email_link: false,
+        created_at: Auto::default(),
+        updated_at: Auto::default(),
+    }
+    .insert_pool(&tenant)
+    .await
+    .unwrap();
+
+    let dir = fresh_dir("sso_schema");
+    let line = format!("[sso] tenant `{slug}`: provider `corp` has allow_email_link off");
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    assert!(out.contains(&line), "{out}");
+
+    let corp = resolve_by_slug(&tenant, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let uid = user.id.get().copied().unwrap();
+    create_link(&tenant, &corp.key(LinkSource::Tenant), "sub-ann", uid)
+        .await
+        .unwrap();
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    assert!(!out.contains(&line), "{out}");
+
+    drop_schema(&pool, &slug).await;
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A schema-mode tenant whose schema is missing is reported, not checked
+/// against `public` (#2359).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let ghost = unique("ghost");
+    drop_schema(&pool, &ghost).await;
+    let mut org = Org {
+        slug: ghost.clone(),
+        display_name: ghost.clone(),
+        storage_mode: "schema".into(),
+        schema_name: Some(ghost.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+    let pools = TenantPools::new(pool.clone());
+    let dir = fresh_dir("sso_ghost");
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    assert!(
+        out.contains(&format!(
+            "[sso] tenant `{ghost}`: could not check SSO providers: schema `{ghost}` is missing"
+        )),
+        "{out}"
+    );
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

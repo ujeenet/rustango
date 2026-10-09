@@ -2479,37 +2479,46 @@ async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> us
 /// * MySQL — filtered to `DATABASE()` (a schema is a database here)
 /// * SQLite — `sqlite_master`, which is inherently per-connection
 pub(crate) async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
-    match pool {
+    try_table_exists_here(pool, table).await.unwrap_or(false)
+}
+
+/// [`table_exists_here`], with a failed probe as an error rather than "missing".
+pub(crate) async fn try_table_exists_here(
+    pool: &crate::sql::Pool,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    let n = match pool {
         #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM information_schema.tables \
+        crate::sql::Pool::Postgres(pg) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM information_schema.tables \
              WHERE table_schema = current_schema() AND table_name = $1",
-        )
-        .bind(table)
-        .fetch_one(pg)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false),
+            )
+            .bind(table)
+            .fetch_one(pg)
+            .await?
+        }
         #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM information_schema.tables \
+        crate::sql::Pool::Mysql(my) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM information_schema.tables \
              WHERE table_schema = DATABASE() AND table_name = ?",
-        )
-        .bind(table)
-        .fetch_one(my)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false),
+            )
+            .bind(table)
+            .fetch_one(my)
+            .await?
+        }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
-        )
-        .bind(table)
-        .fetch_one(sq)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false),
-    }
+        crate::sql::Pool::Sqlite(sq) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(sq)
+            .await?
+        }
+    };
+    Ok(n > 0)
 }
 
 /// Record `mig` as applied **without running its `forward` ops**, and

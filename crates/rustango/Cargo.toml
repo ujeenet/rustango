@@ -572,6 +572,8 @@ subtle           = { workspace = true }
 # Gating those would have silently removed transaction hooks from a bare-ORM
 # build; making the dependency honest costs no extra crate.
 tokio            = { workspace = true, features = ["time"] }
+# Already linked through sqlx; `check --deploy` walks tenants with `buffer_unordered`.
+futures-util     = { version = "0.3", default-features = false, features = ["alloc"] }
 tower            = { workspace = true, optional = true }
 tokio-util       = { version = "0.7", features = ["io"], optional = true }
 redis            = { workspace = true, optional = true }

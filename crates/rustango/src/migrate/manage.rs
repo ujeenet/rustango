@@ -1696,12 +1696,37 @@ fn collation_warning(collation: &str) -> Option<String> {
     }
 }
 
+/// Warn about bare-admin SSO providers that refuse every admin user (#2359).
+#[cfg(feature = "admin-sso")]
+async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    match crate::sso::check::admin_providers(pool).await {
+        Ok(slugs) => audit
+            .warnings
+            .extend(slugs.iter().map(|s| crate::sso::check::admin_warning(s))),
+        Err(e) => audit.warnings.push(format!(
+            "[sso] could not check the admin SSO providers: {e}"
+        )),
+    }
+}
+
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
     pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
+) -> Result<(), MigrateError> {
+    check_cmd_with(pool, dir, args, w, async { DeployAuditFindings::default() }).await
+}
+
+/// [`check_cmd`] plus `extra` deploy findings gathered elsewhere (the tenancy
+/// dispatcher's per-tenant ones), awaited only under `--deploy`.
+pub(crate) async fn check_cmd_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+    extra: impl std::future::Future<Output = DeployAuditFindings>,
 ) -> Result<(), MigrateError> {
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
@@ -1758,6 +1783,12 @@ async fn check_cmd<W: Write>(
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
         collation_audit(pool, &mut audit).await;
+        #[cfg(feature = "admin-sso")]
+        sso_link_audit(pool, &mut audit).await;
+        let extra = extra.await;
+        audit.info.extend(extra.info);
+        audit.warnings.extend(extra.warnings);
+        audit.errors.extend(extra.errors);
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets

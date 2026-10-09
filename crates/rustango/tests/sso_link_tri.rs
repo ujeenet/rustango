@@ -145,6 +145,25 @@ async fn user(pool: &Pool, name: &str, email: &str) -> i64 {
     u.id.get().copied().unwrap()
 }
 
+/// Slugs `check --deploy` reports for this tenant's own providers.
+async fn tenant_stranded(pool: &Pool) -> Vec<String> {
+    let found = rustango::testkit::sso_check::tenant_providers(pool)
+        .await
+        .unwrap();
+    found.into_iter().map(|s| s.slug).collect()
+}
+
+/// Slugs `check --deploy` reports for the shared providers in this tenant.
+#[cfg(feature = "admin-sso")]
+async fn shared_stranded(registry: &Pool, tenant: &Pool) -> Vec<String> {
+    use rustango::testkit::sso_check::{shared_providers, SharedProviders};
+    let shared = SharedProviders::load(registry).await.unwrap();
+    let found = shared_providers(&shared, tenant).await.unwrap();
+    let mut slugs: Vec<String> = found.into_iter().map(|s| s.slug).collect();
+    slugs.sort();
+    slugs
+}
+
 async fn key_matches_every_part(pool: &Pool) {
     provider(pool, "corp", false).await;
     let p = resolve_by_slug(pool, "corp", "https://x/cb".into())
@@ -424,6 +443,13 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
         .unwrap();
     assert!(!p.allow_email_link, "an unreadable flag is off");
     assert_eq!(p.sso.client_secret, "s3cret");
+    // `check --deploy` reads the missing flag as off too, and names the provider.
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    user(pool, &format!("old{n}"), &format!("old{n}@example.com")).await;
+    assert_eq!(tenant_stranded(pool).await, ["old"]);
     let key = p.key(LinkSource::Tenant);
     create_link(pool, &key, "sub-old", 9).await.unwrap();
     let ok = One(Some(Account::new(9, false, true)));
@@ -433,6 +459,123 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
             .unwrap(),
         9
     );
+}
+
+/// The `check --deploy` scan: linking off, no link rows, existing users (#2359).
+async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
+    use rustango::sql::FetcherPool as _;
+    // Unique per run: the shared user tables keep earlier runs' rows.
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    user(pool, &format!("chk{n}"), &format!("chk{n}@example.com")).await;
+    provider(pool, "corp", false).await;
+    provider(pool, "open", true).await;
+    provider(pool, "off", false).await;
+    let mut off = SsoProvider::objects()
+        .filter("slug", "off")
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    off.enabled = false;
+    off.save_pool(pool).await.unwrap();
+    let corp = resolve_by_slug(pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    // A link of another source is not this provider's link.
+    create_link(pool, &corp.key(LinkSource::Shared), "sub-1", 1)
+        .await
+        .unwrap();
+    assert_eq!(tenant_stranded(pool).await, ["corp"]);
+    create_link(pool, &corp.key(LinkSource::Tenant), "sub-1", 1)
+        .await
+        .unwrap();
+    assert!(tenant_stranded(pool).await.is_empty());
+
+    #[cfg(feature = "admin-sso")]
+    {
+        use rustango::testkit::sso_check as check;
+        // The admin never links by email, so `open` counts too.
+        let mut root =
+            rustango::admin::AdminUser::new_with_password(&format!("chk{n}"), "pw-123456789", true)
+                .unwrap();
+        root.insert_pool(pool).await.unwrap();
+        let mut got = check::admin_providers(pool).await.unwrap();
+        got.sort();
+        assert_eq!(got, ["corp", "open"]);
+        let open = resolve_by_slug(pool, "open", String::new())
+            .await
+            .unwrap()
+            .unwrap();
+        create_link(pool, &open.key(LinkSource::Admin), "sub-1", 1)
+            .await
+            .unwrap();
+        assert_eq!(check::admin_providers(pool).await.unwrap(), ["corp"]);
+
+        use check::SharedSsoProvider;
+        rustango::testkit::matrix::fresh_table::<SharedSsoProvider>(pool).await;
+        for (slug, allow) in [
+            ("team", false),
+            ("corp", false),
+            ("free", true),
+            ("off", false),
+        ] {
+            SharedSsoProvider {
+                id: Auto::default(),
+                slug: slug.into(),
+                label: slug.into(),
+                kind: "oidc".into(),
+                // Not the tenant rows' issuer, so their shared-source link above is no match.
+                issuer_url: Some("https://shared.example".into()),
+                client_id: "cid".into(),
+                client_secret: Cast::new("s3cret".into()),
+                enabled: true,
+                sort_order: 0,
+                scopes: None,
+                allow_email_link: allow,
+                created_at: Auto::default(),
+                updated_at: Auto::default(),
+            }
+            .insert_pool(pool)
+            .await
+            .unwrap();
+        }
+        // `corp` is the tenant's own enabled row, so the shared one is never
+        // used here; the tenant's `off` row is disabled, so the shared one is.
+        assert_eq!(shared_stranded(pool, pool).await, ["off", "team"]);
+        let team = SharedSsoProvider::objects()
+            .filter("slug", "team")
+            .fetch(pool)
+            .await
+            .unwrap()
+            .remove(0);
+        let link = |issuer: &str| SsoLink {
+            id: Auto::default(),
+            provider_source: "shared".into(),
+            provider_id: team.id.get().copied().unwrap(),
+            issuer: issuer.into(),
+            subject: "sub-1".into(),
+            key_sha256: rustango::sso::link::key_sha256(issuer, "sub-1"),
+            user_id: 1,
+            created_at: Auto::default(),
+        };
+        // Sign-in matches the issuer exactly, so a case variant is no link (MySQL `_ci`).
+        link("oidc|https://SHARED.example")
+            .insert_pool(pool)
+            .await
+            .unwrap();
+        assert_eq!(shared_stranded(pool, pool).await, ["off", "team"]);
+        link("oidc|https://shared.example")
+            .insert_pool(pool)
+            .await
+            .unwrap();
+        assert_eq!(shared_stranded(pool, pool).await, ["off"]);
+        // Other suites on this database recreate it through the migrations.
+        rustango::testkit::matrix::drop_table(pool, "rustango_shared_sso_providers").await;
+    }
 }
 
 tri_dialect_test!(
@@ -450,5 +593,6 @@ tri_dialect_test!(
         provider_changes_drop_links,
         resolve_reads_row_secret_and_flag,
         a_table_without_the_flag_still_serves_logins,
+        check_finds_providers_that_refuse_every_user,
     ],
 );
