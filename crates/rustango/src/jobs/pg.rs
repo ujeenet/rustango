@@ -169,7 +169,10 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at)
-    WHERE locked_at IS NULL";
+    WHERE locked_at IS NULL;
+CREATE INDEX IF NOT EXISTS rustango_jobs_locked_idx
+    ON rustango_jobs (locked_at)
+    WHERE locked_at IS NOT NULL";
 
 const CREATE_JOBS_TABLE_SQL_MYSQL: &str = "\
 CREATE TABLE IF NOT EXISTS `rustango_jobs` (
@@ -185,7 +188,8 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
     `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     `context`      JSON
 );
-CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`)";
+CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`);
+CREATE INDEX `rustango_jobs_locked_idx` ON `rustango_jobs` (`locked_at`)";
 
 /// `run_at` and `created_at` take their DEFAULT from the dialect, not
 /// from a literal here, so the format cannot drift from the one the
@@ -209,7 +213,9 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     context      TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
-    ON rustango_jobs (run_at) WHERE locked_at IS NULL"
+    ON rustango_jobs (run_at) WHERE locked_at IS NULL;
+CREATE INDEX IF NOT EXISTS rustango_jobs_locked_idx
+    ON rustango_jobs (locked_at) WHERE locked_at IS NOT NULL"
     )
 }
 
@@ -291,10 +297,11 @@ impl PgJobQueue {
     }
 
     /// While running, unlock rows locked longer than `older_than`: at
-    /// `start`, then every minute. Off by default (#2331).
+    /// `start`, then every `min(older_than, 60s)`. Off by default (#2331).
     ///
     /// A worker killed mid-job never reaches `shutdown`, so this is what
-    /// frees its rows. Raised to three heartbeats so a live job keeps its lease.
+    /// frees its rows. `older_than` is raised to three of this queue's
+    /// heartbeats. A handler that blocks its thread past that loses its lease (#2374).
     #[must_use]
     pub fn reclaim_stuck_after(mut self, older_than: Duration) -> Self {
         self.reclaim_after = Some(older_than);
@@ -335,10 +342,9 @@ impl PgJobQueue {
         Self::ensure_table_pool(&Pool::Postgres(pool.clone())).await
     }
 
-    /// Create the `rustango_jobs` table and its pickup index if they
-    /// are missing. Safe to call every boot. MySQL gets a plain index
-    /// because it has no partial indexes; PG and SQLite get the
-    /// `WHERE locked_at IS NULL` one.
+    /// Create the `rustango_jobs` table, its pickup index and its
+    /// `locked_at` reclaim index if they are missing. Safe to call every
+    /// boot. MySQL gets plain indexes because it has no partial indexes.
     ///
     /// # Errors
     /// Underlying sqlx DDL error.
