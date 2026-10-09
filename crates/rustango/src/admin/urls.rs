@@ -817,18 +817,19 @@ impl Builder {
 }
 
 /// Tables the generic admin never serves: the TOTP store holds raw
-/// secrets, and enrollment has its own pages.
+/// secrets, and a passkey row signs in as its `user_id` (#2364).
+/// Enrollment has its own pages.
 fn is_never_served(table: &str) -> bool {
+    let _ = table;
     #[cfg(feature = "totp")]
-    {
-        use crate::core::Model as _;
-        table == super::totp_store::AdminTotp::SCHEMA.table
+    if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
+        return true;
     }
-    #[cfg(not(feature = "totp"))]
-    {
-        let _ = table;
-        false
+    #[cfg(feature = "passkey")]
+    if table == <crate::passkey::WebauthnCredential as crate::core::Model>::SCHEMA.table {
+        return true;
     }
+    false
 }
 
 /// Per-request state: the pool plus the resolved `Config`. It is

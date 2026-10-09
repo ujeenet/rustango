@@ -955,6 +955,9 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
     // fresh install needs it before the first login, not at enrollment.
     #[cfg(all(feature = "admin", feature = "totp"))]
     crate::admin::totp_store::ensure_table(pool).await?;
+    // Passkey sign-in reads it from the first login (#2364).
+    #[cfg(feature = "passkey")]
+    crate::passkey::ensure_table(pool).await?;
     // The admin lists translations wherever they live (#2360).
     crate::i18n::db::ensure_table_pool(pool).await
 }

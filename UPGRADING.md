@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### Admin: registry tables
+### Admin: passkeys and registry tables
 
-A plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them (#2365).
+No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it (#2364). A plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them (#2365).
 
 ## 0.60.4
 

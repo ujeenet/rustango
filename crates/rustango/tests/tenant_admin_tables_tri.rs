@@ -116,11 +116,7 @@ async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<St
     let tables = listed_tables(&index);
     assert!(!tables.is_empty(), "{what}: the index lists no model");
     let mut missing = Vec::new();
-    // Passkeys are app-wired: the app runs `passkey::ensure_table` itself.
-    for t in tables
-        .iter()
-        .filter(|t| *t != "rustango_webauthn_credentials")
-    {
+    for t in &tables {
         let (status, _) = get(router, &format!("/{t}")).await;
         if status != StatusCode::OK {
             missing.push(format!("{t}: {status}"));
@@ -209,6 +205,7 @@ async fn database_mode_tenant_admin(backend: Backend) {
     let listed = assert_listed_tables_exist(&router, "tenant admin").await;
     assert!(listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
     assert_no_registry_tables(&listed);
+    assert_no_passkey_admin(&router).await;
     assert_no_translations_editor(&router, &registry).await;
 
     // The registry holds the translations the tenant admin no longer lists.
@@ -220,6 +217,7 @@ async fn database_mode_tenant_admin(backend: Backend) {
     assert_eq!(status, StatusCode::OK, "registry rustango_translations");
     let (status, _) = get(&registry_admin, "/rustango_orgs").await;
     assert_eq!(status, StatusCode::OK, "registry rustango_orgs");
+    assert_no_passkey_admin(&registry_admin).await;
     // ...and serves the editor the tenant admin 404s.
     let (status, body) = get(&registry_admin, "/rustango_translations/editor").await;
     assert_eq!(status, StatusCode::OK, "registry editor: {body}");
@@ -250,6 +248,22 @@ async fn single_database_admin(backend: Backend) {
     assert!(!listed.iter().any(|t| t == "rustango_orgs"), "{listed:?}");
     let (status, _) = get(&router, "/rustango_orgs").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "rustango_orgs");
+    assert_no_passkey_admin(&router).await;
+    // `migrate` creates the passkey store sign-in reads (#2364).
+    #[cfg(feature = "passkey")]
+    rustango::passkey::for_user(&pool, 1)
+        .await
+        .expect("passkey table");
+}
+
+/// No admin serves passkeys: a row signs in as its `user_id` (#2364).
+async fn assert_no_passkey_admin(router: &axum::Router) {
+    let (status, _) = get(router, "/rustango_webauthn_credentials").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "rustango_webauthn_credentials"
+    );
 }
 
 macro_rules! per_backend {
@@ -313,6 +327,7 @@ async fn schema_mode_tenant_admin() {
     let router = tenant_admin(tenant);
     let listed = assert_listed_tables_exist(&router, "schema-mode tenant admin").await;
     assert_no_registry_tables(&listed);
+    assert_no_passkey_admin(&router).await;
     assert_no_translations_editor(&router, &registry).await;
 
     // `search_path` falls back to `public`, so a 200 alone can't show
@@ -323,10 +338,7 @@ async fn schema_mode_tenant_admin() {
     .fetch_all(pg)
     .await
     .unwrap();
-    let foreign: Vec<&String> = listed
-        .iter()
-        .filter(|t| *t != "rustango_webauthn_credentials" && !in_t1.contains(t))
-        .collect();
+    let foreign: Vec<&String> = listed.iter().filter(|t| !in_t1.contains(t)).collect();
     assert!(
         foreign.is_empty(),
         "listed but not in schema t1: {foreign:?}"
