@@ -9,6 +9,7 @@ use crate::sql::{FetcherPool as _, Pool};
 use crate::sso::check;
 use crate::tenancy::org::Org;
 use crate::tenancy::pools::TenantPools;
+use crate::tenancy::StorageMode;
 
 /// Tenants checked at once.
 const CONCURRENCY: usize = 8;
@@ -121,6 +122,20 @@ where
         // Not `{e}`: a secrets error can echo the database URL into CI logs.
         Err(_) => return TenantFindings::failed(&org.slug, "could not open the tenant pool"),
     };
+    // A missing schema drops out of `search_path`, leaving `public`.
+    if matches!(
+        StorageMode::parse(&org.storage_mode),
+        Ok(StorageMode::Schema)
+    ) {
+        let want = org.effective_schema();
+        match crate::migrate::ensure::creation_schema(&tenant).await {
+            Ok(Some(got)) if got == want => {}
+            Ok(_) => {
+                return TenantFindings::failed(&org.slug, format!("schema `{want}` is missing"))
+            }
+            Err(e) => return TenantFindings::failed(&org.slug, e),
+        }
+    }
     #[cfg_attr(not(feature = "admin-sso"), allow(unused_mut))]
     let mut out = match check::tenant_providers(&tenant).await {
         Ok(found) => TenantFindings {

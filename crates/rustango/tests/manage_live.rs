@@ -1563,3 +1563,40 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A schema-mode tenant whose schema is missing is reported, not checked
+/// against `public` (#2359).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let ghost = unique("ghost");
+    drop_schema(&pool, &ghost).await;
+    let mut org = Org {
+        slug: ghost.clone(),
+        display_name: ghost.clone(),
+        storage_mode: "schema".into(),
+        schema_name: Some(ghost.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+    let pools = TenantPools::new(pool.clone());
+    let dir = fresh_dir("sso_ghost");
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    assert!(
+        out.contains(&format!(
+            "[sso] tenant `{ghost}`: could not check SSO providers: schema `{ghost}` is missing"
+        )),
+        "{out}"
+    );
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
