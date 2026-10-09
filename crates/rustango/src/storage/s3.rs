@@ -1197,7 +1197,8 @@ mod tests {
         let call = tokio::spawn(async move { storage.exists("a.png").await });
         // Connect on the real clock: a paused one jumps to the connect
         // timeout while the loopback handshake is still in flight (#2358).
-        let _held = stalled.accept().await.unwrap().0;
+        let accept = tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, stalled.accept());
+        let _held = accept.await.expect("the client never connected").unwrap().0;
         tokio::time::pause();
         let call = tokio::time::timeout(DEFAULT_READ_TIMEOUT * 2, call);
         assert!(matches!(call.await, Ok(Ok(Err(_)))), "no timeout fired");
