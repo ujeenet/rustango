@@ -16,6 +16,10 @@ A source `database_url` like `env://ACME_DB` is resolved before connecting. `--d
 
 An untrusted extension pre-installed on the target, in the schema the registry has it in, no longer needs `--allow-extension`.
 
+### Fixed — `migrate-tenant-storage` no longer loses writes made during the move (#2383)
+
+The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The row update writes only the storage columns.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.
