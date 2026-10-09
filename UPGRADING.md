@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Tenant admin: TOTP and translations
+
+Run `migrate` once: it creates `rustango_translations` (and in tenancy apps `rustango_admin_totp`) on the single database or the registry. The tenant admin stops listing both. `Translation` is now `scope = "registry"` (#2360).
+
 ### Admin write errors
 
 A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346). `InlineApplyOutcome::failed` is deprecated: it is always 0.

@@ -284,6 +284,8 @@ pub async fn migrate_registry_pool(
         |held| crate::migrate::migrate_pool_locked(held, registry, project_dir, None),
     )
     .await?;
+    // Tenancy's `migrate` never reaches the single-database path (#2360).
+    crate::migrate::manage::ensure_bootstrap_tables(registry).await?;
     // (#89) Auto-seed the `rustango_content_types` registry-side
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
+
+`rustango_admin_totp` shows only with session auth, and `Translation` is registry-scoped. `migrate` and the tenancy registry migrate now create `rustango_translations` too.
+
 ### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
 
 A bad inline value re-renders the form before anything is written. The parent UPDATE and inline writes share one transaction: a refused row rolls the whole edit back and the form says so. `InlineApplyOutcome::failed` is always 0.

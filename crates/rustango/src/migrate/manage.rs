@@ -651,10 +651,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // registry tables get their own file and user's tenant models
     // get theirs. Each scope is a no-op when nothing in that scope
     // changed; the user sees one or two "wrote ..." lines.
-    let has_registry_scoped = inventory::iter::<crate::core::ModelEntry>
-        .into_iter()
-        .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
-    if has_registry_scoped {
+    if has_registry_models() {
         let mut wrote_any = false;
         // Framework ("system app") migrations first — the framework's own
         // `rustango_*` tables are generated into `<project_root>/system/
@@ -720,6 +717,14 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         None => writeln!(w, "no changes — registry matches latest snapshot")?,
     }
     Ok(())
+}
+
+/// A migrated registry model marks a tenancy project. Unmanaged ones
+/// don't: `Translation` is registry-scoped in every build (#2360).
+fn has_registry_models() -> bool {
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .any(|e| e.schema.scope == crate::core::ModelScope::Registry && e.schema.managed)
 }
 
 fn write_scoped_migration<W: Write>(
@@ -908,16 +913,7 @@ where
     if applied.system.is_empty() && applied.project.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
     }
-    // Framework bootstrap table that isn't model-derived: the audit log
-    // is created via idempotent DDL (`CREATE TABLE IF NOT EXISTS`) so any
-    // model declaring `audit(track = ...)` can record writes the moment
-    // migrations are applied — the user never hand-creates it. Cheap and
-    // safe to re-run on every `migrate`.
-    crate::audit::ensure_table_pool(pool).await?;
-    // The admin login fails closed on a missing TOTP table (#1644), so a
-    // fresh install needs it before the first login, not at enrollment.
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    crate::admin::totp_store::ensure_table(pool).await?;
+    ensure_bootstrap_tables(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
@@ -945,6 +941,22 @@ where
         }
     }
     Ok(())
+}
+
+/// The `managed = false` framework tables, created by idempotent DDL on the
+/// database that holds them: the single database, or a tenancy registry.
+///
+/// # Errors
+/// Driver or SQL failures from the DDL.
+pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
+    // Writes to `audit(track = ...)` models record from the first migrate.
+    crate::audit::ensure_table_pool(pool).await?;
+    // The admin login fails closed on a missing TOTP table (#1644), so a
+    // fresh install needs it before the first login, not at enrollment.
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    crate::admin::totp_store::ensure_table(pool).await?;
+    // The admin lists translations wherever they live (#2360).
+    crate::i18n::db::ensure_table_pool(pool).await
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
@@ -5560,6 +5572,19 @@ pub fn settings_audit_check(
 #[cfg(test)]
 mod gen_tests {
     use super::*;
+
+    /// The registry-scoped `Translation` must not flip a single-database
+    /// build into two-scope `makemigrations` (#2360).
+    #[cfg(not(feature = "tenancy"))]
+    #[test]
+    fn unmanaged_registry_model_is_not_tenancy() {
+        use crate::core::Model as _;
+        assert_eq!(
+            crate::i18n::db::Translation::SCHEMA.scope,
+            crate::core::ModelScope::Registry
+        );
+        assert!(!has_registry_models());
+    }
 
     /// #1216 — the verbs that need no database must be dispatchable without
     /// one. `Cli` builds a pool before dispatch otherwise, and `connect_lazy`
