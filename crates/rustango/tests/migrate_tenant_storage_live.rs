@@ -10,7 +10,9 @@ use std::sync::Arc;
 use rustango::core::Column as _;
 use rustango::sql::sqlx::PgPool;
 use rustango::sql::Auto;
-use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};
+use rustango::tenancy::{
+    manage::run_with_writer, ChainSecretsResolver, Org, StorageMode, TenantPools,
+};
 
 use tokio::sync::Mutex;
 
@@ -279,13 +281,15 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     )
     .await;
     let src_url = src_db.url().to_owned();
+    // Stored as a secret reference: the move resolves it (#2384).
+    std::env::set_var("RUSTANGO_T2384_SRC", &src_url);
     let mut org = Org {
         id: Auto::default(),
         slug: "t1864".into(),
         display_name: "Moved".into(),
         storage_mode: StorageMode::Database.as_str().into(),
         backend_kind: "postgres".to_owned(),
-        database_url: Some(src_url.clone()),
+        database_url: Some("env://RUSTANGO_T2384_SRC".into()),
         schema_name: None,
         host_pattern: None,
         port: None,
@@ -294,23 +298,30 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     };
     org.insert(&pool).await.unwrap();
 
-    let pools = TenantPools::new(pool.clone());
-    let migrate = || async {
-        run_with_writer(
-            &pools,
-            &registry_url,
-            std::path::Path::new("."),
-            args(&[
-                "migrate-tenant-storage",
-                "t1864",
-                "--to",
-                "schema",
-                "--schema-name",
-                "t1864_moved",
-            ]),
-            &mut Vec::<u8>::new(),
-        )
-        .await
+    let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
+    let migrate = |drain: &'static str| {
+        let (pools, registry_url) = (&pools, &registry_url);
+        async move {
+            let mut out = Vec::<u8>::new();
+            run_with_writer(
+                pools,
+                registry_url,
+                std::path::Path::new("."),
+                args(&[
+                    "migrate-tenant-storage",
+                    "t1864",
+                    "--to",
+                    "schema",
+                    "--schema-name",
+                    "t1864_moved",
+                    "--drain-secs",
+                    drain,
+                ]),
+                &mut out,
+            )
+            .await
+            .map(|()| String::from_utf8(out).unwrap())
+        }
     };
     let extension = |name: &'static str| {
         let pool = pool.clone();
@@ -338,7 +349,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     ] {
         sqlx_exec(&src, stmt).await;
     }
-    let err = migrate().await.unwrap_err().to_string();
+    let err = migrate("0").await.unwrap_err().to_string();
     assert!(
         err.contains("earthdistance") && err.contains("--allow-extension"),
         "{err}"
@@ -348,7 +359,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     src.close().await;
 
     // No `rustango_users`: the smoke check fails and drops what it restored.
-    let err = migrate().await.unwrap_err();
+    let err = migrate("0").await.unwrap_err();
     assert!(err.to_string().contains("dropped"), "{err}");
     let left: i64 = rustango::sql::sqlx::query_scalar(
         "SELECT count(*) FROM pg_namespace WHERE nspname = 't1864_moved'",
@@ -357,6 +368,16 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     .await
     .unwrap();
     assert_eq!(left, 0, "the failed restore left its schema");
+    // Offline for the move, active again after a failed one (#2383).
+    assert!(org_row(&pool, "t1864").await.active, "left inactive");
+    // An inactive tenant is not activated by a failed move either.
+    set_active(&pool, "t1864", false).await;
+    assert!(migrate("0").await.is_err());
+    assert!(
+        !org_row(&pool, "t1864").await.active,
+        "a failed move activated it"
+    );
+    set_active(&pool, "t1864", true).await;
 
     let src = PgPool::connect(&src_url).await.unwrap();
     // Extension types and opclasses move too (#2210).
@@ -371,7 +392,19 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         sqlx_exec(&src, stmt).await;
     }
     src.close().await;
-    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+    // Known limit (#2383): a suspension made during the move is undone by it.
+    let out = migrate("0").await.unwrap_or_else(|e| panic!("{e}"));
+    assert!(org_row(&pool, "t1864").await.active, "left inactive");
+    // Names the old database as stored, never resolved (#2384) or `purge-tenant` (#2382).
+    let src_name = src_url.rsplit('/').next().unwrap();
+    assert!(
+        out.contains("the database at env://RUSTANGO_T2384_SRC; once")
+            && out.contains("drop that database by hand"),
+        "{out}"
+    );
+    assert!(!out.contains(src_name), "printed the resolved URL: {out}");
+    assert_eq!(out.matches("purge-tenant").count(), 1, "{out}");
+    assert!(out.contains("Not with `purge-tenant`"), "{out}");
     assert!(extension("citext").await && extension("pg_trgm").await);
     assert!(
         !extension("dblink").await && !extension("cube").await,
@@ -437,10 +470,14 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     for stmt in [
         "CREATE EXTENSION IF NOT EXISTS citext",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-        "CREATE EXTENSION IF NOT EXISTS hstore",
+        "CREATE SCHEMA t2189_ext",
+        "CREATE EXTENSION earthdistance WITH SCHEMA t2189_ext CASCADE",
         "CREATE SCHEMA t2189_src",
+        // In the tenant's own schema: the dump creates it (#2386).
+        "CREATE EXTENSION hstore WITH SCHEMA t2189_src",
+        "CREATE TABLE t2189_src.places (id INT, at t2189_ext.earth)",
         // Only an array of it: the extension is found through the element.
-        "CREATE TABLE t2189_src.notes (id INT, kv hstore[])",
+        "CREATE TABLE t2189_src.notes (id INT, kv t2189_src.hstore[])",
         "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
         "CREATE INDEX users_trgm ON t2189_src.rustango_users USING gin (username gin_trgm_ops)",
         "INSERT INTO t2189_src.rustango_users (username) VALUES ('ann'), ('bob')",
@@ -448,6 +485,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         sqlx_exec(&pool, stmt).await;
     }
     let dst_url = dst_db.url().to_owned();
+    // Resolved to connect, stored as given (#2384).
+    std::env::set_var("RUSTANGO_T2384_DST", &dst_url);
     let mut org = Org {
         id: Auto::default(),
         slug: "t2189".into(),
@@ -463,28 +502,35 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     };
     org.insert(&pool).await.unwrap();
 
-    let pools = TenantPools::new(pool.clone());
-    let migrate = || async {
-        run_with_writer(
-            &pools,
-            &registry_url,
-            std::path::Path::new("."),
-            args(&[
-                "migrate-tenant-storage",
-                "t2189",
-                "--to",
-                "database",
-                "--database-url",
-                &dst_url,
-            ]),
-            &mut Vec::<u8>::new(),
-        )
-        .await
+    let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
+    let migrate = |drain: &'static str| {
+        let (pools, registry_url) = (&pools, &registry_url);
+        async move {
+            let mut out = Vec::<u8>::new();
+            run_with_writer(
+                pools,
+                registry_url,
+                std::path::Path::new("."),
+                args(&[
+                    "migrate-tenant-storage",
+                    "t2189",
+                    "--to",
+                    "database",
+                    "--database-url",
+                    "env://RUSTANGO_T2384_DST",
+                    "--drain-secs",
+                    drain,
+                ]),
+                &mut out,
+            )
+            .await
+            .map(|()| String::from_utf8(out).unwrap())
+        }
     };
     // A non-empty `public` is refused before anything moves.
     let dst = PgPool::connect(&dst_url).await.unwrap();
     sqlx_exec(&dst, "CREATE TABLE public.junk (id INT)").await;
-    let err = migrate().await.unwrap_err().to_string();
+    let err = migrate("0").await.unwrap_err().to_string();
     assert!(
         err.contains("must be empty") && err.contains("junk"),
         "{err}"
@@ -497,8 +543,94 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     .unwrap();
     assert_eq!(left, 0, "a refused move restored something");
     sqlx_exec(&dst, "DROP TABLE public.junk").await;
+    // An untrusted extension is refused only while the target lacks it (#2385).
+    let err = migrate("0").await.unwrap_err().to_string();
+    assert!(
+        err.contains("earthdistance") && err.contains("--allow-extension"),
+        "{err}"
+    );
+    // In another schema than the registry's: refused before the drain.
+    for stmt in [
+        "CREATE SCHEMA t2189_wrong",
+        "CREATE EXTENSION earthdistance WITH SCHEMA t2189_wrong CASCADE",
+    ] {
+        sqlx_exec(&dst, stmt).await;
+    }
+    let started = std::time::Instant::now();
+    let err = migrate("30").await.unwrap_err().to_string();
+    assert!(
+        err.contains("t2189_wrong") && err.contains("t2189_ext"),
+        "{err}"
+    );
+    assert!(started.elapsed().as_secs() < 30, "refused after the drain");
+    assert!(org_row(&pool, "t2189").await.active);
+    for stmt in [
+        "DROP EXTENSION earthdistance",
+        "DROP EXTENSION cube",
+        "DROP SCHEMA t2189_wrong",
+        "CREATE SCHEMA t2189_ext",
+        "CREATE EXTENSION earthdistance WITH SCHEMA t2189_ext CASCADE",
+    ] {
+        sqlx_exec(&dst, stmt).await;
+    }
+
+    // Interrupted while offline: back to active, nothing restored (#2383).
+    let interrupt = async {
+        wait_inactive(&pool, "t2189", 3).await;
+        let pid = std::process::id().to_string();
+        let sent = std::process::Command::new("kill")
+            .args(["-INT", &pid])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+    };
+    let (res, ()) = tokio::join!(migrate("5"), interrupt);
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("interrupted"), "{err}");
+    assert!(org_row(&pool, "t2189").await.active, "left inactive");
+    let left: i64 = rustango::sql::sqlx::query_scalar(
+        "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "an interrupted move restored something");
     dst.close().await;
-    migrate().await.unwrap_or_else(|e| panic!("{e}"));
+
+    // Offline before the dump: a write made during the drain moves, and
+    // an edit made meanwhile survives (#2383).
+    let edit = async {
+        wait_inactive(&pool, "t2189", 3).await;
+        sqlx_exec(
+            &pool,
+            "INSERT INTO t2189_src.rustango_users (username) VALUES ('carol')",
+        )
+        .await;
+        Org::objects()
+            .where_(Org::slug.eq("t2189".to_owned()))
+            .update()
+            .set_typed(Org::display_name.set("Renamed".to_owned()))
+            .execute_on(&pool)
+            .await
+            .unwrap();
+    };
+    let started = std::time::Instant::now();
+    let (out, ()) = tokio::join!(migrate("3"), edit);
+    let out = out.unwrap_or_else(|e| panic!("{e}"));
+    assert!(started.elapsed().as_secs() >= 3, "no drain wait");
+    assert!(out.contains("edit-tenant t2189 --activate"), "{out}");
+    // The reference as given, never the resolved URL (#2384).
+    let dst_name = dst_url.rsplit('/').next().unwrap();
+    assert!(out.contains("target: env://RUSTANGO_T2384_DST"), "{out}");
+    assert!(!out.contains(dst_name), "printed the resolved URL: {out}");
+    // Names the old schema, never `purge-tenant` (#2382).
+    assert!(
+        out.contains("schema `t2189_src` on the registry")
+            && out.contains("`DROP SCHEMA \"t2189_src\" CASCADE` there by hand"),
+        "{out}"
+    );
+    assert_eq!(out.matches("purge-tenant").count(), 1, "{out}");
+    assert!(out.contains("Not with `purge-tenant`"), "{out}");
 
     let dst = PgPool::connect(&dst_url).await.unwrap();
     let granted: bool = rustango::sql::sqlx::query_scalar(
@@ -508,14 +640,28 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     .await
     .unwrap();
     assert!(granted, "other roles lost USAGE on public");
+    let hstore_at: String = rustango::sql::sqlx::query_scalar(
+        "SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'hstore'",
+    )
+    .fetch_one(&dst)
+    .await
+    .unwrap();
+    assert_eq!(hstore_at, "public");
     let names: Vec<(String,)> = rustango::sql::sqlx::query_as(
         "SELECT username::text FROM rustango_users WHERE username = 'ANN' \
-             OR username = 'Bob' ORDER BY id",
+             OR username = 'Bob' OR username = 'carol' ORDER BY id",
     )
     .fetch_all(&dst)
     .await
     .unwrap();
-    assert_eq!(names, [("ann".to_owned(),), ("bob".to_owned(),)]);
+    assert_eq!(
+        names,
+        [
+            ("ann".to_owned(),),
+            ("bob".to_owned(),),
+            ("carol".to_owned(),)
+        ]
+    );
     let schemas: i64 = rustango::sql::sqlx::query_scalar(
         "SELECT count(*) FROM pg_namespace WHERE nspname = 't2189_src'",
     )
@@ -533,13 +679,49 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         .await
         .unwrap();
     assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
-    assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
+    assert!(moved[0].active, "left inactive");
+    assert_eq!(moved[0].display_name, "Renamed", "the edit was overwritten");
+    assert_eq!(
+        moved[0].database_url.as_deref(),
+        Some("env://RUSTANGO_T2384_DST")
+    );
     pool.close().await;
     assert_eq!(
         extensions(&shared).await,
         shared_before,
         "shared DB touched"
     );
+}
+
+async fn set_active(pool: &PgPool, slug: &str, active: bool) {
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .update()
+        .set_typed(Org::active.set(active))
+        .execute_on(pool)
+        .await
+        .unwrap();
+}
+
+/// Poll until the move has taken `slug` offline.
+async fn wait_inactive(pool: &PgPool, slug: &str, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while org_row(pool, slug).await.active {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tenant stayed active for the move"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn org_row(pool: &PgPool, slug: &str) -> Org {
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch_on(pool)
+        .await
+        .unwrap()
+        .remove(0)
 }
 
 async fn sqlx_exec(pool: &PgPool, sql: &str) {

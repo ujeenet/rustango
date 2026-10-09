@@ -788,8 +788,12 @@ impl<DB: Database> TenantPools<DB> {
                 org.slug
             ))
         })?;
-        let url = self.secrets.resolve(reference).await?;
-        Ok(url)
+        self.resolve_secret(reference).await
+    }
+
+    /// A `database_url` value (literal or secret reference) as a literal URL.
+    pub(crate) async fn resolve_secret(&self, reference: &str) -> Result<String, TenancyError> {
+        Ok(self.secrets.resolve(reference).await?)
     }
 
     /// Number of database-mode pools currently cached. Schema-mode
