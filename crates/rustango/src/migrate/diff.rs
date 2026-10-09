@@ -295,9 +295,10 @@ impl SchemaChange {
 /// first, then create the dependents. MySQL commits each DDL statement, so
 /// a drop that fails after its column or table went cannot roll back (#1879).
 ///
-/// Renames are **never** emitted: a snapshot diff cannot tell a
-/// rename from a drop plus an add. Write those by hand with
-/// `manage makemigrations --empty <name>`. Changes this cannot
+/// Table and model-column renames are never emitted: a snapshot diff cannot
+/// tell them from a drop plus an add. Write those by hand with
+/// `manage makemigrations --empty <name>`. A changed M2M junction column is
+/// the exception: its junction stays, so it is a `RenameColumn`. Changes this cannot
 /// express are reported by [`detect_unsupported_field_changes`]
 /// instead of being silently skipped.
 #[must_use]
@@ -376,7 +377,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // Dropped or edited M2M junctions, before the tables they reference.
     for mt in &prev.m2m_tables {
         let now = current.m2m_table(&mt.through);
-        if now != Some(mt) {
+        if let Some(renames) = now.filter(|c| *c != mt).and_then(|c| m2m_renames(mt, c)) {
+            changes.extend(renames);
+        } else if now != Some(mt) {
             changes.push(SchemaChange::DropM2MTable {
                 through: mt.through.clone(),
             });
@@ -506,6 +509,65 @@ pub(super) fn add_exclude(x: &super::snapshot::ExclusionSnapshot) -> SchemaChang
         elements: x.elements.clone(),
         where_clause: x.where_clause.clone(),
     }
+}
+
+/// The column renames that turn junction `old` into `new` over the same
+/// tables, so its rows survive (#2245). `None` if an end's table changed,
+/// or a self-referencing junction renamed both columns, which
+/// [`detect_unsupported_field_changes`] refuses.
+fn m2m_renames(
+    old: &super::snapshot::M2MTableSnapshot,
+    new: &super::snapshot::M2MTableSnapshot,
+) -> Option<Vec<SchemaChange>> {
+    let rename = |from: &str, to: &str| SchemaChange::RenameColumn {
+        table: old.through.clone(),
+        old_column: from.to_owned(),
+        new_column: to.to_owned(),
+    };
+    // Self-referencing: the snapshot sorts the ends by name, so only a
+    // column that keeps its name says which end is which.
+    if is_self_ref(old) && is_self_ref(new) && old.src_table == new.src_table {
+        let (olds, news) = ([&old.src_col, &old.dst_col], [&new.src_col, &new.dst_col]);
+        let gone = olds.iter().find(|c| !news.contains(c))?;
+        let came = news.iter().find(|c| !olds.contains(c))?;
+        let kept = olds.iter().filter(|c| news.contains(c)).count();
+        return (kept == 1).then(|| vec![rename(gone, came)]);
+    }
+    let direct = (old.src_table == new.src_table && old.dst_table == new.dst_table)
+        .then_some([(&old.src_col, &new.src_col), (&old.dst_col, &new.dst_col)]);
+    let mirrored = (old.src_table == new.dst_table && old.dst_table == new.src_table)
+        .then_some([(&old.src_col, &new.dst_col), (&old.dst_col, &new.src_col)]);
+    let pairs = direct.or(mirrored)?;
+    let changed: Vec<_> = pairs.into_iter().filter(|(a, b)| a != b).collect();
+    Some(match changed[..] {
+        [(a, b)] => vec![rename(a, b)],
+        // A swap goes through a spare name.
+        [(a, b), (c, d)] if b == c && d == a => {
+            let spare = swap_spare(a, b);
+            vec![rename(a, &spare), rename(c, d), rename(&spare, b)]
+        }
+        // `b` is still `c`'s name until `c` moves.
+        [(a, b), (c, d)] if b == c => vec![rename(c, d), rename(a, b)],
+        [(a, b), (c, d)] => vec![rename(a, b), rename(c, d)],
+        _ => Vec::new(),
+    })
+}
+
+fn is_self_ref(m: &super::snapshot::M2MTableSnapshot) -> bool {
+    m.src_table == m.dst_table
+}
+
+/// A junction column name that is neither `a` nor `b` and fits PG's 63 bytes.
+fn swap_spare(a: &str, b: &str) -> String {
+    let mut cut = a.len().min(56);
+    while !a.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let base = &a[..cut];
+    (0..)
+        .map(|i| format!("{base}_swp{i}"))
+        .find(|s| s != a && s != b)
+        .expect("an unbounded range finds a free name")
 }
 
 pub(super) fn create_m2m(mt: &super::snapshot::M2MTableSnapshot) -> SchemaChange {
@@ -684,6 +746,22 @@ pub fn detect_unsupported_field_changes(
                 continue;
             };
             push_field_diffs(&ct.name, pf, cf, &mut out);
+        }
+    }
+    // A self-referencing junction with both columns renamed: which end is
+    // which is unknown, and a Drop + Create would lose its rows (#2245).
+    for pm in prev.m2m_tables.iter().filter(|m| is_self_ref(m)) {
+        let Some(cm) = current.m2m_table(&pm.through) else {
+            continue;
+        };
+        if cm != pm && is_self_ref(cm) && cm.src_table == pm.src_table {
+            if m2m_renames(pm, cm).is_none() {
+                out.push(format!(
+                    "self-referencing M2M `{}` renamed both columns (`{}`, `{}` → `{}`, `{}`); \
+                     rename one per migration, or write the RenameColumn ops by hand",
+                    pm.through, pm.src_col, pm.dst_col, cm.src_col, cm.dst_col
+                ));
+            }
         }
     }
     out
@@ -955,6 +1033,16 @@ fn alter_column_elsewhere(
     Ok(())
 }
 
+/// PG's `COMMENT ON COLUMN` for `f`; MySQL inlines it and SQLite has none (#2270).
+fn column_comment(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<String> {
+    let comment = f.db_comment.as_deref()?;
+    dialect.column_comment_statement(table, &f.column, comment)
+}
+
 /// The indexes `current` declares on `table`, which a UNIQUE drop keeps.
 pub(crate) fn declared_indexes(current: &SchemaSnapshot, table: &str) -> Vec<String> {
     current
@@ -1045,6 +1133,78 @@ impl UniqueNames {
     }
 }
 
+/// Who holds each FK name in `current`, where `dialect` wants it unique:
+/// per table on PG, per database on MySQL. Two FKs cut to one 63-byte
+/// name are refused before any DDL runs (#2245).
+struct FkNames {
+    holders: std::collections::HashMap<(String, String), Vec<String>>,
+    per_database: bool,
+}
+
+impl FkNames {
+    fn new(current: &SchemaSnapshot, dialect: &dyn crate::sql::Dialect) -> Self {
+        let mut names = Self {
+            holders: std::collections::HashMap::new(),
+            per_database: dialect.name() == "mysql",
+        };
+        // SQLite's inline FK names need not be unique.
+        if dialect.inline_fks_in_create_table() {
+            return names;
+        }
+        for t in &current.tables {
+            for f in t.fields.iter().filter(|f| f.fk.is_some()) {
+                let name = super::ddl::fk_constraint_name(&t.name, &f.column);
+                names.hold(&t.name, name, format!("`{}.{}`", t.name, f.column));
+            }
+            for c in &t.composite_fks {
+                names.hold(
+                    &t.name,
+                    c.name.clone(),
+                    format!("`{}` FK `{}`", t.name, c.name),
+                );
+            }
+        }
+        for m in &current.m2m_tables {
+            for col in [&m.src_col, &m.dst_col] {
+                let name = super::ddl::fk_constraint_name(&m.through, col);
+                names.hold(&m.through, name, format!("`{}.{col}`", m.through));
+            }
+        }
+        names
+    }
+
+    fn key(&self, table: &str, name: String) -> (String, String) {
+        let scope = if self.per_database { "" } else { table };
+        (scope.to_owned(), name)
+    }
+
+    fn hold(&mut self, table: &str, name: String, holder: String) {
+        let key = self.key(table, name);
+        self.holders.entry(key).or_default().push(holder);
+    }
+
+    /// Fails if another FK holds the name of the one on `table.column`.
+    fn check(&self, table: &str, column: &str) -> Result<(), String> {
+        let name = super::ddl::fk_constraint_name(table, column);
+        let me = format!("`{table}.{column}`");
+        let others: Vec<&str> = self
+            .holders
+            .get(&self.key(table, name.clone()))
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|h| *h != me)
+            .collect();
+        if others.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "the FK on {me} is named `{name}`, which {} also uses; rename a table or column",
+            others.join(", ")
+        ))
+    }
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
@@ -1056,6 +1216,7 @@ fn render_changes_split_inner(
 ) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     let unique_names = UniqueNames::new(current);
+    let fk_names = FkNames::new(current, dialect);
     // Once, before the first change that writes a CITEXT column (#2240).
     let mut ci_extension = dialect.ci_text_extension_sql();
     for change in changes {
@@ -1074,8 +1235,14 @@ fn render_changes_split_inner(
                 {
                     unique_names.get(name, &f.column)?;
                 }
+                for f in table.fields.iter().filter(|f| f.fk.is_some()) {
+                    fk_names.check(name, &f.column)?;
+                }
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
+                for f in &table.fields {
+                    out.immediate.extend(column_comment(name, f, dialect));
+                }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
                         .extend(constraints_sql_from_snapshot(table, dialect, schema)?);
@@ -1160,6 +1327,7 @@ fn render_changes_split_inner(
                 } else {
                     out.immediate.push(add_column_sql(table, f, dialect));
                 }
+                out.immediate.extend(column_comment(table, f, dialect));
                 if f.fk.is_some()
                     && dialect.inline_fks_in_create_table()
                     && inline_fk_on_add_column(f, dialect).is_none()
@@ -1180,6 +1348,7 @@ fn render_changes_split_inner(
                     f.fk.as_ref()
                         .filter(|_| !dialect.inline_fks_in_create_table())
                 {
+                    fk_names.check(table, column)?;
                     out.deferred_fks
                         .push(field_fk_sql(table, column, rel, dialect, schema)?);
                 }
@@ -1274,6 +1443,22 @@ fn render_changes_split_inner(
                             r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
                         ));
                     }
+                }
+                // A serial's sequence keeps its old type, so i32 → i64 still stops at 2^31 (#2245).
+                if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
+                    // A tagged body, so a `$$` in a name cannot end it.
+                    const TAG: &str = "$rustango_seq$";
+                    if table.contains(TAG) || column.contains(TAG) {
+                        return Err(format!("`{table}.{column}`: a name cannot contain `{TAG}`"));
+                    }
+                    out.immediate.push(format!(
+                        "DO {TAG} DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
+                         IF s IS NOT NULL THEN EXECUTE format('ALTER SEQUENCE %s AS {}', s); \
+                         END IF; END {TAG}",
+                        dialect.quote_literal(&dialect.quote_ident(table)),
+                        dialect.quote_literal(column),
+                        pg_type_for_ty_name(to),
+                    ));
                 }
             }
             SchemaChange::AlterColumnNullable {
@@ -1610,6 +1795,8 @@ fn render_changes_split_inner(
                 dst_table,
                 dst_col,
             } => {
+                fk_names.check(through, src_col)?;
+                fk_names.check(through, dst_col)?;
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
@@ -1903,6 +2090,24 @@ fn constraints_sql_from_snapshot(
     Ok(out)
 }
 
+/// Each column of `t` with its `ADD CONSTRAINT … FOREIGN KEY`, if it has one.
+pub(crate) fn column_fks(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    t.fields
+        .iter()
+        .map(|f| {
+            let fk = f.fk.as_ref();
+            let sql = fk
+                .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
+                .transpose()?;
+            Ok((f.column.clone(), sql))
+        })
+        .collect()
+}
+
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
 fn inline_references(rel: &RelationSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
     let mut s = format!(
@@ -2001,6 +2206,8 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         }
         sql.push(')');
     }
+    // MySQL's comment; PG's comes after, as `COMMENT ON COLUMN` (#2270).
+    sql.push_str(&inline_comment(f, dialect));
     // SQLite cannot `ADD CONSTRAINT`; its FK rides on the column (#1877).
     if let Some(rel) = inline_fk_on_add_column(f, dialect) {
         sql.push_str(&inline_references(rel, dialect));
@@ -2036,12 +2243,21 @@ fn add_column_backfilled(
         add_column_sql(table, &bare, dialect),
         fill_nulls_sql(table, f, dialect),
         format!(
-            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}",
+            "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}{}",
             dialect.quote_ident(table),
             dialect.quote_ident(&f.column),
-            sql_type_with_dialect(f, dialect)
+            sql_type_with_dialect(f, dialect),
+            inline_comment(f, dialect),
         ),
     ]
+}
+
+/// MySQL's inline ` COMMENT '…'` for `f`; a `MODIFY` without it drops the comment.
+fn inline_comment(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    f.db_comment
+        .as_deref()
+        .and_then(|c| dialect.write_inline_column_comment(c))
+        .unwrap_or_default()
 }
 
 /// `f` added nullable, then made NOT NULL by `MODIFY` (MySQL only).
@@ -2057,10 +2273,11 @@ fn add_column_then_not_null(
     vec![
         add_column_sql(table, &bare, dialect),
         format!(
-            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL",
+            "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL{}",
             dialect.quote_ident(table),
             dialect.quote_ident(&f.column),
-            sql_type_with_dialect(f, dialect)
+            sql_type_with_dialect(f, dialect),
+            inline_comment(f, dialect),
         ),
     ]
 }
@@ -2662,6 +2879,33 @@ mod sql_type_tests {
         assert!(out.deferred_fks[0].contains(r#"REFERENCES "posts" ("id")"#));
         assert!(out.deferred_fks[1].contains(r#"ADD CONSTRAINT "post_tags_tag_id_fkey""#));
         assert!(out.deferred_fks[1].contains(r#"REFERENCES "tags" ("id")"#));
+    }
+
+    /// A MySQL `MODIFY` restates the whole column, so it keeps the comment.
+    #[test]
+    fn mysql_add_column_modify_keeps_the_comment() {
+        let snap: SchemaSnapshot = serde_json::from_value(serde_json::json!({ "tables": [{
+            "name": "t", "model": "T", "fields": [
+                { "name": "c", "column": "c", "ty": "i64", "nullable": false,
+                  "primary_key": false, "db_comment": "kept" },
+                { "name": "u", "column": "u", "ty": "uuid", "nullable": false,
+                  "primary_key": false, "default": "gen_random_uuid()",
+                  "db_comment": "kept" }] }] }))
+        .unwrap();
+        for column in ["c", "u"] {
+            let add = [SchemaChange::AddColumn {
+                table: "t".into(),
+                column: column.into(),
+            }];
+            let out =
+                render_changes_split_for_empty(&add, &snap, &crate::sql::MySql, None).unwrap();
+            let modify = out.immediate.iter().find(|s| s.contains("MODIFY COLUMN"));
+            assert!(
+                modify.is_some_and(|s| s.ends_with("COMMENT 'kept'")),
+                "{:?}",
+                out.immediate
+            );
+        }
     }
 
     #[cfg(feature = "mysql")]

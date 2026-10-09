@@ -158,6 +158,18 @@ untouched.
 
 `EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). Per-queue mailers hold for in-memory queues only; with database queues use one mailer per jobs table (#2334, #2338).
 
+## 0.60.3
+
+### `makemigrations` renames an M2M junction's column
+
+Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
+
+### Colliding FK names are refused
+
+Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail at render, before the op that adds them, on PG and MySQL; rename a table or column. On MySQL, earlier ops of that migration have already committed (#2245).
+
+A self-referencing M2M whose two columns both change is refused by `makemigrations`; rename one per migration.
+
 ### Custom `Cache` backends: override `touch`
 
 `SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).
