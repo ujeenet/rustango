@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `check --deploy` warns when an SSO provider will refuse every existing user (#2359)
+
+One line per enabled tenant, shared or admin provider with email linking off, no `SsoLink` rows and users in its table; the tenancy CLI checks every active tenant.
+
 ### Fixed — admin list facets read only the values they show (#2344)
 
 The `GROUP BY` stops one past the cap unless `facet_show_all`; a count query keeps "+N more" exact, and an active value past the cut is read on its own.

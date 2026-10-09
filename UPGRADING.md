@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `check --deploy`: SSO providers that refuse every user
+
+New `[sso]` warnings name providers with email linking off and no `SsoLink` rows (#2359). In a tenancy project `check` now opens every active tenant's pool to look.
+
 ### Admin audit feed: hook-scoped tables are superuser-only
 
 Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables with a queryset or `view` hook (#2342).

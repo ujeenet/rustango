@@ -27,6 +27,9 @@
 //! [`seal_flow`]: crate::oauth2::seal_flow
 //! [`open_flow`]: crate::oauth2::open_flow
 
+#[cfg(any(feature = "tenancy", feature = "admin-sso"))]
+#[doc(hidden)]
+pub mod check;
 pub mod link;
 pub mod provider;
 pub use link::{LinkSource, ProviderKey, SsoLink};

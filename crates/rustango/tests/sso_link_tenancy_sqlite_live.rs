@@ -423,6 +423,23 @@ impl Env {
         self.sso_in(0, slug, sub, email).await
     }
 
+    /// `check --deploy` output, through the tenancy dispatcher.
+    async fn check_deploy(&self) -> String {
+        let dir = self._dir.path();
+        let reg_url = format!("sqlite://{}?mode=rwc", dir.join("reg.db").display());
+        let mut out = Vec::new();
+        // The unset deploy env fails the check; only the output matters here.
+        let _ = rustango::tenancy::manage::run_with_writer(
+            self._pools.as_ref(),
+            &reg_url,
+            &dir.join("migrations"),
+            vec!["check".to_owned(), "--deploy".to_owned()],
+            &mut out,
+        )
+        .await;
+        String::from_utf8(out).unwrap()
+    }
+
     /// POST a tenant admin form as user `uid`; the response status.
     async fn admin_post(&self, uid: i64, path: &str, form: &str) -> StatusCode {
         let payload = TenantSessionPayload::new(
@@ -670,6 +687,41 @@ async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
         env.sso("corp", "sub-ann", "ann@example.com").await,
         Err("nouser".into())
     );
+}
+
+/// `check --deploy` names the providers that refuse every existing user (#2359).
+#[tokio::test]
+async fn check_deploy_names_providers_that_refuse_every_user() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.shared_provider("team", false).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "no users, nobody refused: {out}");
+
+    let ann = env.user("ann", "ann@example.com", false).await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[warning] [sso] tenant `acme`: provider `corp` has allow_email_link off"),
+        "{out}"
+    );
+    assert!(
+        out.contains("[sso] shared provider `team` has allow_email_link off and no SsoLink rows in tenant(s) acme, so"),
+        "{out}"
+    );
+    assert!(!out.contains("`globex`"), "globex has no users: {out}");
+
+    // Linked once, the provider signs that user in: no warning.
+    let corp = rustango::sso::resolve_by_slug(env.pool(), "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    rustango::sso::link::create_link(env.pool(), &corp.key(LinkSource::Tenant), "sub-ann", ann)
+        .await
+        .unwrap();
+    env.set_shared_email_link(true).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "{out}");
 }
 
 #[tokio::test]
@@ -971,6 +1023,39 @@ async fn bare_admin_never_links_by_email_and_signs_in_by_link() {
     root.save_pool(&pool).await.unwrap();
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp), "{}", location(&resp));
+}
+
+/// `check --deploy` names an admin provider with no links (#2359).
+#[tokio::test]
+async fn check_deploy_names_an_unlinked_admin_provider() {
+    let _g = SUITE.lock().await;
+    let (_app, pool, _idp) = bare_admin().await;
+    let check = || async {
+        let mut out = Vec::new();
+        let _ = rustango::migrate::manage::run_with_writer(
+            &pool,
+            std::path::Path::new("/nonexistent"),
+            vec!["check".to_owned(), "--deploy".to_owned()],
+            &mut out,
+        )
+        .await;
+        String::from_utf8(out).unwrap()
+    };
+    // `corp` allows email linking, which the admin ignores.
+    let out = check().await;
+    assert!(
+        out.contains("[warning] [sso] admin provider `corp` has no SsoLink rows"),
+        "{out}"
+    );
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", 1)
+        .await
+        .unwrap();
+    assert!(!check().await.contains("[sso]"));
 }
 
 /// A bare-admin SSO login gets `iat` = the logout cut-off + 1 (#1855).

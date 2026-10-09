@@ -232,6 +232,18 @@ pub async fn linked_user(
     Ok(Some(link))
 }
 
+/// Whether any identity is linked through `key`.
+#[cfg(any(feature = "tenancy", feature = "admin-sso"))]
+pub(crate) async fn any_link(pool: &Pool, key: &ProviderKey) -> Result<bool, ExecError> {
+    use crate::sql::ExistsPool as _;
+    SsoLink::objects()
+        .filter("provider_source", key.source.as_str())
+        .filter("provider_id", key.provider_id)
+        .filter("issuer", key.issuer.clone())
+        .exists(pool)
+        .await
+}
+
 fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
     SsoLink {
         id: Auto::Unset,
