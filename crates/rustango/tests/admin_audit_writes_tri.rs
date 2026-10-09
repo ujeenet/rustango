@@ -206,7 +206,7 @@ async fn audit_rows(pool: &Pool, table: &str) -> Vec<(String, String, serde_json
         .into_iter()
         .map(|r| (r.operation, r.entity_pk, r.changes))
         .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
     rows
 }
 
@@ -261,6 +261,51 @@ async fn inline_child_writes_are_audited(pool: &Pool) {
     assert_eq!(tags[0].2["order_id"], o, "{:?}", tags[0].2);
 }
 
+/// An inline DELETE or UPDATE whose audit row cannot be written saves
+/// nothing (#2389).
+async fn inline_delete_and_update_audit_failure_save_nothing(pool: &Pool) {
+    use rustango::core::InsertQuery;
+    let o = seed_order(pool).await;
+    let base = break_audit(pool).await;
+    let key = |i: usize| format!("{i}{}", &base[1..]);
+    for i in 0..2 {
+        let values = vec![key(i).into(), o.into(), "n".into()];
+        let q = InsertQuery::new(Tag::SCHEMA, vec!["code", "order_id", "note"], values);
+        rustango::sql::insert_pool(pool, &q)
+            .await
+            .expect("seed tag");
+    }
+    let tag = |code: String| async move {
+        Tag::objects()
+            .filter("code", code)
+            .fetch(pool)
+            .await
+            .expect("fetch tags")
+    };
+    let mut leaks = Vec::new();
+    for (what, i, extra) in [
+        ("delete", 0, "&aaw_tag-0-note=n&aaw_tag-0-DELETE=on"),
+        ("update", 1, "&aaw_tag-0-note=changed"),
+    ] {
+        let form = format!(
+            "name=renamed&aaw_tag-TOTAL_FORMS=1&aaw_tag-INITIAL_FORMS=1&aaw_tag-0-code={}{extra}",
+            key(i)
+        );
+        let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+        let rows = tag(key(i)).await;
+        let kept = rows.len() == 1 && rows[0].note == "n";
+        if status != StatusCode::OK || !body.contains("Nothing was saved") || !kept {
+            leaks.push(format!("{what}: {status}, kept={kept}"));
+        }
+    }
+    let orders = Order::objects().fetch(pool).await.expect("fetch orders");
+    assert_eq!(orders[0].name, "o", "the parent edit committed");
+    assert!(
+        leaks.is_empty(),
+        "committed without an audit row: {leaks:#?}"
+    );
+}
+
 /// An inline row whose audit row cannot be written saves nothing (#2389).
 async fn inline_child_audit_failure_saves_nothing(pool: &Pool) {
     let o = seed_order(pool).await;
@@ -294,37 +339,86 @@ async fn note_count(pool: &Pool) -> i64 {
     Note::objects().count(pool).await.expect("count notes")
 }
 
-async fn memo_deleted(pool: &Pool) -> bool {
-    let memos = Memo::objects().fetch(pool).await.expect("fetch memos");
-    memos[0].deleted_at.is_some()
+async fn memo_stamped(pool: &Pool, code: &str) -> bool {
+    let memos = Memo::objects().filter("code", code).fetch(pool).await;
+    memos.expect("fetch memos")[0].deleted_at.is_some()
 }
 
-/// Single and bulk deletes, soft deletes and restores audit as before.
+/// `(operation, entity_pk)` of every audit row for `table`, sorted.
+async fn audited(pool: &Pool, table: &str) -> Vec<(String, String)> {
+    let rows = audit_rows(pool, table).await;
+    rows.into_iter().map(|r| (r.0, r.1)).collect()
+}
+
+fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+        .collect()
+}
+
+/// Single and bulk deletes, soft deletes and restores each write and
+/// audit exactly their row.
 async fn deletes_and_bulk_actions_are_audited(pool: &Pool) {
-    let ops = |table: &'static str| async move {
-        let rows = audit_rows(pool, table).await;
-        rows.into_iter().map(|r| r.0).collect::<Vec<_>>()
+    let ok = |(status, body): (StatusCode, String)| {
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     };
     seed_note_and_memo(pool, "a").await;
-    let (status, body) = post(pool, "/aaw_note/a/delete", "").await;
-    assert!(status.is_redirection(), "{status}: {body}");
-    assert_eq!(note_count(pool).await, 0);
-    let (status, body) = post(pool, "/aaw_memo/a/delete", "").await;
-    assert!(status.is_redirection(), "{status}: {body}");
-    assert!(memo_deleted(pool).await);
-    let form = "action=restore_selected&_selected=a&trashed=1";
-    let (status, body) = post(pool, "/aaw_memo/__action", form).await;
-    assert!(status.is_redirection(), "{status}: {body}");
-    assert!(!memo_deleted(pool).await);
-    // A bulk action audits as an `update` tagged with its name.
-    assert_eq!(ops("aaw_memo").await, ["soft_delete", "update"]);
-
     seed_note_and_memo(pool, "b").await;
-    let form = "action=delete_selected&_selected=b";
-    let (status, body) = post(pool, "/aaw_note/__action", form).await;
-    assert!(status.is_redirection(), "{status}: {body}");
+    ok(post(pool, "/aaw_note/a/delete", "").await);
+    ok(post(
+        pool,
+        "/aaw_note/__action",
+        "action=delete_selected&_selected=b",
+    )
+    .await);
     assert_eq!(note_count(pool).await, 0);
-    assert_eq!(ops("aaw_note").await, ["delete", "delete"]);
+    let notes = audit_rows(pool, "aaw_note").await;
+    assert_eq!(
+        notes
+            .iter()
+            .map(|r| (r.0.as_str(), r.1.as_str()))
+            .collect::<Vec<_>>(),
+        [("delete", "a"), ("delete", "b")]
+    );
+    assert!(notes.iter().all(|r| r.2["body"] == "note"), "{notes:?}");
+
+    ok(post(pool, "/aaw_memo/a/delete", "").await);
+    assert!(memo_stamped(pool, "a").await);
+    ok(post(
+        pool,
+        "/aaw_memo/__action",
+        "action=delete_selected&_selected=b",
+    )
+    .await);
+    assert!(
+        memo_stamped(pool, "b").await,
+        "the bulk soft delete did not stamp"
+    );
+    let form = "action=restore_selected&_selected=a&trashed=1";
+    ok(post(pool, "/aaw_memo/__action", form).await);
+    assert!(!memo_stamped(pool, "a").await);
+    assert!(
+        memo_stamped(pool, "b").await,
+        "the restore touched an unselected row"
+    );
+    // A bulk action audits as an `update` tagged with its name.
+    assert_eq!(
+        audited(pool, "aaw_memo").await,
+        pairs(&[("soft_delete", "a"), ("soft_delete", "b"), ("update", "a")])
+    );
+    let memos = audit_rows(pool, "aaw_memo").await;
+    assert_eq!(memos[2].2["__action"], "restore_selected", "{memos:?}");
+}
+
+/// The status a refused write answers with: the missing-table page on
+/// SQLite (no audit table), a 500 on PG and MySQL (an overlong key).
+fn refusal_status(pool: &Pool) -> StatusCode {
+    if pool.backend_name() == "sqlite" {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
 }
 
 /// A delete, soft delete or restore whose audit row cannot be written
@@ -341,10 +435,6 @@ async fn delete_audit_failure_keeps_the_row(pool: &Pool) {
             .await
             .expect("count")
             == 0
-    };
-    let memo_stamped = |code: String| async move {
-        let memos = Memo::objects().filter("code", code).fetch(pool).await;
-        memos.expect("fetch")[0].deleted_at.is_some()
     };
     for i in 0..5 {
         seed_note_and_memo(pool, &key(i)).await;
@@ -363,22 +453,23 @@ async fn delete_audit_failure_keeps_the_row(pool: &Pool) {
         .expect("trash");
 
     let mut leaks = Vec::new();
+    let refused = refusal_status(pool);
     let mut check = |what: &'static str, (status, _): (StatusCode, String), wrote: bool| {
-        if status.is_redirection() || wrote {
+        if status != refused || wrote {
             leaks.push(format!("{what}: {status}, wrote={wrote}"));
         }
     };
     let r = post(pool, &format!("/aaw_note/{}/delete", key(0)), "").await;
     check("delete", r, note_gone(key(0)).await);
     let r = post(pool, &format!("/aaw_memo/{}/delete", key(1)), "").await;
-    check("soft delete", r, memo_stamped(key(1)).await);
+    check("soft delete", r, memo_stamped(pool, &key(1)).await);
     let form = |action: &str, i: usize| format!("action={action}&_selected={}&trashed=1", key(i));
     let r = post(pool, "/aaw_note/__action", &form("delete_selected", 2)).await;
     check("bulk delete", r, note_gone(key(2)).await);
     let r = post(pool, "/aaw_memo/__action", &form("delete_selected", 3)).await;
-    check("bulk soft delete", r, memo_stamped(key(3)).await);
+    check("bulk soft delete", r, memo_stamped(pool, &key(3)).await);
     let r = post(pool, "/aaw_memo/__action", &form("restore_selected", 4)).await;
-    check("bulk restore", r, !memo_stamped(key(4)).await);
+    check("bulk restore", r, !memo_stamped(pool, &key(4)).await);
     assert!(
         leaks.is_empty(),
         "committed without an audit row: {leaks:#?}"
@@ -429,6 +520,7 @@ tri_dialect_test! {
     scenarios: [
         inline_child_writes_are_audited,
         inline_child_audit_failure_saves_nothing,
+        inline_delete_and_update_audit_failure_save_nothing,
         deletes_and_bulk_actions_are_audited,
         delete_audit_failure_keeps_the_row,
         inline_delete_stamps_a_soft_delete_child,

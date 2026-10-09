@@ -62,8 +62,6 @@ pub(crate) use executor::rolled_back;
 pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
-#[cfg(feature = "admin")]
-pub(crate) use executor::select_one_row_as_json_tx;
 pub use executor::{
     __rustango_require_join, atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool,
     delete_pool, delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool,
@@ -82,6 +80,8 @@ pub use executor::{
 pub(crate) use executor::{
     bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk,
 };
+#[cfg(feature = "admin")]
+pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted

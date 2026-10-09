@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `SearchClause` with no columns
+
+A `SearchClause` with a non-empty query and no columns now matches no rows (`WHERE 1 = 0`); it used to be dropped. A ViewSet without `search_fields` still ignores `?search=` (#2391).
+
 ### Admin: inline delete of a `soft_delete` child
 
 Ticking DELETE on an inline row of a `soft_delete` model now stamps its column, as the main delete does; it used to remove the row (#2453).

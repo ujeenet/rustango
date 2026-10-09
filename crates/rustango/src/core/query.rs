@@ -1166,7 +1166,7 @@ pub struct SubqueryJoin {
 /// substring match across multiple columns. Used by the admin's `?q=…` box.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchClause {
-    /// SQL columns to search across. Empty = no clause emitted.
+    /// SQL columns to search across. Empty with a query = matches nothing.
     pub columns: Vec<&'static str>,
     /// User-supplied query text. The writer wraps it in `%…%` for `ILIKE`.
     pub query: String,

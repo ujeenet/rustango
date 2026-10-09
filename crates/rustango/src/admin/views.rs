@@ -433,15 +433,9 @@ pub(crate) async fn table_view(
     }
 
     let search_columns = search_columns(model, &admin_cfg);
-    let search = q.as_ref().and_then(|qstr| {
-        if search_columns.is_empty() {
-            None
-        } else {
-            Some(SearchClause {
-                columns: search_columns.clone(),
-                query: qstr.clone(),
-            })
-        }
+    let search = q.as_ref().map(|qstr| SearchClause {
+        columns: search_columns.clone(),
+        query: qstr.clone(),
     });
 
     let where_clause = WhereExpr::and_predicates(
@@ -1633,13 +1627,9 @@ pub(crate) async fn autocomplete_view(
     };
     let display_field = model.display_field().unwrap_or(pk_field);
 
-    let search_columns = search_columns(model, &admin_cfg);
-    // A query with no column to match it matches nothing (#2391).
-    if !q.is_empty() && search_columns.is_empty() {
-        return Ok(axum::Json(serde_json::json!({ "results": [] })));
-    }
+    // With no search column, a query matches nothing (#2391).
     let search = (!q.is_empty()).then(|| SearchClause {
-        columns: search_columns,
+        columns: search_columns(model, &admin_cfg),
         query: q.clone(),
     });
 
@@ -1979,7 +1969,7 @@ pub(crate) async fn create_submit(
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
-    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
+    let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let (columns, values): (Vec<&'static str>, Vec<SqlValue>) = collected.into_iter().unzip();
 
     let query = InsertQuery {
@@ -2132,60 +2122,6 @@ fn keep_unchanged(
     }
 }
 
-/// Stands in for a secret in the audit log.
-const SECRET_CHANGED: &str = "[changed]";
-const SECRET_SET: &str = "[set]";
-
-/// What the audit log records for a write: the form without secrets, a
-/// marker for each secret written, and timestamps the server stamped.
-pub(super) fn audit_form(
-    model: &'static crate::core::ModelSchema,
-    admin_cfg: &crate::core::AdminConfig,
-    form: &HashMap<String, String>,
-    written: &[(&'static str, SqlValue)],
-) -> HashMap<String, String> {
-    // Only written fields: a POSTed readonly or hidden value is skipped,
-    // so the diff must fall back to the row for it (#1939).
-    let is_written = |name: &str| {
-        model
-            .field(name)
-            .is_some_and(|f| written.iter().any(|(c, _)| *c == f.column))
-    };
-    let mut out: HashMap<String, String> = form
-        .iter()
-        .filter(|(k, _)| !is_secret_field(admin_cfg, k) && is_written(k))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    for (column, value) in written {
-        let Some(f) = model.scalar_fields().find(|f| f.column == *column) else {
-            continue;
-        };
-        if is_secret_field(admin_cfg, f.name) {
-            out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
-        } else if let SqlValue::DateTime(at) = value {
-            out.insert(f.name.to_owned(), at.to_rfc3339());
-        }
-    }
-    out
-}
-
-/// `row` with each set secret replaced by a marker, for the audit log.
-pub(super) fn mask_secrets(
-    model: &'static crate::core::ModelSchema,
-    admin_cfg: &crate::core::AdminConfig,
-    row: &serde_json::Value,
-) -> serde_json::Value {
-    let mut row = row.clone();
-    for f in model.scalar_fields() {
-        if is_secret_field(admin_cfg, f.name) {
-            if let Some(v) = row.get_mut(f.name).filter(|v| !v.is_null()) {
-                *v = serde_json::Value::String(SECRET_SET.to_owned());
-            }
-        }
-    }
-    row
-}
-
 // ============================================================== EDIT
 
 pub(crate) async fn edit_form(
@@ -2335,7 +2271,7 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(e.as_str()));
         return Ok(Html(html).into_response());
     }
-    let audit_form = audit_form(model, &admin_cfg, &form, &collected);
+    let audit_form = super::audit::audit_form(model, &admin_cfg, &form, &collected);
     let assignments: Vec<Assignment> = collected
         .into_iter()
         .map(|(column, value)| Assignment {
@@ -2394,10 +2330,7 @@ pub(crate) async fn update_submit(
         &query,
         before_select,
         &pre_update_fields,
-        |row| {
-            let row = mask_secrets(model, &admin_cfg, row);
-            super::audit::admin_audit_diff_entry(model, &pk_raw, &row, &audit_form)
-        },
+        |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
         emit,
     )
     .await;
@@ -2538,7 +2471,7 @@ pub(crate) async fn delete_submit(
         }
     }
     tx.commit().await.map_err(crate::sql::ExecError::from)?;
-    if emit == crate::audit::DiffEmit::AfterCommit {
+    if emit == crate::audit::DiffEmit::Deferred {
         super::audit::emit_best_effort(&state, &entry).await;
     }
     // The `delete_model` hook fires after the delete and the audit
@@ -2781,10 +2714,7 @@ pub(crate) async fn action_submit(
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     let mut tx = crate::sql::write_transaction_pool(&state.pool).await?;
-    let changed = match builtin
-        .run(&mut tx, model, pk_field.column, &pk_values)
-        .await
-    {
+    let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {
             rollback_quietly(tx, model.table).await;
@@ -2792,16 +2722,13 @@ pub(crate) async fn action_submit(
             return refused_delete(&state, model, e);
         }
     };
-    // A row someone else marked since the read keeps their stamp and audit row (#1929).
-    let (before_rows, row_pks): (Vec<_>, Vec<_>) = match changed {
-        Some(changed) => before_rows
-            .into_iter()
-            .zip(row_pks)
-            .zip(changed)
-            .filter_map(|(pair, changed)| changed.then_some(pair))
-            .unzip(),
-        None => (before_rows, row_pks),
-    };
+    // A row someone else deleted or marked since the read keeps their
+    // stamp and audit row (#1929).
+    let (before_rows, row_pks): (Vec<_>, Vec<_>) = before_rows
+        .into_iter()
+        .zip(row_pks)
+        .filter(|(_, pk)| changed.contains(pk))
+        .unzip();
     let entries = entries_for(&before_rows, &row_pks);
     if emit == crate::audit::DiffEmit::InTx {
         if let Err(e) = crate::audit::emit_in_tx(&mut tx, &state.pool, &entries).await {
@@ -2810,7 +2737,7 @@ pub(crate) async fn action_submit(
         }
     }
     tx.commit().await.map_err(crate::sql::ExecError::from)?;
-    if emit == crate::audit::DiffEmit::AfterCommit {
+    if emit == crate::audit::DiffEmit::Deferred {
         super::audit::emit_many_best_effort(&state, &entries, &action).await;
     }
     send_row_signals(model.table, &row_pks, is_delete, false).await;
@@ -2911,7 +2838,11 @@ fn row_perms<'a>(write: &BulkWrite, action: &'a str) -> (&'static str, Option<&'
     }
 }
 
+/// Keys a bulk write locks and writes per statement.
+const BULK_WRITE_CHUNK: usize = 500;
+
 /// The write of a built-in bulk action.
+#[derive(Clone, Copy)]
 enum BuiltinWrite {
     HardDelete,
     /// Set the soft-delete column to this stamp; `None` restores.
@@ -2919,26 +2850,58 @@ enum BuiltinWrite {
 }
 
 impl BuiltinWrite {
-    /// Run in `tx`. A mark writes each row on its own and returns `true`
-    /// where the row changed.
+    /// Run in `tx`: per chunk, lock the rows it would change, then write
+    /// those by key. Returns the keys written, as the PK strings.
     async fn run(
         self,
         tx: &mut crate::sql::PoolTx<'_>,
         model: &'static crate::core::ModelSchema,
-        pk_column: &'static str,
+        pk_field: &'static FieldSchema,
         pks: &[SqlValue],
-    ) -> Result<Option<Vec<bool>>, crate::sql::ExecError> {
-        let Self::Mark(col, deleted_at) = self else {
-            let query = DeleteQuery::by_pk_in(model, pk_column, pks.to_vec());
-            crate::sql::delete_tx(tx, &query).await?;
-            return Ok(None);
-        };
-        let mut changed = Vec::with_capacity(pks.len());
-        for pk in pks {
-            let q = crate::soft_delete::__mark_query(model, col, pk_column, pk.clone(), deleted_at);
-            changed.push(crate::sql::update_tx(tx, &q).await? > 0);
+    ) -> Result<std::collections::HashSet<String>, crate::sql::ExecError> {
+        let pk_in =
+            |keys: Vec<SqlValue>| Filter::new(pk_field.column, Op::In, SqlValue::List(keys));
+        let mut written = std::collections::HashSet::new();
+        for chunk in pks.chunks(BULK_WRITE_CHUNK) {
+            let mut filters = vec![pk_in(chunk.to_vec())];
+            if let Self::Mark(col, deleted_at) = self {
+                // Only rows the mark changes: live ones to delete, trashed to restore.
+                filters.push(Filter::new(
+                    col,
+                    Op::IsNull,
+                    SqlValue::Bool(deleted_at.is_some()),
+                ));
+            }
+            let select = SelectQuery {
+                where_clause: WhereExpr::and_predicates(filters),
+                lock_mode: Some(crate::core::LockMode {
+                    silent_on_sqlite: true,
+                    ..crate::core::LockMode::default()
+                }),
+                ..SelectQuery::new(model)
+            };
+            let mut rows = crate::sql::select_rows_as_json_tx(tx, &select, &[pk_field]).await?;
+            let keys = rows_with_pk(&mut rows, pk_field);
+            if keys.is_empty() {
+                continue;
+            }
+            written.extend(
+                rows.iter()
+                    .filter_map(|row| render::read_value_as_string_json(row, pk_field)),
+            );
+            let target = WhereExpr::Predicate(pk_in(keys));
+            match self {
+                Self::HardDelete => {
+                    crate::sql::delete_tx(tx, &DeleteQuery::new(model, target)).await?;
+                }
+                Self::Mark(col, deleted_at) => {
+                    let value = deleted_at.map_or(SqlValue::Null, SqlValue::DateTime);
+                    let set = vec![Assignment::new(col, value)];
+                    crate::sql::update_tx(tx, &UpdateQuery::new(model, set, target)).await?;
+                }
+            }
         }
-        Ok(Some(changed))
+        Ok(written)
     }
 }
 
@@ -2958,24 +2921,6 @@ fn rows_with_pk(rows: &mut Vec<serde_json::Value>, pk_field: &FieldSchema) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// #1939: a POSTed field the update skipped is not an audit "after".
-    #[test]
-    fn the_audit_form_holds_only_written_fields() {
-        use crate::core::Model as _;
-        let model = crate::admin::user::AdminUser::SCHEMA;
-        let form: HashMap<String, String> = [
-            ("username", "alice"),
-            ("sessions_revoked_at", "2020-01-01T00:00"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect();
-        let written = vec![("username", SqlValue::String("alice".into()))];
-        let out = audit_form(model, &crate::core::AdminConfig::DEFAULT, &form, &written);
-        assert_eq!(out.get("username").map(String::as_str), Some("alice"));
-        assert!(!out.contains_key("sessions_revoked_at"), "{out:?}");
-    }
 
     #[test]
     fn rows_with_pk_drops_the_audit_row_with_its_pk() {

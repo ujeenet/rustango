@@ -423,9 +423,13 @@ const AUDIT_COLUMNS: [&str; 6] = [
     "occurred_at",
 ];
 
+/// Most entries per audit INSERT. Each carries a row snapshot, so the
+/// bind cap alone could pass MySQL's `max_allowed_packet` (64 MB).
+const AUDIT_ROWS_PER_INSERT_MAX: usize = 100;
+
 /// Entries per audit INSERT, so their binds fit the dialect's cap.
 fn audit_rows_per_insert(dialect: &dyn crate::sql::Dialect) -> usize {
-    (dialect.max_bind_params() / AUDIT_COLUMNS.len()).max(1)
+    (dialect.max_bind_params() / AUDIT_COLUMNS.len()).clamp(1, AUDIT_ROWS_PER_INSERT_MAX)
 }
 
 /// One multi-row audit INSERT, rendered by the bulk-insert writer.
@@ -1431,14 +1435,15 @@ pub async fn save_one_with_audit(
     Ok(affected)
 }
 
-/// When an admin-style row-diff write emits its audit entry.
+/// Who writes an admin write's audit entry.
 #[cfg(feature = "admin")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DiffEmit {
-    /// In the UPDATE's transaction: a failed emit undoes the write.
+    /// The helper, in the write's transaction: a failed emit undoes the write.
     InTx,
-    /// After commit; the caller emits [`RowDiffWrite::Written::deferred`] best-effort.
-    AfterCommit,
+    /// The caller, which gets the entry back: best-effort after commit,
+    /// or batched into its own transaction.
+    Deferred,
 }
 
 #[cfg(feature = "admin")]
@@ -1448,7 +1453,7 @@ impl DiffEmit {
         if model.audit_track.is_some() {
             Self::InTx
         } else {
-            Self::AfterCommit
+            Self::Deferred
         }
     }
 }
@@ -1502,7 +1507,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
         emit_one_tx(tx, Via::Pool(pool), entry).await?;
     }
     Ok(RowDiffWrite::Written {
-        deferred: entry.filter(|_| emit == DiffEmit::AfterCommit),
+        deferred: entry.filter(|_| emit == DiffEmit::Deferred),
     })
 }
 
@@ -1539,7 +1544,7 @@ pub(crate) async fn insert_one_with_entry_tx(
     if emit == DiffEmit::InTx {
         emit_one_tx(tx, Via::Pool(pool), &entry).await?;
     }
-    Ok((pk, (emit == DiffEmit::AfterCommit).then_some(entry)))
+    Ok((pk, (emit == DiffEmit::Deferred).then_some(entry)))
 }
 
 /// Run an `InsertQuery`, write the assigned PK back into `model`, then

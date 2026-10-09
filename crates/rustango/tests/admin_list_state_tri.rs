@@ -679,7 +679,8 @@ async fn bulk_action_selection_is_capped(pool: &Pool) {
     assert!(get(pool, "/adminls_item").await.contains("kept-row"));
 }
 
-/// Autocomplete with a query but no searchable column matches nothing (#2391).
+/// A query with no searchable column matches nothing, in autocomplete and
+/// the changelist (#2391).
 async fn autocomplete_without_search_columns_is_empty(pool: &Pool) {
     let mut c = Counter {
         id: Auto::default(),
@@ -694,6 +695,15 @@ async fn autocomplete_without_search_columns_is_empty(pool: &Pool) {
     assert_eq!(results(all), 1, "no query lists the rows");
     let none = get(pool, "/adminls_counter/__autocomplete?q=zzz").await;
     assert_eq!(results(none), 0);
+
+    // The changelist agrees: the writer, not each view, decides.
+    let link = format!("adminls_counter/{}\"", c.id.get().expect("pk"));
+    assert!(get(pool, "/adminls_counter").await.contains(&link));
+    let searched = get(pool, "/adminls_counter?q=zzz").await;
+    assert!(
+        !searched.contains(&link),
+        "a search with no column listed the row"
+    );
 }
 
 tri_dialect_test! {

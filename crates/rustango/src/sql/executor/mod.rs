@@ -343,9 +343,9 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
-#[cfg(feature = "admin")]
-pub(crate) use row_to_json::select_one_row_as_json_tx;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
+#[cfg(feature = "admin")]
+pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
 
 /// Annotate each parent row with the COUNT of its children, from a
 /// single query, so a list page costs one round trip instead of

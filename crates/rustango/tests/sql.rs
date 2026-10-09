@@ -692,15 +692,20 @@ fn empty_search_query_emits_no_clause() {
     assert!(stmt.params.is_empty());
 }
 
+/// A query with no column to search matches nothing (#2391).
 #[test]
-fn empty_search_columns_emits_no_clause() {
+fn empty_search_columns_match_nothing() {
     let mut q = empty_select();
     q.search = Some(SearchClause {
         columns: vec![],
         query: "anything".into(),
     });
     let stmt = pg().compile_select(&q).unwrap();
-    assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE 1 = 0"#
+    );
+    assert!(stmt.params.is_empty());
 }
 
 #[test]

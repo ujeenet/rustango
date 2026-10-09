@@ -8,9 +8,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 As the main admin delete does; trashed children no longer count toward the inline's `max_num`.
 
-### Fixed — admin autocomplete with a query on a model with no searchable column returns no rows (#2391)
+### Fixed — an admin search on a model with no searchable column returns no rows (#2391)
 
-It returned the first rows unfiltered.
+The changelist and autocomplete returned every row. A `SearchClause` with a query and no columns now matches nothing.
 
 ### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
 

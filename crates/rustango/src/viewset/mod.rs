@@ -2447,7 +2447,11 @@ async fn run_list(
     };
 
     // Search
-    let search = params.get("search").filter(|s| !s.is_empty()).cloned();
+    // No `search_fields`: `?search=` is not a filter here.
+    let search = params
+        .get("search")
+        .filter(|s| !s.is_empty() && !state.vs.search_fields.is_empty())
+        .cloned();
     let search_clause = search.map(|q| SearchClause {
         query: q,
         columns: state
