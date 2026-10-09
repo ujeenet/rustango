@@ -1220,12 +1220,13 @@ impl Endpoint {
         BackendKind::parse(&url.split(':').next()?.to_ascii_lowercase()).ok()
     }
 
-    /// `Ok(None)` for another backend's URL, and for a secret reference:
-    /// org edits have no resolver, so its target is unknown here.
+    /// Read as the registry's backend connects it: sqlx ignores a PG/MySQL scheme and SQLite
+    /// takes a bare path. `Ok(None)` when another scheme fails to parse, e.g. a secret reference.
     fn of_url(url: &str, kind: BackendKind) -> Result<Option<Self>, String> {
-        match Self::scheme_kind(url) {
-            Some(k) if k == kind => Self::parse(url, kind).map(Some),
-            _ => Ok(None),
+        match Self::parse(url, kind) {
+            Ok(endpoint) => Ok(Some(endpoint)),
+            Err(e) if Self::scheme_kind(url) == Some(kind) => Err(e),
+            Err(_) => Ok(None),
         }
     }
 
@@ -1325,16 +1326,30 @@ fn sqlite_file(name: &Path) -> std::path::PathBuf {
     file_identity(Path::new(&crate::url_codec::percent_decode_path(path)))
 }
 
-/// `path` resolved against the working directory and symlinks, as far as it exists.
+/// `path` with its deepest existing ancestor canonicalized; the missing rest,
+/// `..` included, is resolved by text.
 fn file_identity(path: &Path) -> std::path::PathBuf {
-    if let Ok(p) = std::fs::canonicalize(path) {
-        return p;
-    }
+    use std::path::Component;
     let abs = std::env::current_dir().map_or_else(|_| path.to_owned(), |d| d.join(path));
-    match (abs.parent().map(std::fs::canonicalize), abs.file_name()) {
-        (Some(Ok(dir)), Some(name)) => dir.join(name),
-        _ => abs,
+    let parts: Vec<Component<'_>> = abs.components().collect();
+    for n in (1..=parts.len()).rev() {
+        let Ok(mut resolved) =
+            std::fs::canonicalize(parts[..n].iter().collect::<std::path::PathBuf>())
+        else {
+            continue;
+        };
+        for part in &parts[n..] {
+            match part {
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        return resolved;
     }
+    abs
 }
 
 /// Build a tenant URL on the same server as the registry, naming
@@ -2192,9 +2207,13 @@ mod registry_endpoint_tests {
             "postgres://db.internal:5433/reg",
             "postgres://db.internal:5432/tenant",
             "postgres://db.internal:5432/reg?host=elsewhere",
-            "mysql://db.internal:5432/reg",
+            "mysql://db.internal:3306/reg",
         ] {
             assert!(refuse_registry_pool(other, &pool).is_ok(), "{other}");
+        }
+        // A PG tenant pool ignores the scheme, so these connect to the registry.
+        for same in ["mysql://db.internal:5432/reg", "x://db.internal:5432/reg"] {
+            assert!(refuse_registry_pool(same, &pool).is_err(), "{same}");
         }
         let socket = pg("postgres://app@%2Fcloudsql%2Fp:5432/reg");
         assert!(refuse_registry_pool("postgres://x:5432/reg?host=/cloudsql/p", &socket).is_err());
@@ -2292,5 +2311,15 @@ mod registry_endpoint_tests {
         }
         let sibling = format!("sqlite:{}", dir.path().join("t.db").display());
         assert!(refuse_registry_pool(&sibling, &pool).is_ok());
+        // The tenant pool is SQLite too, so a bare path or a foreign scheme opens the file.
+        let parent = abs.parent().unwrap().display();
+        for same in [
+            format!("{abs_s}"),
+            format!("{rel}"),
+            format!("{parent}/nope/../reg.db"),
+            format!("sqlite:{parent}/nope/./../reg.db"),
+        ] {
+            assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
+        }
     }
 }
