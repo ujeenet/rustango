@@ -424,6 +424,18 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
         .unwrap();
     assert!(!p.allow_email_link, "an unreadable flag is off");
     assert_eq!(p.sso.client_secret, "s3cret");
+    // `check --deploy` reads the missing flag as off too, and names the provider.
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    user(pool, &format!("old{n}"), &format!("old{n}@example.com")).await;
+    assert_eq!(
+        rustango::testkit::sso_check::tenant_providers(pool)
+            .await
+            .unwrap(),
+        ["old"]
+    );
     let key = p.key(LinkSource::Tenant);
     create_link(pool, &key, "sub-old", 9).await.unwrap();
     let ok = One(Some(Account::new(9, false, true)));

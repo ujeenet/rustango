@@ -11,6 +11,20 @@ use crate::sql::{ExecError, ExistsPool as _, Pool};
 use super::link::{any_link, LinkSource, ProviderKey};
 use super::provider::load_rows;
 
+/// Ids of the `P` rows with email linking on. Read apart from the row, as at
+/// sign-in, so a table without the column reads as off.
+async fn email_linking<P: Model + Send>(pool: &Pool) -> Vec<i64> {
+    QuerySet::<P>::new()
+        .filter("allow_email_link", true)
+        .values_list_flat("id")
+        .fetch::<i64>(pool)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "rustango::sso", "allow_email_link unreadable, treated as off: {e}");
+            Vec::new()
+        })
+}
+
 /// Slugs of the enabled `P` rows on `providers` that refuse every `U` on
 /// `users`. Missing tables count as empty.
 async fn stranded<P: Model + Send, U: Model + Send>(
@@ -24,14 +38,18 @@ async fn stranded<P: Model + Send, U: Model + Send>(
     {
         return Ok(Vec::new());
     }
-    let mut qs = QuerySet::<P>::new().filter("enabled", true);
     // The admin never links by email, whatever the row says.
-    if source != LinkSource::Admin {
-        qs = qs.filter("allow_email_link", false);
-    }
+    let linking = if source == LinkSource::Admin {
+        Vec::new()
+    } else {
+        email_linking::<P>(providers).await
+    };
     let has_links = table_exists_here(users, super::SsoLink::SCHEMA.table).await;
     let mut out = Vec::new();
-    for row in load_rows(qs, providers).await? {
+    for row in load_rows(QuerySet::<P>::new().filter("enabled", true), providers).await? {
+        if linking.contains(&row.id) {
+            continue;
+        }
         let key = ProviderKey::for_row(source, row.id, &row.kind, row.issuer_url.as_deref());
         if !has_links || !any_link(users, &key).await? {
             out.push(row.slug);
