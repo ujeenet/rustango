@@ -1,9 +1,11 @@
-//! `flush`, `dumpdata` and `loaddata` on every backend (#1911, #1912).
+//! `flush`, `dumpdata` and `loaddata` on every backend (#1911, #1912, #2285).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::Model as _;
-use rustango::sql::{Array, Auto, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{
+    raw_execute_pool, Array, Auto, CounterPool as _, FetcherPool as _, ForeignKey, Pool,
+};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -50,6 +52,148 @@ pub struct Tagged {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub tags: Array<String>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_owned", app = "cli2285")]
+pub struct Owned {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_legacy", app = "cli2285", managed = false)]
+pub struct Legacy {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2285_view", app = "cli2285", view)]
+pub struct OwnedView {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2315_target", app = "cli2315")]
+pub struct Target {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+/// Unmanaged, and it references a table `flush` clears.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2315_ref", app = "cli2315", managed = false)]
+pub struct TargetRef {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub target: ForeignKey<Target, i64>,
+}
+
+// Two parent/child pairs declared in opposite orders, so one pair has the
+// parent first whatever order the registry yields; plus a self-FK tree.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_parent_a", app = "cli2316")]
+pub struct ParentA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_child_a", app = "cli2316")]
+pub struct ChildA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent: ForeignKey<ParentA, i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_child_b", app = "cli2316")]
+pub struct ChildB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub parent: ForeignKey<ParentB, i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_parent_b", app = "cli2316")]
+pub struct ParentB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_tree", app = "cli2316")]
+pub struct Tree {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2316_tree", on = "id")]
+    pub parent_id: Option<i64>,
+}
+
+/// Managed, with rows, next to a target the flush cannot clear.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2316_bystander", app = "cli2315")]
+pub struct Bystander {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cli2317_post",
+    app = "cli2317",
+    m2m(
+        name = "tags",
+        to = "cli2317_tag",
+        through = "cli2317_post_tags",
+        src = "post_id",
+        dst = "tag_id"
+    )
+)]
+pub struct M2mPost {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2317_tag", app = "cli2317")]
+pub struct M2mTag {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub n: i64,
+}
+
+// Two tables that reference each other through nullable links.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2318_a", app = "cli2318")]
+pub struct CycA {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2318_b", on = "id")]
+    pub b_id: Option<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli2318_b", app = "cli2318")]
+pub struct CycB {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "cli2318_a", on = "id")]
+    pub a_id: Option<i64>,
 }
 
 async fn fresh_parent_child(pool: &Pool) {
@@ -155,6 +299,237 @@ async fn flush_yes_clears_the_table(pool: &Pool) {
     assert!(left.is_empty(), "flush left {} row(s)", left.len());
 }
 
+/// `flush` leaves unmanaged tables and views alone (#2285).
+async fn flush_skips_unmanaged_tables_and_views(pool: &Pool) {
+    let _ = raw_execute_pool(pool, "DROP VIEW IF EXISTS cli2285_view", vec![]).await;
+    rustango::testkit::matrix::fresh_table::<Owned>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Legacy>(pool).await;
+    raw_execute_pool(
+        pool,
+        "CREATE VIEW cli2285_view AS SELECT id, name FROM cli2285_owned",
+        vec![],
+    )
+    .await
+    .expect("create view");
+    for name in ["a", "b"] {
+        let mut o = Owned {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        o.insert_pool(pool).await.expect("owned");
+        let mut l = Legacy {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        l.insert_pool(pool).await.expect("legacy");
+    }
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2285"]).await;
+    let owned: Vec<Owned> = Owned::objects().fetch(pool).await.expect("owned");
+    let legacy: Vec<Legacy> = Legacy::objects().fetch(pool).await.expect("legacy");
+    raw_execute_pool(pool, "DROP VIEW cli2285_view", vec![])
+        .await
+        .expect("drop view");
+    let out = out.expect("flush --app cli2285");
+    assert!(out.contains("cleared 1 table(s)"), "{out}");
+    assert!(
+        owned.is_empty(),
+        "the managed table kept {} row(s)",
+        owned.len()
+    );
+    assert_eq!(legacy.len(), 2, "flush wiped the unmanaged table");
+}
+
+/// An unmanaged table referencing a flushed one makes flush fail, not empty it.
+async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, TargetRef::SCHEMA.table).await;
+    rustango::testkit::matrix::fresh_table::<Target>(pool).await;
+    rustango::testkit::matrix::fresh_table::<TargetRef>(pool).await;
+    let mut t = Target {
+        id: Auto::default(),
+        name: "t".into(),
+    };
+    t.insert_pool(pool).await.expect("target");
+    let mut r = TargetRef {
+        id: Auto::default(),
+        target: ForeignKey::unloaded(t.id.get().copied().expect("pk")),
+    };
+    r.insert_pool(pool).await.expect("ref");
+    rustango::testkit::matrix::fresh_table::<Bystander>(pool).await;
+    let mut b = Bystander {
+        id: Auto::default(),
+        n: 1,
+    };
+    b.insert_pool(pool).await.expect("bystander");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2315"]).await;
+    let refs: Vec<TargetRef> = TargetRef::objects().fetch(pool).await.expect("refs");
+    let targets: Vec<Target> = Target::objects().fetch(pool).await.expect("targets");
+    let bystanders: Vec<Bystander> = Bystander::objects().fetch(pool).await.expect("bystander");
+    rustango::testkit::matrix::drop_table(pool, TargetRef::SCHEMA.table).await;
+    assert_eq!(bystanders.len(), 1, "a failed flush must clear nothing");
+    assert_eq!(refs.len(), 1, "flush emptied the unmanaged table");
+    assert_eq!(
+        targets.len(),
+        1,
+        "the refused flush still cleared the target"
+    );
+    let err = out.expect_err("flush must fail");
+    // SQLite reports a deferred FK failure at COMMIT, with no table name.
+    if pool.dialect().name() != "sqlite" {
+        assert!(
+            err.contains("cli2315_ref"),
+            "name the blocking table: {err}"
+        );
+    }
+}
+
+/// Parents with children and a self-FK tree all clear, children first.
+async fn flush_clears_children_before_parents(pool: &Pool) {
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, ChildA::SCHEMA.table).await;
+    drop_table(pool, ChildB::SCHEMA.table).await;
+    fresh_table::<ParentA>(pool).await;
+    fresh_table::<ParentB>(pool).await;
+    fresh_table::<ChildA>(pool).await;
+    fresh_table::<ChildB>(pool).await;
+    fresh_table::<Tree>(pool).await;
+    let mut pa = ParentA {
+        id: Auto::default(),
+        n: 1,
+    };
+    pa.insert_pool(pool).await.expect("parent a");
+    let mut pb = ParentB {
+        id: Auto::default(),
+        n: 1,
+    };
+    pb.insert_pool(pool).await.expect("parent b");
+    let mut ca = ChildA {
+        id: Auto::default(),
+        parent: ForeignKey::unloaded(pa.id.get().copied().expect("pk")),
+    };
+    ca.insert_pool(pool).await.expect("child a");
+    let mut cb = ChildB {
+        id: Auto::default(),
+        parent: ForeignKey::unloaded(pb.id.get().copied().expect("pk")),
+    };
+    cb.insert_pool(pool).await.expect("child b");
+    // root <- mid <- leaf: the DELETE meets the root first.
+    let mut parent_id = None;
+    for _ in 0..3 {
+        let mut n = Tree {
+            id: Auto::default(),
+            parent_id,
+        };
+        n.insert_pool(pool).await.expect("tree");
+        parent_id = n.id.get().copied();
+    }
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2316"]).await;
+    let left = [
+        ParentA::objects().count(pool).await.expect("a"),
+        ParentB::objects().count(pool).await.expect("b"),
+        ChildA::objects().count(pool).await.expect("ca"),
+        ChildB::objects().count(pool).await.expect("cb"),
+        Tree::objects().count(pool).await.expect("tree"),
+    ];
+    out.expect("flush --app cli2316");
+    assert_eq!(left, [0; 5], "rows left behind");
+}
+
+/// Two tables linked both ways through nullable FKs still flush.
+async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    // Clear old links first: they block a DROP of either table on MySQL/PG.
+    if let Ok(rows) = CycA::objects().fetch(pool).await {
+        for mut a in rows {
+            a.b_id = None;
+            let _ = a.save_pool(pool).await;
+        }
+    }
+    // PG and MySQL drop the pair together; SQLite takes one table at a time.
+    let q = |t| pool.dialect().quote_ident(t);
+    let both = format!(
+        "DROP TABLE IF EXISTS {}, {}",
+        q(CycA::SCHEMA.table),
+        q(CycB::SCHEMA.table)
+    );
+    let _ = raw_execute_pool(pool, &both, vec![]).await;
+    for t in [CycA::SCHEMA.table, CycB::SCHEMA.table] {
+        drop_table(pool, t).await;
+    }
+    rustango::testkit::create_tables(pool, &[CycA::SCHEMA, CycB::SCHEMA])
+        .await
+        .expect("cycle tables");
+    let mut a = CycA {
+        id: Auto::default(),
+        b_id: None,
+    };
+    a.insert_pool(pool).await.expect("a");
+    let mut b = CycB {
+        id: Auto::default(),
+        a_id: a.id.get().copied(),
+    };
+    b.insert_pool(pool).await.expect("b");
+    a.b_id = b.id.get().copied();
+    a.save_pool(pool).await.expect("close the cycle");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2318"]).await;
+    let left = [
+        CycA::objects().count(pool).await.expect("a"),
+        CycB::objects().count(pool).await.expect("b"),
+    ];
+    out.expect("flush --app cli2318");
+    assert_eq!(left, [0, 0], "rows left behind");
+}
+
+/// An auto-created M2M junction with rows does not block the flush; it clears too.
+async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "cli2317_post_tags").await;
+    fresh_table::<M2mPost>(pool).await;
+    fresh_table::<M2mTag>(pool).await;
+    // The junction as migrations build it, FKs included.
+    let create = SchemaChange::CreateM2MTable {
+        through: "cli2317_post_tags".into(),
+        src_table: M2mPost::SCHEMA.table.into(),
+        src_col: "post_id".into(),
+        dst_table: M2mTag::SCHEMA.table.into(),
+        dst_col: "tag_id".into(),
+    };
+    let snap = SchemaSnapshot::from_models(&[M2mPost::SCHEMA, M2mTag::SCHEMA]);
+    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
+    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
+        raw_execute_pool(pool, sql, vec![])
+            .await
+            .expect("junction ddl");
+    }
+    let mut post = M2mPost {
+        id: Auto::default(),
+        n: 1,
+    };
+    post.insert_pool(pool).await.expect("post");
+    let mut tag = M2mTag {
+        id: Auto::default(),
+        n: 1,
+    };
+    tag.insert_pool(pool).await.expect("tag");
+    let tag_id = tag.id.get().copied().expect("pk");
+    post.tags_m2m().add(tag_id, pool).await.expect("link");
+
+    let out = manage(pool, &["flush", "--yes", "--app", "cli2317"]).await;
+    let links = post.tags_m2m().all(pool).await.expect("links");
+    let left = [
+        M2mPost::objects().count(pool).await.expect("posts"),
+        M2mTag::objects().count(pool).await.expect("tags"),
+    ];
+    drop_table(pool, "cli2317_post_tags").await;
+    let out = out.expect("flush --app cli2317");
+    assert!(out.contains("cleared 3 table(s)"), "{out}");
+    assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -235,6 +610,11 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         flush_yes_clears_the_table,
+        flush_skips_unmanaged_tables_and_views,
+        flush_refuses_when_an_unmanaged_table_references_a_target,
+        flush_clears_children_before_parents,
+        flush_clears_auto_m2m_junctions,
+        flush_breaks_a_nullable_cycle,
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,

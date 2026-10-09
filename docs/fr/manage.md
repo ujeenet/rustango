@@ -623,19 +623,23 @@ La ligne d'état `running: pg_dump …` part sur **stderr** : elle reste donc
 hors de la redirection et hors d'un tube. Jusqu'à [#1404](https://github.com/ujeenet/rustango/issues/1404)
 elle partait sur stdout et se retrouvait en première ligne du fichier `.sql`.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Recharge un fichier de sauvegarde dans votre base de données — l'inverse
 de `db:dump`. Elle exécute le fichier via `psql` contre `DATABASE_URL`
-avec `ON_ERROR_STOP=1`, donc elle s'arrête à la première erreur. Ajoutez
-`--clean` pour effacer le schéma existant au préalable (elle préfixe
+avec `ON_ERROR_STOP=1` dans une seule transaction, donc elle s'arrête à la
+première erreur et ne charge rien. Ajoutez `--clean --yes` pour effacer le
+schéma existant au préalable (elle préfixe
 `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) afin que
-la restauration se fasse sur une base de données vide. Vous devez avoir
-`psql` dans votre `PATH`.
+la restauration se fasse sur une base de données vide ; un chargement en échec
+annule l'effacement. Avec `--clean`, le dump doit être un fichier régulier non
+vide, vérifié avant toute exécution ; sans `--clean`, elle lit aussi un tube.
+Un projet multi-tenant refuse `--clean`, car `public` contient le registre.
+Vous devez avoir `psql` dans votre `PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---
@@ -1625,7 +1629,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `dumpdata` | Exporte des lignes en fixtures JSON |
 | `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON. Un chargement échoué ou partiel n'est pas annulé |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Postgres utilise `TRUNCATE … RESTART IDENTITY CASCADE`, qui vide aussi les tables qui les référencent hors du filtre ; MySQL / SQLite suppriment les lignes et gardent les compteurs d'id |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Les modèles non gérés et les vues sont ignorés. Postgres utilise `TRUNCATE … RESTART IDENTITY` et échoue si une table hors du filtre référence une cible ; MySQL / SQLite suppriment les lignes dans une transaction, enfants d'abord, et gardent les compteurs d'id. Un projet multi-tenant exige `--tenant <slug>` et ne vide que ce tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauration / inspection natifs |
 | `dbshell` | Exécute le client natif (`psql` / `mysql` / `sqlite3`). N'a besoin que de `DATABASE_URL`, pas d'un pool fonctionnel — traité avant la construction du pool, il marche donc quand sqlx n'arrive pas à se connecter |

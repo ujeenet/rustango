@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use rustango::core::{Column as _, SqlValue};
+use rustango::core::{AggregateExpr, Column as _, SqlValue};
 use rustango::sql::{Auto, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -45,6 +45,7 @@ pub struct Post {
     /// building the table from `SCHEMA` rather than by hand.
     pub published: bool,
     pub score: Option<i64>,
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Rebuild the table and seed the four rows every scenario reads.
@@ -66,6 +67,7 @@ async fn seeded(pool: &Pool) {
             view_count,
             published,
             score,
+            meta: Some(serde_json::json!({ "views": view_count })),
         };
         p.insert_pool(pool).await.expect("seed row");
     }
@@ -181,6 +183,52 @@ async fn values_list_flat_decodes_a_boolean_column(pool: &Pool) {
     );
 }
 
+/// A bool reads as `Bool` and a JSON column as `Json` on every backend;
+/// MySQL gave `I64` and `Null` (#2296).
+async fn values_keep_bool_and_json_types(pool: &Pool) {
+    let qs = || Post::objects().where_(Post::id.eq(1_i64));
+    let dict = qs()
+        .values_dict(&["published", "meta"])
+        .fetch(pool)
+        .await
+        .expect("values_dict");
+    let list = qs()
+        .values_list(&["published", "meta"])
+        .fetch(pool)
+        .await
+        .expect("values_list");
+    let want = [
+        SqlValue::Bool(true),
+        SqlValue::Json(serde_json::json!({ "views": 100 })),
+    ];
+    assert_eq!(
+        [dict[0]["published"].clone(), dict[0]["meta"].clone()],
+        want
+    );
+    assert_eq!(list[0], want);
+}
+
+/// An aggregate alias named like a bool column is not that column: it keeps
+/// its own type, while a real group-by column still reads as `Bool` (#2296).
+async fn aggregate_alias_does_not_take_the_column_type(pool: &Pool) {
+    let rows = Post::objects()
+        .where_(Post::id.eq(4_i64))
+        .values(&["title"])
+        .annotate("published", AggregateExpr::Max("score"))
+        .fetch(pool)
+        .await
+        .expect("aggregate");
+    assert_eq!(rows[0]["published"], SqlValue::I64(9));
+    let groups = Post::objects()
+        .where_(Post::id.eq(1_i64))
+        .values(&["published"])
+        .annotate("n", AggregateExpr::Count(None))
+        .fetch(pool)
+        .await
+        .expect("grouped");
+    assert_eq!(groups[0]["published"], SqlValue::Bool(true));
+}
+
 /// NULL must error into a bare `i64` and read as `None` into
 /// `Option<i64>`; SQLite used to hand back `0` (#1773).
 async fn values_list_flat_null_needs_an_option(pool: &Pool) {
@@ -236,5 +284,7 @@ tri_dialect_test! {
         values_list_flat_decodes_a_boolean_column,
         values_list_flat_null_needs_an_option,
         pluck_pairs_null_needs_an_option,
+        values_keep_bool_and_json_types,
+        aggregate_alias_does_not_take_the_column_type,
     ],
 }

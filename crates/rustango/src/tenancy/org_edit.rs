@@ -169,6 +169,10 @@ pub(crate) async fn apply_values(
     let mut touched: Vec<&'static str> = Vec::new();
     let mut database_url_rotated = false;
     let mut claim: Option<String> = None;
+    // An operator activated it, so no provisioning retry may resume it (#2292).
+    let activating = values
+        .iter()
+        .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(true)));
     for (column, value) in values {
         let value = match (column, value) {
             // Blank keeps the current URL; it is a credential, never cleared here.
@@ -239,6 +243,10 @@ pub(crate) async fn apply_values(
         None => crate::sql::write_transaction_pool(registry).await?,
     };
     crate::sql::update_tx(&mut tx, &update).await?;
+    if existing.active || activating {
+        let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(existing_id)?;
+        crate::sql::update_tx(&mut tx, &forget).await?;
+    }
     tx.commit().await?;
 
     // Before anything else acts on the write — see the module docs.
