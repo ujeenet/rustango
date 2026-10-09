@@ -140,6 +140,28 @@ pub(crate) fn apex_domain() -> String {
     configured_apex_domain().unwrap_or_else(|| "localhost".into())
 }
 
+/// Scheme for a link to `host`: `RUSTANGO_TENANT_SCHEME`, else https
+/// wherever cookies are `Secure`, so a handoff token is not sent in clear
+/// by default (#2425).
+pub(crate) fn tenant_scheme(host: &str) -> String {
+    pick_tenant_scheme(
+        std::env::var("RUSTANGO_TENANT_SCHEME").ok(),
+        crate::session::secure_cookies(),
+        host,
+    )
+}
+
+/// A loopback host stays http: it never crosses the network, and browsers
+/// keep `Secure` cookies on it.
+fn pick_tenant_scheme(env: Option<String>, secure: bool, host: &str) -> String {
+    if let Some(scheme) = env.filter(|s| !s.is_empty()) {
+        return scheme;
+    }
+    let name = host.split(':').next().unwrap_or(host);
+    let loopback = name == "localhost" || name.ends_with(".localhost") || name.starts_with("127.");
+    if secure && !loopback { "https" } else { "http" }.into()
+}
+
 /// Run the server until the process is signalled (Ctrl-C / SIGTERM).
 ///
 /// Builds the operator console + tenant admin, wires host-based
@@ -299,6 +321,24 @@ mod apex_tests {
             Some("env.test")
         );
         assert_eq!(pick_apex(None, s()).as_deref(), Some("toml.test"));
+    }
+
+    /// #2425 — a handoff link defaults to https where cookies are Secure.
+    #[test]
+    fn tenant_links_default_to_https_when_cookies_are_secure() {
+        assert_eq!(pick_tenant_scheme(None, true, "acme.example.com"), "https");
+        assert_eq!(pick_tenant_scheme(None, false, "acme.example.com"), "http");
+        // Loopback dev keeps http; the env var always wins.
+        assert_eq!(pick_tenant_scheme(None, true, "acme.localhost"), "http");
+        assert_eq!(pick_tenant_scheme(None, true, "127.0.0.1"), "http");
+        assert_eq!(
+            pick_tenant_scheme(Some("http".into()), true, "acme.example.com"),
+            "http"
+        );
+        assert_eq!(
+            pick_tenant_scheme(Some(String::new()), true, "a.example.com"),
+            "https"
+        );
     }
 
     /// A second, different apex keeps the first (and warns) (#2225).

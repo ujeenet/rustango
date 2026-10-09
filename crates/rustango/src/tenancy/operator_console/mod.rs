@@ -2312,9 +2312,7 @@ async fn org_impersonate(
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
     // Build the redirect: tenant subdomain, the handoff path, and the
-    // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
-    // http for local dev.
-    let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    // token. See `tenant_scheme` for the scheme.
     let prefix = handoff_prefix(org.path_prefix.as_deref());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
@@ -2336,6 +2334,7 @@ async fn org_impersonate(
     let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
+    let scheme = crate::tenancy::server::tenant_scheme(&host);
     let handoff = format!("{scheme}://{host}{port_suffix}{handoff_path}");
     let redirect_to = format!("{handoff}?token={token}");
 

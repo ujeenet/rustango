@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Impersonation links use https by default
+
+Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
+
 ### Password changes refuse a stale row
 
 A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).

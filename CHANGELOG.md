@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — impersonation links default to https (#2425)
+
+With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); `check --deploy` warns when the variable is unset or not `https`.
+
 ### Fixed — a password change no longer undoes a concurrent deactivate or demote (#2467)
 
 The tenant admin, operator console and CLI password writes, and operator activate/deactivate, update only their own columns; a password write is guarded by the old hash.
