@@ -869,6 +869,7 @@ fn preview_migration(
 ) -> Result<MigrationPreview, MigrateError> {
     let mut statements = Vec::new();
     let mut deferred_fks: Vec<String> = Vec::new();
+    let mut live = LiveFks::new(before);
     if mig.atomic {
         statements.push("BEGIN".to_string());
     }
@@ -881,6 +882,7 @@ fn preview_migration(
                     &mig.snapshot,
                     before,
                     dialect,
+                    &mut live,
                     &mut statements,
                 )?;
                 deferred_fks.extend(deferred);
@@ -924,15 +926,18 @@ fn preview_schema_op(
     after: &SchemaSnapshot,
     before: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    live: &mut LiveFks,
     statements: &mut Vec<String>,
 ) -> Result<Vec<String>, MigrateError> {
     let step = render_step(change, ops, after, dialect, None)?;
-    // The runner looks these names up live; a migrate-built FK has this one.
+    // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-        if super::diff::column_fk(before, &fk.table, &fk.column).is_some() {
-            let name = ddl::fk_constraint_name(&fk.table, &fk.column);
+        if let Some(name) = live.take(&fk.table, &fk.column) {
             statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
         }
+    }
+    if let Some((table, column)) = &step.readded_now {
+        live.added(table, column);
     }
     // Apply drops the name it finds in the catalog; this is the usual one.
     if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
@@ -961,10 +966,17 @@ fn preview_schema_op(
                 return None;
             }
             // An earlier op of the migration already dropped a live one.
-            let live = field.is_some_and(|f| f.fk.is_some())
-                && !fk_deferred_earlier(&ix.table, column, earlier);
-            let names = [ddl::fk_constraint_name(&ix.table, column)];
-            let (drops, readd) = ix.plan(column, if live { &names[..] } else { &[] }, dialect);
+            let names: Vec<String> = live
+                .get(&ix.table, column)
+                .filter(|_| !fk_deferred_earlier(&ix.table, column, earlier))
+                .into_iter()
+                .collect();
+            let (drops, readd) = ix.plan(column, &names, dialect);
+            if readd.is_some() {
+                live.added(&ix.table, column);
+            } else if !drops.is_empty() {
+                live.take(&ix.table, column);
+            }
             Some((drops, readd.into_iter().collect::<Vec<_>>()))
         })
         .unwrap_or_default();
@@ -997,7 +1009,88 @@ fn preview_schema_op(
             rebuild.table()
         ));
     }
+    live.follow(change);
     Ok(step.batch.deferred_fks)
+}
+
+/// The column FKs live at each op of a preview, by table and column, with
+/// the name each has; apply finds them in the catalog instead.
+struct LiveFks(std::collections::HashMap<(String, String), String>);
+
+impl LiveFks {
+    fn new(before: &SchemaSnapshot) -> Self {
+        let fields = before.tables.iter().flat_map(|t| {
+            t.fields
+                .iter()
+                .filter(|f| f.fk.is_some())
+                .map(|f| (t.name.clone(), f.column.clone()))
+        });
+        let junctions = before
+            .m2m_tables
+            .iter()
+            .flat_map(|m| [&m.src_col, &m.dst_col].map(|c| (m.through.clone(), c.clone())));
+        Self(
+            fields
+                .chain(junctions)
+                .map(|(t, c)| {
+                    let name = ddl::fk_constraint_name(&t, &c);
+                    ((t, c), name)
+                })
+                .collect(),
+        )
+    }
+
+    fn get(&self, table: &str, column: &str) -> Option<String> {
+        self.0.get(&(table.to_owned(), column.to_owned())).cloned()
+    }
+
+    /// The live FK on `table.column`, which the op drops.
+    fn take(&mut self, table: &str, column: &str) -> Option<String> {
+        self.0.remove(&(table.to_owned(), column.to_owned()))
+    }
+
+    /// An FK the op adds on `table.column`, under the names then.
+    fn added(&mut self, table: &str, column: &str) {
+        let name = ddl::fk_constraint_name(table, column);
+        self.0.insert((table.to_owned(), column.to_owned()), name);
+    }
+
+    /// Its FKs keep their names through renames, and go with their column.
+    fn follow(&mut self, change: &super::SchemaChange) {
+        use super::SchemaChange as SC;
+        let rekey =
+            |map: &mut std::collections::HashMap<_, _>,
+             f: &dyn Fn(&(String, String)) -> Option<(String, String)>| {
+                let moved: Vec<_> = map
+                    .keys()
+                    .filter_map(|k| f(k).map(|n| (k.clone(), n)))
+                    .collect();
+                for (old, new) in moved {
+                    if let Some(name) = map.remove(&old) {
+                        map.insert(new, name);
+                    }
+                }
+            };
+        match change {
+            SC::RenameTable { old_name, new_name } => rekey(&mut self.0, &|(t, c)| {
+                (t == old_name).then(|| (new_name.clone(), c.clone()))
+            }),
+            SC::RenameColumn {
+                table,
+                old_column,
+                new_column,
+            } => rekey(&mut self.0, &|(t, c)| {
+                (t == table && c == old_column).then(|| (t.clone(), new_column.clone()))
+            }),
+            SC::DropColumn { table, column } => {
+                self.take(table, column);
+            }
+            SC::DropTable(t) | SC::DropM2MTable { through: t } => {
+                self.0.retain(|(table, _), _| table != t);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The DDL that moves `before` to `after` by `changes` on `dialect`, as
@@ -1013,6 +1106,7 @@ pub fn render_changes_between(
 ) -> Result<Vec<String>, MigrateError> {
     let ops: Vec<Operation> = changes.iter().cloned().map(Operation::Schema).collect();
     let (mut statements, mut deferred) = (Vec::new(), Vec::new());
+    let mut live = LiveFks::new(before);
     for op in &ops {
         if let Operation::Schema(change) = op {
             deferred.extend(preview_schema_op(
@@ -1021,6 +1115,7 @@ pub fn render_changes_between(
                 after,
                 before,
                 dialect,
+                &mut live,
                 &mut statements,
             )?);
         }
@@ -2817,6 +2912,8 @@ struct Step {
     /// A MySQL index drop, which the FKs it serves refuse (1553; #2244, #2326). Boxed: `Step`
     /// sits in every migrate future, near a debug test thread's 2 MiB stack.
     index_fks: Option<Box<IndexFks>>,
+    /// The column whose FK the step adds back before the migration ends.
+    readded_now: Option<(String, String)>,
 }
 
 /// The FKs a MySQL index drop must take off first, found in the catalog:
@@ -3196,6 +3293,9 @@ fn render_step(
         && readds_fk(change, dialect).is_some_and(|(table, column)| {
             super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
         });
+    let readded_now = readds_fk(change, dialect)
+        .filter(|_| (renamed || column_renamed) && drop_fks.is_some())
+        .map(|(t, c)| (t.to_owned(), c.to_owned()));
     // Its FKs carry the names at this op, which a later rename changes.
     if renamed || column_renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);
@@ -3222,6 +3322,7 @@ fn render_step(
         drop_fks,
         drop_unique,
         index_fks,
+        readded_now,
     })
 }
 
@@ -4528,6 +4629,50 @@ mod tests {
             .unwrap();
             let adds = out.iter().filter(|s| s.contains("ADD CONSTRAINT")).count();
             assert_eq!(adds, 1, "{out:?}");
+            // The ON DELETE op drops the FK under the name it still has.
+            assert!(out[1].contains("DROP") && out[1].contains("book_author_id_fkey"));
+            // Renamed again after: each op drops the name the FK has then.
+            let chain = [
+                rename.clone(),
+                on_delete.clone(),
+                SchemaChange::RenameColumn {
+                    table: "book".into(),
+                    old_column: "writer_id".into(),
+                    new_column: "owner_id".into(),
+                },
+            ];
+            let out = super::render_changes_between(
+                &chain,
+                &before,
+                &snap("owner_id", "SET NULL"),
+                dialect,
+            )
+            .unwrap();
+            let fk_ops: Vec<&str> = out
+                .iter()
+                .filter_map(|s| {
+                    let op = if s.contains("ADD CONSTRAINT") {
+                        "add"
+                    } else if s.contains("DROP CONSTRAINT") || s.contains("DROP FOREIGN KEY") {
+                        "drop"
+                    } else {
+                        return None;
+                    };
+                    ["author_id", "writer_id", "owner_id"]
+                        .into_iter()
+                        .find(|c| s.contains(&format!("book_{c}_fkey")))
+                        .map(|_| op)
+                })
+                .collect();
+            assert_eq!(fk_ops, ["drop", "add", "drop", "add"], "{out:?}");
+            let named = |i: usize, c: &str| {
+                out.iter()
+                    .filter(|s| s.contains("CONSTRAINT") || s.contains("FOREIGN KEY"))
+                    .nth(i)
+                    .is_some_and(|s| s.contains(&format!("book_{c}_fkey")))
+            };
+            assert!(named(0, "author_id") && named(1, "writer_id"), "{out:?}");
+            assert!(named(2, "writer_id") && named(3, "owner_id"), "{out:?}");
         }
     }
 }
