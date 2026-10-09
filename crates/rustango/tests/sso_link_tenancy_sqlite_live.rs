@@ -701,6 +701,17 @@ async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
     );
 }
 
+/// A tenant without its own provider table signs in with a shared one (#2366).
+#[tokio::test]
+async fn shared_provider_serves_a_tenant_without_a_provider_table() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    rustango::testkit::matrix::drop_table(env.pool(), "rustango_sso_providers").await;
+    env.shared_provider("corp", true).await;
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+}
+
 /// `check --deploy` names the providers that refuse every existing user (#2359).
 #[tokio::test]
 async fn check_deploy_names_providers_that_refuse_every_user() {

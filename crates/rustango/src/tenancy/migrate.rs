@@ -713,6 +713,7 @@ where
         },
     )
     .await?;
+    crate::migrate::manage::ensure_tenant_bootstrap_tables(&inner_pool).await?;
     // Data seeders (rows, not DDL — kept): the CRUD permission codenames
     // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
@@ -856,6 +857,8 @@ async fn run_for_one_tenant(
                 },
             )
             .await?;
+            // Lands in the tenant schema, not `public` (#2364).
+            crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -893,6 +896,7 @@ async fn run_for_one_tenant(
                 },
             )
             .await?;
+            crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
             // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions_pool(&dbpool).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");

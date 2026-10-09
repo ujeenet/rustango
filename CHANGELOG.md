@@ -20,6 +20,42 @@ A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_p
 
 New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start`, then every `min(older_than, 60s)`, using a new `locked_at` index. The template uses it instead of a reclaim after shutdown.
 
+### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
+
+A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.
+
+### Fixed — a single-database admin no longer lists registry-only tables (#2365)
+
+With `tenancy` compiled in, a plain admin listed `Org`, `Operator` and other tables single-database `migrate` never creates. New `admin::Builder::registry_mode()` lists only registry tables, for an admin on a registry.
+
+### Fixed — shared SSO sign-in works for a tenant without its own provider table (#2366)
+
+A missing `rustango_sso_providers` reads as no providers, at sign-in and in `check --deploy`.
+
+### Fixed — admin FK facets past the cut are reachable (#2350)
+
+An FK facet's dropdown now has a "+N more" link, like the other facets.
+
+### Fixed — MySQL: dropping the index a composite FK uses no longer fails with 1553 (#2326)
+
+The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.
+
+### Fixed — a renamed FK or junction column's FK takes the new column's name (#2307)
+
+PG and MySQL kept `<table>_<old>_fkey`. The runner drops the live FK by its catalog name and re-adds it at the end of the migration.
+
+### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
+
+The sequence lookup used the bare table name, so outside `search_path` it failed.
+
+### Fixed — `prefetch_reverse_generic_for` splits a large parent list across queries (#2318)
+
+It bound every parent id in one `IN` list and failed past the backend's bind limit.
+
+### Fixed — `values().annotate()` grouped by a joined bool reads as `Bool` on MySQL and SQLite (#2322)
+
+A `values(&["a.flag"])` group column, or a join's `project` column in `values_dict` / `values_list`, took no model type and came back as `I64`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

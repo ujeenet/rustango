@@ -492,6 +492,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `tenant_brand_css(css)` | Per-tenant CSS-variable block. |
 | `impersonated_by(operator_id)` | Render an impersonation banner (operator console). |
 | `tenant_mode()` | Hide registry-scoped models (set automatically for tenant admins). |
+| `registry_mode()` | Serve a tenancy registry: list `Org`, `Operator` and the other registry-only tables a plain admin hides. |
 | `build()` | Finalize and return the `axum::Router`. |
 
 ---
