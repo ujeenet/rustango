@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
-use rustango::auth_flows::{confirm_password_reset_pool_into, AuthFlowError, PasswordReset};
+use rustango::auth_flows::{
+    confirm_password_reset_pool_into, AuthFlowError, LinkScope, PasswordReset,
+};
 use rustango::core::SqlValue;
 use rustango::signed_url::{sign, sign_at, verify, verify_at, SignedUrlError};
 use rustango::sql::Pool;
@@ -100,6 +102,7 @@ async fn password_reset_confirm_rotates_the_hash() {
     let url = PasswordReset::issue(
         "https://app.example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(3600),
     );
@@ -107,6 +110,7 @@ async fn password_reset_confirm_rotates_the_hash() {
     // 2. User submits a new password → verify token + rotate the stored hash.
     let user_id = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &url,
         "a-brand-new-strong-password",
         SECRET,
@@ -131,11 +135,13 @@ async fn password_reset_rejects_weak_and_tampered() {
     let url = PasswordReset::issue(
         "https://app.example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(3600),
     );
     let err = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &url,
         "short",
         SECRET,
@@ -156,6 +162,7 @@ async fn password_reset_rejects_weak_and_tampered() {
     let tampered = url.replace("user_id=1", "user_id=2");
     let err = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &tampered,
         "a-brand-new-strong-password",
         SECRET,

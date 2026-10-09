@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Auth links take a `LinkScope`
+
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` and every `confirm_password_reset_*` take a `&LinkScope` (#2472). Pass `LinkScope::from(&tenant.org)` in a tenant app, or `LinkScope::audience("app")` in a single-tenant one; confirm needs the same scope, else `AuthFlowError::WrongScope` (new variant). Links issued before the upgrade are refused.
+
 ### Admin: passkeys and registry tables
 
 No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it on the single database or on each tenant, never the registry (#2364). With `tenancy` compiled in, a plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them, and lists only registry tables (#2365).

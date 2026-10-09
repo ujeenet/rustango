@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
-use rustango::auth_flows::{confirm_password_reset_pool_into, AuthFlowError, PasswordReset};
+use rustango::auth_flows::{
+    confirm_password_reset_pool_into, AuthFlowError, LinkScope, PasswordReset,
+};
 use rustango::core::SqlValue;
 use rustango::sql::Pool;
 
@@ -63,11 +65,13 @@ async fn confirm_updates_password_on_valid_token() {
     let url = PasswordReset::issue(
         "https://example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(60),
     );
     let user_id = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &url,
         "brand-new-strong-password",
         SECRET,
@@ -94,11 +98,13 @@ async fn weak_password_rejected_without_writing() {
     let url = PasswordReset::issue(
         "https://example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &url,
         "short",
         SECRET,
@@ -119,6 +125,7 @@ async fn tampered_signature_rejected() {
     let url = PasswordReset::issue(
         "https://example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(60),
     );
@@ -127,6 +134,7 @@ async fn tampered_signature_rejected() {
     let tampered = url.replacen("user_id=1", "user_id=2", 1);
     let err = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &tampered,
         "brand-new-strong-password",
         SECRET,
@@ -146,11 +154,13 @@ async fn wrong_secret_rejected() {
     let url = PasswordReset::issue(
         "https://example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &url,
         "brand-new-strong-password",
         b"different-secret-32-bytes-long-xxx",

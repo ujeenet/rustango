@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — reset, verify and magic links are tenant-bound (#2472)
+
+`PasswordReset`, `EmailVerification` and `MagicLink` sign a `LinkScope` and refuse a link redeemed under another one, so a link from one tenant can no longer reset the same user id in another.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.

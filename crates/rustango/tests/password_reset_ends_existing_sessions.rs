@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use rustango::auth_flows::{
-    confirm_password_reset_pool, confirm_password_reset_pool_into, PasswordReset,
+    confirm_password_reset_pool, confirm_password_reset_pool_into, LinkScope, PasswordReset,
 };
 use rustango::sql::Pool;
 
@@ -60,6 +60,7 @@ fn link() -> String {
     PasswordReset::issue(
         "https://example.com/auth/reset",
         1,
+        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(60),
     )
@@ -71,7 +72,7 @@ async fn a_reset_stamps_password_changed_at() {
     let pool = pool().await;
     assert_eq!(password_changed_at(&pool).await, None, "precondition");
 
-    confirm_password_reset_pool(&pool, &link(), STRONG, SECRET)
+    confirm_password_reset_pool(&pool, &LinkScope::audience("app"), &link(), STRONG, SECRET)
         .await
         .expect("reset");
 
@@ -93,6 +94,7 @@ async fn the_caller_named_form_does_not_stamp() {
 
     confirm_password_reset_pool_into(
         &pool,
+        &LinkScope::audience("app"),
         &link(),
         STRONG,
         SECRET,
@@ -118,7 +120,7 @@ async fn the_hash_still_rotates_alongside_the_stamp() {
     use sqlx::Row;
     let pool = pool().await;
 
-    confirm_password_reset_pool(&pool, &link(), STRONG, SECRET)
+    confirm_password_reset_pool(&pool, &LinkScope::audience("app"), &link(), STRONG, SECRET)
         .await
         .expect("reset");
 
