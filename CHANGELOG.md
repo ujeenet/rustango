@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
+
+The check moved into `checked_request` and the org edit path, and compares against the registry pool's endpoint, default ports included.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

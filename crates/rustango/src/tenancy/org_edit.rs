@@ -178,6 +178,8 @@ pub(crate) async fn apply_values(
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
             ("database_url", SqlValue::String(new)) => {
+                crate::tenancy::provision::refuse_registry_pool(&new, registry)
+                    .map_err(TenancyError::Validation)?;
                 database_url_rotated = existing.database_url.as_deref() != Some(new.as_str());
                 SqlValue::String(new)
             }

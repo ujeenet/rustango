@@ -684,13 +684,6 @@ where
             .await;
     }
 
-    if let Some(url) = &request.database_url {
-        if let Err(msg) = refuse_registry_url(url, registry_url) {
-            return rep
-                .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
-                .await;
-        }
-    }
     rep.step(ProvisionStep::Validate, Progress::Ok).await;
 
     // ---- 2. Check the connection ----
@@ -1099,13 +1092,16 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
     Ok(())
 }
 
-/// Every free-text field, then the routing clash check. Returns the
+/// Every free-text field, the registry-URL refusal, then the routing clash check. Returns the
 /// request with `host_pattern` normalized; shared with `api::create_tenant` (#2097).
 pub(crate) async fn checked_request(
     registry: &crate::sql::Pool,
     request: &ProvisionRequest,
 ) -> Result<ProvisionRequest, TenancyError> {
     let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
+    if let Some(url) = &normalized.database_url {
+        refuse_registry_pool(url, registry).map_err(TenancyError::Validation)?;
+    }
     if let Some(clash) = routing_clash(registry, &normalized).await? {
         return Err(TenancyError::Validation(format!(
             "{clash} is already used by another tenant"
@@ -1153,7 +1149,20 @@ async fn routing_clash(
 /// Compares the endpoint only — scheme, host, port, database — because
 /// two URLs may name the same database with different credentials.
 pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
-    if endpoint_identity(tenant_url) == endpoint_identity(registry_url) {
+    refuse_endpoint(tenant_url, &endpoint_identity(registry_url))
+}
+
+/// [`refuse_registry_url`] against the database the registry pool is
+/// connected to, for callers that have no registry URL (#2320).
+pub(crate) fn refuse_registry_pool(
+    tenant_url: &str,
+    registry: &crate::sql::Pool,
+) -> Result<(), String> {
+    refuse_endpoint(tenant_url, &pool_endpoint(registry))
+}
+
+fn refuse_endpoint(tenant_url: &str, registry: &str) -> Result<(), String> {
+    if endpoint_identity(tenant_url) == registry {
         return Err(format!(
             "this is the registry's own database ({}). A tenant needs its own — pointing one \
              here would run the tenant migrations over the registry",
@@ -1276,7 +1285,50 @@ fn endpoint_identity(url: &str) -> String {
         }
         None => rest.to_owned(),
     };
+    // A pool always knows its port; a URL may leave the default out.
+    let default_port = match scheme.as_str() {
+        "postgres" => Some(5432),
+        "mysql" | "mariadb" => Some(3306),
+        _ => None,
+    };
+    let rest = match (default_port, rest.split_once('/')) {
+        (Some(port), Some((authority, db))) if !has_port(authority) => {
+            format!("{authority}:{port}/{db}")
+        }
+        _ => rest,
+    };
     format!("{scheme}://{}", rest.to_ascii_lowercase())
+}
+
+/// `host:port` or `[::1]:port`, not a bare host or `[::1]`.
+fn has_port(authority: &str) -> bool {
+    authority
+        .rsplit_once(']')
+        .map_or(authority, |(_, after)| after)
+        .contains(':')
+}
+
+/// [`endpoint_identity`] of the database `pool` is connected to.
+fn pool_endpoint(pool: &crate::sql::Pool) -> String {
+    let endpoint = match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(p) => {
+            let o = p.connect_options();
+            let db = o.get_database().unwrap_or_else(|| o.get_username());
+            format!("postgres://{}:{}/{db}", o.get_host(), o.get_port())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(p) => {
+            let o = p.connect_options();
+            let db = o.get_database().unwrap_or_default();
+            format!("mysql://{}:{}/{db}", o.get_host(), o.get_port())
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(p) => {
+            format!("sqlite://{}", p.connect_options().get_filename().display())
+        }
+    };
+    endpoint.to_ascii_lowercase()
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request
@@ -2013,5 +2065,44 @@ mod validation_tests {
                 "derived `{derived}` collided with registry `{registry}`"
             );
         }
+    }
+
+    /// #2320: the pool knows its default port; the tenant URL may omit it.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn the_registry_pool_is_refused_by_endpoint() {
+        let pool = crate::sql::Pool::Postgres(
+            sqlx::PgPool::connect_lazy("postgres://app:pw@db.internal/reg").expect("lazy"),
+        );
+        for same in [
+            "postgres://other:x@DB.internal/reg",
+            "postgresql://db.internal:5432/x?dbname=reg",
+        ] {
+            assert!(refuse_registry_pool(same, &pool).is_err(), "{same}");
+        }
+        for other in [
+            "postgres://db.internal/tenant",
+            "postgres://db.internal:5433/reg",
+            "postgres://elsewhere/reg",
+        ] {
+            assert!(refuse_registry_pool(other, &pool).is_ok(), "{other}");
+        }
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn the_mysql_registry_pool_is_refused_by_endpoint() {
+        let pool = crate::sql::Pool::Mysql(
+            sqlx::MySqlPool::connect_lazy("mysql://app:pw@db:3306/reg").expect("lazy"),
+        );
+        assert!(refuse_registry_pool("mysql://x@db/reg", &pool).is_err());
+        assert!(refuse_registry_pool("mysql://x@db/tenant", &pool).is_ok());
+    }
+
+    #[test]
+    fn a_default_port_is_the_same_endpoint() {
+        assert!(refuse_registry_url("postgres://h/reg", "postgres://h:5432/reg").is_err());
+        assert!(refuse_registry_url("mysql://[::1]/reg", "mysql://[::1]:3306/reg").is_err());
+        assert!(refuse_registry_url("postgres://h:5433/reg", "postgres://h/reg").is_ok());
     }
 }
