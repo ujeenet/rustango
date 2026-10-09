@@ -1420,11 +1420,11 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `check --deploy` reports a tenant whose database never answers, without
-/// waiting out the pool's 30 s acquire timeout (#2359).
+/// `check --deploy` reports tenants whose database never answers, in slug
+/// order, checking them at once rather than waiting out each (#2359).
 #[cfg(feature = "sso")]
 #[tokio::test]
-async fn check_deploy_does_not_wait_on_a_silent_tenant() {
+async fn check_deploy_does_not_wait_on_silent_tenants() {
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -1442,16 +1442,22 @@ async fn check_deploy_does_not_wait_on_a_silent_tenant() {
             open.push(s);
         }
     });
-    let slug = unique("silent");
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
-        ..rustango::testkit::org()
-    };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
-        .await
-        .unwrap();
+    // Saved out of slug order, so the report's order is the sort's doing.
+    let slugs: Vec<String> = ["silent-c", "silent-b", "silent-a"]
+        .into_iter()
+        .map(unique)
+        .collect();
+    for slug in &slugs {
+        let mut org = Org {
+            slug: slug.clone(),
+            display_name: slug.clone(),
+            database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
+            ..rustango::testkit::org()
+        };
+        org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+            .await
+            .unwrap();
+    }
 
     let pools = TenantPools::new(pool.clone());
     let dir = fresh_dir("sso_silent");
@@ -1463,12 +1469,14 @@ async fn check_deploy_does_not_wait_on_a_silent_tenant() {
         "{:?}",
         start.elapsed()
     );
-    assert!(
-        out.contains(&format!(
+    let at = |slug: &String| {
+        out.find(&format!(
             "[sso] tenant `{slug}`: could not check SSO providers: timed out"
-        )),
-        "{out}"
-    );
+        ))
+        .unwrap_or_else(|| panic!("{slug}: {out}"))
+    };
+    let (c, b, a) = (at(&slugs[0]), at(&slugs[1]), at(&slugs[2]));
+    assert!(a < b && b < c, "{out}");
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
