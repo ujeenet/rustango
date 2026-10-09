@@ -339,11 +339,46 @@ pub enum ExecError {
     },
 }
 
+/// The declared constraint a database refused a write on (#2345).
+#[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    Unique,
+    ForeignKey,
+    NotNull,
+    Check,
+}
+
 impl ExecError {
+    /// Which constraint refused the write, read from sqlx's `ErrorKind`.
+    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
+    pub(crate) fn refusal(&self) -> Option<Refusal> {
+        use sqlx::error::ErrorKind;
+        let Self::Driver(sqlx::Error::Database(db)) = self else {
+            return None;
+        };
+        match db.kind() {
+            ErrorKind::UniqueViolation => Some(Refusal::Unique),
+            ErrorKind::ForeignKeyViolation => Some(Refusal::ForeignKey),
+            ErrorKind::NotNullViolation => Some(Refusal::NotNull),
+            ErrorKind::CheckViolation => Some(Refusal::Check),
+            _ => None,
+        }
+    }
+
     /// A UNIQUE or primary-key violation, on any backend.
     #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn is_unique_violation(&self) -> bool {
-        matches!(self, Self::Driver(sqlx::Error::Database(db)) if db.is_unique_violation())
+        self.refusal() == Some(Refusal::Unique)
+    }
+
+    /// The referencing table of an FK refusal, where the driver names it (PG).
+    #[cfg(feature = "admin")]
+    pub(crate) fn fk_referencing_table(&self) -> Option<&str> {
+        let Self::Driver(sqlx::Error::Database(db)) = self else {
+            return None;
+        };
+        db.table().filter(|_| db.is_foreign_key_violation())
     }
 
     /// A deadlock the database broke by aborting this transaction:

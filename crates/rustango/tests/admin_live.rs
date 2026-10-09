@@ -2091,8 +2091,8 @@ async fn delete_selected_action_removes_named_rows() {
 }
 
 #[tokio::test]
-async fn unknown_action_returns_500() {
-    // Action name not in `admin.actions` allowlist → 500. Prevents a
+async fn unknown_action_returns_400() {
+    // Action name not in `admin.actions` allowlist → 400 (#2346). Prevents a
     // user from naming an arbitrary string and expecting it to run.
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
@@ -2113,7 +2113,7 @@ async fn unknown_action_returns_500() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_showcase")
         .fetch_one(&pool)
         .await

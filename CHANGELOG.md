@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
+
+A bad inline value re-renders the form before anything is written. The parent UPDATE and inline writes share one transaction: a refused row rolls the whole edit back and the form says so. `InlineApplyOutcome::failed` is always 0.
+
+### Fixed — admin: deleting a still-referenced row is a 409, not a 500 (#2340)
+
+Single delete and `delete_selected` name the referencing table when the user may open it in the admin. `pre_delete` signals have already fired by then; `post_delete` does not.
+
+### Fixed — admin forms show a plain message for a refused write, never driver text (#2345)
+
+A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logged under the error id the page shows.
+
+### Fixed — admin: an unknown or malformed bulk action is a 400, not a 500 (#2346)
+
+The 400 carries the reason; it was a logged 500.
+
 ### Added — `DistributedLock::once_per_period`, `Job::retry_backoff`, `jobs::exponential_backoff`, `JobQueue::register_with` (#2330, #2332, #2334)
 
 `once_per_period` runs a body once per window counted from the Unix epoch (daily = 00:00 UTC); `register_with` registers a job with its own handler.
