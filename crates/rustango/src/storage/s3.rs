@@ -1189,16 +1189,19 @@ mod tests {
     }
 
     /// An endpoint that connects but never answers hits the read timeout (#2220).
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stalled_endpoint_times_out() {
         let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let storage = mock_storage(format!("http://{}", stalled.local_addr().unwrap()));
-        // Accept, then hold the socket open without a reply.
-        let held = tokio::spawn(async move { stalled.accept().await.unwrap().0 });
         let start = tokio::time::Instant::now();
-        let call = tokio::time::timeout(DEFAULT_READ_TIMEOUT * 2, storage.exists("a.png"));
-        assert!(matches!(call.await, Ok(Err(_))), "no timeout fired");
-        assert!(held.is_finished(), "the connect never completed");
+        let call = tokio::spawn(async move { storage.exists("a.png").await });
+        // Connect on the real clock: a paused one jumps to the connect
+        // timeout while the loopback handshake is still in flight (#2358).
+        let accept = tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, stalled.accept());
+        let _held = accept.await.expect("the client never connected").unwrap().0;
+        tokio::time::pause();
+        let call = tokio::time::timeout(DEFAULT_READ_TIMEOUT * 2, call);
+        assert!(matches!(call.await, Ok(Ok(Err(_)))), "no timeout fired");
         // Past the connect timeout, so the read timeout fired.
         assert!(
             start.elapsed() >= DEFAULT_READ_TIMEOUT,

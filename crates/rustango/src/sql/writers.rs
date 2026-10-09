@@ -629,7 +629,7 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
-            b.write_ident(&format!("{}__{}", join.alias, col));
+            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
         }
     }
     // Written before FROM, so the WHERE binds appear twice, in text order.
@@ -839,7 +839,7 @@ fn write_agg_group_col(
     project: bool,
 ) {
     if let Some((alias, c)) = col.split_once('.') {
-        let flat = format!("{alias}__{c}");
+        let flat = crate::core::joins::joined_label(alias, c);
         // A derived source already projects the joined column as `alias__col`.
         if derived && alias != model_table {
             b.write_ident(model_table);
@@ -1725,7 +1725,7 @@ fn write_expr(
                     format!(
                         "{}.{}",
                         b.d.quote_ident(dj.table),
-                        b.d.quote_ident(&format!("{alias}__{column}"))
+                        b.d.quote_ident(&crate::core::joins::joined_label(alias, column))
                     )
                 }
                 _ => format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column)),
