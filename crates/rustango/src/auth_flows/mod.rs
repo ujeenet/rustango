@@ -18,14 +18,14 @@
 //! use std::time::Duration;
 //!
 //! let secret: &[u8] = b"32-byte-app-secret-...";
-//! // The tenant the link is for; confirm checks the same scope (#2472).
-//! let scope = LinkScope::from(&tenant.org);
+//! // The request's tenant; confirm checks the same scope (#2472).
+//! let scope = LinkScope::from(&tenant);
 //!
 //! // Step 1: issue
 //! let url = PasswordReset::issue(
+//!     &scope,
 //!     "https://app.example.com/auth/reset",
 //!     user_id,
-//!     &scope,
 //!     secret,
 //!     Duration::from_secs(3600),
 //! );
@@ -36,7 +36,7 @@
 //! ).await?;
 //!
 //! // Step 2: verify (in the callback handler)
-//! match PasswordReset::verify(&incoming_url, &scope, secret) {
+//! match PasswordReset::verify(&scope, &incoming_url, secret) {
 //!     Ok(user_id) => { /* render form to capture new password */ }
 //!     Err(AuthFlowError::Expired) => { /* "link expired, request a new one" */ }
 //!     Err(_) => { /* tampered or malformed */ }
@@ -58,6 +58,7 @@ use crate::signed_url::{sign, verify, SignedUrlError};
 
 /// Errors from auth-flow helpers.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthFlowError {
     #[error("token is missing or malformed")]
     Malformed,
@@ -90,9 +91,13 @@ pub enum AuthFlowError {
     WrongScope,
 }
 
-/// Who a link is for: a tenant or an app-chosen audience. Signed into the
-/// link and required again on redeem, so a link from one tenant cannot
+/// Who a link is for: one tenant, or an app-chosen audience. Signed into
+/// the link and required again on redeem, so a link from one tenant cannot
 /// act on the same user id in another (#2472).
+///
+/// A multi-tenant app takes it from the request's tenant
+/// (`LinkScope::from(&tenant)`) and confirms with [`LinkTarget::from`] the
+/// same `&tenant`. [`Self::audience`] is for single-database apps only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkScope(String);
 
@@ -100,15 +105,8 @@ impl LinkScope {
     /// Query param holding the scope.
     const PARAM: &'static str = "scope";
 
-    /// Scope a link to one tenant. Use the slug of the tenant whose pool
-    /// redeems it.
-    #[must_use]
-    pub fn tenant(slug: &str) -> Self {
-        Self(format!("tenant:{slug}"))
-    }
-
-    /// Scope a link to an opaque audience, e.g. `"app"` in a single-tenant
-    /// app. Never equal to a [`Self::tenant`] scope.
+    /// Scope a link to an opaque audience, e.g. `"app"`, in an app with one
+    /// user database. Never equal to a tenant scope.
     #[must_use]
     pub fn audience(audience: &str) -> Self {
         Self(format!("aud:{audience}"))
@@ -128,10 +126,52 @@ impl LinkScope {
     }
 }
 
+/// A tenant's scope. The org id is in it, so a slug freed by a purge and
+/// taken again does not accept the old tenant's links.
 #[cfg(feature = "tenancy")]
 impl From<&crate::tenancy::Org> for LinkScope {
     fn from(org: &crate::tenancy::Org) -> Self {
-        Self::tenant(&org.slug)
+        let id = org.id.get().copied().unwrap_or_default();
+        Self(format!("tenant:{}:{id}", org.slug))
+    }
+}
+
+#[cfg(feature = "tenancy")]
+impl<DB: crate::sql::sqlx::Database> From<&crate::extractors::Tenant<DB>> for LinkScope {
+    fn from(tenant: &crate::extractors::Tenant<DB>) -> Self {
+        Self::from(&tenant.org)
+    }
+}
+
+/// The pool a confirm writes to, with the scope its links must carry.
+/// From `&Tenant` both come from one value, so they cannot disagree.
+#[cfg(feature = "passwords")]
+pub struct LinkTarget<'a> {
+    pool: &'a crate::sql::Pool,
+    scope: LinkScope,
+}
+
+#[cfg(feature = "passwords")]
+impl<'a> LinkTarget<'a> {
+    /// A single-database app's user pool and its audience.
+    #[must_use]
+    pub fn audience(pool: &'a crate::sql::Pool, audience: &str) -> Self {
+        Self {
+            pool,
+            scope: LinkScope::audience(audience),
+        }
+    }
+}
+
+#[cfg(all(feature = "passwords", feature = "tenancy"))]
+impl<'a, DB: crate::sql::sqlx::Database> From<&'a crate::extractors::Tenant<DB>>
+    for LinkTarget<'a>
+{
+    fn from(tenant: &'a crate::extractors::Tenant<DB>) -> Self {
+        Self {
+            pool: tenant.pool(),
+            scope: LinkScope::from(tenant),
+        }
     }
 }
 
@@ -177,9 +217,9 @@ impl PasswordReset {
     /// the link (#2248). `scope` names the tenant whose pool will redeem it.
     #[must_use]
     pub fn issue(
+        scope: &LinkScope,
         base_url: &str,
         user_id: i64,
-        scope: &LinkScope,
         secret: &[u8],
         ttl: Duration,
     ) -> String {
@@ -201,11 +241,11 @@ impl PasswordReset {
     /// minted before it carried one.
     #[cfg(feature = "passwords")]
     fn verify_issued(
-        url: &str,
         scope: &LinkScope,
+        url: &str,
         secret: &[u8],
     ) -> Result<(i64, i64), AuthFlowError> {
-        let user_id = Self::verify(url, scope, secret)?;
+        let user_id = Self::verify(scope, url, secret)?;
         let iat = extract_query(url, Self::ISSUED_AT)
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or(AuthFlowError::Expired)?;
@@ -218,7 +258,7 @@ impl PasswordReset {
     ///
     /// # Errors
     /// [`AuthFlowError`] variants describe the failure mode.
-    pub fn verify(url: &str, scope: &LinkScope, secret: &[u8]) -> Result<i64, AuthFlowError> {
+    pub fn verify(scope: &LinkScope, url: &str, secret: &[u8]) -> Result<i64, AuthFlowError> {
         check_link(url, Self::PURPOSE, scope, secret)?;
         let user_id_str = extract_query(url, "user_id").ok_or(AuthFlowError::Malformed)?;
         user_id_str
@@ -236,12 +276,12 @@ impl PasswordReset {
     /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
     #[cfg(feature = "cache")]
     pub async fn verify_single_use(
-        url: &str,
         scope: &LinkScope,
+        url: &str,
         secret: &[u8],
         cache: &std::sync::Arc<dyn crate::cache::Cache>,
     ) -> Result<i64, AuthFlowError> {
-        let user_id = Self::verify(url, scope, secret)?;
+        let user_id = Self::verify(scope, url, secret)?;
         consume_single_use(url, cache).await?;
         Ok(user_id)
     }
@@ -269,8 +309,8 @@ impl PasswordReset {
 ///
 /// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
 /// and call this helper from your POST `/password-reset/confirm`
-/// endpoint to land the new password. `scope` is the tenant `pool`
-/// belongs to; a link issued for another scope is refused (#2472).
+/// endpoint to land the new password. Pass `&tenant` as `target` in a
+/// multi-tenant app; a link issued for another scope is refused (#2472).
 ///
 /// # Errors
 /// - [`AuthFlowError`] from `PasswordReset::verify` (Malformed,
@@ -280,13 +320,13 @@ impl PasswordReset {
 /// - [`AuthFlowError::Database`] for SQL / driver failures.
 #[cfg(feature = "passwords")]
 pub async fn confirm_password_reset_pool(
-    pool: &crate::sql::Pool,
-    scope: &LinkScope,
+    target: impl Into<LinkTarget<'_>>,
     url: &str,
     new_password: &str,
     secret: &[u8],
 ) -> Result<i64, AuthFlowError> {
-    let (user_id, iat) = PasswordReset::verify_issued(url, scope, secret)?;
+    let LinkTarget { pool, scope } = target.into();
+    let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
     // Not a delegation to `_into`: this form owns `rustango_users`, so it
     // also stamps `password_changed_at` and ends existing sessions (#1449).
@@ -316,8 +356,7 @@ pub async fn confirm_password_reset_pool(
 #[cfg(feature = "passwords")]
 #[allow(clippy::too_many_arguments)]
 pub async fn confirm_password_reset_pool_into(
-    pool: &crate::sql::Pool,
-    scope: &LinkScope,
+    target: impl Into<LinkTarget<'_>>,
     url: &str,
     new_password: &str,
     secret: &[u8],
@@ -325,7 +364,8 @@ pub async fn confirm_password_reset_pool_into(
     pk_column: &str,
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
-    let user_id = PasswordReset::verify(url, scope, secret)?;
+    let LinkTarget { pool, scope } = target.into();
+    let user_id = PasswordReset::verify(&scope, url, secret)?;
     check_password_strength(new_password)?;
     write_password_hash(
         pool,
@@ -355,14 +395,14 @@ pub async fn confirm_password_reset_pool_into(
 /// As [`confirm_password_reset_pool`], plus [`AuthFlowError::AlreadyUsed`].
 #[cfg(all(feature = "passwords", feature = "cache"))]
 pub async fn confirm_password_reset_single_use(
-    pool: &crate::sql::Pool,
-    scope: &LinkScope,
+    target: impl Into<LinkTarget<'_>>,
     url: &str,
     new_password: &str,
     secret: &[u8],
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<i64, AuthFlowError> {
-    let (user_id, iat) = PasswordReset::verify_issued(url, scope, secret)?;
+    let LinkTarget { pool, scope } = target.into();
+    let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
     consume_single_use(url, cache).await?;
     // As with the non-single-use form: this one owns `rustango_users`,
@@ -387,8 +427,7 @@ pub async fn confirm_password_reset_single_use(
 #[cfg(all(feature = "passwords", feature = "cache"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn confirm_password_reset_single_use_into(
-    pool: &crate::sql::Pool,
-    scope: &LinkScope,
+    target: impl Into<LinkTarget<'_>>,
     url: &str,
     new_password: &str,
     secret: &[u8],
@@ -397,7 +436,8 @@ pub async fn confirm_password_reset_single_use_into(
     pk_column: &str,
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
-    let user_id = PasswordReset::verify(url, scope, secret)?;
+    let LinkTarget { pool, scope } = target.into();
+    let user_id = PasswordReset::verify(&scope, url, secret)?;
     // Policy before consumption: a weak password must not cost the user
     // their link, but a replay must not reach the write.
     check_password_strength(new_password)?;
@@ -572,10 +612,10 @@ impl EmailVerification {
     /// user hasn't changed their email between issuance and click.
     #[must_use]
     pub fn issue(
+        scope: &LinkScope,
         base_url: &str,
         user_id: i64,
         email: &str,
-        scope: &LinkScope,
         secret: &[u8],
         ttl: Duration,
     ) -> String {
@@ -596,8 +636,8 @@ impl EmailVerification {
     /// # Errors
     /// As [`PasswordReset::verify`].
     pub fn verify(
-        url: &str,
         scope: &LinkScope,
+        url: &str,
         secret: &[u8],
     ) -> Result<(i64, String), AuthFlowError> {
         check_link(url, Self::PURPOSE, scope, secret)?;
@@ -616,12 +656,12 @@ impl EmailVerification {
     /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
     #[cfg(feature = "cache")]
     pub async fn verify_single_use(
-        url: &str,
         scope: &LinkScope,
+        url: &str,
         secret: &[u8],
         cache: &std::sync::Arc<dyn crate::cache::Cache>,
     ) -> Result<(i64, String), AuthFlowError> {
-        let out = Self::verify(url, scope, secret)?;
+        let out = Self::verify(scope, url, secret)?;
         consume_single_use(url, cache).await?;
         Ok(out)
     }
@@ -640,9 +680,9 @@ impl MagicLink {
     /// account and issue a session.
     #[must_use]
     pub fn issue(
+        scope: &LinkScope,
         base_url: &str,
         email: &str,
-        scope: &LinkScope,
         secret: &[u8],
         ttl: Duration,
     ) -> String {
@@ -665,7 +705,7 @@ impl MagicLink {
     ///
     /// # Errors
     /// As [`PasswordReset::verify`].
-    pub fn verify(url: &str, scope: &LinkScope, secret: &[u8]) -> Result<String, AuthFlowError> {
+    pub fn verify(scope: &LinkScope, url: &str, secret: &[u8]) -> Result<String, AuthFlowError> {
         check_link(url, Self::PURPOSE, scope, secret)?;
         extract_query(url, "email").ok_or(AuthFlowError::Malformed)
     }
@@ -679,12 +719,12 @@ impl MagicLink {
     /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
     #[cfg(feature = "cache")]
     pub async fn verify_single_use(
-        url: &str,
         scope: &LinkScope,
+        url: &str,
         secret: &[u8],
         cache: &std::sync::Arc<dyn crate::cache::Cache>,
     ) -> Result<String, AuthFlowError> {
-        let email = Self::verify(url, scope, secret)?;
+        let email = Self::verify(scope, url, secret)?;
         consume_single_use(url, cache).await?;
         Ok(email)
     }
@@ -765,7 +805,7 @@ mod tests {
     const SECRET: &[u8] = b"my-test-secret";
 
     fn scope() -> LinkScope {
-        LinkScope::tenant("acme")
+        LinkScope::audience("acme")
     }
 
     /// The hand-built schema must match the `User` model it stands in for.
@@ -786,40 +826,34 @@ mod tests {
     #[test]
     fn password_reset_issue_and_verify_roundtrip() {
         let url = PasswordReset::issue(
+            &scope(),
             "https://app.example.com/reset",
             42,
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
-        let user_id = PasswordReset::verify(&url, &scope(), SECRET).unwrap();
+        let user_id = PasswordReset::verify(&scope(), &url, SECRET).unwrap();
         assert_eq!(user_id, 42);
     }
 
     /// #2472 — every link kind is refused outside the scope it was issued for.
     #[test]
     fn links_are_refused_in_another_scope() {
-        let other = LinkScope::tenant("globex");
+        let other = LinkScope::audience("globex");
         let ttl = Duration::from_secs(600);
-        let reset = PasswordReset::issue("https://x/r", 1, &scope(), SECRET, ttl);
-        let verify = EmailVerification::issue("https://x/v", 1, "a@x.com", &scope(), SECRET, ttl);
-        let magic = MagicLink::issue("https://x/l", "a@x.com", &scope(), SECRET, ttl);
+        let reset = PasswordReset::issue(&scope(), "https://x/r", 1, SECRET, ttl);
+        let verify = EmailVerification::issue(&scope(), "https://x/v", 1, "a@x.com", SECRET, ttl);
+        let magic = MagicLink::issue(&scope(), "https://x/l", "a@x.com", SECRET, ttl);
         assert_eq!(
-            PasswordReset::verify(&reset, &other, SECRET),
+            PasswordReset::verify(&other, &reset, SECRET),
             Err(AuthFlowError::WrongScope)
         );
         assert_eq!(
-            EmailVerification::verify(&verify, &other, SECRET),
+            EmailVerification::verify(&other, &verify, SECRET),
             Err(AuthFlowError::WrongScope)
         );
         assert_eq!(
-            MagicLink::verify(&magic, &other, SECRET),
-            Err(AuthFlowError::WrongScope)
-        );
-        // An audience never equals a tenant of the same name.
-        let aud = LinkScope::audience("acme");
-        assert_eq!(
-            PasswordReset::verify(&reset, &aud, SECRET),
+            MagicLink::verify(&other, &magic, SECRET),
             Err(AuthFlowError::WrongScope)
         );
     }
@@ -828,11 +862,79 @@ mod tests {
     #[test]
     fn a_rewritten_scope_fails_the_signature() {
         let url =
-            PasswordReset::issue("https://x/r", 1, &scope(), SECRET, Duration::from_secs(600));
-        let forged = url.replace("tenant%3Aacme", "tenant%3Aglobex");
+            PasswordReset::issue(&scope(), "https://x/r", 1, SECRET, Duration::from_secs(600));
+        let forged = url.replace("aud%3Aacme", "aud%3Aglobex");
         assert_ne!(forged, url);
-        let r = PasswordReset::verify(&forged, &LinkScope::tenant("globex"), SECRET);
+        let r = PasswordReset::verify(&LinkScope::audience("globex"), &forged, SECRET);
         assert_eq!(r, Err(AuthFlowError::InvalidSignature));
+    }
+
+    #[cfg(feature = "tenancy")]
+    fn org(slug: &str, id: i64) -> crate::tenancy::Org {
+        crate::tenancy::Org {
+            id: crate::sql::Auto::Set(id),
+            slug: slug.into(),
+            ..crate::testkit::org()
+        }
+    }
+
+    /// #2472 — a tenant scope names the org id, so a slug reused after a
+    /// purge, or an audience of the same name, does not match.
+    #[cfg(all(feature = "tenancy", feature = "testkit"))]
+    #[test]
+    fn a_tenant_scope_is_its_org_not_its_slug() {
+        let old = LinkScope::from(&org("acme", 1));
+        let url = PasswordReset::issue(&old, "https://x/r", 1, SECRET, Duration::from_secs(600));
+        for other in [
+            LinkScope::from(&org("acme", 2)),
+            LinkScope::audience("acme"),
+        ] {
+            assert_eq!(
+                PasswordReset::verify(&other, &url, SECRET),
+                Err(AuthFlowError::WrongScope)
+            );
+        }
+        assert_eq!(PasswordReset::verify(&old, &url, SECRET), Ok(1));
+    }
+
+    /// #2472 — confirm through `&Tenant` takes pool and scope from one
+    /// value: its own links reset, another tenant's are refused.
+    #[cfg(all(feature = "tenancy", feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn confirm_through_a_tenant_checks_its_scope() {
+        use crate::sql::sqlx;
+        let sq = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = crate::sql::Pool::from(sq.clone());
+        crate::testkit::create_tables_for::<crate::tenancy::User>(&pool)
+            .await
+            .unwrap();
+        let mut u = crate::tenancy::User {
+            username: "ada".into(),
+            password_hash: "OLD".into(),
+            ..crate::testkit::user()
+        };
+        u.insert_pool(&pool).await.unwrap();
+        let id = *u.id.get().unwrap();
+        let conn = crate::tenancy::TenantConn::database(sq.acquire().await.unwrap());
+        let tenant = crate::extractors::Tenant::for_test(org("b", 2), conn, pool);
+        let ttl = Duration::from_secs(600);
+        let strong = "brand-new-strong-password-7!";
+
+        let foreign = PasswordReset::issue(
+            &LinkScope::from(&org("x", 1)),
+            "https://x/r",
+            id,
+            SECRET,
+            ttl,
+        );
+        let r = confirm_password_reset_pool(&tenant, &foreign, strong, SECRET).await;
+        assert_eq!(r, Err(AuthFlowError::WrongScope));
+
+        let own = PasswordReset::issue(&LinkScope::from(&tenant), "https://b/r", id, SECRET, ttl);
+        assert_eq!(
+            confirm_password_reset_pool(&tenant, &own, strong, SECRET).await,
+            Ok(id)
+        );
     }
 
     /// A signed link minted before scopes existed is refused.
@@ -843,34 +945,34 @@ mod tests {
             SECRET,
             Some(Duration::from_secs(60)),
         );
-        let r = PasswordReset::verify(&url, &scope(), SECRET);
+        let r = PasswordReset::verify(&scope(), &url, SECRET);
         assert_eq!(r, Err(AuthFlowError::WrongScope));
     }
 
     #[test]
     fn password_reset_wrong_secret_fails() {
         let url = PasswordReset::issue(
+            &scope(),
             "https://x/r",
             42,
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
-        let r = PasswordReset::verify(&url, &scope(), b"different");
+        let r = PasswordReset::verify(&scope(), &url, b"different");
         assert_eq!(r.unwrap_err(), AuthFlowError::InvalidSignature);
     }
 
     #[test]
     fn password_reset_tampered_user_id_fails() {
         let url = PasswordReset::issue(
+            &scope(),
             "https://x/r",
             42,
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
         let tampered = url.replace("user_id=42", "user_id=99");
-        let r = PasswordReset::verify(&tampered, &scope(), SECRET);
+        let r = PasswordReset::verify(&scope(), &tampered, SECRET);
         assert_eq!(r.unwrap_err(), AuthFlowError::InvalidSignature);
     }
 
@@ -878,14 +980,14 @@ mod tests {
     fn password_reset_rejects_email_verification_token() {
         // Same URL shape but issued for a different purpose
         let url = EmailVerification::issue(
+            &scope(),
             "https://x/r",
             42,
             "alice@x.com",
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
-        let r = PasswordReset::verify(&url, &scope(), SECRET);
+        let r = PasswordReset::verify(&scope(), &url, SECRET);
         assert!(matches!(r, Err(AuthFlowError::WrongPurpose(_))));
     }
 
@@ -894,14 +996,14 @@ mod tests {
     #[test]
     fn email_verification_roundtrip() {
         let url = EmailVerification::issue(
+            &scope(),
             "https://x/v",
             42,
             "alice@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(86_400),
         );
-        let (uid, email) = EmailVerification::verify(&url, &scope(), SECRET).unwrap();
+        let (uid, email) = EmailVerification::verify(&scope(), &url, SECRET).unwrap();
         assert_eq!(uid, 42);
         assert_eq!(email, "alice@example.com");
     }
@@ -909,27 +1011,27 @@ mod tests {
     #[test]
     fn email_verification_handles_special_chars() {
         let url = EmailVerification::issue(
+            &scope(),
             "https://x/v",
             42,
             "a+b@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(86_400),
         );
-        let (_, email) = EmailVerification::verify(&url, &scope(), SECRET).unwrap();
+        let (_, email) = EmailVerification::verify(&scope(), &url, SECRET).unwrap();
         assert_eq!(email, "a+b@example.com");
     }
 
     #[test]
     fn email_verification_rejects_password_reset_token() {
         let url = PasswordReset::issue(
+            &scope(),
             "https://x/v",
             42,
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
-        let r = EmailVerification::verify(&url, &scope(), SECRET);
+        let r = EmailVerification::verify(&scope(), &url, SECRET);
         assert!(matches!(r, Err(AuthFlowError::WrongPurpose(_))));
     }
 
@@ -938,26 +1040,26 @@ mod tests {
     #[test]
     fn magic_link_roundtrip() {
         let url = MagicLink::issue(
+            &scope(),
             "https://x/login",
             "alice@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(900),
         );
-        let email = MagicLink::verify(&url, &scope(), SECRET).unwrap();
+        let email = MagicLink::verify(&scope(), &url, SECRET).unwrap();
         assert_eq!(email, "alice@example.com");
     }
 
     #[test]
     fn magic_link_rejects_password_reset_token() {
         let url = PasswordReset::issue(
+            &scope(),
             "https://x/r",
             42,
-            &scope(),
             SECRET,
             Duration::from_secs(3600),
         );
-        let r = MagicLink::verify(&url, &scope(), SECRET);
+        let r = MagicLink::verify(&scope(), &url, SECRET);
         assert!(matches!(r, Err(AuthFlowError::WrongPurpose(_))));
     }
 
@@ -968,33 +1070,33 @@ mod tests {
         let cache: std::sync::Arc<dyn crate::cache::Cache> =
             std::sync::Arc::new(InMemoryCache::new());
         let url = MagicLink::issue(
+            &scope(),
             "https://x/login",
             "alice@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(900),
         );
         // First redemption succeeds.
-        let email = MagicLink::verify_single_use(&url, &scope(), SECRET, &cache)
+        let email = MagicLink::verify_single_use(&scope(), &url, SECRET, &cache)
             .await
             .unwrap();
         assert_eq!(email, "alice@example.com");
         // Audit N1 — replaying the same link is rejected.
-        let replay = MagicLink::verify_single_use(&url, &scope(), SECRET, &cache).await;
+        let replay = MagicLink::verify_single_use(&scope(), &url, SECRET, &cache).await;
         assert!(
             matches!(replay, Err(AuthFlowError::AlreadyUsed)),
             "{replay:?}"
         );
         // A *different* link (fresh signature) is unaffected.
         let other = MagicLink::issue(
+            &scope(),
             "https://x/login",
             "bob@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(900),
         );
         assert!(
-            MagicLink::verify_single_use(&other, &scope(), SECRET, &cache)
+            MagicLink::verify_single_use(&scope(), &other, SECRET, &cache)
                 .await
                 .is_ok()
         );
@@ -1003,9 +1105,9 @@ mod tests {
     #[cfg(feature = "cache")]
     fn link() -> String {
         MagicLink::issue(
+            &scope(),
             "https://x/login",
             "alice@example.com",
-            &scope(),
             SECRET,
             Duration::from_secs(900),
         )
@@ -1061,8 +1163,8 @@ mod tests {
         let (url, scope) = (link(), scope());
         let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
-                MagicLink::verify_single_use(&url, &scope, SECRET, &cache),
-                MagicLink::verify_single_use(&url, &scope, SECRET, &cache),
+                MagicLink::verify_single_use(&scope, &url, SECRET, &cache),
+                MagicLink::verify_single_use(&scope, &url, SECRET, &cache),
             )
         })
         .await
@@ -1076,7 +1178,7 @@ mod tests {
     async fn a_null_cache_refuses_single_use() {
         let cache: std::sync::Arc<dyn crate::cache::Cache> =
             std::sync::Arc::new(crate::cache::NullCache);
-        let r = MagicLink::verify_single_use(&link(), &scope(), SECRET, &cache).await;
+        let r = MagicLink::verify_single_use(&scope(), &link(), SECRET, &cache).await;
         assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
     }
 
@@ -1114,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_marker_write_refuses() {
         let cache: std::sync::Arc<dyn crate::cache::Cache> = std::sync::Arc::new(WriteFails);
-        let r = MagicLink::verify_single_use(&link(), &scope(), SECRET, &cache).await;
+        let r = MagicLink::verify_single_use(&scope(), &link(), SECRET, &cache).await;
         assert_eq!(r, Err(AuthFlowError::AlreadyUsed));
     }
 
@@ -1141,7 +1243,7 @@ mod tests {
             SECRET,
             Some(Duration::from_secs(60)),
         );
-        let r = PasswordReset::verify(&url, &scope(), SECRET);
+        let r = PasswordReset::verify(&scope(), &url, SECRET);
         assert_eq!(r.unwrap_err(), AuthFlowError::Malformed);
     }
 }

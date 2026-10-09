@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use rustango::auth_flows::{
-    confirm_password_reset_pool_into, AuthFlowError, LinkScope, PasswordReset,
+    confirm_password_reset_pool_into, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
 };
 use rustango::core::SqlValue;
 use rustango::signed_url::{sign, sign_at, verify, verify_at, SignedUrlError};
@@ -100,17 +100,16 @@ async fn password_reset_confirm_rotates_the_hash() {
 
     // 1. Issue a reset link (you'd email this). Token encodes user_id + purpose.
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://app.example.com/auth/reset",
         1,
-        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(3600),
     );
 
     // 2. User submits a new password → verify token + rotate the stored hash.
     let user_id = confirm_password_reset_pool_into(
-        &pool,
-        &LinkScope::audience("app"),
+        LinkTarget::audience(&pool, "app"),
         &url,
         "a-brand-new-strong-password",
         SECRET,
@@ -133,15 +132,14 @@ async fn password_reset_rejects_weak_and_tampered() {
     // Weak password → rejected, nothing written.
     let pool = pool_with_user("KEEP-ME").await;
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://app.example.com/auth/reset",
         1,
-        &LinkScope::audience("app"),
         SECRET,
         Duration::from_secs(3600),
     );
     let err = confirm_password_reset_pool_into(
-        &pool,
-        &LinkScope::audience("app"),
+        LinkTarget::audience(&pool, "app"),
         &url,
         "short",
         SECRET,
@@ -161,8 +159,7 @@ async fn password_reset_rejects_weak_and_tampered() {
     // Tampered token (user_id 1 → 2) → InvalidSignature.
     let tampered = url.replace("user_id=1", "user_id=2");
     let err = confirm_password_reset_pool_into(
-        &pool,
-        &LinkScope::audience("app"),
+        LinkTarget::audience(&pool, "app"),
         &tampered,
         "a-brand-new-strong-password",
         SECRET,

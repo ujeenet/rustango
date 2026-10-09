@@ -1,5 +1,5 @@
-//! A reset link minted in one tenant must not reset the same user id in
-//! another tenant's database (#2472).
+//! A reset link minted for one scope must not reset the same user id in
+//! another scope's database (#2472). The `&Tenant` form is unit-tested in `auth_flows`.
 
 #![cfg(all(
     feature = "sqlite",
@@ -10,7 +10,9 @@
 
 use std::time::Duration;
 
-use rustango::auth_flows::{confirm_password_reset_pool, AuthFlowError, LinkScope, PasswordReset};
+use rustango::auth_flows::{
+    confirm_password_reset_pool, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
+};
 use rustango::sql::Pool;
 
 const SECRET: &[u8] = b"a-strong-32-byte-secret-key-here";
@@ -49,39 +51,39 @@ async fn hash(pool: &Pool) -> String {
 }
 
 #[tokio::test]
-async fn a_link_from_tenant_x_does_not_reset_tenant_b() {
+async fn a_link_for_another_scope_does_not_reset_this_one() {
     let tenant_b = tenant_db().await;
-    // Minted by tenant X's "forgot password" for its own user 1.
+    // Minted for scope "x" for its own user 1.
     let url = PasswordReset::issue(
+        &LinkScope::audience("x"),
         "https://x.example.com/reset",
         1,
-        &LinkScope::tenant("x"),
         SECRET,
         Duration::from_secs(600),
     );
     let res =
-        confirm_password_reset_pool(&tenant_b, &LinkScope::tenant("b"), &url, STRONG, SECRET).await;
+        confirm_password_reset_pool(LinkTarget::audience(&tenant_b, "b"), &url, STRONG, SECRET)
+            .await;
     assert_eq!(
         res,
         Err(AuthFlowError::WrongScope),
-        "tenant X's link reset tenant B"
+        "scope x's link reset b"
     );
     assert_eq!(hash(&tenant_b).await, "OLD-HASH");
 }
 
 #[tokio::test]
-async fn a_link_resets_in_its_own_tenant() {
+async fn a_link_resets_in_its_own_scope() {
     let tenant_b = tenant_db().await;
-    let scope = LinkScope::tenant("b");
     let url = PasswordReset::issue(
+        &LinkScope::audience("b"),
         "https://b/reset",
         1,
-        &scope,
         SECRET,
         Duration::from_secs(600),
     );
-    confirm_password_reset_pool(&tenant_b, &scope, &url, STRONG, SECRET)
+    confirm_password_reset_pool(LinkTarget::audience(&tenant_b, "b"), &url, STRONG, SECRET)
         .await
-        .expect("own tenant");
+        .expect("own scope");
     assert_ne!(hash(&tenant_b).await, "OLD-HASH");
 }

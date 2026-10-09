@@ -164,7 +164,7 @@ A password change or reset whose user changed password meanwhile now fails with 
 
 ### Auth links take a `LinkScope`
 
-`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` and every `confirm_password_reset_*` take a `&LinkScope` (#2472). Pass `LinkScope::from(&tenant.org)` in a tenant app, or `LinkScope::audience("app")` in a single-tenant one; confirm needs the same scope, else `AuthFlowError::WrongScope` (new variant). Links issued before the upgrade are refused.
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
 
 ### Admin: passkeys and registry tables
 
