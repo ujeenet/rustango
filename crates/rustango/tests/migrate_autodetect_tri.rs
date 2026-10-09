@@ -2842,6 +2842,49 @@ async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
     orphan_refused(pool, b, "author_id").await;
 }
 
+/// Dropping the index a composite FK uses, though another index starts with
+/// its first column; MySQL refused it with 1553 (#2326).
+async fn composite_fk_index_drops(pool: &Pool) {
+    let (a, b) = ("mad_ci_author", "mad_ci_book");
+    let chain = Chain::new(pool, "ci", &[b, a]).await;
+    let with = |indexed: bool| {
+        let mut idx = vec![
+            json!({"name": "mad_ci_author_id_code", "table": a,
+                   "columns": ["id", "code"], "unique": true}),
+            json!({"name": "mad_ci_book_author_idx", "table": b,
+                   "columns": ["author_id"], "unique": false}),
+        ];
+        if indexed {
+            idx.push(json!({"name": "mad_ci_book_acn_idx", "table": b,
+                            "columns": ["author_id", "code", "n"], "unique": false}));
+        }
+        let composite = json!([{"name": "mad_ci_author_code", "to": a,
+                                "from": ["author_id", "code"], "on": ["id", "code"]}]);
+        json!({
+            "tables": [
+                table(a, vec![id(), col("code", "i64", json!({}))]),
+                {"name": b, "model": b, "fields": [id(), col("author_id", "i64", json!({})),
+                    col("code", "i64", json!({})), col("n", "i32", json!({}))],
+                 "composite_fks": composite},
+            ],
+            "indexes": idx,
+        })
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    chain
+        .step(pool, with(false))
+        .await
+        .expect("the composite FK's index drops");
+    let orphan = exec(
+        pool,
+        "INSERT INTO {} ({}, {}, {}) VALUES (1, 99, 1)",
+        &[b, "id", "author_id", "code"],
+    )
+    .await;
+    let err = orphan.expect_err("the composite FK is back");
+    assert!(err.to_lowercase().contains("foreign key"), "{err}");
+}
+
 /// `b`: an FK to `a`, and `n`.
 fn book(a: &str, b: &str) -> Value {
     table(
@@ -3142,6 +3185,7 @@ tri_dialect_test!(
         fk_alter_then_index_drop,
         fk_index_drop_then_rename,
         fk_index_drop_refuses_an_unknown_shape,
+        composite_fk_index_drops,
         auto_pk_widens_its_sequence,
         fk_name_collision_is_refused,
         m2m_column_rename_keeps_rows,

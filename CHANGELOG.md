@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — MySQL: dropping the index a composite FK uses no longer fails with 1553 (#2326)
+
+The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.
+
 ### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
 
 The sequence lookup used the bare table name, so outside `search_path` it failed.

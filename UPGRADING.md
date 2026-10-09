@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Migrations re-add some FKs
+
+On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

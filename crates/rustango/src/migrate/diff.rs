@@ -1854,22 +1854,8 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
-                let from_cols = from
-                    .iter()
-                    .map(|c| dialect.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let on_cols = on
-                    .iter()
-                    .map(|c| dialect.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.deferred_fks.push(format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({from_cols}) REFERENCES {} ({on_cols})",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                    fk_target(dialect, schema, to),
-                ));
+                out.deferred_fks
+                    .push(composite_fk_sql(table, name, to, from, on, dialect, schema));
             }
             SchemaChange::DropCompositeFk { table, name } => {
                 // Same single owner as the CHECK arm above.
@@ -2069,7 +2055,6 @@ fn constraints_sql_from_snapshot(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
         .fields
         .iter()
@@ -2078,18 +2063,53 @@ fn constraints_sql_from_snapshot(
                 .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
         .collect::<Result<_, _>>()?;
-    for cf in &t.composite_fks {
-        let from_cols: Vec<String> = cf.from.iter().map(|c| dialect.quote_ident(c)).collect();
-        let on_cols: Vec<String> = cf.on.iter().map(|c| dialect.quote_ident(c)).collect();
-        out.push(format!(
-            "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-            dialect.quote_ident(&cf.name),
-            from_cols.join(", "),
-            fk_target(dialect, schema, &cf.to),
-            on_cols.join(", "),
-        ));
-    }
+    out.extend(
+        composite_fks(t, dialect, schema)
+            .into_iter()
+            .map(|(_, sql)| sql),
+    );
     Ok(out)
+}
+
+/// Each composite FK of `t` by name, with its `ADD CONSTRAINT … FOREIGN KEY`.
+pub(crate) fn composite_fks(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Vec<(String, String)> {
+    t.composite_fks
+        .iter()
+        .map(|cf| {
+            let sql =
+                composite_fk_sql(&t.name, &cf.name, &cf.to, &cf.from, &cf.on, dialect, schema);
+            (cf.name.clone(), sql)
+        })
+        .collect()
+}
+
+fn composite_fk_sql(
+    table: &str,
+    name: &str,
+    to: &str,
+    from: &[String],
+    on: &[String],
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    let cols = |cs: &[String]| {
+        cs.iter()
+            .map(|c| dialect.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote_ident(table),
+        dialect.quote_ident(name),
+        cols(from),
+        fk_target(dialect, schema, to),
+        cols(on),
+    )
 }
 
 /// Each column of `t` with its `ADD CONSTRAINT … FOREIGN KEY`, if it has one.

@@ -949,16 +949,13 @@ fn preview_schema_op(
         .iter()
         .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
         .map_or(&[][..], |i| &ops[..i]);
-    let (drops, readd) = step
+    let dropped = step
         .index_fks
         .as_ref()
-        .and_then(|ix| {
-            let column = before
-                .indexes
-                .iter()
-                .find(|i| i.name == ix.index)?
-                .columns
-                .first()?;
+        .and_then(|ix| Some((ix, before.indexes.iter().find(|i| i.name == ix.index)?)));
+    let (mut drops, mut readd) = dropped
+        .and_then(|(ix, index)| {
+            let column = index.columns.first()?;
             let field = before.table(&ix.table).and_then(|t| t.field(column));
             let served = field.is_some_and(|f| f.unique || f.primary_key)
                 || leading_indexes_at(before, earlier, &ix.table, column)
@@ -971,9 +968,29 @@ fn preview_schema_op(
             let live = field.is_some_and(|f| f.fk.is_some())
                 && !fk_deferred_earlier(&ix.table, column, earlier);
             let names = [ddl::fk_constraint_name(&ix.table, column)];
-            Some(ix.plan(column, if live { &names[..] } else { &[] }, dialect))
+            let (drops, readd) = ix.plan(column, if live { &names[..] } else { &[] }, dialect);
+            Some((drops, readd.into_iter().collect::<Vec<_>>()))
         })
         .unwrap_or_default();
+    // The composite FKs only this index serves, as apply finds them (#2326).
+    if let Some((ix, index)) = dropped {
+        let covers = |cols: &[String], fk: &[String]| cols.starts_with(fk);
+        let names: Vec<String> = before
+            .table(&ix.table)
+            .map_or(&[][..], |t| t.composite_fks.as_slice())
+            .iter()
+            .filter(|cf| covers(&index.columns, &cf.from))
+            .filter(|cf| {
+                !indexes_at(before, earlier, &ix.table)
+                    .iter()
+                    .any(|(n, cols)| *n != ix.index && covers(cols, &cf.from))
+            })
+            .map(|cf| cf.name.clone())
+            .collect();
+        let (d, r) = ix.plan_composites(&names, dialect);
+        drops.extend(d);
+        readd.extend(r);
+    }
     statements.extend(drops);
     statements.extend(step.batch.immediate);
     statements.extend(readd);
@@ -2816,6 +2833,8 @@ struct IndexFks {
     /// missing here goes away later, or an earlier op already defers its
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
+    /// The table's composite FKs at the op by name, with their re-add (#2326).
+    composites: Option<Vec<(String, String)>>,
 }
 
 /// The indexes on `table` that start with `column` once `earlier` ran on
@@ -2826,28 +2845,39 @@ fn leading_indexes_at<'a>(
     table: &str,
     column: &str,
 ) -> Vec<&'a str> {
+    indexes_at(before, earlier, table)
+        .into_iter()
+        .filter(|(_, cs)| cs.first().is_some_and(|c| c == column))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The declared indexes on `table` with their columns once `earlier` ran on `before`.
+fn indexes_at<'a>(
+    before: &'a SchemaSnapshot,
+    earlier: &'a [Operation],
+    table: &str,
+) -> Vec<(&'a str, &'a [String])> {
     use super::SchemaChange as SC;
-    let mut names: Vec<&str> = before
+    let mut out: Vec<(&str, &[String])> = before
         .indexes
         .iter()
-        .filter(|i| i.table == table && i.columns.first().is_some_and(|c| c == column))
-        .map(|i| i.name.as_str())
+        .filter(|i| i.table == table)
+        .map(|i| (i.name.as_str(), i.columns.as_slice()))
         .collect();
     for op in earlier {
         match op {
-            Operation::Schema(SC::DropIndex { name, .. }) => names.retain(|n| n != name),
+            Operation::Schema(SC::DropIndex { name, .. }) => out.retain(|(n, _)| n != name),
             Operation::Schema(SC::CreateIndex {
                 name,
                 table: t,
                 columns,
                 ..
-            }) if t == table && columns.first().is_some_and(|c| c == column) => {
-                names.push(name);
-            }
+            }) if t == table => out.push((name, columns)),
             _ => {}
         }
     }
-    names
+    out
 }
 
 /// Whether an earlier op of the migration defers `table.column`'s FK
@@ -2909,26 +2939,50 @@ impl IndexFks {
         let (earlier, later) = at_op.map_or((&[][..], &[][..]), |i| (&ops[..i], &ops[i + 1..]));
         // Only a later DropTable means the table goes; any other failure to
         // build its shape at the op is an error, not a reason to drop FKs.
-        let columns = if dropped_later(table, later) {
-            None
+        let (columns, composites) = if dropped_later(table, later) {
+            (None, None)
         } else {
             let (at, _) = super::rebuild::snapshot_at(table, later, after)
                 .map_err(MigrateError::Validation)?;
+            let at = at.table(table);
             let mut columns = at
-                .table(table)
                 .map(|t| super::diff::column_fks(t, dialect, schema))
                 .transpose()
                 .map_err(MigrateError::Validation)?;
             if let Some(cs) = &mut columns {
                 cs.retain(|(c, fk)| fk.is_none() || !fk_deferred_earlier(table, c, earlier));
             }
-            columns
+            let composites = at.map(|t| super::diff::composite_fks(t, dialect, schema));
+            (columns, composites)
         };
         Ok(Self {
             table: table.to_owned(),
             index: index.to_owned(),
             columns,
+            composites,
         })
+    }
+
+    /// The drops of the live composite FKs `names` only the index serves,
+    /// then the re-adds of those still declared; an undeclared one stays.
+    fn plan_composites(
+        &self,
+        names: &[String],
+        dialect: &dyn crate::sql::Dialect,
+    ) -> (Vec<String>, Vec<String>) {
+        let (mut drops, mut readds) = (Vec::new(), Vec::new());
+        for name in names {
+            let readd = match &self.composites {
+                None => None,
+                Some(cs) => match cs.iter().find(|(n, _)| n == name) {
+                    Some((_, sql)) => Some(sql.clone()),
+                    None => continue,
+                },
+            };
+            drops.extend(dialect.drop_foreign_key_sql(&self.table, name));
+            readds.extend(readd);
+        }
+        (drops, readds)
     }
 
     fn fate(&self, column: &str) -> FkFate<'_> {
@@ -3244,7 +3298,7 @@ async fn mysql_statements(
 ) -> Result<Vec<String>, sqlx::Error> {
     let (mut out, readd) = match &step.index_fks {
         Some(ix) => Box::pin(mysql_index_fks(conn, ix)).await?,
-        None => (Vec::new(), None),
+        None => (Vec::new(), Vec::new()),
     };
     let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
     out.extend(rest?);
@@ -3254,34 +3308,48 @@ async fn mysql_statements(
 
 /// [`IndexFks::plan`] for the index's first column, when no other index
 /// starts with it: then MySQL needs it for the FK (1553), and otherwise a
-/// plain drop works without the FK's table-copy re-add. Boxed by the caller.
+/// plain drop works without the FK's table-copy re-add. Then the same for
+/// the composite FKs only it serves. Boxed by the caller.
 #[cfg(feature = "mysql")]
 async fn mysql_index_fks(
     conn: &mut sqlx::MySqlConnection,
     ix: &IndexFks,
-) -> Result<(Vec<String>, Option<String>), sqlx::Error> {
+) -> Result<(Vec<String>, Vec<String>), sqlx::Error> {
     use crate::sql::Dialect as _;
     let dialect = crate::sql::MySql;
-    let (Some(lead_sql), Some(names_sql)) = (
+    let (Some(lead_sql), Some(names_sql), Some(composite_sql)) = (
         dialect.sole_leading_column_sql(),
         dialect.foreign_key_names_sql(),
+        dialect.composite_fks_needing_index_sql(),
     ) else {
-        return Ok((Vec::new(), None));
+        return Ok((Vec::new(), Vec::new()));
     };
     let lead: Option<String> = sqlx::query_scalar(lead_sql)
         .bind(&ix.table)
         .bind(&ix.index)
         .fetch_optional(&mut *conn)
         .await?;
-    let Some(column) = lead else {
-        return Ok((Vec::new(), None));
-    };
-    let names: Vec<String> = sqlx::query_scalar(names_sql)
+    let (mut drops, mut readds) = (Vec::new(), Vec::new());
+    if let Some(column) = lead {
+        let names: Vec<String> = sqlx::query_scalar(names_sql)
+            .bind(&ix.table)
+            .bind(&column)
+            .fetch_all(&mut *conn)
+            .await?;
+        let (d, r) = ix.plan(&column, &names, &dialect);
+        drops.extend(d);
+        readds.extend(r);
+    }
+    let names: Vec<String> = sqlx::query_scalar(composite_sql)
         .bind(&ix.table)
-        .bind(&column)
+        .bind(&ix.index)
+        .bind(&ix.index)
         .fetch_all(&mut *conn)
         .await?;
-    Ok(ix.plan(&column, &names, &dialect))
+    let (d, r) = ix.plan_composites(&names, &dialect);
+    drops.extend(d);
+    readds.extend(r);
+    Ok((drops, readds))
 }
 
 #[cfg(feature = "postgres")]
@@ -4282,5 +4350,46 @@ mod tests {
         assert!(out[2].starts_with("DROP INDEX `idx_b`"), "{out:?}");
         assert!(out[3].contains("ADD CONSTRAINT"), "{out:?}");
         assert_eq!(out.len(), 4, "{out:?}");
+    }
+
+    /// #2326 — a composite FK only the dropped index serves comes off around it,
+    /// though another index starts with its first column.
+    #[test]
+    fn render_between_drops_a_composite_fk_around_its_index() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |indexed: bool| -> SchemaSnapshot {
+            let mut indexes = vec![serde_json::json!({ "name": "child_p_idx",
+                "table": "child", "columns": ["p_id"], "unique": false })];
+            if indexed {
+                indexes.push(
+                    serde_json::json!({ "name": "child_pc_idx", "table": "child",
+                    "columns": ["p_id", "code", "n"], "unique": false }),
+                );
+            }
+            let col = |c: &str| {
+                serde_json::json!({ "name": c, "column": c, "ty": "i64",
+                "nullable": true, "primary_key": false })
+            };
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    col("p_id"), col("code"), col("n")],
+                "composite_fks": [{ "name": "child_pc_fk", "to": "parent",
+                    "from": ["p_id", "code"], "on": ["id", "code"] }] }],
+                "indexes": indexes }))
+            .unwrap()
+        };
+        let drop = [SchemaChange::DropIndex {
+            name: "child_pc_idx".into(),
+            table: "child".into(),
+        }];
+        let out =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
+                .unwrap();
+        assert!(out[0].contains("DROP FOREIGN KEY `child_pc_fk`"), "{out:?}");
+        assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
+        assert!(out[2].contains("ADD CONSTRAINT `child_pc_fk`"), "{out:?}");
+        assert_eq!(out.len(), 3, "{out:?}");
     }
 }
