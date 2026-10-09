@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
-The check moved into `checked_request` and the org edit path, and compares against the registry pool's endpoint, default ports included.
+The check moved into `checked_request` and the org edit path. It reads the URL with the backend's sqlx parser, so `?host=`, sockets, default ports and `mariadb://` match the registry pool; an unreadable URL is refused.
 
 ### Fixed — a scoped tenant pool quotes its schema in `search_path` (#2325)
 
@@ -18,7 +18,7 @@ A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_p
 
 ### Fixed — a `make:worker` worker frees a killed worker's jobs while it runs (#2331)
 
-New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start` and every minute. The template uses it instead of a reclaim after shutdown.
+New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start`, then every `min(older_than, 60s)`, using a new `locked_at` index. The template uses it instead of a reclaim after shutdown.
 
 ## [0.60.4] — 2026-10-09
 
