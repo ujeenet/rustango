@@ -914,6 +914,7 @@ where
         writeln!(w, "nothing to migrate (already up to date)")?;
     }
     ensure_bootstrap_tables(pool).await?;
+    ensure_tenant_bootstrap_tables(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
@@ -957,6 +958,19 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
     crate::admin::totp_store::ensure_table(pool).await?;
     // The admin lists translations wherever they live (#2360).
     crate::i18n::db::ensure_table_pool(pool).await
+}
+
+/// The `managed = false` tables each tenant holds: the single database, or
+/// every tenant. Never a registry, where schema-mode tenants would share them.
+///
+/// # Errors
+/// Driver or SQL failures from the DDL.
+#[allow(clippy::unused_async, unused_variables)]
+pub(crate) async fn ensure_tenant_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
+    // Passkey sign-in reads it from the first login (#2364).
+    #[cfg(feature = "passkey")]
+    crate::passkey::ensure_table(pool).await?;
+    Ok(())
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.

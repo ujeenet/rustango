@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
+
+A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.
+
+### Fixed — a single-database admin no longer lists registry-only tables (#2365)
+
+With `tenancy` compiled in, a plain admin listed `Org`, `Operator` and other tables single-database `migrate` never creates. New `admin::Builder::registry_mode()` lists only registry tables, for an admin on a registry.
+
+### Fixed — shared SSO sign-in works for a tenant without its own provider table (#2366)
+
+A missing `rustango_sso_providers` reads as no providers, at sign-in and in `check --deploy`.
+
+### Fixed — admin FK facets past the cut are reachable (#2350)
+
+An FK facet's dropdown now has a "+N more" link, like the other facets.
+
 ### Fixed — MySQL: dropping the index a composite FK uses no longer fails with 1553 (#2326)
 
 The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.

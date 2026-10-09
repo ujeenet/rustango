@@ -482,6 +482,7 @@ indique lo contrario):
 | `tenant_brand_css(css)` | Bloque de variables CSS por inquilino. |
 | `impersonated_by(operator_id)` | Renderiza un banner de suplantación (consola de operador). |
 | `tenant_mode()` | Oculta los modelos con ámbito de registro (se establece automáticamente para los admins de inquilino). |
+| `registry_mode()` | Sirve un registro de tenancy: lista `Org`, `Operator` y las demás tablas del registro que un admin simple oculta. |
 | `build()` | Finaliza y devuelve el `axum::Router`. |
 
 ---

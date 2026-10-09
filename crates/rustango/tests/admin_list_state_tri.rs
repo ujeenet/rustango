@@ -585,6 +585,32 @@ async fn facet_reads_only_the_values_it_shows(pool: &Pool) {
     assert!(body.contains("+5 more"), "{body}");
 }
 
+/// An FK facet value past the cut is reachable through its show-all link (#2350).
+async fn fk_facet_past_the_cut_is_reachable(pool: &Pool) {
+    for i in 0..20 {
+        let mut o = Owner {
+            id: Auto::default(),
+            name: format!("owner-{i:02}"),
+        };
+        o.insert_pool(pool).await.expect("insert owner");
+        let mut p = Pet {
+            id: Auto::default(),
+            name: format!("pet-{i:02}"),
+            owner_id: *o.id.get().expect("pk"),
+        };
+        p.insert_pool(pool).await.expect("insert pet");
+    }
+    let body = get(pool, "/adminls_pet").await;
+    assert!(!body.contains("owner-19"), "not truncated: {body}");
+    let more = body
+        .split("href=\"")
+        .filter_map(|s| s.split('"').next())
+        .find(|l| l.contains("facet_show_all=owner_id"))
+        .unwrap_or_else(|| panic!("no FK show-all link: {body}"));
+    let all = get(pool, more.strip_prefix(PREFIX).unwrap()).await;
+    assert!(all.contains("owner-19"), "{all}");
+}
+
 /// The capped facet counts NULL as one more value (#2344).
 async fn capped_facet_counts_null_as_a_value(pool: &Pool) {
     for i in 0..20 {
@@ -659,6 +685,7 @@ tri_dialect_test! {
         empty_facet_lists_the_empty_rows,
         facet_reads_only_the_values_it_shows,
         capped_facet_counts_null_as_a_value,
+        fk_facet_past_the_cut_is_reachable,
         noncanonical_active_value_is_listed_once,
         bulk_action_selection_is_capped,
     ],
