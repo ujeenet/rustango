@@ -2490,9 +2490,13 @@ pub(crate) async fn try_table_exists_here(
     let n = match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
+            // Indexed catalog lookup: sign-in runs it per request (#2366).
+            // Checks `current_schema()` only, never the rest of `search_path`.
             sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_name = $1",
+                "SELECT COUNT(*) FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = current_schema() AND c.relname = $1 \
+             AND c.relkind IN ('r', 'p', 'v', 'f')",
             )
             .bind(table)
             .fetch_one(pg)
