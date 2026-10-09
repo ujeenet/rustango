@@ -79,7 +79,7 @@ pub async fn admin_providers(pool: &Pool) -> Result<Vec<String>, ExecError> {
 /// `check --deploy` line for a tenant provider.
 #[cfg(feature = "tenancy")]
 #[must_use]
-pub fn tenant_warning(tenant: &str, slug: &str) -> String {
+pub(crate) fn tenant_warning(tenant: &str, slug: &str) -> String {
     format!(
         "[sso] tenant `{tenant}`: provider `{slug}` has allow_email_link off and no SsoLink \
          rows, so it refuses every existing user — turn on allow_email_link or add SsoLink rows"
@@ -89,7 +89,7 @@ pub fn tenant_warning(tenant: &str, slug: &str) -> String {
 /// `check --deploy` line for a shared provider, naming the tenants it refuses.
 #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
 #[must_use]
-pub fn shared_warning(slug: &str, tenants: &[String]) -> String {
+pub(crate) fn shared_warning(slug: &str, tenants: &[String]) -> String {
     format!(
         "[sso] shared provider `{slug}` has allow_email_link off and no SsoLink rows in tenant(s) \
          {}, so it refuses every existing user there — turn on allow_email_link or add SsoLink rows",
@@ -100,7 +100,7 @@ pub fn shared_warning(slug: &str, tenants: &[String]) -> String {
 /// `check --deploy` line for a bare-admin provider.
 #[cfg(feature = "admin-sso")]
 #[must_use]
-pub fn admin_warning(slug: &str) -> String {
+pub(crate) fn admin_warning(slug: &str) -> String {
     format!(
         "[sso] admin provider `{slug}` has no SsoLink rows, so it refuses every admin user — \
          add SsoLink rows (the admin never links by email)"

@@ -435,41 +435,10 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
     );
 }
 
-/// `rustango_shared_sso_providers`; the real model is crate-private.
-#[cfg(feature = "admin-sso")]
-#[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_shared_sso_providers", managed = false)]
-#[allow(dead_code)]
-pub struct SharedRow {
-    #[rustango(primary_key)]
-    pub id: Auto<i64>,
-    #[rustango(max_length = 64, unique)]
-    pub slug: String,
-    #[rustango(max_length = 150)]
-    pub label: String,
-    #[rustango(max_length = 32)]
-    pub kind: String,
-    #[rustango(max_length = 255)]
-    pub issuer_url: Option<String>,
-    #[rustango(max_length = 255)]
-    pub client_id: String,
-    #[rustango(max_length = 1024)]
-    pub client_secret: Cast<EncryptedString>,
-    pub enabled: bool,
-    pub sort_order: i32,
-    #[rustango(max_length = 255)]
-    pub scopes: Option<String>,
-    pub allow_email_link: bool,
-    #[rustango(auto_now_add)]
-    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
-    #[rustango(auto_now)]
-    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
-}
-
 /// The `check --deploy` scan: linking off, no link rows, existing users (#2359).
 async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
     use rustango::sql::FetcherPool as _;
-    use rustango::sso::check;
+    use rustango::testkit::sso_check as check;
     // Unique per run: the shared user tables keep earlier runs' rows.
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -520,9 +489,10 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .unwrap();
         assert_eq!(check::admin_providers(pool).await.unwrap(), ["corp"]);
 
-        rustango::testkit::matrix::fresh_table::<SharedRow>(pool).await;
+        use check::SharedSsoProvider;
+        rustango::testkit::matrix::fresh_table::<SharedSsoProvider>(pool).await;
         for (slug, allow) in [("team", false), ("corp", false), ("free", true)] {
-            SharedRow {
+            SharedSsoProvider {
                 id: Auto::default(),
                 slug: slug.into(),
                 label: slug.into(),
@@ -544,7 +514,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
         }
         // `corp` is the tenant's own enabled row, so the shared one is never used here.
         assert_eq!(check::shared_providers(pool, pool).await.unwrap(), ["team"]);
-        let team = SharedRow::objects()
+        let team = SharedSsoProvider::objects()
             .filter("slug", "team")
             .fetch(pool)
             .await

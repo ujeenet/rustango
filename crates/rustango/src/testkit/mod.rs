@@ -411,6 +411,19 @@ pub fn reset_org_cache() {
     crate::tenancy::reset_org_cache();
 }
 
+/// The `check --deploy` SSO scan (#2359), reachable from integration tests.
+#[cfg(all(feature = "sso", any(feature = "tenancy", feature = "admin-sso")))]
+pub mod sso_check {
+    #[cfg(feature = "admin-sso")]
+    pub use crate::sso::check::admin_providers;
+    #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+    pub use crate::sso::check::shared_providers;
+    #[cfg(feature = "tenancy")]
+    pub use crate::sso::check::tenant_providers;
+    #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+    pub use crate::tenancy::sso::SharedSsoProvider;
+}
+
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
 mod tests {
     use super::*;
