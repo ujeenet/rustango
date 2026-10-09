@@ -1063,6 +1063,82 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     assert!(!is_super, "set-superuser --off did not land");
     assert!(rustango::tenancy::password::verify("hunter3", &hash).unwrap());
 
+    // 6c. flush --tenant with no filter clears the tenant schema (#2284).
+    let (out, res) = run(&pools, &url, &dir, &["flush", "--tenant", &slug, "--yes"]).await;
+    res.unwrap_or_else(|e| {
+        panic!(
+            "whole-tenant flush: {e}
+{out}"
+        )
+    });
+    let user_count: i64 = sqlx::query_as::<_, (i64,)>(&format!(
+        r#"SELECT COUNT(*)::bigint FROM "{slug}"."rustango_users""#,
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(user_count, 0, "flush --tenant left the tenant's users");
+
+    // 6d. A registry model is filtered out, and the org row survives.
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "Org"],
+    )
+    .await;
+    res.unwrap();
+    assert!(out.contains("no tables match"), "{out}");
+    let org_left: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    assert_eq!(
+        org_left, 1,
+        "flush --tenant --model Org touched the registry"
+    );
+
+    // 6e. A table missing from the tenant schema never falls through to `public`.
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["create-user", &slug, "bob", "--password", "hunter2"],
+    )
+    .await;
+    res.unwrap();
+    for sql in [
+        // A copy with no referrers, so only the schema decides what TRUNCATE hits.
+        "DROP TABLE IF EXISTS public.rustango_users CASCADE".to_owned(),
+        format!(r#"CREATE TABLE public.rustango_users AS SELECT * FROM "{slug}"."rustango_users""#),
+        format!(r#"DROP TABLE "{slug}"."rustango_users" CASCADE"#),
+    ] {
+        sqlx::query(&sql).execute(&pool).await.unwrap();
+    }
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "User"],
+    )
+    .await;
+    let public_users: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM public.rustango_users")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    sqlx::query("DROP TABLE public.rustango_users CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(public_users, 1, "flush --tenant truncated public's table");
+    assert!(res.is_err(), "the tenant has no rustango_users table");
+
     // 7. Org row landed.
     let org_count: i64 =
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
@@ -1082,5 +1158,264 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
             .await
             .unwrap();
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two tenants never share a schema: a purge of one would drop the other (#2290).
+#[tokio::test]
+async fn create_tenant_refuses_a_schema_another_tenant_uses() {
+    use rustango::sql::FetcherPool as _;
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("schema_clash");
+    let pools = TenantPools::new(pool.clone());
+
+    // An explicit name, then a slug whose default is that name.
+    let shared = unique("shared");
+    let legacy = unique("legacy");
+    drop_schema(&pool, &shared).await;
+    run(
+        &pools,
+        &url,
+        &dir,
+        &[
+            "create-tenant",
+            &legacy,
+            "--mode",
+            "schema",
+            "--schema-name",
+            &shared,
+            "--no-migrate",
+        ],
+    )
+    .await
+    .1
+    .unwrap();
+    let (_, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["create-tenant", &shared, "--mode", "schema", "--no-migrate"],
+    )
+    .await;
+    let err = res.expect_err("a slug defaulting to a used schema must be refused");
+    assert!(err.to_string().contains("already used"), "{err}");
+
+    // A NULL `schema_name` claims the slug.
+    let null_slug = unique("nullschema");
+    let mut org = Org {
+        slug: null_slug.clone(),
+        display_name: null_slug.clone(),
+        storage_mode: "schema".into(),
+        schema_name: None,
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+    let other = unique("other");
+    let (_, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &[
+            "create-tenant",
+            &other,
+            "--mode",
+            "schema",
+            "--schema-name",
+            &null_slug,
+            "--no-migrate",
+        ],
+    )
+    .await;
+    assert!(res.is_err(), "a slug-default schema must be refused too");
+
+    let orgs: Vec<Org> = Org::objects()
+        .fetch(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+    let mut slugs: Vec<_> = orgs.iter().map(|o| o.slug.clone()).collect();
+    slugs.sort();
+    let mut want = vec![legacy.clone(), null_slug.clone()];
+    want.sort();
+    assert_eq!(slugs, want, "a refused tenant left a row");
+
+    drop_schema(&pool, &shared).await;
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The console's create form refuses a schema another tenant uses (#2290).
+#[tokio::test]
+async fn console_create_refuses_a_schema_another_tenant_uses() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use rustango::sql::{Auto, FetcherPool as _};
+    use rustango::tenancy::operator_console::{router_with_provisioning, SessionSecret};
+    use rustango::tenancy::provision::Provisioner;
+    use tower::ServiceExt;
+
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("console_schema_clash");
+    let pools = std::sync::Arc::new(TenantPools::new(pool.clone()));
+    let registry = pools.registry_pool();
+
+    let shared = unique("cshared");
+    drop_schema(&pool, &shared).await;
+    let mut org = Org {
+        slug: unique("clegacy"),
+        display_name: "legacy".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some(shared.clone()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&registry).await.unwrap();
+
+    let username = unique("op");
+    let mut op = rustango::tenancy::Operator {
+        id: Auto::default(),
+        username: username.clone(),
+        password_hash: rustango::tenancy::password::hash("letmein").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(&registry).await.unwrap();
+    let provisioner = Provisioner::new(pools.clone(), url.clone(), &dir).erased();
+    let app = router_with_provisioning(
+        registry.clone(),
+        pools.clone(),
+        provisioner,
+        SessionSecret::from_env_or_random(),
+    );
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("username={username}&password=letmein")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .expect("session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/new")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "slug={shared}&storage_mode=schema&backend_kind=postgres&no_migrate=1"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("already used by another tenant"), "{html}");
+    let taken: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq(shared.clone()))
+        .fetch(&registry)
+        .await
+        .unwrap();
+    assert!(
+        taken.is_empty(),
+        "the console created a tenant on a used schema"
+    );
+
+    drop_schema(&pool, &shared).await;
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A schema is free when only a database-mode tenant has that slug, or a
+/// schema tenant has it as slug but lives elsewhere (#2290).
+#[tokio::test]
+async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    let dir = fresh_dir("schema_free");
+    let pools = TenantPools::new(pool.clone());
+    let registry = rustango::sql::Pool::from(pool.clone());
+
+    let db_slug = unique("dbmode");
+    let mut db_org = Org {
+        slug: db_slug.clone(),
+        display_name: db_slug.clone(),
+        database_url: Some("postgres://example@db.example.com/x".into()),
+        ..rustango::testkit::org()
+    };
+    db_org.save_pool(&registry).await.unwrap();
+    let moved = unique("moved");
+    let elsewhere = unique("elsewhere");
+    let mut schema_org = Org {
+        slug: moved.clone(),
+        display_name: moved.clone(),
+        storage_mode: "schema".into(),
+        schema_name: Some(elsewhere.clone()),
+        ..rustango::testkit::org()
+    };
+    schema_org.save_pool(&registry).await.unwrap();
+
+    for taken_slug in [&db_slug, &moved] {
+        let fresh = unique("fresh");
+        drop_schema(&pool, taken_slug).await;
+        let (out, res) = run(
+            &pools,
+            &url,
+            &dir,
+            &[
+                "create-tenant",
+                &fresh,
+                "--mode",
+                "schema",
+                "--schema-name",
+                taken_slug,
+                "--no-migrate",
+            ],
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("schema `{taken_slug}` is free: {e} {out}"));
+        drop_schema(&pool, taken_slug).await;
+    }
+
+    rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

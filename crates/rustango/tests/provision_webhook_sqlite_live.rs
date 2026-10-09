@@ -769,3 +769,149 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
     let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
     assert!(!orgs[0].active, "a purged tenant's run resumed a new one");
 }
+
+/// Replay a failed run's delivery and wait for its run.
+async fn replay(b: &Booted, slug: &str, key: &str) -> store::ProvisioningRun {
+    let body = body_for(slug, key, chrono::Utc::now().timestamp());
+    let sig = signed(&body);
+    let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
+    let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
+    await_run(b, run_id).await
+}
+
+/// Set `active` without the framework, so only the edit under test unlinks.
+async fn set_active_raw(b: &Booted, org_id: i64, active: bool) {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    Org::objects()
+        .where_(Org::id.eq(org_id))
+        .update()
+        .set("active", active)
+        .execute_pool(&b.pools.registry_pool())
+        .await
+        .unwrap();
+}
+
+/// Activated through the console's edit path: a replay after a later
+/// suspension leaves it suspended (#2292).
+#[tokio::test]
+async fn a_retry_does_not_revive_a_tenant_the_console_activated() {
+    use rustango::tenancy::org_edit::{apply, OrgPatch};
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("activated");
+    let org_id = half_made(&b, &holder, &slug, "evt-activated", true).await;
+    let registry = b.pools.registry_pool();
+    let patch = OrgPatch {
+        active: Some(true),
+        ..OrgPatch::default()
+    };
+    apply(&registry, &slug, &patch).await.expect("console edit");
+    set_active_raw(&b, org_id, false).await;
+
+    let run = replay(&b, &slug, "evt-activated").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a replay revived a suspended tenant");
+}
+
+/// Any console edit of an active org unlinks it too (#2292).
+#[tokio::test]
+async fn a_retry_does_not_revive_a_tenant_edited_while_active() {
+    use rustango::tenancy::org_edit::{apply, OrgPatch};
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("edited");
+    let org_id = half_made(&b, &holder, &slug, "evt-edited", true).await;
+    let registry = b.pools.registry_pool();
+    set_active_raw(&b, org_id, true).await;
+    let patch = OrgPatch {
+        display_name: Some("Renamed".into()),
+        ..OrgPatch::default()
+    };
+    apply(&registry, &slug, &patch).await.expect("console edit");
+    set_active_raw(&b, org_id, false).await;
+
+    let run = replay(&b, &slug, "evt-edited").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a replay revived a suspended tenant");
+}
+
+/// Activated by hand, then deactivated: a replay leaves it suspended (#2292).
+#[tokio::test]
+async fn a_retry_does_not_revive_a_deactivated_tenant() {
+    use rustango::core::Column as _;
+    use rustango::sql::UpdaterPool as _;
+    use rustango::tenancy::decommission::{decommission, Action};
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("deactivated");
+    let org_id = half_made(&b, &holder, &slug, "evt-deactivated", true).await;
+    let registry = b.pools.registry_pool();
+    Org::objects()
+        .where_(Org::id.eq(org_id))
+        .update()
+        .set("active", true)
+        .execute_pool(&registry)
+        .await
+        .unwrap();
+    decommission(b.pools.as_ref(), &slug, Action::Deactivate)
+        .await
+        .expect("deactivate");
+
+    let run = replay(&b, &slug, "evt-deactivated").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a replay revived a deactivated tenant");
+}
+
+/// A run left `running` after it activated the org (its close failed) is
+/// unlinked too, so once reaped as failed it cannot revive the org (#2292).
+#[tokio::test]
+async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
+    let holder = tempfile::tempdir().expect("tenants dir");
+    let b = boot(&holder).await;
+    let slug = unique("reaped");
+    let registry = b.pools.registry_pool();
+    let run = store::open_run(
+        &registry,
+        &slug,
+        "database",
+        "sqlite",
+        None,
+        None,
+        Some("evt-reaped"),
+    )
+    .await
+    .unwrap();
+    let run_id = run.id.get().copied().unwrap();
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!(
+            "sqlite://{}/t_{slug}.db?mode=rwc",
+            holder.path().display()
+        )),
+        active: true,
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&registry).await.unwrap();
+    store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    rustango::tenancy::decommission::decommission(
+        b.pools.as_ref(),
+        &slug,
+        rustango::tenancy::decommission::Action::Deactivate,
+    )
+    .await
+    .expect("deactivate");
+    age_run(&b, run_id).await;
+
+    let run = replay(&b, &slug, "evt-reaped").await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
+    assert!(!orgs[0].active, "a reaped run revived a deactivated tenant");
+}

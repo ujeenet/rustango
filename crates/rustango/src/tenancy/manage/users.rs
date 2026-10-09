@@ -686,8 +686,7 @@ where
         StorageMode::Schema => {
             #[cfg(feature = "postgres")]
             {
-                let schema = org.schema_name.unwrap_or_else(|| slug.to_owned());
-                let pg = build_schema_scoped_pool(registry_url, &schema).await?;
+                let pg = build_schema_scoped_pool(registry_url, org.effective_schema()).await?;
                 Ok(rustango::sql::Pool::Postgres(pg))
             }
             #[cfg(not(feature = "postgres"))]

@@ -71,6 +71,10 @@ impl Dialect for Postgres {
         ))
     }
 
+    fn defer_foreign_keys_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
         let quoted: Vec<String> = tables.iter().map(|t| self.quote_ident(t)).collect();
         vec![format!(

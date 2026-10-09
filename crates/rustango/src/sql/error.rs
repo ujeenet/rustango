@@ -317,6 +317,15 @@ pub enum ExecError {
     #[error("m2m on `{through}` needs a saved source row; its primary key is unset")]
     M2mUnsavedSource { through: &'static str },
 
+    /// A prefetch or `in_bulk` needed more keys than one `IN` list takes
+    /// and the query cannot be split: a limit or offset would apply per
+    /// batch, or the query's own binds already fill the cap (#2295).
+    #[error("`{table}`: {keys} IN-list keys do not fit the {max} binds left, and the query cannot be split")]
+    InListUnsplittable {
+        table: &'static str,
+        keys: usize,
+        max: usize,
+    },
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
     /// filter that matches more than one row, so there is no single
     /// object to return. Tighten the filter or use
