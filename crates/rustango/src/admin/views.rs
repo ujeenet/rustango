@@ -1634,14 +1634,14 @@ pub(crate) async fn autocomplete_view(
     let display_field = model.display_field().unwrap_or(pk_field);
 
     let search_columns = search_columns(model, &admin_cfg);
-    let search = if q.is_empty() || search_columns.is_empty() {
-        None
-    } else {
-        Some(SearchClause {
-            columns: search_columns,
-            query: q.clone(),
-        })
-    };
+    // A query with no column to match it matches nothing (#2391).
+    if !q.is_empty() && search_columns.is_empty() {
+        return Ok(axum::Json(serde_json::json!({ "results": [] })));
+    }
+    let search = (!q.is_empty()).then(|| SearchClause {
+        columns: search_columns,
+        query: q.clone(),
+    });
 
     // The "view" hook runs after the read (#2231), so read up to
     // `AUTOCOMPLETE_MAX_PAGES` pages to fill `limit` past denied rows.

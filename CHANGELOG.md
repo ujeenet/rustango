@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin autocomplete with a query on a model with no searchable column returns no rows (#2391)
+
+It returned the first rows unfiltered.
+
 ### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
 
 For an `audit(...)` model a failed audit write now refuses the write instead of logging a warning. Custom actions still audit after their handler.
