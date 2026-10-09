@@ -26,7 +26,10 @@
 
 use std::collections::HashMap;
 
-use rustango::core::{AggregateExpr, Column as _, SqlValue};
+use rustango::core::joins::aliased;
+use rustango::core::{
+    AggregateExpr, Column as _, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr,
+};
 use rustango::sql::{Auto, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -229,6 +232,43 @@ async fn aggregate_alias_does_not_take_the_column_type(pool: &Pool) {
     assert_eq!(groups[0]["published"], SqlValue::Bool(true));
 }
 
+/// A bool grouped through a join reads as `Bool`, with and without a
+/// derived table; MySQL and SQLite gave `I64` (#2322).
+async fn joined_group_bool_keeps_its_type(pool: &Pool) {
+    let self_join = Join {
+        target: Post::SCHEMA,
+        alias: "p",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("p", "id"),
+            op: Op::Eq,
+            rhs: aliased("values_tri_post", "id"),
+        },
+        project: vec![],
+    };
+    for distinct in [false, true] {
+        let mut qs = Post::objects().join(self_join.clone());
+        if distinct {
+            qs = qs.distinct();
+        }
+        let mut flags: Vec<SqlValue> = qs
+            .values(&["p.published"])
+            .annotate("n", AggregateExpr::Count(None))
+            .fetch(pool)
+            .await
+            .expect("joined group")
+            .into_iter()
+            .map(|r| r["p__published"].clone())
+            .collect();
+        flags.sort_by_key(|v| format!("{v:?}"));
+        assert_eq!(
+            flags,
+            [SqlValue::Bool(false), SqlValue::Bool(true)],
+            "distinct={distinct}"
+        );
+    }
+}
+
 /// NULL must error into a bare `i64` and read as `None` into
 /// `Option<i64>`; SQLite used to hand back `0` (#1773).
 async fn values_list_flat_null_needs_an_option(pool: &Pool) {
@@ -286,5 +326,6 @@ tri_dialect_test! {
         pluck_pairs_null_needs_an_option,
         values_keep_bool_and_json_types,
         aggregate_alias_does_not_take_the_column_type,
+        joined_group_bool_keeps_its_type,
     ],
 }

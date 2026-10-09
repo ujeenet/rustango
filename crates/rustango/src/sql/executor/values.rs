@@ -59,16 +59,22 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
     }
 }
 
-/// Per result column, the type `model` declares for it. MySQL and SQLite
+/// A leading result column: its output name and the type its model declares.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+type TypedCol = (
+    std::borrow::Cow<'static, str>,
+    Option<crate::core::FieldType>,
+);
+
+/// Per result column, the type its model declares. MySQL and SQLite
 /// store a UUID as text and MySQL a bool as an integer, so only the model tells.
 ///
-/// Only the leading `model_cols` count: an annotation or aggregate alias that
+/// Only the leading `typed` columns count: an annotation or aggregate alias that
 /// shares a column name (`SUM(x) AS flag`) is not that column (#2296).
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn column_types<R: sqlx::Row>(
     rows: &[R],
-    model: &crate::core::ModelSchema,
-    model_cols: &[&str],
+    typed: &[TypedCol],
 ) -> Vec<Option<crate::core::FieldType>> {
     use sqlx::Column as _;
     rows.first().map_or_else(Vec::new, |row| {
@@ -76,9 +82,10 @@ fn column_types<R: sqlx::Row>(
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                (model_cols.get(i) == Some(&c.name()))
-                    .then(|| model.field_by_column(c.name()).map(|f| f.ty))
-                    .flatten()
+                typed
+                    .get(i)
+                    .filter(|(name, _)| name == c.name())
+                    .and_then(|(_, ty)| *ty)
             })
             .collect()
     })
@@ -86,11 +93,42 @@ fn column_types<R: sqlx::Row>(
 
 /// The model columns a SELECT emits first: its projection, else every field.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn select_model_cols(query: &SelectQuery) -> Vec<&'static str> {
+fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
+    let model = query.model;
+    let typed = |c: &'static str| (c.into(), model.field_by_column(c).map(|f| f.ty));
+    match &query.projection {
+        Some(cols) => cols.iter().copied().map(typed).collect(),
+        None => model.scalar_fields().map(|f| typed(f.column)).collect(),
+    }
+}
+
+/// An aggregate's group columns. A joined `alias.col` comes back as
+/// `alias__col`, typed by the joined model (#2322).
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn aggregate_group_cols(query: &AggregateQuery) -> Vec<TypedCol> {
+    let model = query.model;
     query
-        .projection
-        .clone()
-        .unwrap_or_else(|| query.model.scalar_fields().map(|f| f.column).collect())
+        .group_by
+        .iter()
+        .map(|&col| match col.split_once('.') {
+            None => (col.into(), model.field_by_column(col).map(|f| f.ty)),
+            Some((alias, c)) => {
+                let target = if alias == model.table {
+                    Some(model)
+                } else {
+                    let derived = query.source.iter().flat_map(|s| s.joins.iter());
+                    query
+                        .joins
+                        .iter()
+                        .chain(derived)
+                        .find(|j| j.alias == alias)
+                        .map(|j| j.target)
+                };
+                let ty = target.and_then(|m| m.field_by_column(c)).map(|f| f.ty);
+                (format!("{alias}__{c}").into(), ty)
+            }
+        })
+        .collect()
 }
 
 #[cfg(feature = "mysql")]
@@ -294,7 +332,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model, &select_model_cols(query));
+            let col_types = column_types(&rows, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -318,7 +356,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model, &select_model_cols(query));
+            let col_types = column_types(&rows, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -380,7 +418,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model, &query.group_by);
+            let col_types = column_types(&rows, &aggregate_group_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -404,7 +442,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model, &query.group_by);
+            let col_types = column_types(&rows, &aggregate_group_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Column as _;
@@ -462,7 +500,7 @@ pub async fn fetch_values_list(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, query.model, &select_model_cols(query));
+            let col_types = column_types(&rows, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
@@ -483,7 +521,7 @@ pub async fn fetch_values_list(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, query.model, &select_model_cols(query));
+            let col_types = column_types(&rows, &select_model_cols(query));
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;

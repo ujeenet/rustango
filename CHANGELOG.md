@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `values().annotate()` grouped by a joined bool reads as `Bool` on MySQL and SQLite (#2322)
+
+A `values(&["a.flag"])` group column took no model type and came back as `I64`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
