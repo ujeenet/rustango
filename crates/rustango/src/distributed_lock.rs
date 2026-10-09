@@ -30,10 +30,22 @@
 //!     guard.release().await;
 //! }
 //!
-//! // Or use the closure form which auto-releases on drop:
-//! lock.with_lock("daily_report", Duration::from_secs(60), || async {
-//!     run_daily_report().await;
+//! // Or use the closure form, which releases when the body ends:
+//! lock.with_lock("rebuild_index", Duration::from_secs(60), || async {
+//!     rebuild_index().await;
 //! }).await;
+//!
+//! // From a scheduler: once per UTC day across every pod. Tick often;
+//! // the first tick of each day runs it. `every(day)` alone can miss a
+//! // day across a deploy, and `with_lock` runs it once per pod.
+//! let day = Duration::from_secs(86_400);
+//! scheduler.every("daily_report", Duration::from_secs(60), move || {
+//!     let lock = lock.clone();
+//!     async move {
+//!         // `run_daily_report` returns a `Result`; an `Err` retries next tick.
+//!         lock.once_per_period("daily_report", day, || run_daily_report()).await;
+//!     }
+//! });
 //! ```
 //!
 //! ## Warnings
@@ -166,6 +178,105 @@ impl DistributedLock {
         guard.release().await;
         Some(result)
     }
+
+    /// Run `body` at most once per `period` across every caller sharing
+    /// the cache. Use this, not [`Self::with_lock`], for a scheduled job,
+    /// and tick well inside the period (say every 60s).
+    ///
+    /// Windows count from the Unix epoch, so a daily period starts at
+    /// 00:00 UTC and pods booted apart agree on them. A finished run keeps
+    /// the window's lock, so later ticks in that window skip. A body that
+    /// returns `Err` or panics frees it, so a later tick retries.
+    ///
+    /// While `body` runs it also holds the plain `name` lock (TTL one
+    /// period), so a run that outlasts its window is not overlapped by the
+    /// next one, provided `body` ends within a period. A run dropped
+    /// mid-way, such as an aborted task, frees both.
+    pub async fn once_per_period<F, Fut, T, E>(
+        &self,
+        name: &str,
+        period: Duration,
+        body: F,
+    ) -> Option<Result<T, E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        let period = period.max(Duration::from_millis(1));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let window = now.as_millis() / period.as_millis();
+        self.once_in_window(name, period, window, body).await
+    }
+
+    /// [`Self::once_per_period`] for a window the caller already computed.
+    pub(crate) async fn once_in_window<F, Fut, T, E>(
+        &self,
+        name: &str,
+        period: Duration,
+        window: u128,
+        body: F,
+    ) -> Option<Result<T, E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        // Twice the period, so a pod whose clock lags still sees the key.
+        let guard = self
+            .try_acquire(&format!("{name}@{window}"), period.saturating_mul(2))
+            .await?;
+        // The key two windows back is past any skew; drop it so a database
+        // cache does not keep one row per window forever.
+        if let Some(old) = window.checked_sub(2) {
+            let _ = self
+                .cache
+                .delete(&self.key_for(&format!("{name}@{old}")))
+                .await;
+        }
+        // A run from the last window may still be going on another pod.
+        // Free this window so a later tick retries once it ends.
+        let Some(running) = self.try_acquire(name, period).await else {
+            guard.release().await;
+            return None;
+        };
+        // Frees both locks if this future is dropped mid-run (an aborted task).
+        let mut held = ReleaseOnDrop(Some((guard, running)));
+        let result = crate::panic_guard::catch_unwind(async move { body().await }).await;
+        let (guard, running) = held.0.take().expect("held until here");
+        running.release().await;
+        match result {
+            Ok(Ok(v)) => {
+                guard.keep_until_ttl();
+                Some(Ok(v))
+            }
+            Ok(Err(e)) => {
+                guard.release().await;
+                Some(Err(e))
+            }
+            Err(panic) => {
+                guard.release().await;
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+}
+
+/// Releases the window and run locks when a run is dropped before it ends.
+struct ReleaseOnDrop(Option<(LockGuard, LockGuard)>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        // Best effort: without a runtime the TTLs free them.
+        if let (Some((window, running)), Ok(rt)) =
+            (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            rt.spawn(async move {
+                running.release().await;
+                window.release().await;
+            });
+        }
+    }
 }
 
 /// Holds a lock until released or until the TTL expires.
@@ -181,6 +292,12 @@ impl LockGuard {
     /// nothing.
     pub async fn release(self) {
         self.release_inner().await;
+    }
+
+    /// Drop the guard without releasing: the TTL frees the lock.
+    fn keep_until_ttl(self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn release_inner(&self) {
@@ -373,6 +490,219 @@ mod tests {
         assert!(r.is_some());
         let g = l.try_acquire("job", Duration::from_secs(5)).await;
         assert!(g.is_some());
+    }
+
+    /// A finished period run keeps its lock, so a caller later in the
+    /// same window skips (#2330).
+    #[tokio::test]
+    async fn once_per_period_holds_the_window_after_the_body() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let ok = |n: i32| async move { Ok::<_, ()>(n) };
+        assert_eq!(l.once_per_period("j", day, || ok(1)).await, Some(Ok(1)));
+        assert_eq!(l.once_per_period("j", day, || ok(2)).await, None);
+    }
+
+    fn window_now(period: Duration) -> u128 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        now.as_millis() / period.as_millis()
+    }
+
+    /// An `Err` or a panic frees the window, so a later tick retries.
+    #[tokio::test]
+    async fn once_per_period_retries_after_err_or_panic() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let failed = l.once_per_period("j", day, || async { Err::<(), _>("x") });
+        assert_eq!(failed.await, Some(Err("x")));
+        let l2 = l.clone();
+        let panicked = tokio::spawn(async move {
+            l2.once_per_period("j", day, || async {
+                if day > Duration::ZERO {
+                    panic!("boom");
+                }
+                Ok::<(), ()>(())
+            })
+            .await
+        });
+        assert!(panicked.await.unwrap_err().is_panic());
+        let ok = l.once_per_period("j", day, || async { Ok::<_, ()>(1) });
+        assert_eq!(ok.await, Some(Ok(1)), "the window stayed taken");
+        // The plain name lock is free again too.
+        assert!(l.try_acquire("j", day).await.is_some());
+    }
+
+    /// The window key outlives the period (clock skew) and the key two
+    /// windows back is deleted.
+    #[tokio::test]
+    async fn once_per_period_keys_ttl_and_cleanup() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let l = DistributedLock::new(cache.clone());
+        let period = Duration::from_millis(100);
+        let w = loop {
+            let w = window_now(period);
+            for old in [w - 2, w - 1] {
+                cache
+                    .set(&format!("lock:t@{old}"), "old", None)
+                    .await
+                    .unwrap();
+            }
+            let r = l.once_per_period("t", period, || async { Ok::<_, ()>(()) });
+            assert!(r.await.is_some());
+            if window_now(period) == w {
+                break w;
+            }
+        };
+        assert!(!cache.exists(&format!("lock:t@{}", w - 2)).await.unwrap());
+        assert!(
+            cache.exists(&format!("lock:t@{}", w - 1)).await.unwrap(),
+            "the last window's key is kept for skew"
+        );
+        tokio::time::sleep(Duration::from_millis(140)).await;
+        assert!(
+            cache.exists(&format!("lock:t@{w}")).await.unwrap(),
+            "TTL shorter than twice the period"
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            !cache.exists(&format!("lock:t@{w}")).await.unwrap(),
+            "TTL longer than twice the period"
+        );
+    }
+
+    /// A zero period is clamped, not a division by zero.
+    #[tokio::test]
+    async fn once_per_period_clamps_a_zero_period() {
+        let l = lock();
+        let r = l.once_per_period("z", Duration::ZERO, || async { Ok::<_, ()>(()) });
+        assert_eq!(r.await, Some(Ok(())));
+    }
+
+    /// Sleep until `offset` into the next `period` window.
+    async fn sleep_to_offset(period: Duration, offset: Duration) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let into = (now % period.as_millis()) as u64;
+        let wait = period.as_millis() as u64 - into + offset.as_millis() as u64;
+        tokio::time::sleep(Duration::from_millis(wait)).await;
+    }
+
+    /// A run that crosses into the next window is not overlapped by that
+    /// window's run; the next window runs once it ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn once_per_period_does_not_overlap_a_long_run() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let period = Duration::from_millis(200);
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let (a, b) = (
+            DistributedLock::new(cache.clone()),
+            DistributedLock::new(cache),
+        );
+        let running = StdArc::new(AtomicBool::new(false));
+        let (overlaps, b_runs) = (
+            StdArc::new(AtomicUsize::new(0)),
+            StdArc::new(AtomicUsize::new(0)),
+        );
+        sleep_to_offset(period, Duration::from_millis(100)).await;
+        let r = running.clone();
+        let pod_a = tokio::spawn(async move {
+            a.once_per_period("long", period, || async {
+                r.store(true, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                r.store(false, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            })
+            .await
+        });
+        let end = std::time::Instant::now() + Duration::from_millis(240);
+        while std::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let (r, o, n) = (running.clone(), overlaps.clone(), b_runs.clone());
+            b.once_per_period("long", period, || async move {
+                if r.load(Ordering::SeqCst) {
+                    o.fetch_add(1, Ordering::SeqCst);
+                }
+                n.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            })
+            .await;
+        }
+        assert!(pod_a.await.unwrap().is_some(), "pod A never ran");
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0, "two runs overlapped");
+        assert_eq!(
+            b_runs.load(Ordering::SeqCst),
+            1,
+            "the next window ran {} times",
+            b_runs.load(Ordering::SeqCst)
+        );
+    }
+
+    /// While another pod's run holds the name lock, a tick frees the window
+    /// it took, so a later tick in the same window runs.
+    #[tokio::test]
+    async fn a_busy_run_lock_leaves_the_window_for_a_later_tick() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let other = l.try_acquire("j", day).await.expect("another pod's run");
+        let blocked = l.once_per_period("j", day, || async { Ok::<_, ()>(1) });
+        assert_eq!(blocked.await, None);
+        other.release().await;
+        let later = l.once_per_period("j", day, || async { Ok::<_, ()>(2) });
+        assert_eq!(later.await, Some(Ok(2)), "the window stayed taken");
+    }
+
+    /// An aborted run (scheduler shutdown) frees both locks, so a later tick
+    /// in the same window runs.
+    #[tokio::test]
+    async fn an_aborted_run_frees_its_window() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let (started_tx, started) = tokio::sync::oneshot::channel();
+        let l2 = l.clone();
+        let task = tokio::spawn(async move {
+            l2.once_per_period("j", day, || async move {
+                let _ = started_tx.send(());
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok::<_, ()>(())
+            })
+            .await
+        });
+        started.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // The release runs on a spawned task.
+        let mut again = None;
+        for _ in 0..50 {
+            again = l
+                .once_per_period("j", day, || async { Ok::<_, ()>(()) })
+                .await;
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(again, Some(Ok(())), "the aborted run kept the window");
+    }
+
+    /// A body that panics before its first await still frees the window.
+    #[tokio::test]
+    async fn a_body_panicking_on_call_frees_the_window() {
+        let l = lock();
+        let day = Duration::from_secs(86_400);
+        let l2 = l.clone();
+        let r = tokio::spawn(async move {
+            l2.once_per_period("j", day, || -> std::future::Ready<Result<(), ()>> {
+                panic!("before the future")
+            })
+            .await
+        });
+        assert!(r.await.unwrap_err().is_panic());
+        let again = l.once_per_period("j", day, || async { Ok::<_, ()>(()) });
+        assert_eq!(again.await, Some(Ok(())));
     }
 
     /// Unscoped, two tenants share one lock name and the second is

@@ -374,3 +374,91 @@ async fn password_and_key_verbs_take_flags_anywhere() {
         .await
         .is_err());
 }
+
+/// `flush` never wipes the registry; `--tenant` clears that tenant only (#2284).
+#[tokio::test]
+async fn flush_never_touches_the_registry() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+
+    let plain = b.run(&["flush", "--yes"]).await;
+    let listed = b.run(&["list-tenants"]).await.expect("list");
+    assert!(
+        listed.contains("acme"),
+        "flush wiped the registry: {listed}"
+    );
+    let err = plain.expect_err("plain flush");
+    assert!(err.contains("--tenant"), "{err}");
+    let out = b
+        .run(&["flush", "--tenant", "acme", "--yes", "--model", "Org"])
+        .await
+        .expect("registry model filtered out");
+    assert!(out.contains("no tables match"), "{out}");
+
+    b.run(&["flush", "--tenant", "acme", "--yes", "--model", "User"])
+        .await
+        .expect("tenant flush");
+    assert!(
+        b.run(&["set-superuser", "acme", "bob", "--off"])
+            .await
+            .is_err(),
+        "the tenant's user survived the flush"
+    );
+    let listed = b.run(&["list-tenants"]).await.expect("list");
+    assert!(listed.contains("acme"), "{listed}");
+}
+
+/// Dry run, unknown slug, and a whole-tenant flush with no filter (#2284).
+#[tokio::test]
+async fn flush_tenant_dry_run_unknown_slug_and_no_filter() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+
+    let out = b
+        .run(&["flush", "--tenant", "acme"])
+        .await
+        .expect("dry run");
+    assert!(out.contains("would clear"), "{out}");
+    b.run(&["set-superuser", "acme", "bob", "--off"])
+        .await
+        .expect("a dry run deleted the user");
+
+    let err = b
+        .run(&["flush", "--tenant", "nope", "--yes"])
+        .await
+        .expect_err("unknown slug");
+    assert!(err.contains("not found"), "{err}");
+
+    let out = b
+        .run(&["flush", "--tenant", "acme", "--yes"])
+        .await
+        .expect("whole-tenant flush");
+    assert!(out.contains("cleared"), "{out}");
+    assert!(
+        b.run(&["set-superuser", "acme", "bob", "--off"])
+            .await
+            .is_err(),
+        "the tenant's user survived the flush"
+    );
+    let listed = b.run(&["list-tenants"]).await.expect("list");
+    assert!(listed.contains("acme"), "{listed}");
+}
+
+/// `db:restore --clean` would drop the registry with `public` (#2283).
+#[tokio::test]
+async fn restore_clean_is_refused_under_tenancy() {
+    let b = boot().await;
+    // A missing file: even unrefused, nothing reaches psql.
+    let missing = b._tmp.path().join("nope.sql");
+    let err = b
+        .run(&["db:restore", "--clean", "--yes", missing.to_str().unwrap()])
+        .await
+        .expect_err("--clean under tenancy");
+    assert!(err.contains("registry"), "{err}");
+}

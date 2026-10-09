@@ -253,3 +253,85 @@ async fn list_view_falls_back_to_placeholder_on_stale_content_type() {
         "stale-CT fallback missing: {html}"
     );
 }
+
+async fn get_html(app: axum::Router, uri: &str) -> String {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+    let body = to_bytes(res.into_body(), 1_000_000).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// One Comment pointing at a fresh Post; returns `(comment_pk, post_pk)`.
+async fn seed_comment_on_post(p: &rustango::sql::Pool) -> (i64, i64) {
+    let mut post = Post {
+        id: Auto::Unset,
+        title: "Post target".into(),
+    };
+    post.save_pool(p).await.unwrap();
+    let post_pk = *post.id.get().unwrap();
+    let mut c = Comment {
+        id: Auto::Unset,
+        content_type_id: 0,
+        object_pk: 0,
+        body: "comment on post".into(),
+    };
+    c.set_content_object_for::<Post>(p, post_pk).await.unwrap();
+    c.save_pool(p).await.unwrap();
+    (*c.id.get().unwrap(), post_pk)
+}
+
+// #2341: the detail page links under the admin prefix, like the list.
+#[tokio::test]
+async fn detail_view_gfk_link_keeps_admin_prefix() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    fresh(&pool).await;
+    let p = rustango::sql::Pool::from(pool.clone());
+    let (c_pk, post_pk) = seed_comment_on_post(&p).await;
+
+    let html = get_html(
+        rustango::admin::router(pool.clone()),
+        &format!("/gfklist_comment/{c_pk}"),
+    )
+    .await;
+    let link = format!(r#"<a href="/__admin/gfklist_post/{post_pk}">"#);
+    assert!(
+        html.contains(&link),
+        "detail GFK link missing `{link}`: {html}"
+    );
+}
+
+// #2341: a target table the user cannot view gets no label or link.
+#[tokio::test]
+async fn gfk_target_without_view_perm_is_not_labelled() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    fresh(&pool).await;
+    let p = rustango::sql::Pool::from(pool.clone());
+    let (c_pk, post_pk) = seed_comment_on_post(&p).await;
+
+    for uri in [
+        "/gfklist_comment".to_owned(),
+        format!("/gfklist_comment/{c_pk}"),
+    ] {
+        let app = rustango::admin::Builder::new(pool.clone())
+            .with_user_perms(["gfklist_comment.view".to_owned()])
+            .build();
+        let html = get_html(app, &uri).await;
+        assert!(
+            !html.contains("gfklist_blog.post #") && !html.contains("/gfklist_post/"),
+            "{uri}: hidden target labelled or linked: {html}"
+        );
+        assert!(
+            html.contains(&format!("pk={post_pk})")),
+            "{uri}: fallback missing: {html}"
+        );
+    }
+}

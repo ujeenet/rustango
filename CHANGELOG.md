@@ -20,6 +20,102 @@ A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logg
 
 The 400 carries the reason; it was a logged 500.
 
+### Added — `DistributedLock::once_per_period`, `Job::retry_backoff`, `jobs::exponential_backoff`, `JobQueue::register_with` (#2330, #2332, #2334)
+
+`once_per_period` runs a body once per window counted from the Unix epoch (daily = 00:00 UTC); `register_with` registers a job with its own handler.
+
+### Fixed — a locked scheduler job ran once per pod (#2330)
+
+Tick often and wrap the body in `once_per_period`. A failed or panicking run frees its window for a later tick.
+
+### Changed — `EmailJob` retries for about ten minutes (#2332)
+
+`MAX_ATTEMPTS` 5 → 8, backoff 5s doubling; before, mail dead-lettered after ~15s.
+
+### Fixed — `MAX_ATTEMPTS = 0` never ran the job (#2333)
+
+Both queues treat 0 as one run, including rows already queued.
+
+### Fixed — `register_email_job` on a second in-memory queue rerouted all mail (#2334)
+
+Each in-memory queue's handler holds its own mailer. Database queues share `rustango_jobs`, so use one mailer per jobs table; a second one logs a warning (#2338).
+
+### Fixed — `FileMailer` processes overwrote each other's files (#2335)
+
+Names carry the pid and are opened with `create_new`, moving to the next number on a clash. On unix the files are 0600 and a new directory 0700.
+
+### Fixed — admin list facets read only the values they show (#2344)
+
+The `GROUP BY` stops one past the cap unless `facet_show_all`; a count query keeps "+N more" exact, and an active value past the cut is read on its own.
+
+### Fixed — admin audit feed hides tables whose rows a hook scopes from non-superusers (#2342)
+
+A queryset or `view` hook cannot be re-applied to a deleted row's snapshot, so those tables are superuser-only in the feed; a row's own history stays on its detail page.
+
+### Fixed — `MediaPerms` refuses an upload attributed to another user or filed into a hidden collection (#2343)
+
+A move into a collection and a collection nested under a parent need `rustango_media_collections.view` too; the gate reads both bodies.
+
+### Fixed — admin detail page links a generic FK under the admin prefix (#2341)
+
+It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.
+
+### Fixed — CI builds `tests/**` on each bare backend (#2328)
+
+`feature_combos` now runs `--tests --no-run` for `sqlite`, `postgres` and `mysql` alone, with `-D warnings`.
+
+### Fixed — `i18n::middleware` gated on axum too (#2329)
+
+Only reachable by enabling the internal `_tower` feature directly; every public feature that turns it on also turns on `_axum`.
+
+### Fixed — `prefetch_generic` on an integer PK narrower than i64 (#2298)
+
+Targets with an `Auto<i32>` or `i16` PK were dropped from the result map.
+
+### Fixed — M2M `set` with a repeated id (#2297)
+
+Repeated ids (e.g. a form posting `tags=1&tags=1`) are linked once instead of failing the whole set.
+
+### Fixed — bulk_update and IN-list prefetches past the bind cap (#2295)
+
+`Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists, and return `ExecError::InListUnsplittable` when a limit or offset forbids it.
+
+### Fixed — `values()` keeps JSON and bool types on MySQL and SQLite (#2296)
+
+MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I64` and `String`. All three now give `Json` and `Bool`.
+
+### Fixed — select_related chains sharing a hop (#2294)
+
+`.select_related("a").select_related("a__b")` joins `a` once; it emitted a duplicate alias every backend rejects.
+
+### Fixed — select_related on a NULL foreign key (#2293)
+
+A NULL FK now leaves the relation unloaded instead of failing the whole fetch; a set FK whose row is missing fails clearly on every backend.
+
+### Fixed — `db:restore --clean` checks the file, asks, and rolls back (#2283)
+
+It dropped `public` before reading the dump. Now `--clean` needs a non-empty regular file and `--yes` (or a typed `yes`), is refused in tenancy projects, and psql runs in one transaction so a failed load keeps the old data. A plain restore still reads pipes.
+
+### Fixed — tenancy `flush` no longer wipes the registry (#2284)
+
+It fell through to the single-tenant flush on the registry pool and deleted orgs, operators and hosts. Plain `flush` is refused now; `flush --tenant <slug>` clears that tenant's tables only.
+
+### Fixed — `flush` skips unmanaged models and views (#2285)
+
+It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail. Postgres also drops `CASCADE`, so a table outside the targets that references one makes the flush fail instead of being emptied. MySQL and SQLite delete in one transaction, children first, so a failure clears nothing and self-referencing tables flush on MySQL.
+
+### Fixed — two tenants can no longer share one schema (#2290)
+
+Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both. A schema-mode purge now refuses a schema another tenant still uses, or a reserved one such as `public`.
+
+### Fixed — a database-mode purge no longer fails on other pods' connections (#2291)
+
+Tenant PG pools connect as `application_name = rustango-tenant:<org id>`; a purge ends only those sessions, on any pod. Any other session, a URL naming the registry's database, or another tenant on the same database refuses the purge before the org is touched.
+
+### Fixed — a provisioning retry no longer revives a suspended tenant (#2292)
+
+Activating a tenant by edit, or deactivating it, unlinks the failed run that made it, so a webhook replay stops resuming it.
+
 ## [0.60.3] — 2026-10-08
 
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)

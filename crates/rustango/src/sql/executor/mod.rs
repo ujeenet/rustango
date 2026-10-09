@@ -91,6 +91,83 @@ pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
+/// Run `fetch` once per slice of `keys` that fits one `IN` list beside the
+/// binds `base` already carries, and concatenate the rows (#2295).
+/// `fetch` must add exactly one `IN` list over its keys to `base`.
+pub(crate) async fn fetch_in_chunks<T, C, F, Fut>(
+    pool: &Pool,
+    base: &QuerySet<T>,
+    keys: Vec<SqlValue>,
+    mut fetch: F,
+) -> Result<Vec<C>, ExecError>
+where
+    T: Model,
+    F: FnMut(Vec<SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    let carried = pool
+        .dialect()
+        .compile_select(&base.clone().compile()?)?
+        .params
+        .len();
+    let room = pool.dialect().max_bind_params().saturating_sub(carried);
+    let size = in_chunk_size(T::SCHEMA.table, keys.len(), room, base.is_sliced())?;
+    if keys.len() <= size {
+        return fetch(keys).await;
+    }
+    let mut out = Vec::new();
+    for chunk in keys.chunks(size) {
+        out.extend(fetch(chunk.to_vec()).await?);
+    }
+    Ok(out)
+}
+
+/// Keys per `IN` list: the `room` the query's own binds leave. Refused when
+/// there is none, or when a limit or offset would apply per batch.
+fn in_chunk_size(
+    table: &'static str,
+    keys: usize,
+    room: usize,
+    sliced: bool,
+) -> Result<usize, ExecError> {
+    if room == 0 || (sliced && keys > room) {
+        return Err(ExecError::InListUnsplittable {
+            table,
+            keys,
+            max: room,
+        });
+    }
+    Ok(room)
+}
+
+/// Fails when the `select_related` LEFT JOIN under `alias` matched no row
+/// though the FK is set: the target's PK cell is NULL, so the row is missing.
+///
+/// # Errors
+/// `sqlx::Error::ColumnDecode` for a missing target row, or a missing PK column.
+#[doc(hidden)]
+pub fn __rustango_require_join<R>(
+    row: &R,
+    target: &crate::core::ModelSchema,
+    alias: &str,
+) -> Result<(), sqlx::Error>
+where
+    R: sqlx::Row,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+{
+    let Some(pk) = target.primary_key() else {
+        return Ok(());
+    };
+    let col = format!("{alias}__{}", pk.column);
+    if sqlx::ValueRef::is_null(&row.try_get_raw(col.as_str())?) {
+        return Err(sqlx::Error::ColumnDecode {
+            index: col,
+            source: format!("foreign-key target row in `{}` is missing", target.table).into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(feature = "postgres")]
 impl<T> QuerySet<T>
 where
@@ -1304,14 +1381,41 @@ pub(crate) fn compile_bulk_insert_batches(
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN
 /// (VALUES …)` (MySQL); returns rows affected.
 ///
+/// Rows past the bind cap go in batches inside one transaction (#2295).
+///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let stmt = pool.dialect().compile_bulk_update(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    // Each row binds its PK plus one value per column; past the cap, batch (#2295).
+    let max_rows = (pool.dialect().max_bind_params() / (query.update_columns.len() + 1)).max(1);
+    let mut stmts = query
+        .rows
+        .chunks(max_rows)
+        .map(|chunk| {
+            let batch =
+                BulkUpdateQuery::new(query.model, query.update_columns.clone(), chunk.to_vec());
+            pool.dialect().compile_bulk_update(&batch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if stmts.len() == 1 && !atomic::in_block(pool) {
+        let stmt = stmts.remove(0);
+        return execute_pool(pool, &stmt.sql, stmt.params).await;
+    }
+    // All batches or none, like `bulk_insert_pool`.
+    atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            let mut affected = 0;
+            for stmt in stmts {
+                affected += execute_tx(&mut guard, &stmt.sql, stmt.params).await?;
+            }
+            Ok(affected)
+        })
+    })
+    .await
 }
 
 /// Run arbitrary SQL with bound `SqlValue` params; returns rows
@@ -2818,7 +2922,9 @@ where
     /// column, the later row wins. Prefer a unique column.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch`].
+    /// As [`FetcherPool::fetch`];
+    /// [`ExecError::InListUnsplittable`] when `ids` exceed one `IN` list
+    /// and the queryset has a limit or offset, or binds of its own fill the cap.
     pub async fn in_bulk<C, K, I, F>(
         self,
         column: C,
@@ -2839,14 +2945,16 @@ where
         if id_values.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let rows = self
-            .filter_op(
-                C::COLUMN,
-                crate::core::Op::In,
-                crate::core::SqlValue::List(id_values),
-            )
-            .fetch(pool)
-            .await?;
+        let rows = fetch_in_chunks(pool, &self, id_values, |keys| {
+            self.clone()
+                .filter_op(
+                    C::COLUMN,
+                    crate::core::Op::In,
+                    crate::core::SqlValue::List(keys),
+                )
+                .fetch(pool)
+        })
+        .await?;
         let mut out = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let key = extract(&row);
@@ -2926,6 +3034,29 @@ where
 
 mod iter;
 pub use iter::ChunkedIter;
+
+#[cfg(test)]
+mod in_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn a_query_that_cannot_be_split_is_refused() {
+        assert_eq!(in_chunk_size("t", 10, 10, true).unwrap(), 10);
+        assert!(matches!(
+            in_chunk_size("t", 11, 10, true),
+            Err(ExecError::InListUnsplittable {
+                keys: 11,
+                max: 10,
+                ..
+            })
+        ));
+        assert_eq!(in_chunk_size("t", 11, 10, false).unwrap(), 10);
+        assert!(matches!(
+            in_chunk_size("t", 5, 0, false),
+            Err(ExecError::InListUnsplittable { max: 0, .. })
+        ));
+    }
+}
 
 #[cfg(test)]
 mod pool_dispatch_tests {

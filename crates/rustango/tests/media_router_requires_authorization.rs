@@ -372,7 +372,13 @@ async fn the_verb_distinguishes_read_change_and_delete() {
     assert_eq!(del, vec![MediaAction::Delete(MediaTarget::Media(1))]);
 
     let (mv, _) = action_for("/media/1/move", "POST").await;
-    assert_eq!(mv, vec![MediaAction::Change(MediaTarget::Media(1))]);
+    assert!(
+        matches!(
+            mv.as_slice(),
+            [MediaAction::Change(MediaTarget::MediaMove { id: 1, .. })]
+        ),
+        "a move was classified as {mv:?}"
+    );
 
     // `NewUpload` is a `#[non_exhaustive]` struct variant, so this
     // crate can match it but cannot construct one to compare against.
@@ -447,10 +453,18 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
         ("POST", "/uploads/7/finalize", "Change(Media(7))"),
         ("GET", "/media/7", "Read(Media(7))"),
         ("DELETE", "/media/7", "Delete(Media(7))"),
-        ("POST", "/media/7/move", "Change(Media(7))"),
+        (
+            "POST",
+            "/media/7/move",
+            "Change(MediaMove { id: 7, collection_id: None })",
+        ),
         ("POST", "/media/7/tags", "Change(Media(7))"),
         ("DELETE", "/media/7/tags/blue", "Change(Media(7))"),
-        ("POST", "/collections", "Add(NewCollection)"),
+        (
+            "POST",
+            "/collections",
+            "Add(NewCollection { parent_id: None })",
+        ),
         ("GET", "/collections", "Read(Listing)"),
         ("GET", "/collections/7", "Read(Collection(7))"),
         // The contents route returns media rows with presigned URLs, so

@@ -833,7 +833,7 @@ async fn run_for_one_tenant(
     })?;
     match mode {
         StorageMode::Schema => {
-            let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
+            let schema = org.effective_schema().to_owned();
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
             // Framework tenant tables (rustango_users/roles/permissions/…)
             // come from the system-app migrations and MUST be applied

@@ -599,18 +599,22 @@ La línea de estado `running: pg_dump …` va a **stderr**, así que se queda
 fuera de la redirección y fuera de una tubería. Hasta [#1404](https://github.com/ujeenet/rustango/issues/1404)
 iba a stdout, lo que la dejaba en la primera línea del archivo `.sql`.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Carga un archivo de dump de vuelta en tu base de datos — la contraparte de
 `db:dump`. Pasa el archivo por `psql` contra `DATABASE_URL` con
-`ON_ERROR_STOP=1`, de modo que se detiene ante el primer error. Añade `--clean`
-para borrar primero el esquema existente (antepone
-`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) para que la
-restauración aterrice en una base de datos vacía. Necesitas `psql` en tu `PATH`.
+`ON_ERROR_STOP=1` en una sola transacción, de modo que se detiene ante el primer
+error y no carga nada. Añade `--clean --yes` para borrar primero el esquema
+existente (antepone `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`)
+para que la restauración aterrice en una base de datos vacía; una carga fallida
+deshace el borrado. Con `--clean` el dump debe ser un archivo regular no vacío,
+comprobado antes de ejecutar nada; sin `--clean` también lee una tubería. Un
+proyecto con tenancy rechaza `--clean`, porque `public` contiene el registro.
+Necesitas `psql` en tu `PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---
@@ -1557,7 +1561,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `dumpdata` | Exporta filas como fixtures JSON |
 | `loaddata <fixture.json> [--fail-fast]` | Vuelve a cargar fixtures JSON. Una carga fallida o parcial no se revierte |
-| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Postgres usa `TRUNCATE … RESTART IDENTITY CASCADE`, que también vacía tablas que las referencian fuera del filtro; MySQL / SQLite borran las filas y conservan los contadores de id |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vacía todas las tablas de modelos; las banderas limitan el conjunto. Se omiten los modelos no gestionados y las vistas. Postgres usa `TRUNCATE … RESTART IDENTITY` y falla si una tabla fuera del filtro referencia un objetivo; MySQL / SQLite borran las filas en una transacción, hijos primero, y conservan los contadores de id. Un proyecto con tenancy necesita `--tenant <slug>` y solo vacía ese tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Borrado masivo en streaming; `--pretend` informa sin borrar |
 | `db:dump` / `db:restore` / `db:info` | Dump / restauración / inspección nativos |
 | `dbshell` | Ejecuta el cliente nativo (`psql` / `mysql` / `sqlite3`). Solo necesita `DATABASE_URL`, no un pool funcional — se gestiona antes de construir el pool, así que funciona cuando sqlx no puede conectar |

@@ -398,10 +398,19 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Statement that defers FK checks to `COMMIT` for the current
+    /// transaction only. Default (SQLite): the pragma; `None` where no
+    /// transaction-scoped form exists.
+    fn defer_foreign_keys_sql(&self) -> Option<&'static str> {
+        Some("PRAGMA defer_foreign_keys = ON")
+    }
+
     /// Statements that empty `tables` in any order, run in one
     /// transaction. Default (SQLite): FK checks deferred to `COMMIT`.
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
-        std::iter::once("PRAGMA defer_foreign_keys = ON".to_owned())
+        self.defer_foreign_keys_sql()
+            .map(str::to_owned)
+            .into_iter()
             .chain(
                 tables
                     .iter()

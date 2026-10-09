@@ -238,21 +238,34 @@ fn empty_hop_in_chain_is_rejected() {
 
 #[test]
 fn two_separate_chains_compose_into_distinct_alias_trees() {
-    // `.select_related("author")` + `.select_related("author__profile")`
-    // — the first emits an `author` alias; the second emits both
-    // `author` (deduplicated by the writer? — actually the current
-    // writer keeps both; just verify both alias names appear in their
-    // own joins).
+    // The shared `author` hop is joined once (#2294).
     let sql = compile_pg(
         Post::objects()
             .select_related("author")
             .select_related("author__profile"),
     );
-    assert!(sql.contains(r#"AS "author""#), "first chain: {sql}");
+    assert_eq!(
+        sql.matches(r#"AS "author""#).count(),
+        1,
+        "first chain: {sql}"
+    );
     assert!(
         sql.contains(r#"AS "author__profile""#),
         "second chain: {sql}"
     );
+}
+
+#[test]
+fn repeated_select_related_joins_once() {
+    let qs = || {
+        Post::objects()
+            .select_related("author__profile")
+            .select_related("author")
+            .select_related("author__profile")
+    };
+    for sql in [compile_pg(qs()), compile_my(qs()), compile_sqlite(qs())] {
+        assert_eq!(sql.matches("LEFT JOIN").count(), 2, "{sql}");
+    }
 }
 
 // ---------- Decoder-side recursive stitching (#451) ----------
