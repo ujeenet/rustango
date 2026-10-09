@@ -765,7 +765,8 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
         &templates::config_prod_settings_toml(name),
     )?;
 
-    fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
+    // git drops an empty dir, and the image copies it (#2396).
+    write(root, "migrations/.gitkeep", "")?;
 
     // The library target is where the app lives; the binary uses it.
     // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
@@ -1008,7 +1009,18 @@ mod tests {
         }
     }
 
-    /// #1988 — the image must carry `system/migrations/`, and every path
+    fn holds_a_file(path: &Path) -> bool {
+        if path.is_file() {
+            return true;
+        }
+        fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|e| holds_a_file(&e.path()))
+    }
+
+    /// #1988, #2396 — the image must carry `system/migrations/`, and every path
     /// it copies must exist in a fresh project, or `docker build` fails.
     #[test]
     fn image_ships_system_migrations_on_every_template() {
@@ -1027,8 +1039,12 @@ mod tests {
                 .filter(|l| !l.starts_with("--from") && !l.starts_with(". "))
                 .filter_map(|l| l.split_whitespace().next())
                 .collect();
+            // git keeps no empty dir, so a fresh clone has only what holds a file.
             for src in &sources {
-                assert!(root.join(src).exists(), "{template}: COPY {src} is missing");
+                assert!(
+                    holds_a_file(&root.join(src)),
+                    "{template}: COPY {src} is missing from a clone"
+                );
             }
             assert!(
                 sources.contains(&"system"),

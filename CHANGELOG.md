@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a new project keeps `migrations/` in git (#2396)
+
+The scaffolder writes `migrations/.gitkeep`, so a clone made before the first `makemigrations` still builds the image.
+
 ### Fixed — `create-api-key --expires-days` no longer panics on a huge value (#2395)
 
 A count of zero, below zero or past chrono's range is now a validation error.
