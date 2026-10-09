@@ -18,7 +18,7 @@ Creating, re-linking and deleting a shared SSO provider, and an operator's own p
 
 ### Security — impersonation links default to https (#2425)
 
-With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); `check --deploy` warns when the variable is unset or not `https`.
+With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); the tenancy `check --deploy` warns when the variable is unset or not `https`.
 
 ### Fixed — a password change no longer undoes a concurrent deactivate or demote (#2467)
 

@@ -5135,9 +5135,6 @@ pub(crate) struct DeployAuditEnv {
     pub database_url: Option<String>,
     pub apex_domain: Option<String>,
     pub bind: Option<String>,
-    /// `RUSTANGO_TENANT_SCHEME`, the scheme of impersonation links (#2425).
-    #[cfg(feature = "tenancy")]
-    pub tenant_scheme: Option<String>,
     /// An admin was built without session auth (#1627).
     pub ungated_admin: bool,
 }
@@ -5152,8 +5149,6 @@ fn deploy_audit_env() -> DeployAuditEnv {
         #[cfg(not(feature = "tenancy"))]
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
-        #[cfg(feature = "tenancy")]
-        tenant_scheme: crate::tenancy::server::tenant_scheme_setting(),
         #[cfg(feature = "admin")]
         ungated_admin: crate::admin::ungated_admin_built(),
         #[cfg(not(feature = "admin"))]
@@ -5293,21 +5288,6 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
         Some(_) => out
             .info
             .push("RUSTANGO_APEX_DOMAIN set to a non-localhost value".into()),
-    }
-
-    // The impersonation handoff carries a one-time superuser login.
-    #[cfg(feature = "tenancy")]
-    match env.tenant_scheme.as_deref() {
-        Some("https") => {}
-        Some(other) => out.warnings.push(format!(
-            "RUSTANGO_TENANT_SCHEME is `{other}` — impersonation handoff tokens go out in \
-             clear; set it to `https`"
-        )),
-        None => out.warnings.push(
-            "RUSTANGO_TENANT_SCHEME is unset — impersonation links use https only while \
-             cookies are Secure; set it to `https`. Single-tenant projects can ignore."
-                .into(),
-        ),
     }
 
     // RUSTANGO_BIND — warn if loopback-only. Common typo in dev
@@ -6936,30 +6916,22 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             apex_domain: Some("app.example.com".into()),
             bind: Some("0.0.0.0:8080".into()),
-            #[cfg(feature = "tenancy")]
-            tenant_scheme: Some("https".into()),
             ungated_admin: false,
         }
     }
 
-    /// #2425 — an unset or http tenant scheme is flagged.
-    #[cfg(feature = "tenancy")]
+    /// #2425 — the tenant-scheme warning is the tenancy dispatcher's, so a
+    /// single-database deploy never sees it.
     #[test]
-    fn deploy_audit_warns_on_a_tenant_scheme_that_is_not_https() {
-        for scheme in [None, Some("http".to_owned())] {
-            let env = DeployAuditEnv {
-                tenant_scheme: scheme.clone(),
-                ..good_prod_env()
-            };
-            let r = run(&env);
-            assert!(
-                r.warnings
-                    .iter()
-                    .any(|w| w.contains("RUSTANGO_TENANT_SCHEME")),
-                "{scheme:?} not flagged: {:?}",
-                r.warnings
-            );
-        }
+    fn deploy_audit_says_nothing_about_the_tenant_scheme() {
+        let r = run(&good_prod_env());
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("RUSTANGO_TENANT_SCHEME")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// #1627 — an admin built without session auth is named.
