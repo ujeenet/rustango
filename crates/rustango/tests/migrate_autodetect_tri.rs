@@ -2842,21 +2842,44 @@ async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
     orphan_refused(pool, b, "author_id").await;
 }
 
+/// The composite FKs MySQL's catalog says only `index` on `t` serves;
+/// `None` elsewhere.
+async fn composite_fks_needing(pool: &Pool, t: &str, index: &str) -> Option<Vec<(String,)>> {
+    use rustango::sql::Dialect as _;
+    if pool.dialect().name() != "mysql" {
+        return None;
+    }
+    let sql = rustango::sql::MySql.composite_fks_needing_index_sql()?;
+    let s = |v: &str| rustango::core::SqlValue::String(v.to_owned());
+    Some(
+        rustango::sql::raw_query_pool(sql, vec![s(t), s(index), s(index)], pool)
+            .await
+            .unwrap(),
+    )
+}
+
 /// Dropping the index a composite FK uses, though another index starts with
-/// its first column; MySQL refused it with 1553 (#2326).
+/// its first column; MySQL refused it with 1553 (#2326). An index that also
+/// serves it, in the same column order, leaves the FK alone.
 async fn composite_fk_index_drops(pool: &Pool) {
     let (a, b) = ("mad_ci_author", "mad_ci_book");
     let chain = Chain::new(pool, "ci", &[b, a]).await;
-    let with = |indexed: bool| {
+    let with = |indexed: bool, served: bool| {
         let mut idx = vec![
             json!({"name": "mad_ci_author_id_code", "table": a,
                    "columns": ["id", "code"], "unique": true}),
             json!({"name": "mad_ci_book_author_idx", "table": b,
                    "columns": ["author_id"], "unique": false}),
+            json!({"name": "mad_ci_book_ca_idx", "table": b,
+                   "columns": ["code", "author_id"], "unique": false}),
         ];
         if indexed {
             idx.push(json!({"name": "mad_ci_book_acn_idx", "table": b,
                             "columns": ["author_id", "code", "n"], "unique": false}));
+        }
+        if served {
+            idx.push(json!({"name": "mad_ci_book_ac_idx", "table": b,
+                            "columns": ["author_id", "code"], "unique": false}));
         }
         let composite = json!([{"name": "mad_ci_author_code", "to": a,
                                 "from": ["author_id", "code"], "on": ["id", "code"]}]);
@@ -2870,9 +2893,25 @@ async fn composite_fk_index_drops(pool: &Pool) {
             "indexes": idx,
         })
     };
-    chain.step(pool, with(true)).await.expect("initial");
+    let needing = |index: &'static str| composite_fks_needing(pool, b, index);
+    let mysql = |names: &[&str]| {
+        (pool.dialect().name() == "mysql")
+            .then(|| names.iter().map(|n| ((*n).to_owned(),)).collect::<Vec<_>>())
+    };
+    chain.step(pool, with(true, true)).await.expect("initial");
+    assert_eq!(needing("mad_ci_book_acn_idx").await, mysql(&[]));
+    assert_eq!(needing("mad_ci_book_ac_idx").await, mysql(&[]));
     chain
-        .step(pool, with(false))
+        .step(pool, with(true, false))
+        .await
+        .expect("an index the other one covers drops");
+    assert_eq!(
+        needing("mad_ci_book_acn_idx").await,
+        mysql(&["mad_ci_author_code"]),
+        "`(code, author_id)` does not serve it"
+    );
+    chain
+        .step(pool, with(false, false))
         .await
         .expect("the composite FK's index drops");
     let orphan = exec(
@@ -3043,24 +3082,40 @@ async fn m2m_column_rename_keeps_rows(pool: &Pool) {
     assert_eq!(got, [(7,)], "and the unapply");
 }
 
-/// The live FK names of `t`, sorted; `None` on SQLite, whose names are never looked up.
-async fn fk_names(pool: &Pool, t: &str) -> Option<Vec<String>> {
+/// Each FK column of `t` with its live FK's name, sorted; `None` on SQLite,
+/// whose names are never looked up.
+async fn fk_names(pool: &Pool, t: &str) -> Option<Vec<(String, String)>> {
     let sql = match pool.dialect().name() {
         "postgres" => format!(
-            "SELECT conname::text FROM pg_constraint \
-             WHERE conrelid = '{t}'::regclass AND contype = 'f' ORDER BY 1"
+            "SELECT a.attname::text, c.conname::text FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+             WHERE c.conrelid = '{t}'::regclass AND c.contype = 'f' ORDER BY 1"
         ),
         "mysql" => format!(
-            "SELECT CAST(CONSTRAINT_NAME AS CHAR) FROM information_schema.TABLE_CONSTRAINTS \
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}' \
-             AND CONSTRAINT_TYPE = 'FOREIGN KEY' ORDER BY 1"
+            "SELECT CAST(COLUMN_NAME AS CHAR), CAST(CONSTRAINT_NAME AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() \
+             AND TABLE_NAME = '{t}' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY 1"
         ),
         _ => return None,
     };
-    let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
-        .await
-        .unwrap();
-    Some(got.into_iter().map(|(n,)| n).collect())
+    Some(
+        rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+            .await
+            .unwrap(),
+    )
+}
+
+/// What [`fk_names`] reads when each of `cols` has the FK migrate names.
+fn fks_named(pool: &Pool, t: &str, cols: &[&str]) -> Option<Vec<(String, String)>> {
+    let mut v: Vec<(String, String)> = cols
+        .iter()
+        .map(|c| {
+            let name = rustango::migrate::ddl::fk_constraint_name(t, c);
+            ((*c).to_owned(), name)
+        })
+        .collect();
+    v.sort();
+    (pool.dialect().name() != "sqlite").then_some(v)
 }
 
 /// A renamed junction column's FK takes the new column's name, through a
@@ -3075,14 +3130,7 @@ async fn m2m_column_rename_renames_its_fk(pool: &Pool) {
                             "dst_table": tag, "dst_col": dst_col}],
         })
     };
-    let names = |cols: &[&str]| {
-        let mut v: Vec<String> = cols
-            .iter()
-            .map(|c| rustango::migrate::ddl::fk_constraint_name(through, c))
-            .collect();
-        v.sort();
-        (pool.dialect().name() != "sqlite").then_some(v)
-    };
+    let names = |cols: &[&str]| fks_named(pool, through, cols);
     chain
         .step(pool, with("post_id", "tag_id"))
         .await
@@ -3099,7 +3147,7 @@ async fn m2m_column_rename_renames_its_fk(pool: &Pool) {
         .expect("the rename applies");
     assert_eq!(
         fk_names(pool, through).await,
-        names(&["post_id", "label_id"])
+        names(&["label_id", "post_id"])
     );
     chain.undo(pool, &renamed).await.expect("unapply");
     assert_eq!(fk_names(pool, through).await, names(&["post_id", "tag_id"]));
@@ -3125,6 +3173,92 @@ async fn m2m_column_rename_renames_its_fk(pool: &Pool) {
     .await;
     let err = orphan.expect_err("each FK is enforced");
     assert!(err.to_lowercase().contains("foreign key"), "{err}");
+}
+
+/// A renamed FK column's FK takes its name, and a later op on that FK in the
+/// same migration adds it once, both ways; it was added twice (#2307 review).
+async fn fk_column_rename_then_fk_op(pool: &Pool) {
+    let (a, b) = ("mad_rfo_author", "mad_rfo_book");
+    let chain = Chain::new(pool, "rfo", &[b, a]).await;
+    let with = |column: &str, on_delete: &str, unique: bool| {
+        let rel = json!({"fk": {"kind": "fk", "to": a, "on": "id", "on_delete": on_delete},
+                         "unique": unique});
+        json!({"tables": [table(a, vec![id()]),
+                          table(b, vec![id(), col(column, "i64", rel)])]})
+    };
+    let rename = |from: &str, to: &str| SchemaChange::RenameColumn {
+        table: b.into(),
+        old_column: from.into(),
+        new_column: to.into(),
+    };
+    chain
+        .step(pool, with("author_id", "CASCADE", true))
+        .await
+        .expect("initial");
+    let plain = chain
+        .hand(
+            pool,
+            with("writer_id", "CASCADE", true),
+            vec![rename("author_id", "writer_id")],
+            None,
+        )
+        .await
+        .expect("a plain rename");
+    assert_eq!(fk_names(pool, b).await, fks_named(pool, b, &["writer_id"]));
+    chain.undo(pool, &plain).await.expect("unapply the rename");
+    assert_eq!(fk_names(pool, b).await, fks_named(pool, b, &["author_id"]));
+    chain.discard_head();
+    // Then ON DELETE, which re-adds the FK on every backend.
+    let ops = vec![
+        rename("author_id", "writer_id"),
+        SchemaChange::AlterFkOnDelete {
+            table: b.into(),
+            column: "writer_id".into(),
+            from: Some("CASCADE".into()),
+            to: Some("SET NULL".into()),
+        },
+    ];
+    let on_delete = chain
+        .hand(pool, with("writer_id", "SET NULL", true), ops, None)
+        .await
+        .expect("rename then ON DELETE");
+    assert_eq!(fk_names(pool, b).await, fks_named(pool, b, &["writer_id"]));
+    chain.undo(pool, &on_delete).await.expect("its unapply");
+    assert_eq!(fk_names(pool, b).await, fks_named(pool, b, &["author_id"]));
+    chain.discard_head();
+    // Then a UNIQUE drop, which MySQL's MODIFY needs the FK off for.
+    let ops = vec![
+        rename("author_id", "writer_id"),
+        SchemaChange::AlterColumnUnique {
+            table: b.into(),
+            column: "writer_id".into(),
+            unique: false,
+        },
+    ];
+    chain
+        .hand(pool, with("writer_id", "CASCADE", false), ops, None)
+        .await
+        .expect("rename then UNIQUE drop");
+    assert_eq!(fk_names(pool, b).await, fks_named(pool, b, &["writer_id"]));
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
+        .await
+        .unwrap();
+    for id in [1, 2] {
+        exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, 1)"),
+            &[b, "id", "writer_id"],
+        )
+        .await
+        .expect("no longer unique");
+    }
+    let orphan = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (3, 99)",
+        &[b, "id", "writer_id"],
+    )
+    .await;
+    assert!(orphan.is_err(), "the FK is back");
 }
 
 /// A `db_comment` lands with CreateTable and AddColumn too (#2270).
@@ -3274,6 +3408,7 @@ tri_dialect_test!(
         fk_name_collision_is_refused,
         m2m_column_rename_keeps_rows,
         m2m_column_rename_renames_its_fk,
+        fk_column_rename_then_fk_op,
         citext_survives_length_and_type_changes,
         citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,

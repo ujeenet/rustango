@@ -3148,7 +3148,9 @@ fn render_step(
     let renamed_fk = match change {
         SC::RenameColumn {
             table, new_column, ..
-        } if !dialect.inline_fks_in_create_table() => {
+        } if !dialect.inline_fks_in_create_table()
+            && !fk_readded_later(table, new_column, later, dialect) =>
+        {
             let end = super::rebuild::name_at_end(table, later);
             let at_end =
                 super::rebuild::columns_at_end(table, std::slice::from_ref(new_column), later);
@@ -3165,17 +3167,9 @@ fn render_step(
         SC::RenameColumn {
             table, old_column, ..
         } if renamed_fk.is_some() => Some(at_column(table, old_column)),
-        // MySQL re-adds it after the MODIFY or the index drop (3780, 1553).
-        SC::AlterColumnType { table, column, .. }
-        | SC::AlterColumnMaxLength { table, column, .. }
-        | SC::AlterColumnUnique {
-            table,
-            column,
-            unique: false,
-        } if dialect.modifies_whole_column() && has_fk(table, column) => {
-            Some(at_column(table, column))
-        }
-        _ => None,
+        _ => readds_fk(change, dialect)
+            .filter(|(table, column)| has_fk(table, column))
+            .map(|(table, column)| at_column(table, column)),
     };
     let drop_unique = match change {
         SC::AlterColumnUnique {
@@ -3197,8 +3191,13 @@ fn render_step(
     if let Some((true, sql)) = renamed_fk {
         batch.deferred_fks.push(sql);
     }
+    // The FK it re-adds, whose column a later rename takes off and re-adds.
+    let column_renamed = !dialect.inline_fks_in_create_table()
+        && readds_fk(change, dialect).is_some_and(|(table, column)| {
+            super::rebuild::columns_at_end(table, &[column.to_owned()], later)[0] != column
+        });
     // Its FKs carry the names at this op, which a later rename changes.
-    if renamed {
+    if renamed || column_renamed {
         let fks = std::mem::take(&mut batch.deferred_fks);
         batch.immediate.extend(fks);
     }
@@ -3223,6 +3222,46 @@ fn render_step(
         drop_fks,
         drop_unique,
         index_fks,
+    })
+}
+
+/// The column whose live FK `change` drops and adds back: ON DELETE
+/// everywhere, and MySQL's MODIFY, which refuses it on (3780, 1553).
+fn readds_fk<'a>(
+    change: &'a super::SchemaChange,
+    dialect: &dyn crate::sql::Dialect,
+) -> Option<(&'a str, &'a str)> {
+    use super::SchemaChange as SC;
+    match change {
+        SC::AlterFkOnDelete { table, column, .. } => Some((table, column)),
+        SC::AlterColumnType { table, column, .. }
+        | SC::AlterColumnMaxLength { table, column, .. }
+        | SC::AlterColumnUnique {
+            table,
+            column,
+            unique: false,
+        } if dialect.modifies_whole_column() => Some((table, column)),
+        _ => None,
+    }
+}
+
+/// Whether one of `later` re-adds the FK of `table.column`, so a rename
+/// leaves it to that op rather than adding it twice.
+fn fk_readded_later(
+    table: &str,
+    column: &str,
+    later: &[Operation],
+    dialect: &dyn crate::sql::Dialect,
+) -> bool {
+    later.iter().enumerate().any(|(i, op)| {
+        let Operation::Schema(change) = op else {
+            return false;
+        };
+        readds_fk(change, dialect).is_some_and(|(t, c)| {
+            let before = &later[..i];
+            t == super::rebuild::name_at_end(table, before)
+                && super::rebuild::columns_at_end(table, &[column.to_owned()], before)[0] == c
+        })
     })
 }
 
@@ -4381,7 +4420,8 @@ mod tests {
     #[test]
     fn render_between_drops_a_composite_fk_around_its_index() {
         use crate::migrate::{SchemaChange, SchemaSnapshot};
-        let snap = |indexed: bool| -> SchemaSnapshot {
+        // `other`: one more index on the table, which may serve the FK too.
+        let snap = |indexed: bool, other: &[&str]| -> SchemaSnapshot {
             let mut indexes = vec![serde_json::json!({ "name": "child_p_idx",
                 "table": "child", "columns": ["p_id"], "unique": false })];
             if indexed {
@@ -4389,6 +4429,10 @@ mod tests {
                     serde_json::json!({ "name": "child_pc_idx", "table": "child",
                     "columns": ["p_id", "code", "n"], "unique": false }),
                 );
+            }
+            if !other.is_empty() {
+                indexes.push(serde_json::json!({ "name": "child_other_idx",
+                    "table": "child", "columns": other, "unique": false }));
             }
             let col = |c: &str| {
                 serde_json::json!({ "name": c, "column": c, "ty": "i64",
@@ -4408,12 +4452,82 @@ mod tests {
             name: "child_pc_idx".into(),
             table: "child".into(),
         }];
-        let out =
-            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
-                .unwrap();
-        assert!(out[0].contains("DROP FOREIGN KEY `child_pc_fk`"), "{out:?}");
-        assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
-        assert!(out[2].contains("ADD CONSTRAINT `child_pc_fk`"), "{out:?}");
-        assert_eq!(out.len(), 3, "{out:?}");
+        let render = |other: &[&str]| {
+            super::render_changes_between(
+                &drop,
+                &snap(true, other),
+                &snap(false, other),
+                &crate::sql::MySql,
+            )
+            .unwrap()
+        };
+        // `(code, p_id)` has the FK's columns in the wrong order.
+        for other in [&[][..], &["code", "p_id"]] {
+            let out = render(other);
+            assert!(out[0].contains("DROP FOREIGN KEY `child_pc_fk`"), "{out:?}");
+            assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
+            assert!(out[2].contains("ADD CONSTRAINT `child_pc_fk`"), "{out:?}");
+            assert_eq!(out.len(), 3, "{out:?}");
+        }
+        let out = render(&["p_id", "code"]);
+        assert_eq!(out.len(), 1, "another index serves it: {out:?}");
+        assert!(out[0].starts_with("DROP INDEX"), "{out:?}");
+    }
+
+    /// #2307 — a renamed FK column's FK comes back under the new name, once
+    /// even when a later op re-adds it.
+    #[test]
+    fn render_between_renames_an_fk_once() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |column: &str, on_delete: &str| -> SchemaSnapshot {
+            serde_json::from_value(serde_json::json!({ "tables": [
+                { "name": "author", "model": "Author", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true }] },
+                { "name": "book", "model": "Book", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": column, "column": column, "ty": "i64", "nullable": true,
+                      "primary_key": false, "fk": { "kind": "fk", "to": "author",
+                      "on": "id", "on_delete": on_delete } }] }] }))
+            .unwrap()
+        };
+        let rename = SchemaChange::RenameColumn {
+            table: "book".into(),
+            old_column: "author_id".into(),
+            new_column: "writer_id".into(),
+        };
+        let on_delete = SchemaChange::AlterFkOnDelete {
+            table: "book".into(),
+            column: "writer_id".into(),
+            from: Some("CASCADE".into()),
+            to: Some("SET NULL".into()),
+        };
+        let before = snap("author_id", "CASCADE");
+        for dialect in [
+            &crate::sql::Postgres as &dyn crate::sql::Dialect,
+            &crate::sql::MySql,
+        ] {
+            let out = super::render_changes_between(
+                std::slice::from_ref(&rename),
+                &before,
+                &snap("writer_id", "CASCADE"),
+                dialect,
+            )
+            .unwrap();
+            assert!(out[0].contains("book_author_id_fkey"), "{out:?}");
+            assert!(out[2].contains("ADD CONSTRAINT") && out[2].contains("book_writer_id_fkey"));
+            assert_eq!(out.len(), 3, "{out:?}");
+            let both = [rename.clone(), on_delete.clone()];
+            let out = super::render_changes_between(
+                &both,
+                &before,
+                &snap("writer_id", "SET NULL"),
+                dialect,
+            )
+            .unwrap();
+            let adds = out.iter().filter(|s| s.contains("ADD CONSTRAINT")).count();
+            assert_eq!(adds, 1, "{out:?}");
+        }
     }
 }
