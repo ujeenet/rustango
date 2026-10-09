@@ -249,10 +249,9 @@ where
 
 /// Backend-agnostic registry migration runner — counterpart of
 /// [`migrate_registry`] that takes a [`crate::sql::Pool`] enum
-/// directly instead of going through [`TenantPools`]. Routes the
-/// migration runner, audit-table bootstrap, and contenttype seed
-/// through their backend-agnostic `_pool` variants so a sqlite /
-/// mysql registry works end-to-end.
+/// directly instead of going through [`TenantPools`]. Runs the
+/// migrations, the `managed = false` table bootstrap and the
+/// contenttype seed on any backend.
 ///
 /// The PG-only password-changed-at ALTER stays gated to Postgres —
 /// it only matters for registries upgraded from pre-v0.28.4, and
@@ -267,9 +266,8 @@ pub async fn migrate_registry_pool(
     info!(target: "rustango::tenancy", "applying registry-scoped migrations");
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
     let project_dir = scoped_dir.path(dir);
-    // The framework's own registry tables (rustango_orgs, rustango_operators,
-    // rustango_admin_users) come from makemigrations-generated system-app
-    // migrations — no hand-written bootstrap/ensure/ALTER DDL.
+    // Model-derived registry tables come from system-app migrations; the
+    // `managed = false` ones from `ensure_bootstrap_tables` below.
     let chain = crate::migrate::make::SystemChain::for_migrations_dir(
         dir,
         &[crate::core::ModelScope::Registry],
