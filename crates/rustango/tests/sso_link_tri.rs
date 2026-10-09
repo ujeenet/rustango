@@ -565,6 +565,8 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .await
             .unwrap();
         assert!(shared_stranded(pool, pool).await.is_empty());
+        // Other suites on this database recreate it through the migrations.
+        rustango::testkit::matrix::drop_table(pool, "rustango_shared_sso_providers").await;
     }
 }
 

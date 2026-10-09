@@ -245,6 +245,17 @@ async fn handshake(app: &Router, host: &str, login: &str, slug: &str) -> axum::r
     .await
 }
 
+/// The check ran to the end: the unset deploy env may fail it, nothing else.
+fn assert_check_ran<E: std::fmt::Display>(res: Result<(), E>, out: &str) {
+    if let Err(e) = res {
+        assert!(e.to_string().contains("system check(s) failed"), "{e}");
+    }
+    assert!(
+        out.contains("running rustango system check (deploy mode)"),
+        "{out}"
+    );
+}
+
 fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider {
     SsoProvider {
         id: Auto::default(),
@@ -428,8 +439,7 @@ impl Env {
         let dir = self._dir.path();
         let reg_url = format!("sqlite://{}?mode=rwc", dir.join("reg.db").display());
         let mut out = Vec::new();
-        // The unset deploy env fails the check; only the output matters here.
-        let _ = rustango::tenancy::manage::run_with_writer(
+        let res = rustango::tenancy::manage::run_with_writer(
             self._pools.as_ref(),
             &reg_url,
             &dir.join("migrations"),
@@ -437,7 +447,9 @@ impl Env {
             &mut out,
         )
         .await;
-        String::from_utf8(out).unwrap()
+        let out = String::from_utf8(out).unwrap();
+        assert_check_ran(res, &out);
+        out
     }
 
     /// POST a tenant admin form as user `uid`; the response status.
@@ -1126,14 +1138,16 @@ async fn check_deploy_names_an_unlinked_admin_provider() {
     let (_app, pool, _idp) = bare_admin().await;
     let check = || async {
         let mut out = Vec::new();
-        let _ = rustango::migrate::manage::run_with_writer(
+        let res = rustango::migrate::manage::run_with_writer(
             &pool,
             std::path::Path::new("/nonexistent"),
             vec!["check".to_owned(), "--deploy".to_owned()],
             &mut out,
         )
         .await;
-        String::from_utf8(out).unwrap()
+        let out = String::from_utf8(out).unwrap();
+        assert_check_ran(res, &out);
+        out
     };
     // `corp` allows email linking, which the admin ignores.
     let out = check().await;
