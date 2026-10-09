@@ -164,6 +164,10 @@ An inline row of an `audit(...)` child model now writes its audit row in the edi
 
 The same holds for admin delete, soft delete, `delete_selected` and `restore_selected` on an `audit(...)` model: a missing or failing audit table now refuses the delete (a 500 or the missing-table page) where it used to delete and log a warning (#2390).
 
+### `migrate-tenant-storage` takes the tenant offline
+
+The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. A suspension made during the move is undone when it ends; suspend again afterwards. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).
+
 ### Admin: passkeys and registry tables
 
 No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it on the single database or on each tenant, never the registry (#2364). With `tenancy` compiled in, a plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them, and lists only registry tables (#2365).
