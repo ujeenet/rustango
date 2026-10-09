@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
 
-`rustango_admin_totp` shows only with session auth, and `Translation` is registry-scoped. `migrate` and the tenancy registry migrate now create `rustango_translations` too.
+`Translation` is registry-scoped, so a tenant admin serves neither its list nor the translations editor and export. The generic admin never lists `rustango_admin_totp`, which holds raw secrets. `migrate` now creates `rustango_translations`; the tenancy registry migrate also creates `rustango_audit_log` and, with `totp`, `rustango_admin_totp`.
 
 ### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
 
