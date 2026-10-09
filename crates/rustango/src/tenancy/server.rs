@@ -140,26 +140,55 @@ pub(crate) fn apex_domain() -> String {
     configured_apex_domain().unwrap_or_else(|| "localhost".into())
 }
 
-/// Scheme for a link to `host`: `RUSTANGO_TENANT_SCHEME`, else https
-/// wherever cookies are `Secure`, so a handoff token is not sent in clear
-/// by default (#2425).
-pub(crate) fn tenant_scheme(host: &str) -> String {
-    pick_tenant_scheme(
-        std::env::var("RUSTANGO_TENANT_SCHEME").ok(),
+/// `RUSTANGO_TENANT_SCHEME`, empty counted as unset. The one reader of it.
+pub(crate) fn tenant_scheme_setting() -> Option<String> {
+    std::env::var("RUSTANGO_TENANT_SCHEME")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// `{scheme}://{host}{port_suffix}` for a link into a tenant host. The
+/// scheme is [`tenant_scheme_setting`], else https wherever cookies are
+/// `Secure`, so a handoff token is not sent in clear by default (#2425).
+pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
+    let scheme = pick_tenant_scheme(
+        tenant_scheme_setting(),
         crate::session::secure_cookies(),
         host,
-    )
+    );
+    format!("{scheme}://{host}{port_suffix}")
 }
 
 /// A loopback host stays http: it never crosses the network, and browsers
 /// keep `Secure` cookies on it.
-fn pick_tenant_scheme(env: Option<String>, secure: bool, host: &str) -> String {
-    if let Some(scheme) = env.filter(|s| !s.is_empty()) {
+fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> String {
+    if let Some(scheme) = setting.filter(|s| !s.is_empty()) {
         return scheme;
     }
-    let name = host.split(':').next().unwrap_or(host);
-    let loopback = name == "localhost" || name.ends_with(".localhost") || name.starts_with("127.");
-    if secure && !loopback { "https" } else { "http" }.into()
+    if secure && !is_loopback_host(host) {
+        "https"
+    } else {
+        "http"
+    }
+    .into()
+}
+
+/// `localhost`, `*.localhost`, or a loopback IP, with or without a port.
+fn is_loopback_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if host.parse::<IpAddr>().is_ok() {
+        host
+    } else {
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(host, |(name, _)| name)
+    };
+    let name = name.to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Run the server until the process is signalled (Ctrl-C / SIGTERM).
@@ -339,6 +368,32 @@ mod apex_tests {
             pick_tenant_scheme(Some(String::new()), true, "a.example.com"),
             "https"
         );
+    }
+
+    /// #2425 — loopback is an address or `localhost`, port or not; a
+    /// public name that starts with `127.` is not loopback.
+    #[test]
+    fn only_real_loopback_hosts_keep_http() {
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "acme.localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8000",
+            "::1",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in [
+            "127.example.com",
+            "acme.example.com:443",
+            "[2001:db8::1]:80",
+            "10.0.0.1",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
     }
 
     /// A second, different apex keeps the first (and warns) (#2225).

@@ -5153,7 +5153,7 @@ fn deploy_audit_env() -> DeployAuditEnv {
         apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
         bind: std::env::var("RUSTANGO_BIND").ok(),
         #[cfg(feature = "tenancy")]
-        tenant_scheme: std::env::var("RUSTANGO_TENANT_SCHEME").ok(),
+        tenant_scheme: crate::tenancy::server::tenant_scheme_setting(),
         #[cfg(feature = "admin")]
         ungated_admin: crate::admin::ungated_admin_built(),
         #[cfg(not(feature = "admin"))]

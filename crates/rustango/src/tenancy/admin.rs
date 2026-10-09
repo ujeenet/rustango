@@ -1489,13 +1489,15 @@ fn end_impersonation_response(cookie_path: &str) -> Response {
         })
         .collect();
     let apex = crate::tenancy::server::apex_domain();
-    let scheme = crate::tenancy::server::tenant_scheme(&apex);
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
         .ok()
         .filter(|s| !s.is_empty() && s != "80" && s != "443")
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
-    let target = format!("{scheme}://{apex}{port_suffix}/orgs");
+    let target = format!(
+        "{}/orgs",
+        crate::tenancy::server::tenant_origin(&apex, &port_suffix)
+    );
     let mut resp = Redirect::to(&target).into_response();
     for clear in clears {
         resp.headers_mut().append(
