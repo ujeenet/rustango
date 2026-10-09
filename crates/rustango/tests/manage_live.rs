@@ -1063,6 +1063,82 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     assert!(!is_super, "set-superuser --off did not land");
     assert!(rustango::tenancy::password::verify("hunter3", &hash).unwrap());
 
+    // 6c. flush --tenant with no filter clears the tenant schema (#2284).
+    let (out, res) = run(&pools, &url, &dir, &["flush", "--tenant", &slug, "--yes"]).await;
+    res.unwrap_or_else(|e| {
+        panic!(
+            "whole-tenant flush: {e}
+{out}"
+        )
+    });
+    let user_count: i64 = sqlx::query_as::<_, (i64,)>(&format!(
+        r#"SELECT COUNT(*)::bigint FROM "{slug}"."rustango_users""#,
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(user_count, 0, "flush --tenant left the tenant's users");
+
+    // 6d. A registry model is filtered out, and the org row survives.
+    let (out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "Org"],
+    )
+    .await;
+    res.unwrap();
+    assert!(out.contains("no tables match"), "{out}");
+    let org_left: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    assert_eq!(
+        org_left, 1,
+        "flush --tenant --model Org touched the registry"
+    );
+
+    // 6e. A table missing from the tenant schema never falls through to `public`.
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["create-user", &slug, "bob", "--password", "hunter2"],
+    )
+    .await;
+    res.unwrap();
+    for sql in [
+        // A copy with no referrers, so only the schema decides what TRUNCATE hits.
+        "DROP TABLE IF EXISTS public.rustango_users CASCADE".to_owned(),
+        format!(r#"CREATE TABLE public.rustango_users AS SELECT * FROM "{slug}"."rustango_users""#),
+        format!(r#"DROP TABLE "{slug}"."rustango_users" CASCADE"#),
+    ] {
+        sqlx::query(&sql).execute(&pool).await.unwrap();
+    }
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["flush", "--tenant", &slug, "--yes", "--model", "User"],
+    )
+    .await;
+    let public_users: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM public.rustango_users")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
+    sqlx::query("DROP TABLE public.rustango_users CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(public_users, 1, "flush --tenant truncated public's table");
+    assert!(res.is_err(), "the tenant has no rustango_users table");
+
     // 7. Org row landed.
     let org_count: i64 =
         sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")

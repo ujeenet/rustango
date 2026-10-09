@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `db:restore --clean` checks the file, asks, and rolls back (#2283)
+
+It dropped `public` before reading the dump. Now `--clean` needs a non-empty regular file and `--yes` (or a typed `yes`), is refused in tenancy projects, and psql runs in one transaction so a failed load keeps the old data. A plain restore still reads pipes.
+
+### Fixed — tenancy `flush` no longer wipes the registry (#2284)
+
+It fell through to the single-tenant flush on the registry pool and deleted orgs, operators and hosts. Plain `flush` is refused now; `flush --tenant <slug>` clears that tenant's tables only.
+
+### Fixed — `flush` skips unmanaged models and views (#2285)
+
+It wiped `managed = false` tables the operator owns, and a view-backed model made the whole Postgres TRUNCATE fail. Postgres also drops `CASCADE`, so a table outside the targets that references one makes the flush fail instead of being emptied. MySQL and SQLite delete in one transaction, children first, so a failure clears nothing and self-referencing tables flush on MySQL.
+
 ### Fixed — two tenants can no longer share one schema (#2290)
 
 Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both. A schema-mode purge now refuses a schema another tenant still uses, or a reserved one such as `public`.

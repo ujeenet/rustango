@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `db:restore --clean` needs `--yes`
+
+Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. `--clean` takes only a non-empty regular file, and a tenancy project refuses it. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).
+
+### `flush` on Postgres no longer cascades
+
+If a table outside the filter references a flushed one, the flush now fails and clears nothing; add that model with `--model` or `--app` (#2285). An `ON DELETE CASCADE` link from such a table still empties it on MySQL and SQLite, but Postgres refuses.
+
+### Tenancy `flush` needs `--tenant <slug>`
+
+In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
+
 ### Tenant PG pools set `application_name`
 
 Database-mode tenant pools connect as `rustango-tenant:<org id>`, overriding one in the URL. A purge ends those sessions; any other session open on the database makes it fail (#2291).

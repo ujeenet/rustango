@@ -45,6 +45,7 @@ mod agents;
 mod args;
 mod audit;
 mod edit;
+mod flush;
 mod hosts;
 mod inspect;
 mod menu;
@@ -321,6 +322,13 @@ where
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
+        // The fall-through flush is scope-blind and ran on the registry pool (#2284).
+        "flush" => flush::flush_cmd(pools, &args[1..], writer).await,
+        // `public` holds the registry here; --clean would drop every org with it.
+        "db:restore" if args[1..].iter().any(|a| a == "--clean") => Err(TenancyError::Validation(
+            "db:restore --clean is refused in a tenancy project: schema `public` is the registry"
+                .into(),
+        )),
         "create-role" => roles::create_role_cmd(pools, &args[1..], writer).await,
         "list-roles" => roles::list_roles_cmd(pools, &args[1..], writer).await,
         "assign-role" => roles::assign_role_cmd(pools, &args[1..], writer).await,
@@ -787,6 +795,12 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                [--tenant <s>]  Scope to one tenant instead of all."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "DATA:")?;
+    writeln!(
+        w,
+        "  flush --tenant <s> [--yes]   Wipe one tenant's tables; the registry is never flushed."
     )?;
     writeln!(w)?;
     writeln!(w, "SERVER:")?;
