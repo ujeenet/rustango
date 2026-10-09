@@ -22,6 +22,16 @@ where
         .await?;
     let mut out = DeployAuditFindings::default();
     #[cfg(feature = "admin-sso")]
+    let shared_rows = match check::SharedProviders::load(&registry).await {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            out.warnings.push(format!(
+                "[sso] could not check the shared SSO providers: {e}"
+            ));
+            None
+        }
+    };
+    #[cfg(feature = "admin-sso")]
     let mut shared: std::collections::BTreeMap<(String, check::Refusal), Vec<String>> =
         Default::default();
     for org in &orgs {
@@ -45,19 +55,21 @@ where
             )),
         }
         #[cfg(feature = "admin-sso")]
-        match check::shared_providers(&registry, &tenant).await {
-            Ok(found) => {
-                for s in found {
-                    shared
-                        .entry((s.slug, s.why))
-                        .or_default()
-                        .push(org.slug.clone());
+        if let Some(rows) = &shared_rows {
+            match check::shared_providers(rows, &tenant).await {
+                Ok(found) => {
+                    for s in found {
+                        shared
+                            .entry((s.slug, s.why))
+                            .or_default()
+                            .push(org.slug.clone());
+                    }
                 }
+                Err(e) => out.warnings.push(format!(
+                    "[sso] tenant `{}`: could not check shared SSO providers: {e}",
+                    org.slug
+                )),
             }
-            Err(e) => out.warnings.push(format!(
-                "[sso] tenant `{}`: could not check shared SSO providers: {e}",
-                org.slug
-            )),
         }
     }
     #[cfg(feature = "admin-sso")]

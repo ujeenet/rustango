@@ -156,9 +156,9 @@ async fn tenant_stranded(pool: &Pool) -> Vec<String> {
 /// Slugs `check --deploy` reports for the shared providers in this tenant.
 #[cfg(feature = "admin-sso")]
 async fn shared_stranded(registry: &Pool, tenant: &Pool) -> Vec<String> {
-    let found = rustango::testkit::sso_check::shared_providers(registry, tenant)
-        .await
-        .unwrap();
+    use rustango::testkit::sso_check::{shared_providers, SharedProviders};
+    let shared = SharedProviders::load(registry).await.unwrap();
+    let found = shared_providers(&shared, tenant).await.unwrap();
     found.into_iter().map(|s| s.slug).collect()
 }
 

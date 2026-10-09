@@ -417,7 +417,7 @@ pub mod sso_check {
     #[cfg(feature = "admin-sso")]
     pub use crate::sso::check::admin_providers;
     #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
-    pub use crate::sso::check::shared_providers;
+    pub use crate::sso::check::{shared_providers, SharedProviders};
     #[cfg(feature = "tenancy")]
     pub use crate::sso::check::{tenant_providers, Refusal, Stranded};
     #[cfg(all(feature = "tenancy", feature = "admin-sso"))]

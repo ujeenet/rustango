@@ -30,9 +30,11 @@ pub struct Stranded {
     pub why: Refusal,
 }
 
-/// An enabled provider row with no link rows.
-struct Unlinked {
+/// An enabled provider row.
+#[derive(Debug, Clone)]
+struct Candidate {
     slug: String,
+    key: ProviderKey,
     allow_email_link: bool,
 }
 
@@ -50,49 +52,65 @@ async fn email_linking<P: Model + Send>(pool: &Pool) -> Vec<i64> {
         })
 }
 
-/// The enabled `P` rows on `providers` with no link on `users`; none when
-/// `U` has no rows. Missing tables count as empty.
-async fn unlinked<P: Model + Send, U: Model + Send>(
-    providers: &Pool,
+/// The enabled `P` rows on `pool`. A missing table counts as empty.
+async fn candidates<P: Model + Send>(
+    pool: &Pool,
     source: LinkSource,
-    users: &Pool,
-) -> Result<Vec<Unlinked>, ExecError> {
-    if !try_table_exists_here(providers, P::SCHEMA.table).await?
-        || !try_table_exists_here(users, U::SCHEMA.table).await?
-        || !QuerySet::<U>::new().exists(users).await?
-    {
+) -> Result<Vec<Candidate>, ExecError> {
+    if !try_table_exists_here(pool, P::SCHEMA.table).await? {
         return Ok(Vec::new());
     }
     // The admin never links by email, whatever the row says.
     let linking = if source == LinkSource::Admin {
         Vec::new()
     } else {
-        email_linking::<P>(providers).await
+        email_linking::<P>(pool).await
     };
-    let has_links = try_table_exists_here(users, super::SsoLink::SCHEMA.table).await?;
+    let rows = load_rows(QuerySet::<P>::new().filter("enabled", true), pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Candidate {
+            key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+            allow_email_link: linking.contains(&r.id),
+            slug: r.slug,
+        })
+        .collect())
+}
+
+/// The `rows` with no link on `users`; none when `U` has no rows. Missing
+/// tables count as empty.
+async fn unlinked<U: Model + Send>(
+    rows: Vec<Candidate>,
+    users: &Pool,
+) -> Result<Vec<Candidate>, ExecError> {
+    if rows.is_empty()
+        || !try_table_exists_here(users, U::SCHEMA.table).await?
+        || !QuerySet::<U>::new().exists(users).await?
+    {
+        return Ok(Vec::new());
+    }
+    if !try_table_exists_here(users, super::SsoLink::SCHEMA.table).await? {
+        return Ok(rows);
+    }
     let mut out = Vec::new();
-    for row in load_rows(QuerySet::<P>::new().filter("enabled", true), providers).await? {
-        let key = ProviderKey::for_row(source, row.id, &row.kind, row.issuer_url.as_deref());
-        if !has_links || !any_link(users, &key).await? {
-            out.push(Unlinked {
-                allow_email_link: linking.contains(&row.id),
-                slug: row.slug,
-            });
+    for row in rows {
+        if !any_link(users, &row.key).await? {
+            out.push(row);
         }
     }
     Ok(out)
 }
 
-/// The `rows` that refuse every tenant user: linking off, or no user email
-/// linking may sign in.
+/// The `rows` that refuse every tenant user: no link, and linking off or no
+/// user email linking may sign in.
 #[cfg(feature = "tenancy")]
 async fn refusing_tenant_users(
-    rows: Vec<Unlinked>,
+    rows: Vec<Candidate>,
     tenant: &Pool,
 ) -> Result<Vec<Stranded>, ExecError> {
     let mut linkable = None;
     let mut out = Vec::new();
-    for row in rows {
+    for row in unlinked::<crate::tenancy::User>(rows, tenant).await? {
         let why = if row.allow_email_link {
             if linkable.is_none() {
                 linkable = Some(crate::tenancy::member_auth::any_email_linkable(tenant).await?);
@@ -118,26 +136,40 @@ async fn refusing_tenant_users(
 /// Driver failures.
 #[cfg(feature = "tenancy")]
 pub async fn tenant_providers(tenant: &Pool) -> Result<Vec<Stranded>, ExecError> {
-    let rows =
-        unlinked::<super::SsoProvider, crate::tenancy::User>(tenant, LinkSource::Tenant, tenant)
-            .await?;
+    let rows = candidates::<super::SsoProvider>(tenant, LinkSource::Tenant).await?;
     refusing_tenant_users(rows, tenant).await
 }
 
-/// Registry-wide shared providers that refuse every user of this tenant.
-/// A shared slug the tenant overrides with an enabled row of its own is skipped.
+/// The registry's enabled shared providers, read once for every tenant.
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+#[derive(Debug, Clone)]
+pub struct SharedProviders(Vec<Candidate>);
+
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+impl SharedProviders {
+    /// # Errors
+    /// Driver failures.
+    pub async fn load(registry: &Pool) -> Result<Self, ExecError> {
+        candidates::<crate::tenancy::sso::SharedSsoProvider>(registry, LinkSource::Shared)
+            .await
+            .map(Self)
+    }
+}
+
+/// The `shared` providers that refuse every user of this tenant. A shared
+/// slug the tenant overrides with an enabled row of its own is skipped.
 ///
 /// # Errors
 /// Driver failures.
 #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
-pub async fn shared_providers(registry: &Pool, tenant: &Pool) -> Result<Vec<Stranded>, ExecError> {
-    use crate::tenancy::sso::SharedSsoProvider;
-    let mut rows =
-        unlinked::<SharedSsoProvider, crate::tenancy::User>(registry, LinkSource::Shared, tenant)
-            .await?;
+pub async fn shared_providers(
+    shared: &SharedProviders,
+    tenant: &Pool,
+) -> Result<Vec<Stranded>, ExecError> {
+    let mut rows = shared.0.clone();
     if !rows.is_empty() && try_table_exists_here(tenant, super::SsoProvider::SCHEMA.table).await? {
         let own = load_rows(QuerySet::<super::SsoProvider>::new(), tenant).await?;
-        rows.retain(|u| !own.iter().any(|r| r.enabled && r.slug == u.slug));
+        rows.retain(|c| !own.iter().any(|r| r.enabled && r.slug == c.slug));
     }
     refusing_tenant_users(rows, tenant).await
 }
@@ -148,13 +180,9 @@ pub async fn shared_providers(registry: &Pool, tenant: &Pool) -> Result<Vec<Stra
 /// Driver failures.
 #[cfg(feature = "admin-sso")]
 pub async fn admin_providers(pool: &Pool) -> Result<Vec<String>, ExecError> {
-    Ok(
-        unlinked::<super::SsoProvider, crate::admin::AdminUser>(pool, LinkSource::Admin, pool)
-            .await?
-            .into_iter()
-            .map(|u| u.slug)
-            .collect(),
-    )
+    let rows = candidates::<super::SsoProvider>(pool, LinkSource::Admin).await?;
+    let rows = unlinked::<crate::admin::AdminUser>(rows, pool).await?;
+    Ok(rows.into_iter().map(|c| c.slug).collect())
 }
 
 /// What to do about `why`, for the warning lines.
