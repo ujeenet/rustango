@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Workers from `make:worker` (#2331)
+
+The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

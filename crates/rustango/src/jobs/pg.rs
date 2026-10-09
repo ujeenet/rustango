@@ -59,7 +59,8 @@
 //!
 //! [`PgJobQueue::reclaim_stuck_jobs_pool`] clears `locked_at` on rows
 //! locked longer than a threshold. Run it on a schedule so jobs from a
-//! crashed worker get picked up again. A running job refreshes its lock
+//! crashed worker get picked up again, or let the queue do it with
+//! [`PgJobQueue::reclaim_stuck_after`]. A running job refreshes its lock
 //! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
 //! above that. `attempt` counts at pickup: a job that crashes its
 //! process still spends an attempt.
@@ -99,6 +100,8 @@ pub struct PgJobQueue {
     worker_id_prefix: String,
     heartbeat_interval: Duration,
     context_column: ContextColumn,
+    reclaim_after: Option<Duration>,
+    sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Whether `rustango_jobs` has a usable `context` column. A table from a
@@ -242,6 +245,8 @@ impl PgJobQueue {
             worker_id_prefix: id_prefix,
             heartbeat_interval: Duration::from_secs(10),
             context_column: ContextColumn::default(),
+            reclaim_after: None,
+            sweeper: Mutex::new(None),
         }
     }
 
@@ -282,6 +287,17 @@ impl PgJobQueue {
     pub fn heartbeat_interval(mut self, d: Duration) -> Self {
         // `tokio::time::interval` panics on zero.
         self.heartbeat_interval = d.max(Duration::from_millis(1));
+        self
+    }
+
+    /// While running, unlock rows locked longer than `older_than`: at
+    /// `start`, then every minute. Off by default (#2331).
+    ///
+    /// A worker killed mid-job never reaches `shutdown`, so this is what
+    /// frees its rows. Raised to three heartbeats so a live job keeps its lease.
+    #[must_use]
+    pub fn reclaim_stuck_after(mut self, older_than: Duration) -> Self {
+        self.reclaim_after = Some(older_than);
         self
     }
 
@@ -477,12 +493,21 @@ impl JobQueue for PgJobQueue {
             });
             run.push(h);
         }
+        if let Some(older_than) = self.reclaim_after {
+            let older_than = older_than.max(self.heartbeat_interval * 3);
+            let every = older_than.min(Duration::from_secs(60));
+            let sweep = sweep_loop(self.pool.clone(), older_than, every, stop.clone());
+            *self.sweeper.lock().await = Some(tokio::spawn(sweep));
+        }
         *slot = Some(run);
     }
 
     async fn shutdown(&self) {
         let mut slot = self.run.lock().await;
         let Some(run) = slot.take() else { return };
+        if let Some(sweeper) = self.sweeper.lock().await.take() {
+            sweeper.abort();
+        }
         for n in run.stop(self.shutdown_grace).await {
             // Hand the aborted job back now rather than at the next reclaim.
             release_worker_rows(&self.pool, &self.worker_id(n)).await;
@@ -541,6 +566,21 @@ async fn worker_loop(
                     () = stop.wait() => {}
                 }
             }
+        }
+    }
+}
+
+/// [`PgJobQueue::reclaim_stuck_after`]'s sweep, until the run stops.
+async fn sweep_loop(pool: Pool, older_than: Duration, every: Duration, mut stop: StopSignal) {
+    while !stop.is_set() {
+        match PgJobQueue::reclaim_stuck_jobs_pool(&pool, older_than).await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(reclaimed = n, "unlocked jobs a dead worker left locked"),
+            Err(e) => tracing::error!(error = %e, "stuck-job sweep failed"),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            () = stop.wait() => {}
         }
     }
 }

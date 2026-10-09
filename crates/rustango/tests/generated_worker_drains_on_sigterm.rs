@@ -147,18 +147,34 @@ fn the_generated_worker_is_not_postgres_only() {
         "the worker template must not name PgPool — it would pin the generated \
          project to Postgres. Got:\n{body}"
     );
-    for needed in [
-        "sql::Pool",
-        "ensure_table_pool",
-        "with_workers_pool",
-        "reclaim_stuck_jobs_pool",
-    ] {
+    for needed in ["sql::Pool", "ensure_table_pool", "with_workers_pool"] {
         assert!(
             body.contains(needed),
             "the worker template must use the tri-dialect `_pool` API (`{needed}` \
              missing) — the bare constructors are postgres-gated. Got:\n{body}"
         );
     }
+}
+
+/// #2331: a SIGKILLed worker never reaches its shutdown, so the sweep
+/// has to run while the replacement runs, not after it exits.
+#[test]
+fn the_generated_worker_reclaims_while_running_not_on_exit() {
+    let body = generate("reclaim");
+    let code = code_only(&body);
+    let sweep = code
+        .find(".reclaim_stuck_after(")
+        .unwrap_or_else(|| panic!("the queue must sweep stuck rows. Got:\n{body}"));
+    let start = code.find("queue.start()").expect("queue start present");
+    assert!(
+        sweep < start,
+        "the sweep must be set before start. Got:\n{body}"
+    );
+    let drain = code.find(".shutdown().await").expect("queue drain present");
+    assert!(
+        !code[drain..].contains("reclaim"),
+        "a reclaim after shutdown never runs for a killed worker. Got:\n{body}"
+    );
 }
 
 /// A generated binary is the first thing an operator runs, usually with

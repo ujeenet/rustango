@@ -16,6 +16,10 @@ A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_p
 
 `pg_dump` and `psql` get it through `PGPASSWORD`, so `ps` no longer shows it.
 
+### Fixed — a `make:worker` worker frees a killed worker's jobs while it runs (#2331)
+
+New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start` and every minute. The template uses it instead of a reclaim after shutdown.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

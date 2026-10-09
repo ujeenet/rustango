@@ -2755,12 +2755,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     // The queue is tri-dialect despite the `Database` name — the table
     // DDL and the row-pickup strategy are chosen from the pool's dialect.
     DatabaseJobQueue::ensure_table_pool(&pool).await?;
-    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 4));
+    // A worker killed mid-job (OOM, SIGKILL) never reaches its shutdown,
+    // so its rows stay locked. This unlocks them at start and every minute.
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool.clone(), 4)
+            .reclaim_stuck_after(Duration::from_secs(300)),
+    );
 
     // Register EVERY job type this queue might see, not just the ones
     // this process dispatches. A worker that picks up a row whose name
     // is unregistered here logs and returns *without unlocking it* — the
-    // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
+    // row is then stranded until the reclaim sweep, and
     // it does not show up in `pending_count()`.
     //
     // Note the crate name: this file is its own binary crate, so `crate::`
@@ -2778,10 +2783,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
 
     tracing::info!("{snake}: signal received, draining in-flight jobs");
     queue.shutdown().await;
-
-    // Rows whose worker died mid-job stay locked. Nothing sweeps them
-    // for you; run this on a scheduler, or at boot as done here.
-    let _ = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await;
     Ok(())
 }}
 "#
