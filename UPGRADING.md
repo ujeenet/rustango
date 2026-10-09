@@ -164,15 +164,19 @@ On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (
 
 ### `create_tenant` fails on a failed migration
 
-`api::create_tenant` (and `create_tenant_if_missing`) now returns `Err` when the tenant's migrations fail, and leaves the tenant inactive. It no longer migrates the other tenants (#2392).
+`api::create_tenant` (and `create_tenant_if_missing`) now returns `Err` when the tenant's migrations fail, and leaves the tenant inactive. It no longer migrates the other tenants. The next `create_tenant_if_missing` for that slug migrates and activates it; a tenant you suspended stays inactive (#2392).
 
 ### `forget-pending` reads every tenant ledger
 
-In a tenancy project `forget-pending` now refuses a migration any tenant applied, and fails if a tenant's ledger can't be read (#2393).
+In a tenancy project `forget-pending` now refuses a migration any tenant applied, inactive ones included, and fails if a tenant's ledger can't be read, such as a missing SQLite file (#2393).
 
 ### Schema-mode tenants need a new schema
 
 Creating a schema-mode tenant now fails if its schema already exists. Drop it or pick another `--schema-name` (#2394).
+
+### `create-api-key --expires-days` must be positive
+
+`--expires-days 0` or below, and values past chrono's range, are now refused (#2395).
 
 ## 0.60.4
 

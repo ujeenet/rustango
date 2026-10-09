@@ -1,13 +1,17 @@
 //! Tenancy manage verbs and `api::create_tenant`, on every registry backend.
-//! Tenants are database-mode on the registry's backend.
+//! Each scenario gets a scratch registry, so no rows outlive it.
 
 #![cfg(all(feature = "tenancy", feature = "testkit", feature = "sqlite"))]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "postgres")]
+use std::time::Duration;
 
 use rustango::core::Column as _;
 use rustango::sql::{FetcherPool as _, Pool};
-use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
+use rustango::tenancy::manage::api::{create_tenant, create_tenant_if_missing, CreateTenantOpts};
+#[cfg(feature = "postgres")]
+use rustango::tenancy::provision::{provision_tenant, ProvisionRequest};
 use rustango::tenancy::{BackendKind, Org, StorageMode, TenancyError, TenantPools};
 use rustango::tri_dialect_test;
 
@@ -15,204 +19,187 @@ use rustango::tri_dialect_test;
 #[path = "support/scratch_db.rs"]
 mod scratch_db;
 
-async fn setup(pool: &Pool) {
-    rustango::testkit::migrate_framework(pool)
-        .await
-        .expect("framework tables");
+/// Run `$body` with `$p` bound to a typed `TenantPools` over `$pool`.
+macro_rules! typed {
+    ($pool:expr, $p:ident => $body:expr) => {
+        match $pool.clone() {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(x) => {
+                let $p = TenantPools::new(x);
+                $body
+            }
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(x) => {
+                let $p = TenantPools::new(x);
+                $body
+            }
+            Pool::Sqlite(x) => {
+                let $p = TenantPools::new(x);
+                $body
+            }
+        }
+    };
 }
 
-fn name(tag: &str) -> String {
-    format!("mt-{tag}-{}", std::process::id())
+/// The macro's pool only picks the backend; every scenario builds an [`Env`].
+async fn setup(_: &Pool) {}
+
+struct Env {
+    url: String,
+    registry: Pool,
+    tmp: tempfile::TempDir,
+    // Dropped last: each removes a scratch database.
+    #[allow(dead_code)]
+    guards: Vec<Box<dyn std::any::Any>>,
 }
 
-async fn create(
-    pool: &Pool,
-    dir: &Path,
-    slug: &str,
-    opts: CreateTenantOpts,
-) -> Result<Org, TenancyError> {
-    match pool.clone() {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(p) => create_tenant(&TenantPools::new(p), "", dir, slug, opts).await,
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(p) => create_tenant(&TenantPools::new(p), "", dir, slug, opts).await,
-        Pool::Sqlite(p) => create_tenant(&TenantPools::new(p), "", dir, slug, opts).await,
+impl Env {
+    async fn new(backend: &Pool) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        #[cfg_attr(not(any(feature = "postgres", feature = "mysql")), allow(unused_mut))]
+        let mut guards: Vec<Box<dyn std::any::Any>> = Vec::new();
+        let url = match backend {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(_) => scratch(&mut guards, "DATABASE_URL").await,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => scratch(&mut guards, "MYSQL_TEST_URL").await,
+            Pool::Sqlite(_) => format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display()),
+        };
+        let registry = Pool::connect(&url).await.expect("registry");
+        rustango::testkit::migrate_framework(&registry)
+            .await
+            .expect("framework tables");
+        Self {
+            url,
+            registry,
+            tmp,
+            guards,
+        }
     }
-}
 
-/// A database-mode tenant on the registry's own backend: PG and MySQL reuse
-/// the test database, SQLite gets a file.
-fn tenant_opts(pool: &Pool, tmp: &Path) -> CreateTenantOpts {
-    let (backend, url) = match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(_) => (
-            BackendKind::Postgres,
-            std::env::var("DATABASE_URL").unwrap(),
-        ),
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(_) => (BackendKind::MySql, std::env::var("MYSQL_TEST_URL").unwrap()),
-        Pool::Sqlite(_) => (
-            BackendKind::Sqlite,
-            format!("sqlite://{}?mode=rwc", tmp.join("t.db").display()),
-        ),
-    };
-    CreateTenantOpts {
-        mode: StorageMode::Database,
-        backend,
-        database_url: Some(url),
-        ..CreateTenantOpts::default()
+    fn backend(&self) -> BackendKind {
+        match &self.registry {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(_) => BackendKind::Postgres,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => BackendKind::MySql,
+            Pool::Sqlite(_) => BackendKind::Sqlite,
+        }
     }
-}
 
-/// One tenant migration whose SQL fails on every backend, writing nothing.
-fn broken_migration(dir: &Path) {
-    let mig = rustango::migrate::Migration {
-        name: "0001_fail".to_owned(),
-        created_at: "2026-10-09T00:00:00Z".into(),
-        prev: None,
-        atomic: true,
-        scope: rustango::migrate::MigrationScope::Tenant,
-        replaces: Vec::new(),
-        snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
-        forward: vec![rustango::migrate::Operation::Data(
-            rustango::migrate::DataOp {
-                sql: "SELECT * FROM rustango_no_such_table_2392".into(),
-                reverse_sql: None,
-                reversible: false,
-            },
-        )],
-    };
-    rustango::migrate::file::write(&dir.join("0001_fail.json"), &mig).unwrap();
-}
+    fn dir(&self, name: &str) -> PathBuf {
+        let dir = self.tmp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-async fn org_by_slug(pool: &Pool, slug: &str) -> Option<Org> {
-    let rows: Vec<Org> = Org::objects()
-        .where_(Org::slug.eq(slug.to_owned()))
-        .fetch(pool)
-        .await
-        .expect("fetch org");
-    rows.into_iter().next()
-}
+    /// A database-mode tenant on the registry database itself.
+    fn shared_opts(&self) -> CreateTenantOpts {
+        CreateTenantOpts {
+            mode: StorageMode::Database,
+            backend: self.backend(),
+            database_url: Some(self.url.clone()),
+            ..CreateTenantOpts::default()
+        }
+    }
 
-/// #2392 — a failed migration is an error, and the tenant stays inactive.
-async fn create_tenant_returns_a_failed_migration(pool: &Pool) {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("migrations");
-    std::fs::create_dir_all(&dir).unwrap();
-    broken_migration(&dir);
-    let slug = name("broken");
-    let r = create(pool, &dir, &slug, tenant_opts(pool, tmp.path())).await;
-    let err = r.expect_err("a failed migration must fail create_tenant");
-    assert!(
-        err.to_string().contains("rustango_no_such_table_2392"),
-        "{err}"
-    );
-    let org = org_by_slug(pool, &slug)
-        .await
-        .expect("row kept for the operator");
-    assert!(!org.active, "a half-migrated tenant must not resolve");
-}
-
-/// #2392 — a clean run activates the tenant.
-async fn create_tenant_activates_after_migrating(pool: &Pool) {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("migrations");
-    std::fs::create_dir_all(&dir).unwrap();
-    let slug = name("clean");
-    let org = create(pool, &dir, &slug, tenant_opts(pool, tmp.path()))
-        .await
-        .expect("create");
-    assert!(org.active);
-}
-
-/// A fresh registry plus one tenant with its own ledger: a PG schema, a
-/// MySQL database, a SQLite file. The guards drop the scratch databases.
-#[allow(clippy::type_complexity)]
-async fn own_registry(pool: &Pool, tmp: &Path) -> (String, Org, Vec<Box<dyn std::any::Any>>) {
-    let mut guards: Vec<Box<dyn std::any::Any>> = Vec::new();
-    let tenant = Org {
-        slug: name("fp"),
-        display_name: "fp".into(),
-        ..rustango::testkit::org()
-    };
-    let (url, tenant) = match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(_) => {
-            let reg = scratch_db::ScratchDb::create(
-                &std::env::var("DATABASE_URL").unwrap(),
-                "rustango_mt",
-            )
-            .await;
-            let url = reg.url().to_owned();
-            guards.push(Box::new(reg));
-            let tenant = Org {
+    /// An unsaved, active tenant with a ledger of its own: a PG schema, a
+    /// MySQL scratch database, a SQLite file.
+    async fn own_tenant(&mut self, tag: &str) -> Org {
+        let base = Org {
+            slug: format!("mt-{tag}"),
+            display_name: tag.into(),
+            ..rustango::testkit::org()
+        };
+        match self.backend() {
+            BackendKind::Postgres => Org {
                 storage_mode: "schema".into(),
-                schema_name: Some("mt_fp".into()),
-                ..tenant
-            };
-            (url, tenant)
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(_) => {
-            let admin = std::env::var("MYSQL_TEST_URL").unwrap();
-            let reg = scratch_db::ScratchDb::create(&admin, "rustango_mt").await;
-            let db = scratch_db::ScratchDb::create(&admin, "rustango_mt_t").await;
-            let url = reg.url().to_owned();
-            let tenant = Org {
-                backend_kind: "mysql".into(),
-                database_url: Some(db.url().to_owned()),
-                ..tenant
-            };
-            guards.push(Box::new(reg));
-            guards.push(Box::new(db));
-            (url, tenant)
-        }
-        Pool::Sqlite(_) => {
-            let url = format!("sqlite://{}?mode=rwc", tmp.join("reg.db").display());
-            let tenant = Org {
+                schema_name: Some(format!("mt_{tag}")),
+                ..base
+            },
+            #[cfg(feature = "mysql")]
+            BackendKind::MySql => {
+                let url = scratch(&mut self.guards, "MYSQL_TEST_URL").await;
+                Org {
+                    backend_kind: "mysql".into(),
+                    database_url: Some(url),
+                    ..base
+                }
+            }
+            _ => Org {
                 backend_kind: "sqlite".into(),
-                database_url: Some(format!("sqlite://{}?mode=rwc", tmp.join("t.db").display())),
-                ..tenant
-            };
-            (url, tenant)
+                database_url: Some(format!(
+                    "sqlite://{}?mode=rwc",
+                    self.tmp.path().join(format!("{tag}.db")).display()
+                )),
+                ..base
+            },
         }
-    };
-    (url, tenant, guards)
+    }
+
+    async fn org(&self, slug: &str) -> Option<Org> {
+        let rows: Vec<Org> = Org::objects()
+            .where_(Org::slug.eq(slug.to_owned()))
+            .fetch(&self.registry)
+            .await
+            .expect("fetch org");
+        rows.into_iter().next()
+    }
+
+    async fn create(
+        &self,
+        dir: &Path,
+        slug: &str,
+        opts: CreateTenantOpts,
+    ) -> Result<Org, TenancyError> {
+        typed!(self.registry, p => create_tenant(&p, &self.url, dir, slug, opts).await)
+    }
+
+    async fn create_if_missing(
+        &self,
+        dir: &Path,
+        slug: &str,
+        opts: CreateTenantOpts,
+    ) -> Result<Org, TenancyError> {
+        typed!(self.registry, p => create_tenant_if_missing(&p, &self.url, dir, slug, opts).await)
+    }
+
+    /// Apply `dir` to `org` alone.
+    async fn migrate(&self, org: &Org, dir: &Path) {
+        typed!(self.registry, p => {
+            rustango::tenancy::migrate::migrate_one_tenant(&p, org, dir, &self.url, None)
+                .await
+                .expect("tenant migrates");
+        })
+    }
+
+    /// `org`'s applied project migrations.
+    async fn applied(&self, org: &Org) -> std::collections::HashSet<String> {
+        let pool = typed!(self.registry, p => p.scoped_pool_dyn(org).await.expect("tenant pool"));
+        rustango::migrate::applied_set_pool(&pool)
+            .await
+            .expect("ledger")
+    }
+
+    async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let mut out = Vec::new();
+        typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)
+    }
 }
 
-/// Apply `dir` to `org` only, then `forget-pending <name>` through the tenancy CLI.
-async fn forget_after_tenant_applied<DB: rustango::sql::sqlx::Database>(
-    pools: &TenantPools<DB>,
-    url: &str,
-    dir: &Path,
-    org: &Org,
-    migration: &str,
-) -> Result<(), TenancyError>
-where
-    Pool: From<rustango::sql::sqlx::Pool<DB>>,
-{
-    rustango::tenancy::migrate::migrate_one_tenant(pools, org, dir, url, None)
-        .await
-        .expect("tenant migrates");
-    let mut out = Vec::new();
-    let args = ["forget-pending".to_owned(), migration.to_owned()];
-    rustango::tenancy::manage::run_with_writer(pools, url, dir, args, &mut out).await
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn scratch(guards: &mut Vec<Box<dyn std::any::Any>>, var: &str) -> String {
+    let db = scratch_db::ScratchDb::create(&std::env::var(var).unwrap(), "rustango_mt").await;
+    let url = db.url().to_owned();
+    guards.push(Box::new(db));
+    url
 }
 
-/// #2393 — a migration only a tenant ledger records is not forgotten.
-async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
-    let tmp = tempfile::tempdir().unwrap();
-    let (url, mut org, _guards) = own_registry(pool, tmp.path()).await;
-    let registry = Pool::connect(&url).await.expect("registry");
-    rustango::testkit::migrate_framework(&registry)
-        .await
-        .expect("framework");
-    org.save_pool(&registry).await.expect("insert org");
-
-    let dir = tmp.path().join("migrations");
-    std::fs::create_dir_all(&dir).unwrap();
+/// One tenant migration running `sql`.
+fn migration(dir: &Path, name: &str, sql: &str) {
     let mig = rustango::migrate::Migration {
-        name: "0001_tenant".to_owned(),
+        name: name.to_owned(),
         created_at: "2026-10-09T00:00:00Z".into(),
         prev: None,
         atomic: true,
@@ -221,168 +208,337 @@ async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
         snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
         forward: vec![rustango::migrate::Operation::Data(
             rustango::migrate::DataOp {
-                sql: "SELECT 1".into(),
+                sql: sql.into(),
                 reverse_sql: Some("SELECT 1".into()),
                 reversible: true,
             },
         )],
     };
-    let file = dir.join("0001_tenant.json");
-    rustango::migrate::file::write(&file, &mig).unwrap();
+    rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+}
 
-    let r = match registry.clone() {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(p) => {
-            forget_after_tenant_applied(&TenantPools::new(p), &url, &dir, &org, "0001_tenant").await
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(p) => {
-            forget_after_tenant_applied(&TenantPools::new(p), &url, &dir, &org, "0001_tenant").await
-        }
-        Pool::Sqlite(p) => {
-            forget_after_tenant_applied(&TenantPools::new(p), &url, &dir, &org, "0001_tenant").await
-        }
+/// Fails on every backend and writes nothing.
+const BROKEN: &str = "SELECT * FROM rustango_no_such_table_2392";
+
+/// #2392 — a failed migration is an error, and the tenant stays inactive.
+async fn create_tenant_returns_a_failed_migration(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_fail", BROKEN);
+    let err = env
+        .create(&dir, "broken", env.shared_opts())
+        .await
+        .expect_err("a failed migration must fail create_tenant");
+    assert!(
+        err.to_string().contains("rustango_no_such_table_2392"),
+        "{err}"
+    );
+    let org = env.org("broken").await.expect("row kept for the operator");
+    assert!(!org.active, "a half-migrated tenant must not resolve");
+}
+
+/// #2392 — `create_tenant_if_missing` finishes a create that failed at migrate.
+async fn create_tenant_if_missing_finishes_a_failed_create(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_fail", BROKEN);
+    assert!(env.create(&dir, "retry", env.shared_opts()).await.is_err());
+    std::fs::remove_file(dir.join("0001_fail.json")).unwrap();
+    migration(&dir, "0001_ok", "SELECT 1");
+    let org = env
+        .create_if_missing(&dir, "retry", env.shared_opts())
+        .await
+        .expect("resume");
+    assert!(org.active, "the failed create was not finished");
+}
+
+/// #2392 — a suspended tenant is not reactivated by `create_tenant_if_missing`.
+async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let mut org = Org {
+        slug: "paused".into(),
+        display_name: "paused".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(env.url.clone()),
+        active: false,
+        ..rustango::testkit::org()
     };
-    registry.close().await;
-    let err = r.expect_err("a tenant-applied migration must not be forgotten");
+    org.save_pool(&env.registry).await.expect("insert org");
+    let got = env
+        .create_if_missing(&env.dir("migrations"), "paused", env.shared_opts())
+        .await
+        .expect("existing org");
+    assert!(!got.active, "a suspended tenant was reactivated");
+}
+
+/// #2392 — a clean run activates the tenant.
+async fn create_tenant_activates_after_migrating(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let org = env
+        .create(&env.dir("migrations"), "clean", env.shared_opts())
+        .await
+        .expect("create");
+    assert!(org.active);
+}
+
+/// #2392 — creating a tenant does not migrate the others.
+async fn create_tenant_migrates_only_the_new_tenant(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let mut other = env.own_tenant("other").await;
+    other.save_pool(&env.registry).await.expect("other org");
+    let first = env.dir("first");
+    migration(&first, "0000_first", "SELECT 1");
+    env.migrate(&other, &first).await;
+
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_new", "SELECT 1");
+    let new = env
+        .create(&dir, "new", env.shared_opts())
+        .await
+        .expect("create");
+    assert!(env.applied(&new).await.contains("0001_new"));
+    assert!(
+        !env.applied(&other).await.contains("0001_new"),
+        "an unrelated tenant was migrated"
+    );
+}
+
+/// #2393 — a migration only an inactive tenant's ledger records is not forgotten.
+async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let mut org = Org {
+        active: false,
+        ..env.own_tenant("fp").await
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    env.migrate(&org, &dir).await;
+
+    let err = env
+        .run(&dir, &["forget-pending", "0001_tenant"])
+        .await
+        .expect_err("a tenant-applied migration must not be forgotten");
     assert!(
         err.to_string()
             .contains(&format!("already applied on tenant `{}`", org.slug)),
         "{err}"
     );
-    assert!(file.exists(), "the JSON was deleted");
+    assert!(
+        dir.join("0001_tenant.json").exists(),
+        "the JSON was deleted"
+    );
+}
+
+/// #2393 — a tenant whose ledger can't be read refuses, and a missing SQLite
+/// file is not created by looking.
+async fn forget_pending_refuses_an_unreadable_tenant(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let missing = env.tmp.path().join("missing.db");
+    let mut org = Org {
+        slug: "gone".into(),
+        display_name: "gone".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!("sqlite://{}?mode=rwc", missing.display())),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+
+    let err = env
+        .run(&dir, &["forget-pending", "0001_tenant"])
+        .await
+        .expect_err("an unreadable tenant must refuse");
+    assert!(
+        err.to_string().contains("could not read tenant `gone`"),
+        "{err}"
+    );
+    assert!(!missing.exists(), "forget-pending created the tenant file");
+    assert!(
+        dir.join("0001_tenant.json").exists(),
+        "the JSON was deleted"
+    );
 }
 
 #[cfg(feature = "postgres")]
-async fn schema_exists(pool: &rustango::sql::sqlx::PgPool, schema: &str) -> bool {
+async fn schema_exists(pool: &Pool, schema: &str) -> bool {
+    let Pool::Postgres(pg) = pool else {
+        unreachable!()
+    };
     rustango::sql::sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
     )
     .bind(schema)
-    .fetch_one(pool)
+    .fetch_one(pg)
     .await
     .unwrap()
 }
 
-fn schema_opts(schema: &str) -> CreateTenantOpts {
+fn schema_opts(backend: BackendKind, schema: &str) -> CreateTenantOpts {
     CreateTenantOpts {
         mode: StorageMode::Schema,
+        backend,
         schema_name: Some(schema.to_owned()),
         no_migrate: true,
         ..CreateTenantOpts::default()
     }
 }
 
-/// #2394 — a schema-mode tenant does not adopt a schema that exists.
-async fn an_existing_schema_is_not_adopted(pool: &Pool) {
-    #[cfg(feature = "postgres")]
-    if let Pool::Postgres(pg) = pool {
-        let schema = format!("mt_app_{}", std::process::id());
-        for sql in [
-            format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
-            format!("CREATE SCHEMA {schema}"),
-            format!("CREATE TABLE {schema}.keep (id INT)"),
-        ] {
-            rustango::sql::sqlx::query(&sql).execute(pg).await.unwrap();
-        }
-        let dir = Path::new("no-migrations");
+#[cfg(feature = "postgres")]
+fn schema_request(slug: &str, schema: &str, host: Option<String>) -> ProvisionRequest {
+    ProvisionRequest {
+        slug: slug.to_owned(),
+        mode: StorageMode::Schema,
+        backend: BackendKind::Postgres,
+        display_name: None,
+        database_url: None,
+        schema_name: Some(schema.to_owned()),
+        host_pattern: host,
+        port: None,
+        path_prefix: None,
+        run_migrations: false,
+        preflight: rustango::tenancy::preflight::Preflight::default(),
+    }
+}
 
-        let slug = name("adopt");
-        let err = create(pool, dir, &slug, schema_opts(&schema))
+/// #2394 — a schema-mode tenant does not adopt a schema that exists. Off
+/// Postgres, schema mode itself is refused and no row is written.
+async fn an_existing_schema_is_not_adopted(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    if env.backend() != BackendKind::Postgres {
+        let r = env
+            .create(&dir, "adopt", schema_opts(env.backend(), "adopt"))
+            .await;
+        assert!(matches!(r, Err(TenancyError::Validation(_))), "{r:?}");
+        assert!(env.org("adopt").await.is_none());
+        return;
+    }
+    #[cfg(feature = "postgres")]
+    {
+        for sql in ["CREATE SCHEMA app", "CREATE TABLE app.keep (id INT)"] {
+            rustango::sql::raw_execute_pool(&env.registry, sql, Vec::new())
+                .await
+                .unwrap();
+        }
+        let err = env
+            .create(&dir, "adopt", schema_opts(BackendKind::Postgres, "app"))
             .await
             .expect_err("create_tenant adopted the schema");
         assert!(err.to_string().contains("already exists"), "{err}");
-        assert!(org_by_slug(pool, &slug).await.is_none());
+        assert!(err.to_string().contains("DROP SCHEMA"), "{err}");
+        assert!(env.org("adopt").await.is_none());
 
-        let request = rustango::tenancy::provision::ProvisionRequest {
-            slug: name("adopt2"),
-            mode: StorageMode::Schema,
-            backend: BackendKind::Postgres,
-            display_name: None,
-            database_url: None,
-            schema_name: Some(schema.clone()),
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            run_migrations: false,
-            preflight: rustango::tenancy::preflight::Preflight::default(),
-        };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let r = rustango::tenancy::provision::provision_tenant(
-            &TenantPools::new(pg.clone()),
-            &url,
-            dir,
-            &request,
-            None,
-        )
-        .await;
+        let r = typed!(env.registry, p => provision_tenant(&p, &env.url, &dir, &schema_request("adopt2", "app", None), None).await);
         assert!(
             matches!(&r, Err(e) if e.to_string().contains("already exists")),
             "provision adopted the schema: {r:?}"
         );
-
-        let kept: i64 =
-            rustango::sql::sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {schema}.keep"))
-                .fetch_one(pg)
-                .await
-                .expect("the app's table is untouched");
-        assert_eq!(kept, 0);
-        rustango::sql::sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(pg)
-            .await
-            .unwrap();
+        assert!(env.org("adopt2").await.is_none());
+        let kept: Vec<(i64,)> = rustango::sql::raw_query_pool(
+            "SELECT COUNT(*) FROM app.keep",
+            Vec::new(),
+            &env.registry,
+        )
+        .await
+        .expect("the app's table is untouched");
+        assert_eq!(kept[0].0, 0);
     }
-    let _ = pool;
 }
 
-/// #2394 — when the Org row fails, the schema just made is dropped, so a
-/// retry is not refused as taken.
-async fn a_failed_insert_releases_its_schema(pool: &Pool) {
+/// Run `create` while an uncommitted extra-host row holds `host`; commit it
+/// only once `schema` exists, so the INSERT loses after the schema is made.
+#[cfg(feature = "postgres")]
+async fn losing_the_insert<T, F>(env: &Env, host: &str, schema: &str, create: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut owner = Org {
+        slug: "owner".into(),
+        display_name: "owner".into(),
+        database_url: Some(env.url.clone()),
+        ..rustango::testkit::org()
+    };
+    owner.save_pool(&env.registry).await.expect("owner");
+    let mut tx = rustango::sql::transaction_pool(&env.registry)
+        .await
+        .expect("begin");
+    let mut row = rustango::tenancy::OrgHost {
+        id: rustango::sql::Auto::Unset,
+        org_id: *owner.id.get().unwrap(),
+        hostname: host.to_owned(),
+        enabled: true,
+        created_at: rustango::sql::Auto::Unset,
+    };
+    row.insert_tx(&mut tx).await.expect("held host");
+    let create = tokio::spawn(create);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !schema_exists(&env.registry, schema).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the schema was never created"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tx.commit().await.expect("commit");
+    create.await.expect("join")
+}
+
+/// #2394 — when `create_tenant`'s Org row fails, the schema it made is dropped.
+async fn create_tenant_releases_its_schema_on_a_failed_insert(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
     #[cfg(feature = "postgres")]
-    if let Pool::Postgres(pg) = pool {
-        use rustango::sql::Auto;
-        use rustango::tenancy::OrgHost;
-
-        let mut owner = Org {
-            slug: name("race-a"),
-            display_name: "a".into(),
-            database_url: Some(std::env::var("DATABASE_URL").unwrap()),
-            ..rustango::testkit::org()
-        };
-        owner.save_pool(pool).await.expect("owner");
-        let host = format!("{}.example.test", name("race"));
-        let schema = format!("mt_race_{}", std::process::id());
-
-        // Hold an uncommitted claim on `host`, so the INSERT loses the race.
-        let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
-        let mut row = OrgHost {
-            id: Auto::Unset,
-            org_id: *owner.id.get().unwrap(),
-            hostname: host.clone(),
-            enabled: true,
-            created_at: Auto::Unset,
-        };
-        row.insert_tx(&mut tx).await.expect("held host");
+    {
+        let host = "race.example.test";
         let opts = CreateTenantOpts {
-            host_pattern: Some(host.clone()),
-            ..schema_opts(&schema)
+            host_pattern: Some(host.to_owned()),
+            ..schema_opts(BackendKind::Postgres, "race")
         };
-        let (p, slug) = (pool.clone(), name("race-b"));
-        let create =
-            tokio::spawn(async move { create(&p, Path::new("no-migrations"), &slug, opts).await });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        tx.commit().await.expect("commit");
-        let r = create.await.expect("join");
+        let (registry, url) = (env.registry.clone(), env.url.clone());
+        let r = losing_the_insert(&env, host, "race", async move {
+            typed!(registry, p => create_tenant(&p, &url, Path::new("none"), "race", opts).await)
+        })
+        .await;
         assert!(
             matches!(&r, Err(e) if e.to_string().contains("already used")),
             "{r:?}"
         );
         assert!(
-            !schema_exists(pg, &schema).await,
+            !schema_exists(&env.registry, "race").await,
             "the new schema was left behind"
         );
     }
-    let _ = pool;
+}
+
+/// #2394 — the same for `provision_tenant`.
+async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let host = "race.example.test";
+        let request = schema_request("race", "race", Some(host.to_owned()));
+        let (registry, url) = (env.registry.clone(), env.url.clone());
+        let r = losing_the_insert(&env, host, "race", async move {
+            typed!(registry, p => provision_tenant(&p, &url, Path::new("none"), &request, None).await)
+        })
+        .await;
+        assert!(
+            matches!(&r, Err(e) if e.to_string().contains("already used")),
+            "{r:?}"
+        );
+        assert!(
+            !schema_exists(&env.registry, "race").await,
+            "the new schema was left behind"
+        );
+    }
 }
 
 tri_dialect_test! {
@@ -390,9 +546,14 @@ tri_dialect_test! {
     sqlite: file,
     scenarios: [
         create_tenant_returns_a_failed_migration,
+        create_tenant_if_missing_finishes_a_failed_create,
+        create_tenant_if_missing_leaves_a_suspended_tenant,
         create_tenant_activates_after_migrating,
+        create_tenant_migrates_only_the_new_tenant,
         forget_pending_refuses_a_tenant_applied_migration,
+        forget_pending_refuses_an_unreadable_tenant,
         an_existing_schema_is_not_adopted,
-        a_failed_insert_releases_its_schema,
+        create_tenant_releases_its_schema_on_a_failed_insert,
+        provision_releases_its_schema_on_a_failed_insert,
     ],
 }

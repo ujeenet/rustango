@@ -22,7 +22,7 @@ In a tenancy project it checked only the registry ledger. It now refuses when an
 
 ### Fixed — `api::create_tenant` returns a failed migration (#2392)
 
-It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run.
+It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run; `create_tenant_if_missing` finishes one that failed.
 
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 

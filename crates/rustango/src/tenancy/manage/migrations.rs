@@ -194,8 +194,7 @@ where
         .await?;
     let mut out = Vec::with_capacity(orgs.len());
     for org in orgs {
-        let pool = pools
-            .scoped_pool_dyn(&org)
+        let (pool, own) = ledger_pool(pools, &org)
             .await
             .map_err(|e| unreadable(&org.slug, &e))?;
         let has_ledger = rustango::migrate::try_table_exists_here(&pool, LEDGER_TABLE)
@@ -208,9 +207,40 @@ where
         } else {
             std::collections::HashSet::new()
         };
+        if own {
+            pool.close().await;
+        }
         out.push((org.slug, applied));
     }
     Ok(out)
+}
+
+/// The tenant's pool, but a SQLite file is opened read-only and never
+/// created: a missing file is unreadable, not empty (#2393). `true` when the
+/// pool is this call's own, to close.
+async fn ledger_pool<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &crate::tenancy::org::Org,
+) -> Result<(crate::sql::Pool, bool), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    #[cfg(feature = "sqlite")]
+    if org.storage_mode == "database" && org.database_url.is_some() {
+        let url = pools.resolved_database_url(org).await?;
+        if url.starts_with("sqlite:") {
+            use std::str::FromStr as _;
+            let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+                .create_if_missing(false)
+                .read_only(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await?;
+            return Ok((crate::sql::Pool::Sqlite(pool), true));
+        }
+    }
+    Ok((pools.scoped_pool_dyn(org).await?, false))
 }
 
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).

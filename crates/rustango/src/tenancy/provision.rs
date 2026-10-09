@@ -1360,7 +1360,9 @@ pub(crate) async fn provision_schema<DB: Database>(
             // duplicate_schema
             Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P06") => {
                 Err(TenancyError::Validation(format!(
-                    "schema `{schema}` already exists — choose another schema name"
+                    "schema `{schema}` already exists — choose another schema name, or, if a \
+                     failed create left it empty, run `DROP SCHEMA {}`",
+                    crate::sql::Postgres.quote_ident(schema)
                 )))
             }
             Err(e) => Err(e.into()),
@@ -1394,6 +1396,7 @@ pub(crate) async fn release_schema<DB: Database>(pools: &TenantPools<DB>, schema
             tracing::warn!(target: "rustango::tenancy::provision", schema, error = %e, "could not drop the new schema");
         }
     }
+    #[cfg(not(feature = "postgres"))]
     let _ = (pools, schema);
 }
 
