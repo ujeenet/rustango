@@ -69,15 +69,27 @@ async fn fresh(backend: Backend, tmp: &Path, tag: &str) -> Option<(Pool, String,
     Some((Pool::connect(&url).await.expect("connect"), url, guard))
 }
 
-async fn get(router: &axum::Router, uri: &str) -> (StatusCode, String) {
-    let res = router
-        .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+async fn send(router: &axum::Router, req: Request<Body>) -> (StatusCode, String) {
+    let res = router.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let body = res.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+async fn get(router: &axum::Router, uri: &str) -> (StatusCode, String) {
+    send(
+        router,
+        Request::builder().uri(uri).body(Body::empty()).unwrap(),
+    )
+    .await
+}
+
+/// A tenant admin over `pool`, mounted at `/a`.
+fn tenant_admin(pool: Pool) -> axum::Router {
+    rustango::admin::Builder::new(pool)
+        .tenant_mode()
+        .admin_prefix("/a")
+        .build()
 }
 
 /// The tables the admin index links to.
@@ -96,11 +108,10 @@ fn listed_tables(index: &str) -> Vec<String> {
     out
 }
 
-/// Every table the admin over `pool` lists opens without "isn't in this
-/// database yet" (a 503).
-async fn assert_listed_tables_exist(admin: rustango::admin::Builder, what: &str) -> Vec<String> {
-    let router = admin.admin_prefix("/a").build();
-    let (status, index) = get(&router, "/").await;
+/// Every table the admin lists opens without "isn't in this database
+/// yet" (a 503).
+async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<String> {
+    let (status, index) = get(router, "/").await;
     assert_eq!(status, StatusCode::OK, "{what}: index");
     let tables = listed_tables(&index);
     assert!(!tables.is_empty(), "{what}: the index lists no model");
@@ -110,7 +121,7 @@ async fn assert_listed_tables_exist(admin: rustango::admin::Builder, what: &str)
         .iter()
         .filter(|t| *t != "rustango_webauthn_credentials")
     {
-        let (status, _) = get(&router, &format!("/{t}")).await;
+        let (status, _) = get(router, &format!("/{t}")).await;
         if status == StatusCode::SERVICE_UNAVAILABLE {
             missing.push(t.clone());
         }
@@ -127,6 +138,26 @@ async fn assert_listed_tables_exist(admin: rustango::admin::Builder, what: &str)
 fn assert_no_registry_tables(listed: &[String]) {
     for t in ["rustango_translations", "rustango_admin_totp"] {
         assert!(!listed.iter().any(|l| l == t), "tenant admin lists {t}");
+    }
+}
+
+/// The translations editor and export are registry-only: a 404 on a
+/// tenant admin, and nothing reaches the registry's table.
+async fn assert_no_translations_editor(router: &axum::Router, registry: &Pool) {
+    let post = Request::post("/rustango_translations/editor")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("tr:en:greeting=pwned"))
+        .unwrap();
+    let (status, body) = send(router, post).await;
+    let rows = rustango::i18n::db::all_pool(registry).await.unwrap();
+    assert!(rows.is_empty(), "registry translations written: {rows:?}");
+    assert_eq!(status, StatusCode::NOT_FOUND, "POST editor: {body}");
+    for uri in [
+        "/rustango_translations/editor",
+        "/rustango_translations/export.json",
+    ] {
+        let (status, body) = get(router, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {uri}: {body}");
     }
 }
 
@@ -174,13 +205,11 @@ async fn database_mode_tenant_admin(backend: Backend) {
             pools.scoped_pool_dyn(&org).await.unwrap()
         }
     };
-    let listed = assert_listed_tables_exist(
-        rustango::admin::Builder::new(tenant).tenant_mode(),
-        "tenant admin",
-    )
-    .await;
+    let router = tenant_admin(tenant);
+    let listed = assert_listed_tables_exist(&router, "tenant admin").await;
     assert!(listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
     assert_no_registry_tables(&listed);
+    assert_no_translations_editor(&router, &registry).await;
 
     // The registry holds the translations the tenant admin no longer lists.
     let registry_admin = rustango::admin::Builder::new(registry.clone())
@@ -188,6 +217,9 @@ async fn database_mode_tenant_admin(backend: Backend) {
         .build();
     let (status, _) = get(&registry_admin, "/rustango_translations").await;
     assert_eq!(status, StatusCode::OK, "registry rustango_translations");
+    // ...and serves the editor the tenant admin 404s.
+    let (status, body) = get(&registry_admin, "/rustango_translations/editor").await;
+    assert_eq!(status, StatusCode::OK, "registry editor: {body}");
 }
 
 /// A single-database `migrate` creates what its admin lists.
@@ -268,10 +300,8 @@ async fn schema_mode_tenant_admin() {
         .expect("tenants");
     assert!(report.all_ok(), "{report:?}");
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
-    let listed = assert_listed_tables_exist(
-        rustango::admin::Builder::new(tenant).tenant_mode(),
-        "schema-mode tenant admin",
-    )
-    .await;
+    let router = tenant_admin(tenant);
+    let listed = assert_listed_tables_exist(&router, "schema-mode tenant admin").await;
     assert_no_registry_tables(&listed);
+    assert_no_translations_editor(&router, &registry).await;
 }

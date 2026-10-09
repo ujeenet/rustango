@@ -801,7 +801,15 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    /// Whether this admin serves `table` at all. Index, sidebar, routes,
+    /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {
+        // A schema-mode tenant's `search_path` reaches the registry's
+        // copy, so registry tables must not be served there (#2360).
+        if super::helpers::served_entry(table).is_some_and(|e| !self.scope_visible(e.schema.scope))
+        {
+            return false;
+        }
         // `rustango_admin_users` is the bare admin's credential
         // store, and its table exists only when the host opts into
         // `Builder::with_session_auth`. The derive on `AdminUser`
@@ -826,12 +834,12 @@ impl AppState {
         true
     }
 
-    /// Scope filter. With `tenant_mode` on, registry-only models
+    /// Scope filter, applied by [`Self::is_visible`]. With `tenant_mode` on, registry-only models
     /// (`#[rustango(scope = "registry")]`, such as `Org` and
     /// `Operator`) are hidden, so **cross-tenant data cannot
     /// surface inside a tenant subdomain**. Standalone admins
     /// return true for every scope.
-    pub(crate) fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
+    fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
         if !self.config.tenant_mode {
             return true;
         }
@@ -931,8 +939,8 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
             );
             continue;
         }
-        // A route on a hidden table would be unreachable anyway,
-        // and skipping it reads more clearly as "view not loaded".
+        // A hidden table, registry ones on a tenant admin included,
+        // gets no custom routes either.
         if !state.is_visible(view.table) {
             tracing::debug!(
                 target: "rustango::admin",
@@ -1046,6 +1054,9 @@ mod scope_filter_tests {
         let state = state_with(true);
         assert!(state.scope_visible(ModelScope::Tenant));
         assert!(!state.scope_visible(ModelScope::Registry));
+        // `is_visible` is the gate custom views and docs use too (#2360).
+        assert!(!state.is_visible("rustango_translations"));
+        assert!(state_with(false).is_visible("rustango_translations"));
     }
 
     #[tokio::test]

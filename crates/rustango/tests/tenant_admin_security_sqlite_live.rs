@@ -433,22 +433,21 @@ async fn an_audit_pk_cannot_inject_markup() {
     assert!(!body.contains(r#"" onmouseover=""#), "{body}");
 }
 
-/// #1863: a non-superuser in the tenant admin cannot write translations.
+/// #1863, #2360: translations are registry-wide, so the tenant admin
+/// serves no editor, not even to its superuser.
 #[tokio::test]
-async fn translation_edits_need_a_superuser_in_the_tenant_admin() {
+async fn the_tenant_admin_serves_no_translations_editor() {
     let env = boot().await;
     let editor = "/__admin/rustango_translations/editor";
-    let cookie = env.login(false, &["rustango_translations.view"]).await;
-    let (status, body) = env.post(editor, &cookie, "tr:en:greeting=pwned").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    for superuser in [false, true] {
+        let cookie = env.login(superuser, &["rustango_translations.view"]).await;
+        let (status, body) = env.post(editor, &cookie, "tr:en:greeting=pwned").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{superuser}: {body}");
+        let (status, _) = env.get(editor, &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{superuser}: GET");
+    }
     let rows = rustango::i18n::db::all_pool(&env.tenant).await.unwrap();
     assert!(rows.is_empty(), "nothing written: {rows:?}");
-
-    let root = env.login(true, &[]).await;
-    let (status, body) = env.post(editor, &root, "tr:en:greeting=Hello").await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
-    let rows = rustango::i18n::db::all_pool(&env.tenant).await.unwrap();
-    assert_eq!(rows.len(), 1, "a superuser still saves");
 }
 
 /// A user holding `sec_owned` perms: `(env, cookie, own pk, other pk, other owner)`.
