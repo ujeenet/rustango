@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a password change no longer undoes a concurrent deactivate or demote (#2467)
+
+The tenant admin, operator console and CLI password writes, and operator activate/deactivate, update only their own columns; a password write is guarded by the old hash.
+
 ### Security — reset, verify and magic links are tenant-bound (#2472)
 
 `PasswordReset`, `EmailVerification` and `MagicLink` sign a `LinkScope` and refuse a link redeemed under another one, so a link from one tenant can no longer reset the same user id in another.

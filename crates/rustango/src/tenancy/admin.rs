@@ -1636,10 +1636,7 @@ async fn change_password_submit(
     if user_id <= 0 {
         return redir_err("Session is missing a user id; please log in again.");
     }
-    // v0.38 — fetch the user via the tri-dialect ORM, verify current
-    // password, then save the updated row. save_pool covers PG / MySQL
-    // / SQLite and the dialect emitter handles the placeholder /
-    // identifier quoting differences.
+    // Verify the current password, then write only the password columns.
     let users: Vec<super::auth::User> = match super::auth::User::objects()
         .where_(super::auth::User::id.eq(user_id))
         .fetch(tenant_pool)
@@ -1651,7 +1648,7 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let Some(mut user) = users.into_iter().next() else {
+    let Some(user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
     let verify = async {
@@ -1687,11 +1684,13 @@ async fn change_password_submit(
             return redir_err("Could not update the password; please try again.");
         }
     };
-    user.password_hash = new_hash;
-    user.password_changed_at = Some(chrono::Utc::now());
-    if let Err(e) = user.save_pool(tenant_pool).await {
-        warn!(target: "rustango::tenancy::admin", error = %e, "change-password update");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    match super::password::store_new_hash(tenant_pool, &user, new_hash).await {
+        Ok(true) => {}
+        Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
+        Err(e) => {
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password update");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+        }
     }
     Redirect::to(&format!(
         "{}?ok=Password+updated",

@@ -1433,10 +1433,9 @@ async fn change_password_submit(
         return redir_err("Session is missing an operator id; please log in again.");
     }
 
-    // `op` from the extension is a snapshot taken in `require_session`.
-    // Re-read the live row so we do not overwrite a change another
-    // operator just made.
-    let mut op_row: auth::Operator = match auth::Operator::objects()
+    // `op` from the extension is a snapshot taken in `require_session`;
+    // verify against the live hash.
+    let op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
         .fetch(&state.registry)
         .await
@@ -1488,11 +1487,13 @@ async fn change_password_submit(
             ))
         }
     };
-    op_row.password_hash = new_hash;
-    op_row.password_changed_at = Some(chrono::Utc::now());
-    if let Err(e) = op_row.save_pool(&state.registry).await {
-        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password update");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    match super::password::store_new_hash(&state.registry, &op_row, new_hash).await {
+        Ok(true) => {}
+        Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password update");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+        }
     }
     redir("ok=Password+updated")
 }

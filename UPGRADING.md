@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Password changes refuse a stale row
+
+A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
+
 ### Auth links take a `LinkScope`
 
 `PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` and every `confirm_password_reset_*` take a `&LinkScope` (#2472). Pass `LinkScope::from(&tenant.org)` in a tenant app, or `LinkScope::audience("app")` in a single-tenant one; confirm needs the same scope, else `AuthFlowError::WrongScope` (new variant). Links issued before the upgrade are refused.

@@ -13,7 +13,7 @@
 //! it is the invariant, not a UI courtesy.
 
 use crate::core::Column as _;
-use crate::sql::{CounterPool as _, FetcherPool as _, Pool};
+use crate::sql::{CounterPool as _, FetcherPool as _, Pool, UpdaterPool as _};
 use crate::tenancy::auth::Operator;
 
 /// Why an activation change was refused.
@@ -136,7 +136,14 @@ pub async fn set_active(
         }
     }
 
+    // Only `active`: a whole-row save would undo a password reset that
+    // landed since `target` was read (#2467).
+    Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(active))
+        .execute_pool(registry)
+        .await?;
     target.active = active;
-    target.save_pool(registry).await?;
     Ok(Outcome::Changed)
 }

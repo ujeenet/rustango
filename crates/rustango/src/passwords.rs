@@ -306,6 +306,24 @@ pub(crate) fn rehash_update(
     }
 }
 
+/// [`rehash_update`] that also stamps `password_changed_at`: a password
+/// change, not a rehash.
+pub(crate) fn password_change_update(
+    model: &'static crate::core::ModelSchema,
+    id: i64,
+    old: &str,
+    new: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> crate::core::UpdateQuery {
+    use crate::core::{Assignment, SqlValue};
+    let mut q = rehash_update(model, id, old, new);
+    q.set.push(Assignment::new(
+        "password_changed_at",
+        SqlValue::DateTime(at),
+    ));
+    q
+}
+
 /// The hash in force after running [`rehash_update`].
 pub(crate) fn rehash_applied<E: std::fmt::Display>(
     applied: Result<u64, E>,
