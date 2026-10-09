@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
+
+For an `audit(...)` model a failed audit write now refuses the write instead of logging a warning. Custom actions still audit after their handler.
+
 ### Fixed — admin inline rows of an `audit(...)` model are audited (#2389)
 
 Inline updates, deletes and inserts write their audit rows in the parent edit's transaction; a failed audit write saves nothing.

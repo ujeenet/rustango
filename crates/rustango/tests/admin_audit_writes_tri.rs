@@ -1,5 +1,5 @@
 //! Admin writes on `audit(...)` models audit in the write's transaction:
-//! inline child rows (#2389).
+//! inline child rows (#2389); delete, soft delete, restore and bulk actions (#2390).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use rustango::audit::AuditLog;
+use rustango::core::Model as _;
 use rustango::sql::{Auto, CounterPool as _, FetcherPool as _, Pool};
 use rustango::{tri_dialect_test, Model};
 use tower::ServiceExt as _;
@@ -51,6 +52,38 @@ pub struct Tag {
     pub note: String,
 }
 
+/// Hard delete. The long key fails the audit row on PG and MySQL.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "aaw_note",
+    audit(track = "body"),
+    admin(actions = "delete_selected")
+)]
+#[allow(dead_code)]
+pub struct Note {
+    #[rustango(primary_key, max_length = 300)]
+    pub code: String,
+    #[rustango(max_length = 32)]
+    pub body: String,
+}
+
+/// Soft delete and restore.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "aaw_memo",
+    audit(track = "body, deleted_at"),
+    admin(actions = "delete_selected, restore_selected")
+)]
+#[allow(dead_code)]
+pub struct Memo {
+    #[rustango(primary_key, max_length = 300)]
+    pub code: String,
+    #[rustango(max_length = 32)]
+    pub body: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 rustango::register_admin_inline!(
     parent = "aaw_order",
     child = "aaw_line",
@@ -74,10 +107,12 @@ async fn setup(pool: &Pool) {
     fresh_table::<Order>(pool).await;
     fresh_table::<Line>(pool).await;
     fresh_table::<Tag>(pool).await;
+    fresh_table::<Note>(pool).await;
+    fresh_table::<Memo>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
-    for t in ["aaw_order", "aaw_line", "aaw_tag"] {
+    for t in ["aaw_order", "aaw_line", "aaw_tag", "aaw_note", "aaw_memo"] {
         AuditLog::delete_where("entity_table", t, pool)
             .await
             .expect("clear audit rows");
@@ -203,10 +238,120 @@ async fn inline_child_audit_failure_saves_nothing(pool: &Pool) {
     assert_eq!(orders[0].name, "o", "the parent edit committed");
 }
 
+/// One note and one live memo under `code`, written without an audit row.
+async fn seed_note_and_memo(pool: &Pool, code: &str) {
+    use rustango::core::InsertQuery;
+    for (table, schema) in [("note", Note::SCHEMA), ("memo", Memo::SCHEMA)] {
+        let q = InsertQuery::new(
+            schema,
+            vec!["code", "body"],
+            vec![code.into(), table.into()],
+        );
+        rustango::sql::insert_pool(pool, &q).await.expect("seed");
+    }
+}
+
+async fn note_count(pool: &Pool) -> i64 {
+    Note::objects().count(pool).await.expect("count notes")
+}
+
+async fn memo_deleted(pool: &Pool) -> bool {
+    let memos = Memo::objects().fetch(pool).await.expect("fetch memos");
+    memos[0].deleted_at.is_some()
+}
+
+/// Single and bulk deletes, soft deletes and restores audit as before.
+async fn deletes_and_bulk_actions_are_audited(pool: &Pool) {
+    let ops = |table: &'static str| async move {
+        let rows = audit_rows(pool, table).await;
+        rows.into_iter().map(|r| r.0).collect::<Vec<_>>()
+    };
+    seed_note_and_memo(pool, "a").await;
+    let (status, body) = post(pool, "/aaw_note/a/delete", "").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(note_count(pool).await, 0);
+    let (status, body) = post(pool, "/aaw_memo/a/delete", "").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert!(memo_deleted(pool).await);
+    let form = "action=restore_selected&_selected=a&trashed=1";
+    let (status, body) = post(pool, "/aaw_memo/__action", form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert!(!memo_deleted(pool).await);
+    // A bulk action audits as an `update` tagged with its name.
+    assert_eq!(ops("aaw_memo").await, ["soft_delete", "update"]);
+
+    seed_note_and_memo(pool, "b").await;
+    let form = "action=delete_selected&_selected=b";
+    let (status, body) = post(pool, "/aaw_note/__action", form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(note_count(pool).await, 0);
+    assert_eq!(ops("aaw_note").await, ["delete", "delete"]);
+}
+
+/// A delete, soft delete or restore whose audit row cannot be written
+/// writes nothing (#2390). Each write gets its own rows; leaks are
+/// collected so one run shows every path that commits.
+async fn delete_audit_failure_keeps_the_row(pool: &Pool) {
+    use rustango::core::{Assignment, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    let base = break_audit(pool).await;
+    let key = |i: usize| format!("{i}{}", &base[1..]);
+    let note_gone = |code: String| async move {
+        Note::objects()
+            .filter("code", code)
+            .count(pool)
+            .await
+            .expect("count")
+            == 0
+    };
+    let memo_stamped = |code: String| async move {
+        let memos = Memo::objects().filter("code", code).fetch(pool).await;
+        memos.expect("fetch")[0].deleted_at.is_some()
+    };
+    for i in 0..5 {
+        seed_note_and_memo(pool, &key(i)).await;
+    }
+    // Trash memo 4 without an audit row, to restore it below.
+    let stamp = UpdateQuery::new(
+        Memo::SCHEMA,
+        vec![Assignment::new(
+            "deleted_at",
+            SqlValue::DateTime(chrono::Utc::now()),
+        )],
+        WhereExpr::Predicate(Filter::new("code", Op::Eq, SqlValue::String(key(4)))),
+    );
+    rustango::sql::update_pool(pool, &stamp)
+        .await
+        .expect("trash");
+
+    let mut leaks = Vec::new();
+    let mut check = |what: &'static str, (status, _): (StatusCode, String), wrote: bool| {
+        if status.is_redirection() || wrote {
+            leaks.push(format!("{what}: {status}, wrote={wrote}"));
+        }
+    };
+    let r = post(pool, &format!("/aaw_note/{}/delete", key(0)), "").await;
+    check("delete", r, note_gone(key(0)).await);
+    let r = post(pool, &format!("/aaw_memo/{}/delete", key(1)), "").await;
+    check("soft delete", r, memo_stamped(key(1)).await);
+    let form = |action: &str, i: usize| format!("action={action}&_selected={}&trashed=1", key(i));
+    let r = post(pool, "/aaw_note/__action", &form("delete_selected", 2)).await;
+    check("bulk delete", r, note_gone(key(2)).await);
+    let r = post(pool, "/aaw_memo/__action", &form("delete_selected", 3)).await;
+    check("bulk soft delete", r, memo_stamped(key(3)).await);
+    let r = post(pool, "/aaw_memo/__action", &form("restore_selected", 4)).await;
+    check("bulk restore", r, !memo_stamped(key(4)).await);
+    assert!(
+        leaks.is_empty(),
+        "committed without an audit row: {leaks:#?}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         inline_child_writes_are_audited,
         inline_child_audit_failure_saves_nothing,
+        deletes_and_bulk_actions_are_audited,
+        delete_audit_failure_keeps_the_row,
     ],
 }

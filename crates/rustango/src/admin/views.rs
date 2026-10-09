@@ -2474,9 +2474,9 @@ pub(crate) async fn delete_submit(
         &delete_fields,
     )
     .await?;
-    if before_row.is_none() {
+    let Some(before_row) = before_row else {
         return Err(AdminError::RowNotFound { table, pk: pk_raw });
-    }
+    };
 
     // `has_delete_permission(request, obj)` hook. It **must** run
     // before any soft-delete UPDATE or hard DELETE.
@@ -2484,7 +2484,7 @@ pub(crate) async fn delete_submit(
         model.table,
         "delete",
         &parts,
-        before_row.as_ref(),
+        Some(&before_row),
     ) {
         return Err(AdminError::Forbidden {
             table: model.table.to_owned(),
@@ -2504,59 +2504,42 @@ pub(crate) async fn delete_submit(
     })
     .await;
     let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
-    let affected = if let Some(col) = model.soft_delete_column {
+    let entry =
+        super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
+    // An `audit(...)` model's entry commits with the write, as on edit (#2390).
+    let emit = crate::audit::DiffEmit::for_model(model);
+    let mut tx = crate::sql::write_transaction_pool(&state.pool).await?;
+    let written = if let Some(col) = model.soft_delete_column {
         let now = Some(chrono::Utc::now());
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
-        crate::sql::update_pool(&state.pool, &stamp).await?
+        crate::sql::update_tx(&mut tx, &stamp).await
     } else {
-        let deleted = crate::sql::delete_pool(
-            &state.pool,
-            &DeleteQuery {
-                model,
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
-                    op: Op::Eq,
-                    value: pk_value,
-                }),
-            },
-        )
-        .await;
-        match deleted {
-            Ok(n) => n,
-            Err(e) => return refused_delete(&state, model, e),
+        let query = DeleteQuery::by_pk(model, pk_field.column, pk_value);
+        crate::sql::delete_tx(&mut tx, &query).await
+    };
+    let affected = match written {
+        Ok(n) => n,
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            return refused_delete(&state, model, e);
         }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
     if affected == 0 {
+        rollback_quietly(tx, model.table).await;
         return Ok(Redirect::to(&list_url).into_response());
     }
-
-    let delete_cfg = admin_config_or_default(model);
-    let pairs: Vec<(&str, serde_json::Value)> = before_row
-        .as_ref()
-        .map(|row| mask_secrets(model, &delete_cfg, row))
-        .map(|row| {
-            model
-                .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json_from_json(&row, f)))
-                .collect()
-        })
-        .unwrap_or_default();
-    let entry = crate::audit::PendingEntry {
-        entity_table: model.table,
-        entity_pk: pk_raw.clone(),
-        operation: audit_op,
-        source: crate::audit::current_source(),
-        changes: crate::audit::snapshot_changes(&pairs),
-    };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
-        tracing::warn!(
-            target: "rustango::admin::audit",
-            error = %e,
-            entity_table = %model.table,
-            entity_pk = %pk_raw,
-            "admin audit emit failed for delete",
-        );
+    if emit == crate::audit::DiffEmit::InTx {
+        if let Err(e) =
+            crate::audit::emit_in_tx(&mut tx, &state.pool, std::slice::from_ref(&entry)).await
+        {
+            rollback_quietly(tx, model.table).await;
+            return Err(e.into());
+        }
+    }
+    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+    if emit == crate::audit::DiffEmit::AfterCommit {
+        super::audit::emit_best_effort(&state, &entry).await;
     }
     // The `delete_model` hook fires after the delete and the audit
     // emit, in both soft and hard delete mode.
@@ -2766,39 +2749,51 @@ pub(crate) async fn action_submit(
         .collect();
     send_row_signals(model.table, &row_pks, is_delete, true).await;
 
-    let mark = |col, deleted_at| {
-        mark_each(
-            &state.pool,
-            model,
-            col,
-            pk_field.column,
-            &pk_values,
-            deleted_at,
-        )
+    // One snapshot per row. For `delete_selected` it is what was deleted;
+    // other actions tag the action name, so the panel shows who ran what.
+    let tag = (!is_delete).then_some(action.as_str());
+    let entries_for = |rows: &[serde_json::Value], pks: &[String]| {
+        rows.iter()
+            .zip(pks)
+            .map(|(row, pk)| {
+                super::audit::admin_row_snapshot_entry(model, pk.clone(), audit_op, row, tag)
+            })
+            .collect::<Vec<_>>()
     };
-    let changed = match write {
+    let builtin = match &write {
+        BulkWrite::Custom(a) => {
+            // Handlers get the `Pool` enum, so a user action can match on the
+            // backend. It writes on its own connection, so its audit follows it.
+            (a.handler)(&state.pool, &pk_values).await?;
+            let entries = entries_for(&before_rows, &row_pks);
+            super::audit::emit_many_best_effort(&state, &entries, &action).await;
+            send_row_signals(model.table, &row_pks, is_delete, false).await;
+            return back();
+        }
         BulkWrite::Delete => match model.soft_delete_column {
             // Soft delete: stamp the column instead of a DELETE.
-            Some(col) => Some(mark(col, Some(chrono::Utc::now())).await?),
-            None => {
-                let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
-                if let Err(e) = crate::sql::delete_pool(&state.pool, &query).await {
-                    return refused_delete(&state, model, e);
-                }
-                None
-            }
+            Some(col) => BuiltinWrite::Mark(col, Some(chrono::Utc::now())),
+            None => BuiltinWrite::HardDelete,
         },
         // Built-in restore: clear the soft-delete column, where NULL means live.
-        BulkWrite::Restore(col) => Some(mark(col, None).await?),
-        // Handlers get the `Pool` enum, so a user action can match
-        // on the backend if it needs to.
-        BulkWrite::Custom(a) => {
-            (a.handler)(&state.pool, &pk_values).await?;
-            None
+        BulkWrite::Restore(col) => BuiltinWrite::Mark(*col, None),
+    };
+    // An `audit(...)` model's entries commit with the write (#2390).
+    let emit = crate::audit::DiffEmit::for_model(model);
+    let mut tx = crate::sql::write_transaction_pool(&state.pool).await?;
+    let changed = match builtin
+        .run(&mut tx, model, pk_field.column, &pk_values)
+        .await
+    {
+        Ok(changed) => changed,
+        Err(e) => {
+            rollback_quietly(tx, model.table).await;
+            // Only a hard delete can hit an FK; else this is `Err(e.into())`.
+            return refused_delete(&state, model, e);
         }
     };
     // A row someone else marked since the read keeps their stamp and audit row (#1929).
-    let (before_rows, row_pks) = match changed {
+    let (before_rows, row_pks): (Vec<_>, Vec<_>) = match changed {
         Some(changed) => before_rows
             .into_iter()
             .zip(row_pks)
@@ -2807,46 +2802,16 @@ pub(crate) async fn action_submit(
             .unzip(),
         None => (before_rows, row_pks),
     };
-
-    // One audit entry per row, emitted in a single batched INSERT.
-    // For `delete_selected` the changes JSON is what was deleted.
-    // Other actions record the pre-action state plus an `__action`
-    // marker, so the panel shows who ran what against which rows.
-    let source = crate::audit::current_source();
-    let entries: Vec<crate::audit::PendingEntry> = before_rows
-        .iter()
-        .map(|row| {
-            let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
-            let row = &mask_secrets(model, &admin_cfg, row);
-            let mut pairs: Vec<(&str, serde_json::Value)> = model
-                .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
-                .collect();
-            if !is_delete {
-                // Tag the action name so the audit row reads as
-                // "alice ran publish_selected", not a plain edit.
-                pairs.push(("__action", serde_json::Value::String(action.clone())));
-            }
-            crate::audit::PendingEntry {
-                entity_table: model.table,
-                entity_pk: pk_str,
-                operation: audit_op,
-                source: source.clone(),
-                changes: crate::audit::snapshot_changes(&pairs),
-            }
-        })
-        .collect();
-    if !entries.is_empty() {
-        if let Err(e) = crate::audit::emit_many_pool(&state.pool, &entries).await {
-            tracing::warn!(
-                target: "rustango::admin::audit",
-                error = %e,
-                entity_table = %model.table,
-                action = %action,
-                count = entries.len(),
-                "admin bulk-action audit emit failed",
-            );
+    let entries = entries_for(&before_rows, &row_pks);
+    if emit == crate::audit::DiffEmit::InTx {
+        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &state.pool, &entries).await {
+            rollback_quietly(tx, model.table).await;
+            return Err(e.into());
         }
+    }
+    tx.commit().await.map_err(crate::sql::ExecError::from)?;
+    if emit == crate::audit::DiffEmit::AfterCommit {
+        super::audit::emit_many_best_effort(&state, &entries, &action).await;
     }
     send_row_signals(model.table, &row_pks, is_delete, false).await;
 
@@ -2946,21 +2911,35 @@ fn row_perms<'a>(write: &BulkWrite, action: &'a str) -> (&'static str, Option<&'
     }
 }
 
-/// Soft delete or restore each row on its own; `true` where the row changed.
-async fn mark_each(
-    pool: &crate::sql::Pool,
-    model: &'static crate::core::ModelSchema,
-    col: &'static str,
-    pk_column: &'static str,
-    pks: &[SqlValue],
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> Result<Vec<bool>, crate::sql::ExecError> {
-    let mut changed = Vec::with_capacity(pks.len());
-    for pk in pks {
-        let q = crate::soft_delete::__mark_query(model, col, pk_column, pk.clone(), deleted_at);
-        changed.push(crate::sql::update_pool(pool, &q).await? > 0);
+/// The write of a built-in bulk action.
+enum BuiltinWrite {
+    HardDelete,
+    /// Set the soft-delete column to this stamp; `None` restores.
+    Mark(&'static str, Option<chrono::DateTime<chrono::Utc>>),
+}
+
+impl BuiltinWrite {
+    /// Run in `tx`. A mark writes each row on its own and returns `true`
+    /// where the row changed.
+    async fn run(
+        self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        model: &'static crate::core::ModelSchema,
+        pk_column: &'static str,
+        pks: &[SqlValue],
+    ) -> Result<Option<Vec<bool>>, crate::sql::ExecError> {
+        let Self::Mark(col, deleted_at) = self else {
+            let query = DeleteQuery::by_pk_in(model, pk_column, pks.to_vec());
+            crate::sql::delete_tx(tx, &query).await?;
+            return Ok(None);
+        };
+        let mut changed = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let q = crate::soft_delete::__mark_query(model, col, pk_column, pk.clone(), deleted_at);
+            changed.push(crate::sql::update_tx(tx, &q).await? > 0);
+        }
+        Ok(Some(changed))
     }
-    Ok(changed)
 }
 
 /// Keep the rows whose PK round-trips and return those PKs, so the rows

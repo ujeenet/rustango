@@ -435,6 +435,27 @@ pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::Pen
     }
 }
 
+/// [`emit_best_effort`] for a bulk action's entries.
+pub(crate) async fn emit_many_best_effort(
+    state: &AppState,
+    entries: &[crate::audit::PendingEntry],
+    action: &str,
+) {
+    let Some(first) = entries.first() else {
+        return;
+    };
+    if let Err(e) = crate::audit::emit_many_pool(&state.pool, entries).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %first.entity_table,
+            action = %action,
+            count = entries.len(),
+            "admin bulk-action audit emit failed",
+        );
+    }
+}
+
 /// Snapshot audit entry from a form submission.
 pub(crate) fn admin_audit_entry(
     model: &'static crate::core::ModelSchema,
