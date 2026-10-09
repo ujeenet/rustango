@@ -812,6 +812,37 @@ where
     migrate_tenants_db_opts(pools, dir, registry_url, observer).await
 }
 
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+const PASSKEY_TABLE: &str = "rustango_webauthn_credentials";
+
+/// A new tenant passkey table shadows `public`'s on the search path, so
+/// passkeys kept there stop working (#2518). Rows are not copied: user
+/// ids overlap across tenants, so only the operator knows whose they are.
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+async fn warn_hidden_public_passkeys(registry: &crate::sql::Pool, slug: &str, schema: &str) {
+    use crate::sql::CounterPool as _;
+    if !crate::migrate::try_table_exists_here(registry, PASSKEY_TABLE)
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let rows = crate::passkey::WebauthnCredential::objects()
+        .count(registry)
+        .await
+        .unwrap_or(0);
+    if rows > 0 {
+        tracing::warn!(
+            target: "rustango::tenancy",
+            slug,
+            rows,
+            "tenant `{slug}` now has its own {PASSKEY_TABLE}, which hides the {rows} row(s) in \
+             public.{PASSKEY_TABLE}: move this tenant's rows into \"{schema}\".{PASSKEY_TABLE} \
+             by hand (see UPGRADING, 0.60.5)"
+        );
+    }
+}
+
 #[cfg(feature = "postgres")]
 async fn run_for_one_tenant(
     pools: &TenantPools,
@@ -858,7 +889,15 @@ async fn run_for_one_tenant(
             )
             .await?;
             // Lands in the tenant schema, not `public` (#2364).
+            #[cfg(feature = "passkey")]
+            let had_passkeys = crate::migrate::try_table_exists_here(&dbpool, PASSKEY_TABLE)
+                .await
+                .unwrap_or(false);
             crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+            #[cfg(feature = "passkey")]
+            if !had_passkeys {
+                warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
+            }
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.

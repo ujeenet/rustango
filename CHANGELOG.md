@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — migrate warns when a tenant's passkey table hides `public` passkeys (#2518)
+
+On PG schema-mode tenants the new per-tenant `rustango_webauthn_credentials` shadows `public`'s; `migrate-tenants` now logs a warning naming the table and the rows to move.
+
 ### Security — logout ends the refresh family even with an expired access token (#2419)
 
 The family is read from any token signed for the tenant, expired or already rotated, so a thief's rotated refresh token stops working at logout.

@@ -191,3 +191,61 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
     drop(pools);
     registry.close().await;
 }
+
+/// #2518 — a schema tenant's new passkey table hides the rows in `public`;
+/// `migrate-tenants` must say so, not hide them silently.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn migrate_warns_when_public_passkeys_get_hidden() {
+    use rustango::sql::Auto;
+    use tracing::instrument::WithSubscriber as _;
+    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let db = ScratchDb::create(&admin_url, "rustango_t2518").await;
+    let url = db.url().to_owned();
+    let registry = sqlx::PgPool::connect(&url).await.unwrap();
+    let reg = rustango::sql::Pool::from(registry.clone());
+    rustango::testkit::migrate_framework(&reg).await.unwrap();
+    // A pre-0.60.5 app kept passkeys in `public`.
+    rustango::passkey::ensure_table(&reg).await.unwrap();
+    let mut cred = rustango::passkey::WebauthnCredential {
+        id: Auto::default(),
+        user_id: 1,
+        credential_id: "cred-1".into(),
+        public_key: vec![1, 2, 3],
+        sign_count: 0,
+        label: String::new(),
+        created_at: chrono::Utc::now(),
+    };
+    cred.insert_pool(&reg).await.unwrap();
+    let pools = TenantPools::new(registry.clone());
+    let slug = "t2518-acme";
+    run(
+        &pools,
+        &url,
+        &["create-tenant", slug, "--mode", "schema", "--no-migrate"],
+    )
+    .await
+    .unwrap();
+
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    run(&pools, &url, &["migrate-tenants"])
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+    let logs = buf.contents();
+    assert!(
+        logs.contains("public.rustango_webauthn_credentials") && logs.contains(slug),
+        "no warning about hidden passkeys:\n{logs}"
+    );
+
+    drop(pools);
+    registry.close().await;
+}
