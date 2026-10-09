@@ -867,60 +867,13 @@ pub(crate) async fn any_email_linkable(pool: &Pool) -> Result<bool, crate::sql::
         .values_list_flat("id")
         .fetch::<i64>(pool)
         .await?;
-    if ids.is_empty() {
-        return Ok(false);
-    }
-    // Three reads for the whole tenant, not one per user; a read error
-    // counts as privileged, like `holds_permissions`.
-    use crate::sql::FetcherPool as _;
-    use crate::tenancy::permissions::{RolePermission, UserPermission, UserRole};
-    let (Ok(overrides), Ok(memberships), Ok(role_perms)) = (
-        UserPermission::objects().fetch(pool).await,
-        UserRole::objects().fetch(pool).await,
-        RolePermission::objects().fetch(pool).await,
-    ) else {
-        return Ok(false);
-    };
-    Ok(any_without_permissions(
-        &ids,
-        &overrides,
-        &memberships,
-        &role_perms,
-    ))
-}
-
-/// Whether one of `ids` holds no permission: role and direct grants, minus
-/// denials, as in `user_permissions_pool`.
-fn any_without_permissions(
-    ids: &[i64],
-    overrides: &[crate::tenancy::permissions::UserPermission],
-    memberships: &[crate::tenancy::permissions::UserRole],
-    role_perms: &[crate::tenancy::permissions::RolePermission],
-) -> bool {
-    use std::collections::{HashMap, HashSet};
-    let mut by_role: HashMap<i64, Vec<&str>> = HashMap::new();
-    for rp in role_perms {
-        by_role.entry(rp.role_id).or_default().push(&rp.codename);
-    }
-    let mut held: HashMap<i64, HashSet<&str>> = HashMap::new();
-    let mut denied: HashSet<(i64, &str)> = HashSet::new();
-    for up in overrides {
-        if up.granted {
-            held.entry(up.user_id).or_default().insert(&up.codename);
-        } else {
-            denied.insert((up.user_id, &up.codename));
+    // Sign-in's own rule; stops at the first user without permissions.
+    for id in ids {
+        if !holds_permissions(pool, id).await {
+            return Ok(true);
         }
     }
-    for ur in memberships {
-        if let Some(codes) = by_role.get(&ur.role_id) {
-            held.entry(ur.user_id).or_default().extend(codes);
-        }
-    }
-    ids.iter().any(|id| {
-        !held
-            .get(id)
-            .is_some_and(|codes| codes.iter().any(|c| !denied.contains(&(*id, *c))))
-    })
+    Ok(false)
 }
 
 impl AccountLookup for TenantAccounts<'_> {
@@ -1401,38 +1354,5 @@ mod tests {
         // leaves as protocol-relative `//evil.com/x` (#1526).
         assert_eq!(safe_landing(Some("/\\evil.com/x"), "/"), "/");
         assert_eq!(safe_landing(Some("/%5Cevil.com/x"), "/"), "/");
-    }
-
-    // ---- any_without_permissions --------------------------------------
-
-    #[test]
-    fn any_without_permissions_applies_roles_grants_and_denials() {
-        use crate::tenancy::permissions::{RolePermission, UserPermission, UserRole};
-        let up = |user_id, codename: &str, granted| UserPermission {
-            id: Auto::default(),
-            user_id,
-            codename: codename.into(),
-            granted,
-            data: serde_json::json!({}),
-        };
-        let ur = |user_id, role_id| UserRole {
-            id: Auto::default(),
-            user_id,
-            role_id,
-        };
-        let roles = [RolePermission {
-            id: Auto::default(),
-            role_id: 7,
-            codename: "post.change".into(),
-        }];
-        // 1 holds via a role, 2 via a grant.
-        let (grants, members) = ([up(2, "post.view", true)], [ur(1, 7)]);
-        assert!(!any_without_permissions(&[1, 2], &grants, &members, &roles));
-        assert!(any_without_permissions(&[1, 3], &grants, &members, &roles));
-        // A denial cancels the role's only codename.
-        let denied = [up(1, "post.change", false)];
-        assert!(any_without_permissions(&[1], &denied, &members, &roles));
-        // A role with no codenames grants nothing.
-        assert!(any_without_permissions(&[4], &[], &[ur(4, 8)], &roles));
     }
 }
