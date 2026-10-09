@@ -717,8 +717,13 @@ async fn prefetch_reverse_generic_past_the_bind_cap(pool: &Pool) {
         .unwrap()
         .expect("row ct");
     let ct_id = *ct.id.get().expect("ct id");
-    // Hits in the first and the last batch.
-    for (id, object_pk) in [(1, 9), (2, 69_999)] {
+    let other = ContentType::for_model::<Badge>(pool)
+        .await
+        .unwrap()
+        .expect("badge ct");
+    let other_ct = *other.id.get().expect("other ct id");
+    // Hits in the first and the last batch; note 3 is a badge's, not a row's.
+    for (id, ct_id, object_pk) in [(1, ct_id, 9), (2, ct_id, 69_999), (3, other_ct, 9)] {
         Note {
             id,
             ct_id,
