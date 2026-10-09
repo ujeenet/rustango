@@ -217,9 +217,8 @@ impl core::fmt::Display for StorageMode {
 /// **Storage-mode constraint:** `StorageMode::Schema` is only valid
 /// for `BackendKind::Postgres`. MySQL "schema" ≡ "database" with
 /// different transaction semantics; SQLite has no namespaces at all.
-/// [`Self::validate_storage_mode`] enforces this — the admin's
-/// org form, the `manage create-tenant` CLI, and
-/// `migrate-tenant-storage` all call it before persisting.
+/// [`Self::validate_storage_mode`] enforces this — the operator
+/// console and the `manage create-tenant` CLI call it before persisting.
 ///
 /// ```
 /// use rustango::tenancy::{BackendKind, StorageMode};

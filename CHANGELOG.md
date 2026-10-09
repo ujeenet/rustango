@@ -10,15 +10,15 @@ That would drop the new storage and the Org row. The message now names the old s
 
 ### Fixed — `migrate-tenant-storage` resolves secret references (#2384)
 
-A source `database_url` like `env://ACME_DB` is resolved before connecting. `--database-url` may be a reference too; it is stored as given, so the password stays out of the registry.
+A source `database_url` like `env://ACME_DB` is resolved before connecting. `--database-url` may be a reference too; it is stored and printed as given, so the password stays out of the registry and the output.
 
 ### Fixed — `migrate-tenant-storage --to database` accepts extensions the target already has (#2385)
 
-An untrusted extension pre-installed on the target, in the schema the registry has it in, no longer needs `--allow-extension`.
+An untrusted extension pre-installed on the target, in the schema the registry has it in, no longer needs `--allow-extension`. One in another schema is refused before the move starts.
 
 ### Fixed — `migrate-tenant-storage` no longer loses writes made during the move (#2383)
 
-The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The row update writes only the storage columns.
+The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The Org row stays locked until the switch, so a suspension or edit made meanwhile wins; the update writes only the storage columns. Ctrl-C and failures reactivate the tenant; otherwise the output names `edit-tenant <slug> --activate`.
 
 ### Fixed — `migrate-tenant-storage --to database` moves an extension in the tenant's own schema (#2386)
 
