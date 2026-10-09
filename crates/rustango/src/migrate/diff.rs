@@ -1411,13 +1411,15 @@ fn render_changes_split_inner(
                     .table(table)
                     .and_then(|t| t.field(column))
                     .filter(|f| f.ty == *to);
+                // In `schema`, not whatever `search_path` finds (#2308).
+                let target = fk_target(dialect, schema, table);
                 // The old DEFAULT may not cast to the new type, so it goes
                 // first and the new one comes back after (#2242). A serial
                 // or generated column keeps its own.
                 let default = field.filter(|f| !f.auto && f.generated_as.is_none());
                 if default.is_some() {
                     out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                        r#"ALTER TABLE {target} ALTER COLUMN "{column}" DROP DEFAULT"#,
                     ));
                 }
                 // A string takes the field's whole type, so CITEXT (#2238) or
@@ -1426,13 +1428,13 @@ fn render_changes_split_inner(
                 let string = field.filter(|_| to == "string");
                 out.immediate.push(match string {
                     Some(f) => format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {}"#,
+                        r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {}"#,
                         sql_type_with_dialect(f, dialect)
                     ),
                     None => {
                         let pg_to = pg_type_for_ty_name(to);
                         format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
                         )
                     }
                 });
@@ -1440,7 +1442,7 @@ fn render_changes_split_inner(
                     if let Some(expr) = &f.default {
                         let value = render_column_default(expr, &f.ty, f.max_length, dialect);
                         out.immediate.push(format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" SET DEFAULT {value}"#,
                         ));
                     }
                 }
@@ -1448,8 +1450,6 @@ fn render_changes_split_inner(
                 if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
                     // A tagged body, so a `$$` in a name cannot end it.
                     const TAG: &str = "$rustango_seq$";
-                    // In `schema`, not whatever `search_path` finds (#2308).
-                    let target = fk_target(dialect, schema, table);
                     if target.contains(TAG) || column.contains(TAG) {
                         return Err(format!("`{table}.{column}`: a name cannot contain `{TAG}`"));
                     }
@@ -1802,17 +1802,17 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
-                let q_src_table = fk_target(dialect, schema, src_table);
-                let q_dst_table = fk_target(dialect, schema, dst_table);
-                let q_id = dialect.quote_ident("id");
-                let q_src_fk =
-                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
-                let q_dst_fk =
-                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
                     // Emit the FK clauses inside the CREATE TABLE statement.
+                    let q_src_table = fk_target(dialect, schema, src_table);
+                    let q_dst_table = fk_target(dialect, schema, dst_table);
+                    let q_id = dialect.quote_ident("id");
+                    let q_src_fk =
+                        dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
+                    let q_dst_fk =
+                        dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
                     out.immediate.push(format!(
                         "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}), \
@@ -2126,6 +2126,30 @@ pub(crate) fn column_fks(
         .collect()
 }
 
+/// The FK of a column: a model field's, or a junction column's.
+pub(crate) enum ColumnFk<'a> {
+    Field(&'a RelationSnapshot),
+    /// The junction end's table.
+    Junction(&'a str),
+}
+
+/// The FK `table.column` has in `snap`, if any.
+pub(crate) fn column_fk<'a>(
+    snap: &'a SchemaSnapshot,
+    table: &str,
+    column: &str,
+) -> Option<ColumnFk<'a>> {
+    let field = snap.table(table).and_then(|t| t.field(column));
+    if let Some(rel) = field.and_then(|f| f.fk.as_ref()) {
+        return Some(ColumnFk::Field(rel));
+    }
+    snap.m2m_table(table).and_then(|m| {
+        [(&m.src_col, &m.src_table), (&m.dst_col, &m.dst_table)]
+            .into_iter()
+            .find_map(|(c, to)| (c == column).then_some(ColumnFk::Junction(to)))
+    })
+}
+
 /// The `ADD CONSTRAINT … FOREIGN KEY` of `table.column` in `snap`, a model's or a junction's.
 pub(crate) fn column_fk_sql(
     snap: &SchemaSnapshot,
@@ -2134,16 +2158,12 @@ pub(crate) fn column_fk_sql(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let field = snap.table(table).and_then(|t| t.field(column));
-    if let Some(rel) = field.and_then(|f| f.fk.as_ref()) {
-        return field_fk_sql(table, column, rel, dialect, schema).map(Some);
-    }
-    let to = snap.m2m_table(table).and_then(|m| {
-        [(&m.src_col, &m.src_table), (&m.dst_col, &m.dst_table)]
-            .into_iter()
-            .find_map(|(c, to)| (c == column).then_some(to))
-    });
-    Ok(to.map(|to| m2m_fk_sql(table, column, to, dialect, schema)))
+    column_fk(snap, table, column)
+        .map(|fk| match fk {
+            ColumnFk::Field(rel) => field_fk_sql(table, column, rel, dialect, schema),
+            ColumnFk::Junction(to) => Ok(m2m_fk_sql(table, column, to, dialect, schema)),
+        })
+        .transpose()
 }
 
 /// A junction column's FK, which cascades.
@@ -3298,6 +3318,11 @@ mod sql_type_tests {
         assert!(
             seq.is_some_and(|s| s.contains(r#"pg_get_serial_sequence('"t1"."item"', 'id')"#)),
             "{:?}",
+            out.immediate
+        );
+        assert!(
+            out.immediate[0].starts_with(r#"ALTER TABLE "t1"."item" ALTER COLUMN"#),
+            "and the ALTER beside it: {:?}",
             out.immediate
         );
     }

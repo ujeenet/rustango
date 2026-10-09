@@ -929,9 +929,7 @@ fn preview_schema_op(
     let step = render_step(change, ops, after, dialect, None)?;
     // The runner looks these names up live; a migrate-built FK has this one.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
-        let has_fk = super::diff::column_fk_sql(before, &fk.table, &fk.column, dialect, None)
-            .is_ok_and(|sql| sql.is_some());
-        if has_fk {
+        if super::diff::column_fk(before, &fk.table, &fk.column).is_some() {
             let name = ddl::fk_constraint_name(&fk.table, &fk.column);
             statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
         }
@@ -2816,14 +2814,15 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
-    /// A MySQL index drop, which its FK refuses (1553; #2244). Boxed: `Step`
+    /// A MySQL index drop, which the FKs it serves refuse (1553; #2244, #2326). Boxed: `Step`
     /// sits in every migrate future, near a debug test thread's 2 MiB stack.
     index_fks: Option<Box<IndexFks>>,
 }
 
-/// The FK a MySQL index drop must take off first, found by the index's
-/// first column in the catalog. It comes back right after the drop, under
-/// the names at the op, so a later alter or rename of the column finds it.
+/// The FKs a MySQL index drop must take off first, found in the catalog:
+/// the one on the index's first column, and the composite FKs no other index
+/// serves. They come back right after the drop, under the names at the op,
+/// so a later alter or rename of the column finds them.
 struct IndexFks {
     table: String,
     index: String,
@@ -2831,7 +2830,8 @@ struct IndexFks {
     /// missing here goes away later, or an earlier op already defers its
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
-    /// The table's composite FKs at the op by name, with their re-add (#2326).
+    /// The table's composite FKs at the op by name, with their re-add; one
+    /// missing here just drops; `None` if the whole table goes (#2326).
     composites: Option<Vec<(String, String)>>,
 }
 
