@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin: inline delete of a `soft_delete` child
+
+Ticking DELETE on an inline row of a `soft_delete` model now stamps its column, as the main delete does; it used to remove the row (#2453).
+
 ### Admin: audit in the write's transaction
 
 An inline row of an `audit(...)` child model now writes its audit row in the edit's transaction; if that write fails, the edit is not saved (#2389).

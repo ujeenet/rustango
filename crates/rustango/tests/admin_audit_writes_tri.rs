@@ -1,5 +1,6 @@
 //! Admin writes on `audit(...)` models audit in the write's transaction:
 //! inline child rows (#2389); delete, soft delete, restore and bulk actions (#2390).
+//! An inline delete of a `soft_delete` child stamps it (#2453).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -41,7 +42,7 @@ pub struct Line {
 /// A key longer than the audit log's `entity_pk` (255), so its audit row
 /// fails on PG and MySQL.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "aaw_tag", audit(track = "note"))]
+#[rustango(table = "aaw_tag", audit(track = "note, order_id"))]
 #[allow(dead_code)]
 pub struct Tag {
     #[rustango(primary_key, max_length = 300)]
@@ -92,6 +93,28 @@ rustango::register_admin_inline!(
     extra = 1,
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aaw_step", audit(track = "note, deleted_at"))]
+#[allow(dead_code)]
+pub struct Step {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aaw_order", on = "id")]
+    pub order_id: i64,
+    #[rustango(max_length = 32)]
+    pub note: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+rustango::register_admin_inline!(
+    parent = "aaw_order",
+    child = "aaw_step",
+    fk = "order_id",
+    fields = &["note"],
+    max_num = Some(1),
+);
+
 rustango::register_admin_inline!(
     parent = "aaw_order",
     child = "aaw_tag",
@@ -104,15 +127,24 @@ async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "aaw_line").await;
     drop_table(pool, "aaw_tag").await;
+    drop_table(pool, "aaw_step").await;
     fresh_table::<Order>(pool).await;
     fresh_table::<Line>(pool).await;
     fresh_table::<Tag>(pool).await;
+    fresh_table::<Step>(pool).await;
     fresh_table::<Note>(pool).await;
     fresh_table::<Memo>(pool).await;
     rustango::audit::ensure_table_pool(pool)
         .await
         .expect("audit table");
-    for t in ["aaw_order", "aaw_line", "aaw_tag", "aaw_note", "aaw_memo"] {
+    for t in [
+        "aaw_order",
+        "aaw_line",
+        "aaw_tag",
+        "aaw_note",
+        "aaw_memo",
+        "aaw_step",
+    ] {
         AuditLog::delete_where("entity_table", t, pool)
             .await
             .expect("clear audit rows");
@@ -190,7 +222,8 @@ async fn inline_child_writes_are_audited(pool: &Pool) {
         "name=o&aaw_line-TOTAL_FORMS=3&aaw_line-INITIAL_FORMS=2\
          &aaw_line-0-id={l1}&aaw_line-0-qty=5&aaw_line-0-note=a\
          &aaw_line-1-id={l2}&aaw_line-1-qty=2&aaw_line-1-note=b&aaw_line-1-DELETE=on\
-         &aaw_line-2-qty=3&aaw_line-2-note=c"
+         &aaw_line-2-qty=3&aaw_line-2-note=c\
+         &aaw_tag-TOTAL_FORMS=1&aaw_tag-INITIAL_FORMS=0&aaw_tag-0-code=t1&aaw_tag-0-note=n"
     );
     let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
     assert!(status.is_redirection(), "{status}: {body}");
@@ -220,6 +253,12 @@ async fn inline_child_writes_are_audited(pool: &Pool) {
     assert_eq!(rows[1].2["qty"], 2, "{:?}", rows[1].2);
     assert_eq!(rows[2].2["qty"]["before"], 1, "{:?}", rows[2].2);
     assert_eq!(rows[2].2["qty"]["after"], 5, "{:?}", rows[2].2);
+
+    // A typed key; the snapshot names the parent too.
+    let tags = audit_rows(pool, "aaw_tag").await;
+    assert_eq!(tags.len(), 1, "{tags:?}");
+    assert_eq!((tags[0].0.as_str(), tags[0].1.as_str()), ("create", "t1"));
+    assert_eq!(tags[0].2["order_id"], o, "{:?}", tags[0].2);
 }
 
 /// An inline row whose audit row cannot be written saves nothing (#2389).
@@ -346,6 +385,45 @@ async fn delete_audit_failure_keeps_the_row(pool: &Pool) {
     );
 }
 
+/// An inline DELETE stamps a `soft_delete` child and audits it as a
+/// soft delete; the stamped row frees its `max_num` slot (#2453).
+async fn inline_delete_stamps_a_soft_delete_child(pool: &Pool) {
+    let o = seed_order(pool).await;
+    let mut step = Step {
+        id: Auto::default(),
+        order_id: o,
+        note: "s".into(),
+        deleted_at: None,
+    };
+    step.insert_pool(pool).await.expect("insert step");
+    let id = *step.id.get().expect("pk");
+    AuditLog::delete_where("entity_table", "aaw_step", pool)
+        .await
+        .expect("clear seed audit rows");
+    let form = format!(
+        "name=o&aaw_step-TOTAL_FORMS=1&aaw_step-INITIAL_FORMS=1\
+         &aaw_step-0-id={id}&aaw_step-0-note=s&aaw_step-0-DELETE=on"
+    );
+    let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let steps = Step::objects().fetch(pool).await.expect("fetch steps");
+    assert_eq!(steps.len(), 1, "the child was hard-deleted");
+    assert!(steps[0].deleted_at.is_some(), "the child was not stamped");
+    let ops: Vec<String> = audit_rows(pool, "aaw_step")
+        .await
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
+    assert_eq!(ops, ["soft_delete"]);
+
+    let form = "name=o&aaw_step-TOTAL_FORMS=1&aaw_step-INITIAL_FORMS=0&aaw_step-0-note=t";
+    let (status, body) = post(pool, &format!("/aaw_order/{o}"), form).await;
+    assert!(
+        status.is_redirection(),
+        "a trashed row held the slot: {status}: {body}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -353,5 +431,6 @@ tri_dialect_test! {
         inline_child_audit_failure_saves_nothing,
         deletes_and_bulk_actions_are_audited,
         delete_audit_failure_keeps_the_row,
+        inline_delete_stamps_a_soft_delete_child,
     ],
 }

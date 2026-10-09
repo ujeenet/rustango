@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an admin inline DELETE stamps a `soft_delete` child instead of removing it (#2453)
+
+As the main admin delete does; trashed children no longer count toward the inline's `max_num`.
+
 ### Fixed — admin autocomplete with a query on a model with no searchable column returns no rows (#2391)
 
 It returned the first rows unfiltered.

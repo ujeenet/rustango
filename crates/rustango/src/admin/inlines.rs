@@ -1176,9 +1176,15 @@ enum InlineWrite {
         audit: Option<ChildAudit>,
     },
     Delete {
-        query: crate::core::DeleteQuery,
+        query: InlineRemove,
         entry: Option<crate::audit::PendingEntry>,
     },
+}
+
+/// A `soft_delete` child is stamped, as the main delete does (#2453).
+enum InlineRemove {
+    Hard(crate::core::DeleteQuery),
+    Soft(crate::core::UpdateQuery),
 }
 
 struct InlineInsert {
@@ -1410,19 +1416,34 @@ async fn plan_target(
             {
                 return Err(refused("delete").into());
             }
+            // `row_where` holds the live-rows scope, so a stamp lands once.
+            let (query, op) = match target.child.soft_delete_column {
+                Some(col) => {
+                    let stamp = SqlValue::DateTime(chrono::Utc::now());
+                    let set = vec![crate::core::Assignment::new(col, stamp)];
+                    let q = crate::core::UpdateQuery::new(
+                        target.child,
+                        set,
+                        target.row_where(pk.clone()),
+                    );
+                    (InlineRemove::Soft(q), crate::audit::AuditOp::SoftDelete)
+                }
+                None => {
+                    let q =
+                        crate::core::DeleteQuery::new(target.child, target.row_where(pk.clone()));
+                    (InlineRemove::Hard(q), crate::audit::AuditOp::Delete)
+                }
+            };
             let entry = audited.then(|| {
                 super::audit::admin_row_snapshot_entry(
                     target.child,
                     pk.to_display_string(),
-                    crate::audit::AuditOp::Delete,
+                    op,
                     &before,
                     None,
                 )
             });
-            out.existing.push(InlineWrite::Delete {
-                query: crate::core::DeleteQuery::new(target.child, target.row_where(pk)),
-                entry,
-            });
+            out.existing.push(InlineWrite::Delete { query, entry });
             continue;
         }
 
@@ -1458,11 +1479,14 @@ async fn plan_target(
         });
     }
     // `max_num` caps the rows a POST that adds any may leave (#1717):
-    // every row of the parent, not only those the hooks show.
+    // every live row of the parent, not only those the hooks show.
     if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {
         let count = crate::core::CountQuery {
             model: target.child,
-            where_clause: target.scope.all_where(),
+            where_clause: crate::soft_delete::compose_with_active(
+                target.child,
+                target.scope.all_where(),
+            ),
             search: None,
             source: None,
         };
@@ -1550,7 +1574,11 @@ pub(crate) async fn apply_plan_tx(
                 }
                 // 0 rows: deleted or moved since the plan was checked.
                 InlineWrite::Delete { query, entry } => {
-                    if crate::sql::delete_tx(tx, &query).await.map_err(refused)? > 0 {
+                    let removed = match &query {
+                        InlineRemove::Hard(q) => crate::sql::delete_tx(tx, q).await,
+                        InlineRemove::Soft(q) => crate::sql::update_tx(tx, q).await,
+                    };
+                    if removed.map_err(refused)? > 0 {
                         deleted += 1;
                         if let Some(entry) = entry {
                             crate::audit::emit_in_tx(tx, pool, &[entry])
