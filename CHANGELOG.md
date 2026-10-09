@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin list facets read only the values they show (#2344)
+
+The `GROUP BY` stops one past the cap unless `facet_show_all`; a count query keeps "+N more" exact, and an active value past the cut is read on its own.
+
+### Fixed — admin audit feed hides tables whose rows a hook scopes from non-superusers (#2342)
+
+A queryset or `view` hook cannot be re-applied to a deleted row's snapshot, so those tables are superuser-only in the feed; a row's own history stays on its detail page.
+
+### Fixed — `MediaPerms` refuses an upload attributed to another user or filed into a hidden collection (#2343)
+
+A move into a collection and a collection nested under a parent need `rustango_media_collections.view` too; the gate reads both bodies.
+
+### Fixed — admin detail page links a generic FK under the admin prefix (#2341)
+
+It shares the list view's renderer; a target table the user cannot view gets no label or link on either page.
+
 ### Fixed — CI builds `tests/**` on each bare backend (#2328)
 
 `feature_combos` now runs `--tests --no-run` for `sqlite`, `postgres` and `mysql` alone, with `-D warnings`.

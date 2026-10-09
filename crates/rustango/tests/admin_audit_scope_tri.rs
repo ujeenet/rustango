@@ -26,11 +26,28 @@ pub struct Audit {
 
 const SEEN: &str = "audscope_seen";
 const HIDDEN: &str = "audscope_hidden";
+/// Tables whose rows a hook hides (#2342).
+const QS_HOOKED: &str = "audscope_qshooked";
+const VIEW_HOOKED: &str = "audscope_viewhooked";
+
+fn hide_all_rows(_: &axum::http::request::Parts) -> Vec<rustango::core::Filter> {
+    vec![rustango::core::Filter::new(
+        "id",
+        rustango::core::Op::Eq,
+        rustango::core::SqlValue::I64(-1),
+    )]
+}
+rustango::register_admin_queryset!(QS_HOOKED, hide_all_rows);
+
+fn deny_view(_: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
+    false
+}
+rustango::register_admin_object_permission!(VIEW_HOOKED, "view", deny_view);
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Audit>(pool).await;
     audit::ensure_table_pool(pool).await.expect("audit table");
-    for t in [SEEN, HIDDEN] {
+    for t in [SEEN, HIDDEN, QS_HOOKED, VIEW_HOOKED] {
         AuditLog::delete_where("entity_table", t, pool)
             .await
             .expect("clear audit rows");
@@ -83,6 +100,49 @@ async fn feed_shows_only_viewable_tables(pool: &Pool) {
     let (status, body) = get(pool, &perms, "/__audit?entity_table=audscope_hidden").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!body.contains("mark-audscope_hidden"), "{body}");
+}
+
+/// A table whose rows a hook hides keeps its snapshots out of a
+/// non-superuser's feed and home page; a superuser still sees them (#2342).
+async fn feed_hides_hook_scoped_tables(pool: &Pool) {
+    let perms = [
+        audit::VIEW_CODENAME,
+        "audscope_seen.view",
+        "audscope_qshooked.view",
+        "audscope_viewhooked.view",
+    ];
+    for uri in ["/__audit", "/__audit?entity_table=audscope_qshooked", "/"] {
+        let (status, body) = get(pool, &perms, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(!body.contains("mark-audscope_qshooked"), "{uri}: {body}");
+        assert!(!body.contains("mark-audscope_viewhooked"), "{uri}: {body}");
+        assert!(!body.contains("audscope_qshooked/1"), "{uri}: {body}");
+        assert!(!body.contains("audscope_viewhooked/1"), "{uri}: {body}");
+    }
+    let (_, body) = get(pool, &perms, "/").await;
+    assert!(
+        body.contains("audscope_seen/1"),
+        "home feed control: {body}"
+    );
+    let (_, body) = get(pool, &perms, "/__audit").await;
+    assert!(body.contains("mark-audscope_seen"), "{body}");
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .build();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/__audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(body.contains("mark-audscope_qshooked"), "{body}");
+    assert!(body.contains("mark-audscope_viewhooked"), "{body}");
 }
 
 /// A user holding the feed codename but no table perms sees an empty feed.
@@ -204,6 +264,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         feed_shows_only_viewable_tables,
+        feed_hides_hook_scoped_tables,
         feed_with_no_viewable_table_is_empty,
         feed_urls_carry_the_admin_prefix,
         audit_model_perms_do_not_open_the_feed,

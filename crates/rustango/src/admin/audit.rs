@@ -55,7 +55,8 @@ impl AuditReader<'_> {
         crate::audit::count_in(self.pool, filter, self.tables.as_deref()).await
     }
 
-    /// One row's history. The caller already checked `{table}.view`.
+    /// One row's history. The caller already checked `{table}.view` and
+    /// the row's scope and `view` hook.
     pub(crate) async fn for_entity(
         &self,
         table: &str,
@@ -75,6 +76,9 @@ impl AuditReader<'_> {
 impl AppState {
     /// `None` unless the user is a superuser or holds [`AuditPerm::View`];
     /// then rows are limited to tables they hold `{table}.view` on.
+    ///
+    /// A table with a queryset or `view` hook is superuser-only in the feed:
+    /// a deleted row's snapshot has no row left to re-scope per entry (#2342).
     pub(crate) fn audit_reader(&self) -> Option<AuditReader<'_>> {
         let tables = match &self.config.user_perms {
             None => None,
@@ -82,7 +86,7 @@ impl AppState {
                 perms
                     .iter()
                     .filter_map(|c| c.strip_suffix(".view"))
-                    .filter(|t| self.is_visible(t))
+                    .filter(|t| self.is_visible(t) && !row_limited(t))
                     .map(str::to_owned)
                     .collect(),
             ),
@@ -102,6 +106,12 @@ impl AppState {
             .as_ref()
             .is_none_or(|p| AuditPerm::Delete.granted_by(p))
     }
+}
+
+/// `true` when a hook narrows which of `table`'s rows a request may see.
+fn row_limited(table: &str) -> bool {
+    !super::queryset_hooks::for_table(table).is_empty()
+        || super::object_permissions::has_hook(table, "view")
 }
 
 /// The feed's mounted path: `audit_url` is relative to the admin prefix.

@@ -594,12 +594,11 @@ impl GenericForeignKey {
     }
 }
 
-/// v0.37 — backend-agnostic counterpart of [`render_generic_fk_link`].
-/// Routes the ContentType lookup through [`ContentType::by_id`]
-/// so admin detail views render generic-FK links on any backend.
+/// Render a generic FK as `<a href="/{table}/{pk}">`, root-relative and
+/// with no permission check. The admin uses its own prefixed, gated renderer.
 ///
 /// # Errors
-/// As [`render_generic_fk_link`].
+/// Driver failures from the ContentType lookup.
 pub async fn render_generic_fk_link(
     pool: &crate::sql::Pool,
     gfk: GenericForeignKey,
