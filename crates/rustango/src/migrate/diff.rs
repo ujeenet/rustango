@@ -1411,13 +1411,15 @@ fn render_changes_split_inner(
                     .table(table)
                     .and_then(|t| t.field(column))
                     .filter(|f| f.ty == *to);
+                // In `schema`, not whatever `search_path` finds (#2308).
+                let target = fk_target(dialect, schema, table);
                 // The old DEFAULT may not cast to the new type, so it goes
                 // first and the new one comes back after (#2242). A serial
                 // or generated column keeps its own.
                 let default = field.filter(|f| !f.auto && f.generated_as.is_none());
                 if default.is_some() {
                     out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                        r#"ALTER TABLE {target} ALTER COLUMN "{column}" DROP DEFAULT"#,
                     ));
                 }
                 // A string takes the field's whole type, so CITEXT (#2238) or
@@ -1426,13 +1428,13 @@ fn render_changes_split_inner(
                 let string = field.filter(|_| to == "string");
                 out.immediate.push(match string {
                     Some(f) => format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {}"#,
+                        r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {}"#,
                         sql_type_with_dialect(f, dialect)
                     ),
                     None => {
                         let pg_to = pg_type_for_ty_name(to);
                         format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
                         )
                     }
                 });
@@ -1440,7 +1442,7 @@ fn render_changes_split_inner(
                     if let Some(expr) = &f.default {
                         let value = render_column_default(expr, &f.ty, f.max_length, dialect);
                         out.immediate.push(format!(
-                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {value}"#,
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" SET DEFAULT {value}"#,
                         ));
                     }
                 }
@@ -1448,14 +1450,14 @@ fn render_changes_split_inner(
                 if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
                     // A tagged body, so a `$$` in a name cannot end it.
                     const TAG: &str = "$rustango_seq$";
-                    if table.contains(TAG) || column.contains(TAG) {
+                    if target.contains(TAG) || column.contains(TAG) {
                         return Err(format!("`{table}.{column}`: a name cannot contain `{TAG}`"));
                     }
                     out.immediate.push(format!(
                         "DO {TAG} DECLARE s text := pg_get_serial_sequence({}, {}); BEGIN \
                          IF s IS NOT NULL THEN EXECUTE format('ALTER SEQUENCE %s AS {}', s); \
                          END IF; END {TAG}",
-                        dialect.quote_literal(&dialect.quote_ident(table)),
+                        dialect.quote_literal(&target),
                         dialect.quote_literal(column),
                         pg_type_for_ty_name(to),
                     ));
@@ -1800,17 +1802,17 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
-                let q_src_table = fk_target(dialect, schema, src_table);
-                let q_dst_table = fk_target(dialect, schema, dst_table);
-                let q_id = dialect.quote_ident("id");
-                let q_src_fk =
-                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
-                let q_dst_fk =
-                    dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
                     // Emit the FK clauses inside the CREATE TABLE statement.
+                    let q_src_table = fk_target(dialect, schema, src_table);
+                    let q_dst_table = fk_target(dialect, schema, dst_table);
+                    let q_id = dialect.quote_ident("id");
+                    let q_src_fk =
+                        dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
+                    let q_dst_fk =
+                        dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
                     out.immediate.push(format!(
                         "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}), \
@@ -1824,14 +1826,10 @@ fn render_changes_split_inner(
                         "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}))",
                     ));
-                    out.deferred_fks.push(format!(
-                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_src_fk} \
-                         FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE",
-                    ));
-                    out.deferred_fks.push(format!(
-                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_dst_fk} \
-                         FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE",
-                    ));
+                    out.deferred_fks
+                        .push(m2m_fk_sql(through, src_col, src_table, dialect, schema));
+                    out.deferred_fks
+                        .push(m2m_fk_sql(through, dst_col, dst_table, dialect, schema));
                 }
             }
             SchemaChange::DropM2MTable { through } => {
@@ -1852,22 +1850,8 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
-                let from_cols = from
-                    .iter()
-                    .map(|c| dialect.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let on_cols = on
-                    .iter()
-                    .map(|c| dialect.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.deferred_fks.push(format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({from_cols}) REFERENCES {} ({on_cols})",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                    fk_target(dialect, schema, to),
-                ));
+                out.deferred_fks
+                    .push(composite_fk_sql(table, name, to, from, on, dialect, schema));
             }
             SchemaChange::DropCompositeFk { table, name } => {
                 // Same single owner as the CHECK arm above.
@@ -2067,7 +2051,6 @@ fn constraints_sql_from_snapshot(
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
         .fields
         .iter()
@@ -2076,18 +2059,53 @@ fn constraints_sql_from_snapshot(
                 .map(|rel| field_fk_sql(&t.name, &f.column, rel, dialect, schema))
         })
         .collect::<Result<_, _>>()?;
-    for cf in &t.composite_fks {
-        let from_cols: Vec<String> = cf.from.iter().map(|c| dialect.quote_ident(c)).collect();
-        let on_cols: Vec<String> = cf.on.iter().map(|c| dialect.quote_ident(c)).collect();
-        out.push(format!(
-            "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-            dialect.quote_ident(&cf.name),
-            from_cols.join(", "),
-            fk_target(dialect, schema, &cf.to),
-            on_cols.join(", "),
-        ));
-    }
+    out.extend(
+        composite_fks(t, dialect, schema)
+            .into_iter()
+            .map(|(_, sql)| sql),
+    );
     Ok(out)
+}
+
+/// Each composite FK of `t` by name, with its `ADD CONSTRAINT … FOREIGN KEY`.
+pub(crate) fn composite_fks(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Vec<(String, String)> {
+    t.composite_fks
+        .iter()
+        .map(|cf| {
+            let sql =
+                composite_fk_sql(&t.name, &cf.name, &cf.to, &cf.from, &cf.on, dialect, schema);
+            (cf.name.clone(), sql)
+        })
+        .collect()
+}
+
+fn composite_fk_sql(
+    table: &str,
+    name: &str,
+    to: &str,
+    from: &[String],
+    on: &[String],
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    let cols = |cs: &[String]| {
+        cs.iter()
+            .map(|c| dialect.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        dialect.quote_ident(table),
+        dialect.quote_ident(name),
+        cols(from),
+        fk_target(dialect, schema, to),
+        cols(on),
+    )
 }
 
 /// Each column of `t` with its `ADD CONSTRAINT … FOREIGN KEY`, if it has one.
@@ -2106,6 +2124,64 @@ pub(crate) fn column_fks(
             Ok((f.column.clone(), sql))
         })
         .collect()
+}
+
+/// The FK of a column: a model field's, or a junction column's.
+pub(crate) enum ColumnFk<'a> {
+    Field(&'a RelationSnapshot),
+    /// The junction end's table.
+    Junction(&'a str),
+}
+
+/// The FK `table.column` has in `snap`, if any.
+pub(crate) fn column_fk<'a>(
+    snap: &'a SchemaSnapshot,
+    table: &str,
+    column: &str,
+) -> Option<ColumnFk<'a>> {
+    let field = snap.table(table).and_then(|t| t.field(column));
+    if let Some(rel) = field.and_then(|f| f.fk.as_ref()) {
+        return Some(ColumnFk::Field(rel));
+    }
+    snap.m2m_table(table).and_then(|m| {
+        [(&m.src_col, &m.src_table), (&m.dst_col, &m.dst_table)]
+            .into_iter()
+            .find_map(|(c, to)| (c == column).then_some(ColumnFk::Junction(to)))
+    })
+}
+
+/// The `ADD CONSTRAINT … FOREIGN KEY` of `table.column` in `snap`, a model's or a junction's.
+pub(crate) fn column_fk_sql(
+    snap: &SchemaSnapshot,
+    table: &str,
+    column: &str,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> Result<Option<String>, String> {
+    column_fk(snap, table, column)
+        .map(|fk| match fk {
+            ColumnFk::Field(rel) => field_fk_sql(table, column, rel, dialect, schema),
+            ColumnFk::Junction(to) => Ok(m2m_fk_sql(table, column, to, dialect, schema)),
+        })
+        .transpose()
+}
+
+/// A junction column's FK, which cascades.
+fn m2m_fk_sql(
+    through: &str,
+    column: &str,
+    to: &str,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE CASCADE",
+        dialect.quote_ident(through),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(through, column)),
+        dialect.quote_ident(column),
+        fk_target(dialect, schema, to),
+        dialect.quote_ident("id"),
+    )
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
@@ -3217,6 +3293,38 @@ mod sql_type_tests {
         assert!(out.deferred_fks[0].contains(r#"REFERENCES "t1"."posts" ("id")"#));
         assert!(out.deferred_fks[1].contains(r#"REFERENCES "t1"."tags" ("id")"#));
         assert!(out.deferred_fks[2].contains(r#"REFERENCES "t1"."parent" ("a_id", "b_id")"#));
+    }
+
+    /// #2308 — the widened PK's sequence is looked up in the schema.
+    #[test]
+    fn in_schema_render_qualifies_the_sequence_widen() {
+        let snap: SchemaSnapshot = serde_json::from_value(serde_json::json!({ "tables": [{
+            "name": "item", "model": "Item", "fields": [{
+                "name": "id", "column": "id", "ty": "i64", "nullable": false,
+                "primary_key": true, "auto": true }] }] }))
+        .unwrap();
+        let widen = [SchemaChange::AlterColumnType {
+            table: "item".into(),
+            column: "id".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let out = render_changes_split_in_schema(&widen, &snap, &crate::sql::Postgres, Some("t1"))
+            .unwrap();
+        let seq = out
+            .immediate
+            .iter()
+            .find(|s| s.contains("pg_get_serial_sequence"));
+        assert!(
+            seq.is_some_and(|s| s.contains(r#"pg_get_serial_sequence('"t1"."item"', 'id')"#)),
+            "{:?}",
+            out.immediate
+        );
+        assert!(
+            out.immediate[0].starts_with(r#"ALTER TABLE "t1"."item" ALTER COLUMN"#),
+            "and the ALTER beside it: {:?}",
+            out.immediate
+        );
     }
 
     /// #1645 — the plain per-field FK arm qualifies its target.

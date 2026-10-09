@@ -158,6 +158,10 @@ No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migra
 
 A missing `rustango_sso_providers` table now reads as no providers, so bare-admin `resolve_by_slug` returns `Ok(None)` instead of an error (#2366).
 
+### Migrations re-add some FKs
+
+On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326). On PG and MySQL, renaming an FK or M2M junction column re-adds its FK under the new column's name, which re-checks every row (#2307). FKs on columns renamed by 0.60.4 or older keep their old names: `migrate` finds them by column, but `sqlmigrate` prints the new name.
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

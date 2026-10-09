@@ -20,6 +20,18 @@ A missing `rustango_sso_providers` reads as no providers, at sign-in and in `che
 
 An FK facet's dropdown now has a "+N more" link, like the other facets.
 
+### Fixed — MySQL: dropping the index a composite FK uses no longer fails with 1553 (#2326)
+
+The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.
+
+### Fixed — a renamed FK or junction column's FK takes the new column's name (#2307)
+
+PG and MySQL kept `<table>_<old>_fkey`. The runner drops the live FK by its catalog name and re-adds it at the end of the migration.
+
+### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
+
+The sequence lookup used the bare table name, so outside `search_path` it failed.
+
 ### Fixed — `prefetch_reverse_generic_for` splits a large parent list across queries (#2318)
 
 It bound every parent id in one `IN` list and failed past the backend's bind limit.
