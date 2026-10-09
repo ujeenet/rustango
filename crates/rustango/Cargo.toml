@@ -501,7 +501,7 @@ tenancy = [
 # tokio in their own Cargo.toml just to use the rustango entrypoint shim.
 # That re-export no longer needs a feature to carry it — tokio is an
 # unconditional dependency (see the note on the `tokio` line below).
-runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
+runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:dotenvy"]
 
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
 # single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
@@ -511,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.60.2", path = "../rustango-macros" }
+rustango-macros = { version = "0.60.3", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -604,6 +604,8 @@ lettre = { version = "0.11", default-features = false, features = [
 # `[logging] color` setting; this only makes the choice available.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json", "ansi"], optional = true }
 tracing-appender = { workspace = true, optional = true }
+# `#[rustango::main]` loads `.env` before installing its subscriber (#2204).
+dotenvy = { workspace = true, optional = true }
 # Not used directly — declared only to pin the transitive `time` away from
 # the broken 0.3.48 (see the workspace.dependencies note). `time` is
 # already pulled by cookie / tracing-appender / sqlx in every real build.
@@ -620,7 +622,8 @@ libc = { workspace = true, optional = true }
 # `default-features = false` matters: without it this would quietly
 # re-enable postgres and make `--no-default-features` meaningless.
 rustango       = { path = ".", default-features = false, features = ["testkit"] }
-tokio          = { workspace = true }
+# `test-util` pauses the clock for timeout tests.
+tokio          = { workspace = true, features = ["test-util"] }
 chrono         = { workspace = true }
 uuid           = { workspace = true }
 serde_json     = { workspace = true }

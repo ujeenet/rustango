@@ -352,6 +352,9 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     .await;
     let dialect = pool.dialect();
     let models = bootstrap_models();
+    if let Some(sql) = ddl::ci_text_extension_sql(dialect, &models) {
+        crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await?;
+    }
     for model in &models {
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
@@ -554,12 +557,6 @@ async fn migrate_with_ledger_body(
     emit(observer, || MigrationEvent::Planned { total });
 
     let mut newly = Vec::with_capacity(total);
-    // Squash reconciliation applies on this legacy PgPool entry point
-    // too — route through the same dialect-agnostic decision used by
-    // `migrate_pool` so both runners agree. `fake_initial` stays off
-    // here: table-existence faking is opted into only by the
-    // framework's system-migration path.
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
     for (i, mig) in pending.into_iter().enumerate() {
         let index = i + 1;
         emit(observer, || MigrationEvent::Started {
@@ -569,26 +566,7 @@ async fn migrate_with_ledger_body(
         });
         let began = std::time::Instant::now();
 
-        let step = async {
-            Ok::<_, MigrateError>(match reconcile(&enum_pool, &mig, &applied, false).await? {
-                ReconcileAction::Fake => {
-                    fake_apply_pool(&enum_pool, &mig, ledger).await?;
-                    Outcome::Faked
-                }
-                // `fake_initial` is off on this path, so
-                // `RunPartial` is unreachable here; treat it as a
-                // plain run for totality.
-                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-                    apply_one(pool, &mig, ledger).await?;
-                    Outcome::Ran
-                }
-                ReconcileAction::RunOutside(existing) => {
-                    apply_one(pool, &outside_tables(&mig, &existing), ledger).await?;
-                    Outcome::RanPartial { skipped: existing }
-                }
-            })
-        }
-        .await;
+        let step = reconcile_and_apply_pg(pool, &mig, &applied, ledger).await;
 
         let outcome = match step {
             Ok(outcome) => outcome,
@@ -613,6 +591,48 @@ async fn migrate_with_ledger_body(
         newly.push(mig);
     }
     Ok(newly)
+}
+
+/// [`reconcile_and_apply`] for the legacy PgPool runner, which applies
+/// through [`apply_one`]. `fake_initial` stays off: only the system chain
+/// opts into table-existence faking.
+#[cfg(feature = "postgres")]
+async fn reconcile_and_apply_pg(
+    pool: &PgPool,
+    mig: &Migration,
+    applied: &HashSet<String>,
+    ledger: &str,
+) -> Result<Outcome, MigrateError> {
+    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
+    Ok(match reconcile(&enum_pool, mig, applied, false).await? {
+        ReconcileAction::Fake => {
+            fake_apply_pool(&enum_pool, mig, ledger).await?;
+            Outcome::Faked
+        }
+        // Unreachable with `fake_initial` off; a plain run for totality.
+        ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+            apply_one(pool, mig, ledger).await?;
+            Outcome::Ran
+        }
+        ReconcileAction::RunOutside(existing) => {
+            apply_one(pool, &outside_tables(mig, &existing), ledger).await?;
+            Outcome::RanPartial { skipped: existing }
+        }
+    })
+}
+
+/// What `migrate <target>` applies going forward: the pending files after
+/// `head` up to `target`, squashes included so they reconcile (#2243).
+fn forward_to(
+    all: &[Migration],
+    applied: &HashSet<String>,
+    head: Option<&str>,
+    target: &str,
+) -> Vec<Migration> {
+    pending_migrations(all, applied)
+        .into_iter()
+        .filter(|m| head.is_none_or(|h| m.name.as_str() > h) && m.name.as_str() <= target)
+        .collect()
 }
 
 /// Hold the migrate advisory lock for the duration of `body`, then
@@ -923,7 +943,40 @@ fn preview_schema_op(
         let name = ddl::unique_constraint_name(&u.table, &u.column);
         statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
     }
+    // An index's FK, as apply finds it: by the index's first column, when no
+    // other index (declared, UNIQUE or the PK) starts with it at this op.
+    let earlier = ops
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
+        .map_or(&[][..], |i| &ops[..i]);
+    let (drops, readd) = step
+        .index_fks
+        .as_ref()
+        .and_then(|ix| {
+            let column = before
+                .indexes
+                .iter()
+                .find(|i| i.name == ix.index)?
+                .columns
+                .first()?;
+            let field = before.table(&ix.table).and_then(|t| t.field(column));
+            let served = field.is_some_and(|f| f.unique || f.primary_key)
+                || leading_indexes_at(before, earlier, &ix.table, column)
+                    .iter()
+                    .any(|name| *name != ix.index);
+            if served {
+                return None;
+            }
+            // An earlier op of the migration already dropped a live one.
+            let live = field.is_some_and(|f| f.fk.is_some())
+                && !fk_deferred_earlier(&ix.table, column, earlier);
+            let names = [ddl::fk_constraint_name(&ix.table, column)];
+            Some(ix.plan(column, if live { &names[..] } else { &[] }, dialect))
+        })
+        .unwrap_or_default();
+    statements.extend(drops);
     statements.extend(step.batch.immediate);
+    statements.extend(readd);
     if let Some(rebuild) = &step.batch.rebuild {
         statements.extend(rebuild.statements(dialect));
         statements.push(format!(
@@ -1067,8 +1120,8 @@ async fn migrate_to_with_ledger(
         match head {
             None => {
                 // Nothing applied — forward up to and including target.
-                for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one(pool, &mig, ledger).await?;
+                for mig in forward_to(&all, &applied, None, target) {
+                    reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
                     touched.push(mig);
                 }
             }
@@ -1077,12 +1130,8 @@ async fn migrate_to_with_ledger(
                 match target.cmp(h.as_str()) {
                     Ordering::Equal => {}
                     Ordering::Greater => {
-                        for mig in all.into_iter().filter(|m| {
-                            m.name.as_str() > h.as_str()
-                                && m.name.as_str() <= target
-                                && !applied.contains(&m.name)
-                        }) {
-                            apply_one(pool, &mig, ledger).await?;
+                        for mig in forward_to(&all, &applied, Some(&h), target) {
+                            reconcile_and_apply_pg(pool, &mig, &applied, ledger).await?;
                             touched.push(mig);
                         }
                     }
@@ -2743,6 +2792,185 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
+    /// A MySQL index drop, which its FK refuses (1553; #2244). Boxed: `Step`
+    /// sits in every migrate future, near a debug test thread's 2 MiB stack.
+    index_fks: Option<Box<IndexFks>>,
+}
+
+/// The FK a MySQL index drop must take off first, found by the index's
+/// first column in the catalog. It comes back right after the drop, under
+/// the names at the op, so a later alter or rename of the column finds it.
+struct IndexFks {
+    table: String,
+    index: String,
+    /// The table's columns at the op, with their FK to re-add. A column
+    /// missing here goes away later, or an earlier op already defers its
+    /// FK's re-add, so its FK just drops; `None` if the whole table goes.
+    columns: Option<Vec<(String, Option<String>)>>,
+}
+
+/// The indexes on `table` that start with `column` once `earlier` ran on
+/// `before`: its own, less those dropped, plus those created.
+fn leading_indexes_at<'a>(
+    before: &'a SchemaSnapshot,
+    earlier: &'a [Operation],
+    table: &str,
+    column: &str,
+) -> Vec<&'a str> {
+    use super::SchemaChange as SC;
+    let mut names: Vec<&str> = before
+        .indexes
+        .iter()
+        .filter(|i| i.table == table && i.columns.first().is_some_and(|c| c == column))
+        .map(|i| i.name.as_str())
+        .collect();
+    for op in earlier {
+        match op {
+            Operation::Schema(SC::DropIndex { name, .. }) => names.retain(|n| n != name),
+            Operation::Schema(SC::CreateIndex {
+                name,
+                table: t,
+                columns,
+                ..
+            }) if t == table && columns.first().is_some_and(|c| c == column) => {
+                names.push(name);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Whether an earlier op of the migration defers `table.column`'s FK
+/// (re-)add, which a re-add at the DropIndex would then duplicate (1826).
+fn fk_deferred_earlier(table: &str, column: &str, earlier: &[Operation]) -> bool {
+    use super::SchemaChange as SC;
+    earlier.iter().any(|op| match op {
+        Operation::Schema(SC::CreateTable(t)) => t == table,
+        Operation::Schema(
+            SC::AddColumn {
+                table: t,
+                column: c,
+            }
+            | SC::AlterColumnType {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterColumnMaxLength {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterFkOnDelete {
+                table: t,
+                column: c,
+                ..
+            }
+            | SC::AlterColumnUnique {
+                table: t,
+                column: c,
+                unique: false,
+            },
+        ) => t == table && c == column,
+        _ => false,
+    })
+}
+
+/// What happens to the FK on an index's first column.
+enum FkFate<'a> {
+    /// No FK in the schema: leave a live one alone.
+    Keep,
+    /// Its column or table goes away later.
+    Drop,
+    Readd(&'a str),
+}
+
+impl IndexFks {
+    /// For dropping `index` on `table`, `ops[at_op]`.
+    fn at(
+        table: &str,
+        index: &str,
+        ops: &[Operation],
+        at_op: Option<usize>,
+        after: &SchemaSnapshot,
+        dialect: &dyn crate::sql::Dialect,
+        schema: Option<&str>,
+    ) -> Result<Self, MigrateError> {
+        let (earlier, later) = at_op.map_or((&[][..], &[][..]), |i| (&ops[..i], &ops[i + 1..]));
+        // Only a later DropTable means the table goes; any other failure to
+        // build its shape at the op is an error, not a reason to drop FKs.
+        let columns = if dropped_later(table, later) {
+            None
+        } else {
+            let (at, _) = super::rebuild::snapshot_at(table, later, after)
+                .map_err(MigrateError::Validation)?;
+            let mut columns = at
+                .table(table)
+                .map(|t| super::diff::column_fks(t, dialect, schema))
+                .transpose()
+                .map_err(MigrateError::Validation)?;
+            if let Some(cs) = &mut columns {
+                cs.retain(|(c, fk)| fk.is_none() || !fk_deferred_earlier(table, c, earlier));
+            }
+            columns
+        };
+        Ok(Self {
+            table: table.to_owned(),
+            index: index.to_owned(),
+            columns,
+        })
+    }
+
+    fn fate(&self, column: &str) -> FkFate<'_> {
+        let found = self
+            .columns
+            .as_ref()
+            .and_then(|cs| cs.iter().find(|(c, _)| c == column));
+        match found {
+            None => FkFate::Drop,
+            Some((_, None)) => FkFate::Keep,
+            Some((_, Some(sql))) => FkFate::Readd(sql),
+        }
+    }
+
+    /// The drops of the live FKs `names` on `column`, then the re-add of the
+    /// declared one, which also comes back if a failed run lost it.
+    fn plan(
+        &self,
+        column: &str,
+        names: &[String],
+        dialect: &dyn crate::sql::Dialect,
+    ) -> (Vec<String>, Option<String>) {
+        let fate = self.fate(column);
+        if matches!(fate, FkFate::Keep) {
+            return (Vec::new(), None);
+        }
+        let drops = names
+            .iter()
+            .filter_map(|n| dialect.drop_foreign_key_sql(&self.table, n))
+            .collect();
+        match fate {
+            FkFate::Readd(sql) => (drops, Some(sql.to_owned())),
+            _ => (drops, None),
+        }
+    }
+}
+
+/// Whether a later op drops `table`, under whatever name it has by then.
+fn dropped_later(table: &str, later: &[Operation]) -> bool {
+    use super::SchemaChange as SC;
+    let mut name = table.to_owned();
+    for op in later {
+        match op {
+            Operation::Schema(SC::RenameTable { old_name, new_name }) if *old_name == name => {
+                name.clone_from(new_name);
+            }
+            Operation::Schema(SC::DropTable(t)) if *t == name => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A column whose FKs or UNIQUE the runner finds by name in the catalog:
@@ -2766,10 +2994,10 @@ fn render_step(
 ) -> Result<Step, MigrateError> {
     use super::SchemaChange as SC;
     // The ops after `change`, which is borrowed from `ops`.
-    let later = ops
+    let at_op = ops
         .iter()
-        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)))
-        .map_or(&[][..], |i| &ops[i + 1..]);
+        .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)));
+    let later = at_op.map_or(&[][..], |i| &ops[i + 1..]);
     // Its FK is deferred past the later renames, so it takes their names (#2190).
     let ended = match change {
         SC::AddCompositeFk {
@@ -2873,6 +3101,14 @@ fn render_step(
         } => Some(at_column(table, column)),
         _ => None,
     };
+    let index_fks = match change {
+        SC::DropIndex { name, table } if dialect.sole_leading_column_sql().is_some() => {
+            Some(Box::new(IndexFks::at(
+                table, name, ops, at_op, after, dialect, schema,
+            )?))
+        }
+        _ => None,
+    };
     let mut batch = render(snap).map_err(MigrateError::Validation)?;
     // Its FKs carry the names at this op, which a later rename changes.
     if renamed {
@@ -2899,6 +3135,7 @@ fn render_step(
         retry,
         drop_fks,
         drop_unique,
+        index_fks,
     })
 }
 
@@ -2996,7 +3233,46 @@ async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
     step: &Step,
 ) -> Result<Vec<String>, sqlx::Error> {
-    step_statements!(conn, step, crate::sql::MySql)
+    let (mut out, readd) = match &step.index_fks {
+        Some(ix) => Box::pin(mysql_index_fks(conn, ix)).await?,
+        None => (Vec::new(), None),
+    };
+    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
+    out.extend(rest?);
+    out.extend(readd);
+    Ok(out)
+}
+
+/// [`IndexFks::plan`] for the index's first column, when no other index
+/// starts with it: then MySQL needs it for the FK (1553), and otherwise a
+/// plain drop works without the FK's table-copy re-add. Boxed by the caller.
+#[cfg(feature = "mysql")]
+async fn mysql_index_fks(
+    conn: &mut sqlx::MySqlConnection,
+    ix: &IndexFks,
+) -> Result<(Vec<String>, Option<String>), sqlx::Error> {
+    use crate::sql::Dialect as _;
+    let dialect = crate::sql::MySql;
+    let (Some(lead_sql), Some(names_sql)) = (
+        dialect.sole_leading_column_sql(),
+        dialect.foreign_key_names_sql(),
+    ) else {
+        return Ok((Vec::new(), None));
+    };
+    let lead: Option<String> = sqlx::query_scalar(lead_sql)
+        .bind(&ix.table)
+        .bind(&ix.index)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(column) = lead else {
+        return Ok((Vec::new(), None));
+    };
+    let names: Vec<String> = sqlx::query_scalar(names_sql)
+        .bind(&ix.table)
+        .bind(&column)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(ix.plan(&column, &names, &dialect))
 }
 
 #[cfg(feature = "postgres")]
@@ -3421,9 +3697,8 @@ pub async fn migrate_to_pool_with_ledger(
         let mut touched = Vec::new();
         match head {
             None => {
-                for mig in all.iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one_pool(pool, mig, ledger).await?;
-                    let mig = mig.clone();
+                for mig in forward_to(&all, &applied, None, target) {
+                    reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
                     touched.push(mig);
                 }
             }
@@ -3432,13 +3707,8 @@ pub async fn migrate_to_pool_with_ledger(
                 match target.cmp(h.as_str()) {
                     Ordering::Equal => {}
                     Ordering::Greater => {
-                        for mig in all.iter().filter(|m| {
-                            m.name.as_str() > h.as_str()
-                                && m.name.as_str() <= target
-                                && !applied.contains(&m.name)
-                        }) {
-                            apply_one_pool(pool, mig, ledger).await?;
-                            let mig = mig.clone();
+                        for mig in forward_to(&all, &applied, Some(&h), target) {
+                            reconcile_and_apply(pool, &mig, &applied, ledger, false).await?;
                             touched.push(mig);
                         }
                     }
@@ -3925,5 +4195,83 @@ mod tests {
                 .unwrap();
         assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
         assert!(out[1].contains("DROP COLUMN `p_id`"), "{out:?}");
+    }
+
+    /// #2244 — the index an FK uses drops after the FK, which comes back.
+    #[test]
+    fn render_between_drops_the_fk_around_its_index() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |indexed: bool| -> SchemaSnapshot {
+            let indexes = if indexed {
+                serde_json::json!([{ "name": "child_p_idx", "table": "child",
+                    "columns": ["p_id"], "unique": false }])
+            } else {
+                serde_json::json!([])
+            };
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "p", "column": "p_id", "ty": "i64",
+                      "nullable": true, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }],
+                "indexes": indexes }))
+            .unwrap()
+        };
+        let drop = [SchemaChange::DropIndex {
+            name: "child_p_idx".into(),
+            table: "child".into(),
+        }];
+        let out =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::MySql)
+                .unwrap();
+        assert!(out[0].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
+        assert!(out[2].contains("ADD CONSTRAINT"), "{out:?}");
+        let pg =
+            super::render_changes_between(&drop, &snap(true), &snap(false), &crate::sql::Postgres)
+                .unwrap();
+        assert_eq!(pg.len(), 1, "PG needs no index under an FK: {pg:?}");
+    }
+
+    /// #2244 — the second of two index drops is the one the FK needs: the
+    /// first no longer serves it once dropped.
+    #[test]
+    fn render_between_takes_the_fk_off_for_the_last_index() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = |indexed: bool| -> SchemaSnapshot {
+            let indexes = if indexed {
+                serde_json::json!([
+                    { "name": "idx_a", "table": "child", "columns": ["p_id", "x"], "unique": false },
+                    { "name": "idx_b", "table": "child", "columns": ["p_id", "y"], "unique": false }])
+            } else {
+                serde_json::json!([])
+            };
+            serde_json::from_value(serde_json::json!({ "tables": [{
+                "name": "child", "model": "Child", "fields": [
+                    { "name": "id", "column": "id", "ty": "i64",
+                      "nullable": false, "primary_key": true },
+                    { "name": "p", "column": "p_id", "ty": "i64",
+                      "nullable": true, "primary_key": false,
+                      "fk": { "kind": "fk", "to": "parent", "on": "id" } }] }],
+                "indexes": indexes }))
+            .unwrap()
+        };
+        let drop = |name: &str| SchemaChange::DropIndex {
+            name: name.into(),
+            table: "child".into(),
+        };
+        let out = super::render_changes_between(
+            &[drop("idx_a"), drop("idx_b")],
+            &snap(true),
+            &snap(false),
+            &crate::sql::MySql,
+        )
+        .unwrap();
+        assert!(out[0].starts_with("DROP INDEX `idx_a`"), "{out:?}");
+        assert!(out[1].contains("DROP FOREIGN KEY"), "{out:?}");
+        assert!(out[2].starts_with("DROP INDEX `idx_b`"), "{out:?}");
+        assert!(out[3].contains("ADD CONSTRAINT"), "{out:?}");
+        assert_eq!(out.len(), 4, "{out:?}");
     }
 }

@@ -169,7 +169,7 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.60.2" },
+    "serverInfo": { "name": "rustango", "version": "0.60.3" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -395,7 +395,7 @@ cargo test -p rustango --features sqlite,mcp,config --test 'mcp_*'
 ### (b) curl the JSON-RPC
 
 Boot the demo (next section) and talk to it directly. The demo guards **every**
-method behind an agent token (an unauthed call returns `401`), so mint one first
+method behind an agent token (an unauthed call returns `401` with a JSON-RPC error body, code `-32001`), so mint one first
 — the demo prints the agent secret on boot:
 
 ```bash

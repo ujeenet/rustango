@@ -298,6 +298,7 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
+            --test env_override_spelling \
             --test every_example_crate_is_built \
             --test every_live_suite_runs_in_ci \
             --test every_serve_shuts_down_gracefully \
@@ -424,15 +425,10 @@ jobs:
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
       # only shape that compiles it; nothing else in CI did.
       #
-      # `--test` on purpose, unlike the two commands above. Building the
-      # whole test surface under this narrow feature set fails on suites
-      # whose `#![cfg]` under-specifies what they import — e.g.
-      # `forms_prepare_save_sqlite_live` is gated on `sqlite` alone and
-      # uses `rustango::forms`, which nothing here enables. Those gates
-      # are wrong and only ever compiled because every job that built
-      # them happened to have the feature on; that is its own class of
-      # defect and its own change (#1594), not a reason to hold this job
-      # back.
+      # `--test` on purpose, unlike the two commands above: the whole test
+      # surface under this narrow feature set is not a gate this job owns.
+      # Under-gated suites (e.g. `forms_prepare_save_sqlite_live`, now
+      # `sqlite` + `forms`) were fixed in #1594 and #2313.
       - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
       # `sso` without `admin-sso`: literals gated on the wrong one broke here (#1737).
       - run: cargo test -p rustango --features tenancy,sso --no-run --test non_superuser_admin_visibility_live --test permissions_upsert_live --test admin_user_roles_panel_live
@@ -1043,6 +1039,7 @@ jobs:
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test m2m_non_int_pk_tri \
+            --test m2m_changed_noop_tri \
             --test update_validation_tri \
             --test uuid_v7_pk_writes_tri \
             --test media_sqlite_live \
@@ -1062,6 +1059,7 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
+            --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
             --test admin_totp_2fa_sqlite_live \
@@ -1082,6 +1080,7 @@ jobs:
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
           --test system_chain_order_tri
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
@@ -1311,23 +1310,27 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
       - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_natural_pk_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test viewset_filters_tri
       - run: cargo test -p rustango --features mysql,tenancy,serializer,testkit --test viewset_serializer_patch_tri
       - run: cargo test -p rustango --features mysql,serializer,testkit --test unique_together_validator_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test inserted_pk_readback_tri
       - run: cargo test -p rustango --features mysql,sso,tenancy,testkit --test sso_link_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
+      - run: cargo test -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri
       - run: cargo test -p rustango --features mysql,template_views,testkit --test template_views_typed_binds_tri
       - run: cargo test -p rustango --features mysql,testkit --test row_to_json_nulls_tri
       - run: cargo test -p rustango --features mysql,testkit --test column_types_tri
       - run: cargo test -p rustango --features mysql,testkit --test m2m_non_int_pk_tri
+      - run: cargo test -p rustango --features mysql,signals,testkit --test m2m_changed_noop_tri
       - run: cargo test -p rustango --features mysql,forms,testkit --test update_validation_tri
       - run: cargo test -p rustango --features mysql,testkit --test uuid_v7_pk_writes_tri
       # #1911 / #1912 — flush / dumpdata / loaddata; MySQL rejected `"t"`.

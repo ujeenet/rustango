@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.60.2`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.60.3`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -302,7 +302,7 @@ Migrationen erstellen deine Datenbanktabellen, dieselbe Idee wie `php artisan mi
 cargo run -- migrate
 ```
 
-Der erste Kompiliervorgang dauert ~2 Minuten (Rust baut alles aus dem Quellcode). Ein frisches Projekt bringt noch keine Migrationsdateien mit, du siehst also `nothing to migrate (already up to date)` — `migrate` richtet dennoch die Audit-Log-Tabelle des Frameworks ein, damit auditierte Modelle sofort funktionieren, sobald du sie hinzufügst. Deine erste echte Migration generierst du in Schritt 9.
+Der erste Kompiliervorgang dauert ~2 Minuten (Rust baut alles aus dem Quellcode). Ein frisches Projekt bringt noch keine eigenen Migrationsdateien mit, aber `migrate` ist kein No-op: Es generiert zuerst die Migrationen des Frameworks aus den kompilierten Modellen und wendet sie an, du siehst also ein paar `applied …`-Zeilen statt `nothing to migrate`. (Diese Meldung erscheint erst, wenn alles — Framework und Projekt — schon auf dem neuesten Stand ist.) Außerdem legt es die Audit-Log-Tabelle an, damit auditierte Modelle sofort funktionieren, sobald du sie hinzufügst. Deine erste Projekt-Migration generierst du in Schritt 9.
 
 Prüfe den Migrationsstatus:
 
@@ -509,25 +509,29 @@ Du solltest die ID deines neuen Beitrags und die zurückgelesenen Zeilen sehen. 
 
 ## Schritt 11: Den Auto-Admin einschalten
 
-**Rustango** bringt eine generierte Admin-Oberfläche für deine Modelle mit — ein fertiges Backoffice zum Durchsuchen und Bearbeiten deiner Daten. Der Aufbau besteht aus zwei kleinen Schritten: einem Helfer, der einen Pool in einen Admin-Router verwandelt, und einem `.nest(...)`-Aufruf, um ihn einzuhängen.
+**Rustango** bringt eine generierte Admin-Oberfläche für deine Modelle mit — ein fertiges Backoffice zum Durchsuchen, Suchen und Bearbeiten deiner Daten, ganz ohne eigenen Code. Das Fullstack-Gerüst verdrahtet ihn bereits: Ein Helfer in `src/urls.rs` verwandelt einen Pool in einen Admin-Router, und `src/main.rs` hängt ihn unter `/admin` ein.
 
-Füge den Helfer selbst zu `src/urls.rs` hinzu — der Scaffolder generiert ihn nicht, weil nichts, was er generiert, ihn aufrufen würde. Das `admin_prefix` muss zu dem Pfad passen, unter dem du ihn im nächsten Schritt einhängst (`/admin`), damit die eigenen Links und Formularaktionen des Admins aufgelöst werden:
+Der Helfer stellt den Admin hinter ein Login. Das `admin_prefix` muss zu dem Pfad passen, unter dem er eingehängt ist (`/admin`), damit die eigenen Links und Formularaktionen des Admins aufgelöst werden:
 
 ```rust
 use rustango::admin;
+use rustango::session::SessionSecret;
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
+        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
+        .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }
 ```
 
+> **Behalte `.with_session_auth(...)`.** Ohne es hat der Admin kein Login: Jeder, der `/admin` erreicht, kann jedes Modell lesen, bearbeiten und löschen. `check --deploy` warnt, wenn ein Admin ohne es gebaut wird (siehe [admin.md](admin.md)).
+
 `Builder::new` nimmt den Pool jedes Backends, sodass dieser Helfer keinen Treiber nennt und auf allen dreien funktioniert.
 
-Verbinde dann einen Pool in `src/main.rs` und hänge den Admin in den API-Router ein, bevor du ihn an das `Cli` übergibst. Behalte die `mod blog;`-Zeile aus Schritt 7 — die registriert dein `Post`-Modell beim Admin:
+`src/main.rs` übergibt den Helfer an das `Cli`, das den Admin aus dem Pool baut, mit dem es serviert; Verben wie `makemigrations` laufen also weiterhin ohne Datenbank. Behalte die `mod blog;`-Zeile aus Schritt 7 — die registriert dein `Post`-Modell beim Admin:
 
 ```rust
 mod blog;
@@ -538,16 +542,19 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
-
-    let api = urls::api().nest("/admin", urls::admin_router(pool));
-
     rustango::manage::Cli::new()
-        .api(api)
+        .api(urls::api())
+        .nest_with("/admin", urls::admin_router)
         .with_health() // /health + /ready endpoints
         .run()
         .await
 }
+```
+
+Lege das Konto an, mit dem du dich anmeldest (das Passwort wird abgefragt):
+
+```bash
+cargo run -- create-admin alice --superuser
 ```
 
 `Cli::new()...run()` ist derselbe vereinheitlichte Dispatcher, den der Scaffolder generiert hat — er bedient weiterhin jedes `cargo run -- <verb>`; du hast nur den Router angereichert, den er zur Runserver-Zeit bedient.
@@ -558,7 +565,7 @@ Führe es aus:
 cargo run
 ```
 
-Öffne <http://localhost:8080/admin> (kein abschließender Schrägstrich). Du siehst die Admin-Startseite mit einem `posts`-Link. Klicke ihn an, um deinen Entwurfsbeitrag in der Liste zu sehen, klicke den Beitrag an, um sein Bearbeitungsformular zu öffnen, und speichere. Der Audit-Trail-Tab zeichnet jeden Schreibvorgang auf.
+Öffne <http://localhost:8080/admin> (kein abschließender Schrägstrich) und melde dich als `alice` an. Du siehst die Admin-Startseite mit einem `posts`-Link. Klicke ihn an, um deinen Entwurfsbeitrag in der Liste zu sehen, klicke den Beitrag an, um sein Bearbeitungsformular zu öffnen, und speichere. Der Audit-Trail-Tab zeichnet jeden Schreibvorgang auf.
 
 ---
 
@@ -690,6 +697,8 @@ JWTs sind signierte Tokens, die du einem Client nach dem Login übergibst und be
 
 ### 14a. Beim Login ein Token ausstellen
 
+Das hier sind Fragmente, keine eigenständigen Dateien: Dieses gehört in deinen Login-Handler in `src/views.rs`, neben die Handler aus Schritt 6.
+
 Backe die Benutzer-ID (das „Subject" des Tokens) und beliebige benutzerdefinierte Claims, wie Rollen, in ein signiertes Token und übergib es dann dem Client:
 
 ```rust
@@ -707,6 +716,8 @@ let token = encode(&claims.ttl(Duration::from_secs(900)), &secret)?;
 ```
 
 ### 14b. Das Token bei jeder Anfrage verifizieren
+
+Das gehört dorthin, wo du eine Route absicherst — in einen geschützten Handler in `src/views.rs` oder in einen axum-Extractor bzw. eine `middleware::from_fn`-Schicht, wenn es für einen ganzen Teilbaum gelten soll.
 
 Dekodiere das Token — das prüft die Signatur und die Ablaufzeit — und lies dann die Claims zurück. Falls es fehlt oder ungültig ist, weise die Anfrage als nicht autorisiert ab:
 
@@ -870,7 +881,7 @@ export RUSTANGO_ENV=prod
 export DATABASE_URL=postgres://prod-host/myblog
 export RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 
-# 2. Run migrations
+# 2. Run migrations (ship `migrations/` AND `system/migrations/` with the binary)
 cargo run --release -- migrate
 
 # 3. Audit
@@ -885,7 +896,7 @@ cargo build --release
 
 Stelle sicher, dass dein Reverse-Proxy:
 - HTTPS terminiert
-- `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))
+- `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`Cli::with_trusted_proxies([...])?` oder `server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))
 - `X-Forwarded-Host`, `X-Forwarded-Proto` weiterleitet
 - `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` verwendet, damit `ConnectInfo` für Rate-Limiting + IP-Filterung befüllt ist
 

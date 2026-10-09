@@ -244,3 +244,133 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
         assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
     }
 }
+
+/// Trailing arguments and stray flags once ran the bare verb (#1952).
+#[tokio::test]
+async fn role_and_operator_verbs_refuse_extra_arguments() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    b.run(&["create-role", "acme", "editor"])
+        .await
+        .expect("role");
+    for args in [
+        &["assign-role", "acme", "bob", "editor", "junk"][..],
+        &["revoke-role", "acme", "bob", "editor", "junk"],
+        &["list-roles", "acme", "junk"],
+        &["list-operators", "-active"],
+        &["prewarm-pools", "-x"],
+    ] {
+        let res = b.run(args).await;
+        assert!(res.is_err(), "{args:?} ran: {res:?}");
+    }
+
+    for name in ["alice", "carol"] {
+        b.run(&["create-operator", name, "--password", "pw"])
+            .await
+            .expect("operator");
+    }
+    let res = b
+        .run(&["set-operator-active", "alice", "carol", "--off"])
+        .await;
+    assert!(res.is_err(), "a second username was ignored: {res:?}");
+    let list = b.run(&["list-operators"]).await.expect("list");
+    assert!(list.contains("2 active"), "{list}");
+}
+
+/// Flags may sit anywhere, and `--on --off` is refused (#1952).
+#[tokio::test]
+async fn user_verbs_take_flags_anywhere() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    let res = b
+        .run(&["set-superuser", "acme", "bob", "--on", "--off"])
+        .await;
+    assert!(res.is_err(), "contradicting flags ran: {res:?}");
+    let out = b
+        .run(&["set-superuser", "--off", "acme", "bob"])
+        .await
+        .expect("leading flag");
+    assert!(out.contains("is_superuser=false"), "{out}");
+    b.run(&["reset-password", "--password", "pw2", "acme", "bob"])
+        .await
+        .expect("leading flag");
+}
+
+/// set-superuser and reset-password write through the ORM (#1952).
+#[tokio::test]
+async fn set_superuser_and_reset_password_write_the_row() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    let url = format!("sqlite://{}", b._tmp.path().join("acme.db").display());
+    let tenant = sqlx::SqlitePool::connect(&url).await.expect("tenant db");
+    let is_super = || {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT is_superuser FROM rustango_users WHERE username = 'bob'",
+        )
+        .fetch_one(&tenant)
+    };
+    assert!(is_super().await.unwrap(), "the first user is promoted");
+    b.run(&["set-superuser", "acme", "bob", "--off"])
+        .await
+        .expect("off");
+    assert!(!is_super().await.unwrap());
+    assert!(b.run(&["set-superuser", "acme", "nobody"]).await.is_err());
+
+    b.run(&["reset-password", "acme", "bob", "--password", "pw2"])
+        .await
+        .expect("reset");
+    b.run(&[
+        "change-password",
+        "acme",
+        "bob",
+        "--current",
+        "pw2",
+        "--password",
+        "pw3",
+    ])
+    .await
+    .expect("the reset password works");
+}
+
+/// The remaining user and key verbs take flags before positionals too (#2225).
+#[tokio::test]
+async fn password_and_key_verbs_take_flags_anywhere() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-operator", "--password", "pw", "alice"])
+        .await
+        .expect("create-operator");
+    b.run(&["reset-operator-password", "--password", "pw2", "alice"])
+        .await
+        .expect("reset-operator-password");
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    b.run(&[
+        "change-password",
+        "--current",
+        "pw",
+        "--password",
+        "pw2",
+        "acme",
+        "bob",
+    ])
+    .await
+    .expect("change-password");
+    b.run(&["create-api-key", "--label", "ci", "acme", "bob"])
+        .await
+        .expect("create-api-key");
+    assert!(b
+        .run(&["create-api-key", "acme", "bob", "junk"])
+        .await
+        .is_err());
+}

@@ -145,6 +145,20 @@ fn mcp_prod_audit_silent_when_configured() {
     );
 }
 
+// #2299 — 0 is unlimited, so it must flag like unset.
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_prod_audit_flags_zero_rate_limit() {
+    let out = audit_prod(|s| s.mcp.rate_limit_per_minute = Some(0));
+    assert!(
+        out.info
+            .iter()
+            .any(|m| m.contains("[mcp] rate_limit_per_minute")),
+        "expected [mcp] rate-limit info for 0; got: {:?}",
+        out.info
+    );
+}
+
 #[test]
 fn dev_tier_does_not_run_security_audit() {
     let mut s = Settings::default();

@@ -67,6 +67,12 @@ pub trait Dialect: Send + Sync {
         format!("\"{escaped}\"")
     }
 
+    /// Quote text as an inline string literal, for the few spots
+    /// that take no bind. The default doubles `'`; MySQL also escapes `\`.
+    fn quote_literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
     /// Render the placeholder for the `n`-th bind, counting from 1.
     ///
     /// **`n` is advisory.** Only PostgreSQL uses it, as `$n`. SQLite
@@ -362,6 +368,13 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for an index's first column when no other index starts with it,
+    /// binding `(table, index)`, where an FK refuses to lose the only index
+    /// it can use (MySQL, 1553; #2244).
+    fn sole_leading_column_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for the names of the single-column UNIQUE indexes on one
     /// column, binding `(table, column)`. `Some` where an `AlterColumnUnique`
     /// drops the index by that name (MySQL) (#1676).
@@ -534,9 +547,9 @@ pub trait Dialect: Send + Sync {
         "TEXT".to_owned()
     }
 
-    /// DDL to run once before any case-insensitive column is created,
-    /// such as `CREATE EXTENSION IF NOT EXISTS citext` on Postgres.
-    /// `None` when nothing is needed.
+    /// DDL a migration runs before it writes a case-insensitive column,
+    /// such as `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` on
+    /// Postgres. `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
         None
     }
@@ -566,6 +579,40 @@ pub trait Dialect: Send + Sync {
     fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
         sql.push_str(qualified_col);
         sql.push_str(if negated { " NOT ILIKE " } else { " ILIKE " });
+        sql.push_str(placeholder);
+    }
+
+    /// `qualified_col` as text a `LIKE` can match, given its field type
+    /// (`None` when unknown). Postgres casts a non-text column (#2229).
+    fn like_operand(&self, qualified_col: &str, ty: Option<FieldType>) -> String {
+        let _ = ty;
+        qualified_col.to_owned()
+    }
+
+    /// [`Self::write_ilike`] on [`Self::like_operand`].
+    fn write_ilike_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        let col = self.like_operand(qualified_col, ty);
+        self.write_ilike(sql, &col, placeholder, negated);
+    }
+
+    /// Case-sensitive `<col> [NOT] LIKE <p>` on [`Self::like_operand`] (#2263).
+    fn write_like_typed(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        ty: Option<FieldType>,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        sql.push_str(&self.like_operand(qualified_col, ty));
+        sql.push_str(if negated { " NOT LIKE " } else { " LIKE " });
         sql.push_str(placeholder);
     }
 

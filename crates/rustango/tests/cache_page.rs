@@ -463,6 +463,10 @@ async fn oversize_body_bypasses_cache_not_500() {
             .and_then(|h| h.to_str().ok()),
         Some("BYPASS")
     );
+    // The whole body still reaches the client, not an empty one (#2218).
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 2 * (1 << 20));
+    assert!(body.iter().all(|b| *b == b'A'));
 }
 
 /// `Vary` response header is set on cached responses to communicate
@@ -947,4 +951,146 @@ async fn default_layer_caches_without_tenancy() {
         );
     }
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+fn get_req(uri: &str, headers: &[(header::HeaderName, &str)]) -> Request<Body> {
+    let mut b = Request::builder().uri(uri);
+    for (n, v) in headers {
+        b = b.header(n, *v);
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+fn cache_status(resp: &axum::response::Response) -> Option<&str> {
+    resp.headers()
+        .get("x-cache-status")
+        .and_then(|h| h.to_str().ok())
+}
+
+/// A gzip body is not replayed to a client that sent no `Accept-Encoding` (#2219).
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn compressed_response_is_not_replayed_to_other_encodings() {
+    use rustango::compression::{CompressionLayer, CompressionRouterExt as _};
+    let app = |layer: CachePageLayer| -> Router {
+        Router::new()
+            .route("/c", get(|| async { "x".repeat(4096) }))
+            .compression(CompressionLayer::default())
+            .layer(layer.tenant_agnostic(true))
+    };
+    let gzip = [(header::ACCEPT_ENCODING, "gzip")];
+
+    let plain_app = app(CachePageLayer::new(Arc::new(InMemoryCache::new())));
+    let gz = plain_app
+        .clone()
+        .oneshot(get_req("/c", &gzip))
+        .await
+        .unwrap();
+    assert_eq!(gz.headers()[header::CONTENT_ENCODING], "gzip");
+    let plain = plain_app.oneshot(get_req("/c", &[])).await.unwrap();
+    assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(body_to_string(plain.into_body()).await, "x".repeat(4096));
+
+    // Keyed on Accept-Encoding, each encoding gets its own entry.
+    let keyed =
+        app(CachePageLayer::new(Arc::new(InMemoryCache::new())).vary_on(["accept-encoding"]));
+    keyed.clone().oneshot(get_req("/c", &gzip)).await.unwrap();
+    let hit = keyed.clone().oneshot(get_req("/c", &gzip)).await.unwrap();
+    assert_eq!(cache_status(&hit), Some("HIT"));
+    assert_eq!(hit.headers()[header::CONTENT_ENCODING], "gzip");
+    let plain = keyed.oneshot(get_req("/c", &[])).await.unwrap();
+    assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+}
+
+/// One language is not replayed to every client under `LocaleMiddleware` (#2219).
+#[tokio::test]
+async fn localized_response_is_not_replayed_to_other_languages() {
+    use rustango::i18n::middleware::{ActiveLocale, LocaleMiddleware};
+    let app = |layer: CachePageLayer| -> Router {
+        Router::new()
+            .route("/l", get(|l: ActiveLocale| async move { l.0 }))
+            .layer(LocaleMiddleware::new(&["en", "fr"]).default("en"))
+            .layer(layer.tenant_agnostic(true))
+    };
+    let fr = [(header::ACCEPT_LANGUAGE, "fr")];
+    let en = [(header::ACCEPT_LANGUAGE, "en")];
+
+    let unkeyed = app(CachePageLayer::new(Arc::new(InMemoryCache::new())));
+    unkeyed.clone().oneshot(get_req("/l", &fr)).await.unwrap();
+    let resp = unkeyed.oneshot(get_req("/l", &en)).await.unwrap();
+    assert_eq!(body_to_string(resp.into_body()).await, "en");
+
+    // `Vary: Cookie` needs no key: a cookie request skips the cache.
+    let keyed =
+        app(CachePageLayer::new(Arc::new(InMemoryCache::new())).vary_on(["accept-language"]));
+    keyed.clone().oneshot(get_req("/l", &fr)).await.unwrap();
+    let hit = keyed.clone().oneshot(get_req("/l", &fr)).await.unwrap();
+    assert_eq!(cache_status(&hit), Some("HIT"));
+    assert_eq!(body_to_string(hit.into_body()).await, "fr");
+    let resp = keyed.oneshot(get_req("/l", &en)).await.unwrap();
+    assert_eq!(body_to_string(resp.into_body()).await, "en");
+}
+
+/// `Vary: *` is never cached (#2219).
+#[tokio::test]
+async fn vary_star_is_not_cached() {
+    let app: Router = Router::new()
+        .route("/s", get(|| async { ([(header::VARY, "*")], "ok") }))
+        .layer(CachePageLayer::new(Arc::new(InMemoryCache::new())).tenant_agnostic(true));
+    app.clone().oneshot(get_req("/s", &[])).await.unwrap();
+    let resp = app.oneshot(get_req("/s", &[])).await.unwrap();
+    assert_eq!(cache_status(&resp), Some("BYPASS"));
+}
+
+/// `invalidate` deletes exactly the key the layer wrote (#2252).
+#[tokio::test]
+async fn invalidate_purges_the_cached_page() {
+    use rustango::cache_page::PageKey;
+    let hits = Arc::new(AtomicU32::new(0));
+    let h = hits.clone();
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()))
+        .tenant_agnostic(true)
+        .key_prefix("pages")
+        .vary_on(["accept-language"]);
+    let app: Router = Router::new()
+        .route(
+            "/p",
+            get(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+                async { "ok" }
+            }),
+        )
+        .layer(layer.clone());
+    let status = |app: Router| async move {
+        let req = Request::get("/p?x=1")
+            .header(header::HOST, "a.test")
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()["x-cache-status"]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(status(app.clone()).await, "MISS");
+    assert_eq!(status(app.clone()).await, "HIT");
+
+    let page = PageKey::new("/p", "a.test").query("x=1");
+    layer
+        .invalidate([&page.clone().vary("Accept-Language", "fr")])
+        .await
+        .unwrap();
+    assert_eq!(
+        status(app.clone()).await,
+        "HIT",
+        "purged another vary value"
+    );
+
+    layer
+        .invalidate([&page.vary("Accept-Language", "en")])
+        .await
+        .unwrap();
+    assert_eq!(status(app.clone()).await, "MISS", "page still cached");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 }

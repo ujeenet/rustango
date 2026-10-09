@@ -150,6 +150,152 @@ untouched.
 
 ## Unreleased
 
+## 0.60.3
+
+### `makemigrations` renames an M2M junction's column
+
+Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
+
+### Colliding FK names are refused
+
+Two FKs whose `<table>_<column>_fkey` cuts to the same 63 bytes now fail at render, before the op that adds them, on PG and MySQL; rename a table or column. On MySQL, earlier ops of that migration have already committed (#2245).
+
+A self-referencing M2M whose two columns both change is refused by `makemigrations`; rename one per migration.
+
+### Custom `Cache` backends: override `touch`
+
+`SessionStore::touch` now calls `Cache::touch`. The trait default is a get then a set, which can revive a session deleted in between; override it to extend only a live key (#2300).
+
+### `[mcp] rate_limit_per_minute = 0` means unlimited
+
+It used to refuse every request with 429 (#2299).
+
+### i18n locale matching
+
+`languages = ["pt-BR"]` now loads `pt_BR.json` (#2288), and `negotiate_language` picks `en` over `en-GB` for `en-US` (#2289). Check any test that pinned the old pick.
+
+### `IpFilterLayer::behind_trusted_proxy` (opt-in)
+
+The filter still checks the socket peer by default. Call `.behind_trusted_proxy()` to gate the client a `RealIpLayer::trust_proxies` layer resolved; then list client networks, not proxy ones (#2278).
+
+### Purge pages with `CachePageLayer::invalidate`
+
+Replace hand-built page-cache keys with `layer.invalidate([&PageKey::new(path, host).tenant(slug)])`; since 0.60 they miss the tenant and delete nothing (#2252).
+
+### `RUSTANGO__LOGGING__FORMAT` now applies under `#[rustango::main]`
+
+If it is set in the env or `./.env`, the default subscriber uses that format; before, it was ignored there (#2258).
+
+### `Cli` behind a reverse proxy
+
+Call `Cli::with_trusted_proxies(["127.0.0.1/32"])?` so logs and login limits key on the client, not the proxy (#2255).
+
+### Mistyped env overrides now warn
+
+A var with one `_` after `RUSTANGO` and `__` later is ignored, as before, but config loading now prints a warning. Rename it to `RUSTANGO__SECTION__KEY` (#2257).
+
+### MCP 401 body is JSON
+
+A missing or invalid agent token now gets a JSON-RPC error (code `-32001`), not plain text. Status and `WWW-Authenticate` are the same (#2259).
+
+### Webhook headers are checked
+
+`WebhookSubscription::header` with an invalid name or value makes `dispatch` return `JobError::Fatal` (#2236).
+
+### MCP SSE streams close
+
+The stream ends at the JWT's `exp` and within a minute of a revoke; clients should reconnect with a fresh token (#2237).
+
+### `CachePageLayer` skips responses whose `Vary` is not in the key
+
+Behind compression or `LocaleMiddleware`, pages stop being cached until you add the header, e.g. `.vary_on(["accept-encoding", "accept-language"])` (#2219).
+
+### `S3Storage` default timeouts
+
+10 s to connect; GET, HEAD and DELETE fail after 60 s without a reply or body chunk; an upload gets 60 s + size / 256 KiB/s. A client passed to `with_http` replaces all of them (#2220).
+
+### `m2m_changed` skips no-op `add` / `remove`
+
+A receiver that counted on a signal for a duplicate `add` or a missing `remove` no longer gets one (#2221).
+
+### Password-reset links from before the upgrade are refused
+
+`confirm_password_reset_pool` / `_single_use` need the issue time new links carry, and return `Expired` for older ones and for a link older than the last password change (#2248). Users request a new link. The `_into` forms are unchanged.
+
+### Admin SSO with a TOTP device shows a code step
+
+The callback now renders a code form posting to `{admin}/login/sso-totp` before the session is minted (#2249). With `totp` on, SSO also fails closed when the device table cannot be read.
+
+### Member logout on a path-prefix tenant
+
+Use `member_auth::logout_at(pool, &user, &org, full_request_path)`; `logout` clears `Path=/`, which leaves a prefix tenant's cookie in the browser (#2251).
+
+### `Dialect::write_ilike_typed`
+
+New provided method; the writers call it with the column's field type. A custom dialect that needs a cast before `ILIKE` overrides it (#2229).
+
+### `Dialect::quote_literal`
+
+New provided method for inline string literals. On MySQL a `\` in a comment or `string_agg` separator is now kept as written (#2232).
+
+### `server::catch_panics` is public
+
+Additive: `catch_panics(routes).layer(your_layer)` lets your layers see a panic 500 (#2168).
+
+### `#[rustango::main]` reads `RUST_LOG` from `./.env`
+
+With default logging it uses that value when the real `RUST_LOG` is unset. It sets no env vars; a bad `.env` is ignored (#2204).
+
+### New `SchemaChange::AlterColumnComment`; `generated_as` changes are refused
+
+makemigrations writes `AlterColumnComment` for a `db_comment` change and stops on a `generated_as` change; drop and re-add that column by hand. On PG a type change into a string now writes the field's whole type with no `USING` (#2239).
+
+Binaries older than 0.60.3 cannot read a migrations directory that holds an `AlterColumnComment` file, so upgrade every checkout before pulling those migrations.
+
+If an older `generated_as` edit was never migrated, makemigrations now refuses. Remove the field and run makemigrations (a DropColumn), add it back and run it again (an AddColumn), then migrate: the column comes back with the new expression.
+
+### PG migrations create `citext` themselves
+
+A migration, `apply_all_pool` and testkit table creation run `CREATE EXTENSION IF NOT EXISTS citext SCHEMA public` before a CITEXT column. It goes in `public` so every schema-mode tenant finds it. Where the role cannot create extensions, install it once by hand (#2240, #2269, #2271).
+
+### A type change no longer writes a separate default op
+
+makemigrations folds the new `DEFAULT` into `AlterColumnType`, so undoing it works on PG.
+
+### `cursor_pagination` on a nullable column is logged, and will be refused in 0.61.0
+
+It logs `tracing::error!` at build time (#2230), and will panic from 0.61.0 (#2265). Paginate on a NOT NULL column such as the primary key.
+
+### ViewSet answers a bad filter with 400
+
+An unknown `__lookup` or a value that does not parse (`?id=abc`, `?id__in=1,x`, `?flag__isnull=maybe`) now returns `400` instead of being ignored (#2227). With a filter backend registered, an unknown lookup is still passed to it. `iexact`/`contains`/... on a non-string field is a `400`.
+
+### ViewSet skips empty filter values
+
+`?field=` with an empty value no longer filters, on any field (#2226). It used to match `''` on a string field and nothing on a nullable one.
+
+### Resolver caches are per registry
+
+`invalidate_org_cache`, `invalidate_host_cache` and the testkit resolver resets still act on every registry in the process (#2077).
+
+### Tenancy verbs reject stray arguments
+
+`assign-role acme bob editor extra`, `set-operator-active alice bob --off` and similar used to ignore the extra word; they now fail. `set-superuser --on --off` fails instead of using the last flag (#1952).
+
+`create-role --help` and `create-api-key --help` now return an error with the usage instead of printing it and exiting 0. A `--password` (or `--current`) value that starts with `--` is refused as a missing value. `create-operator`, `reset-operator-password`, `change-password`, `change-operator-password` and `create-api-key` now also take flags before the positionals.
+
+### `[tenancy] apex_domain` now takes effect
+
+If your config sets it, `Cli::with_settings` uses it when `RUSTANGO_APEX_DOMAIN` is unset (#1379).
+
+### Admin search never covers a secret field
+
+A `formfield_overrides = "x: password"` column is left out of `?q=` and autocomplete, even when `search_fields` names it (#2228). Only the `password` widget marks a secret: give `token` / `api_key` fields that widget too.
+
+### A "view" object-permission hook now filters the admin list
+
+Denied rows vanish from the list, autocomplete, FK facet names and FK cell names (#2267); pages may come up short, and totals, facet values and counts, date buckets and "has next" still see them. Use `register_admin_queryset!` to hide them everywhere (#2231). A password-widget field in `list_filter` gets no facet.
+
 ## 0.60.2
 
 ### `migrate-tenant-storage --to database` replaces the target's `public`
@@ -1714,6 +1860,7 @@ migration, the callback alone in the next.
 (#1661). A match without a `_ =>` arm now fails with
 `error[E0004]: non-exhaustive patterns`; add the arm. `Weight` and
 `NullsOrder` stay exhaustive.
+
 ### Every framework JSON error is now an `ApiError` body
 
 Only affects clients that parse error bodies (#1193). The shape is

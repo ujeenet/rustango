@@ -259,22 +259,52 @@ fn mint_cookie_at(secret: &SessionSecret, user: &User, slug: &str, ttl: i64, pat
 
 /// Build a `Set-Cookie` value that expires the member session (logout).
 /// Only clears this browser; [`logout`] also ends the other sessions.
+/// `Path=/`: on a path-prefix tenant use [`logout_at`].
 #[must_use]
 pub fn clear_cookie() -> String {
-    format!("{MEMBER_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+    clear_cookie_at("/")
+}
+
+/// [`clear_cookie`] for a cookie minted with `Path={path}`.
+fn clear_cookie_at(path: &str) -> String {
+    format!("{MEMBER_COOKIE}=; HttpOnly; SameSite=Lax; Path={path}; Max-Age=0")
 }
 
 /// Log `user` out on every device and return the [`clear_cookie`] value.
 /// Pass the row [`CurrentMember`] just loaded from the tenant `pool`.
+/// On a path-prefix tenant use [`logout_at`], which clears the right path.
 ///
 /// # Errors
 /// [`crate::sql::ExecError`] when the cut-off cannot be stored.
 pub async fn logout(pool: &crate::sql::Pool, user: &User) -> Result<String, crate::sql::ExecError> {
+    revoke_member_sessions(pool, user).await?;
+    Ok(clear_cookie())
+}
+
+/// [`logout`] whose cookie clears the path SSO minted it with: `org`'s path
+/// prefix when `request_path` (the full path, e.g. `OriginalUri`) is under it (#2251).
+///
+/// # Errors
+/// [`crate::sql::ExecError`] when the cut-off cannot be stored.
+pub async fn logout_at(
+    pool: &crate::sql::Pool,
+    user: &User,
+    org: &crate::tenancy::Org,
+    request_path: &str,
+) -> Result<String, crate::sql::ExecError> {
+    revoke_member_sessions(pool, user).await?;
+    Ok(Mount::at(org, request_path, "").clear_cookie())
+}
+
+async fn revoke_member_sessions(
+    pool: &crate::sql::Pool,
+    user: &User,
+) -> Result<(), crate::sql::ExecError> {
     if let Some(&id) = user.id.get() {
         // No cookie here, so no skew cover: the cut-off is this node's clock.
         crate::session::revoke_sessions::<User>(pool, id, user.sessions_revoked_at, 0).await?;
     }
-    Ok(clear_cookie())
+    Ok(())
 }
 
 // ===================================================================
@@ -441,11 +471,26 @@ struct Mount {
 impl Mount {
     /// `None` when a prefixed route matched a path outside the prefix.
     fn of(t: &TenantScope, sso: &SsoPath, parts: &Parts, login_base: &str) -> Option<Self> {
-        let path = super::routes::cookie_path(&t.org, parts.uri.path());
-        (sso.prefix.is_none() || path != "/").then(|| Self {
-            path: path.to_owned(),
+        let mount = Self::at(&t.org, parts.uri.path(), login_base);
+        (sso.prefix.is_none() || mount.path != "/").then_some(mount)
+    }
+
+    /// The mount `org` is served under at `request_path` (#2098).
+    fn at(org: &crate::tenancy::Org, request_path: &str, login_base: &str) -> Self {
+        Self {
+            path: super::routes::cookie_path(org, request_path).to_owned(),
             login: login_base.trim_end_matches('/').to_owned(),
-        })
+        }
+    }
+
+    /// Mint `user`'s member cookie under this mount.
+    fn mint_cookie(&self, secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
+        mint_cookie_at(secret, user, slug, ttl, &self.path)
+    }
+
+    /// Expire the member cookie [`Self::mint_cookie`] set.
+    fn clear_cookie(&self) -> String {
+        clear_cookie_at(&self.path)
     }
 
     /// A site-absolute path as seen under this mount.
@@ -717,13 +762,7 @@ async fn sso_callback_in(
         tracing::warn!(member_id, "member missing or inactive after sign-in");
         return clear_flow(sso_error("Could not complete sign-in.", &mount));
     };
-    let cookie = mint_cookie_at(
-        &secret,
-        &member,
-        &t.org.slug,
-        config.session_ttl,
-        &mount.path,
-    );
+    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
@@ -1245,6 +1284,37 @@ mod tests {
             .extensions
             .insert(crate::real_ip::TrustedRealIp([203, 0, 113, 9].into()));
         assert_eq!(external_base(&parts), None);
+    }
+
+    /// #2251 — logout clears the member cookie at the path SSO minted it with.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn logout_clears_the_cookie_where_it_was_minted() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::testkit::user();
+        user.insert_pool(&pool).await.unwrap();
+        let org = crate::tenancy::Org {
+            path_prefix: Some("/acme".into()),
+            ..crate::testkit::org()
+        };
+        let path_of = |cookie: &str| {
+            cookie
+                .split("; ")
+                .find_map(|a| a.strip_prefix("Path="))
+                .map(str::to_owned)
+        };
+        let minted = Mount::at(&org, "/acme/auth/sso/corp/callback", "/auth").mint_cookie(
+            &secret(),
+            &user,
+            &org.slug,
+            60,
+        );
+        let cleared = logout_at(&pool, &user, &org, "/acme/logout").await.unwrap();
+        assert_eq!(path_of(&minted).as_deref(), Some("/acme"));
+        assert_eq!(path_of(&cleared), path_of(&minted));
     }
 
     // ---- safe_landing -----------------------------------------------

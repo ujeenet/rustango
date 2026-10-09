@@ -126,7 +126,7 @@ impl JsonRpcError {
 /// What an agent sees for any internal failure.
 pub(crate) const INTERNAL_MESSAGE: &str = "internal error";
 
-/// The error codes JSON-RPC 2.0 reserves, plus the two this server
+/// The error codes JSON-RPC 2.0 reserves, plus the three this server
 /// defines in the range left for servers.
 pub mod codes {
     pub const PARSE_ERROR: i64 = -32700;
@@ -134,6 +134,8 @@ pub mod codes {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL_ERROR: i64 = -32603;
+    /// The bearer token is missing, invalid or revoked (sent with a `401`).
+    pub const UNAUTHORIZED: i64 = -32001;
     /// `tools/call` named a tool that is not registered.
     pub const TOOL_NOT_FOUND: i64 = -32002;
     /// `tools/call` named a tool the agent may not use.

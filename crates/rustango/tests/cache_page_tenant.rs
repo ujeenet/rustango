@@ -290,3 +290,24 @@ async fn server_builder_keys_the_page_on_the_tenant() {
     }
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
+
+/// `invalidate` with the tenant purges only that tenant's page (#2252).
+#[tokio::test]
+async fn invalidate_purges_one_tenants_page() {
+    use rustango::cache_page::PageKey;
+    let hits = Arc::new(AtomicU32::new(0));
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()));
+    let app = page(hits.clone())
+        .layer(layer.clone())
+        .layer(Extension(context().await));
+    fetch(&app, "acme").await;
+    fetch(&app, "globex").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+    let page = PageKey::new("/page", "app.test").tenant("acme");
+    layer.invalidate([&page]).await.unwrap();
+    fetch(&app, "globex").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "globex was purged");
+    fetch(&app, "acme").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 3, "acme was not purged");
+}

@@ -1384,6 +1384,22 @@ impl Chain {
     }
 
     /// Delete the newest migration file, one that failed to apply.
+    /// Write a hand-built migration of `forward` ops ending at `current`.
+    fn write_hand(&self, current: Value, forward: Vec<Operation>) {
+        let prev = self.head();
+        let n: u32 = prev.name[..4].parse().expect("a numbered migration");
+        self.write(&Migration {
+            name: format!("{:04}_hand", n + 1),
+            created_at: prev.created_at.clone(),
+            prev: Some(prev.name.clone()),
+            atomic: true,
+            scope: prev.scope,
+            replaces: Vec::new(),
+            snapshot: snap(current),
+            forward,
+        });
+    }
+
     fn discard_head(&self) {
         let path = self.dir.path().join(format!("{}.json", self.head().name));
         std::fs::remove_file(path).unwrap();
@@ -2428,9 +2444,709 @@ async fn alter_column_unapplies(pool: &Pool) {
     .expect("nullable and not unique again");
 }
 
+// ---------------------------------------------------------------- #2240
+
+/// A new PG database, which has no `citext` yet; `None` elsewhere.
+async fn fresh_pg(pool: &Pool, tag: &str) -> Option<(Pool, String)> {
+    if pool.dialect().name() != "postgres" {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db = format!("rustango_mad_{tag}_{}_{nanos}", std::process::id());
+    raw_execute_pool(pool, &format!("CREATE DATABASE {db}"), Vec::new())
+        .await
+        .expect("create database");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let (base, _) = url.rsplit_once('/').unwrap();
+    let fresh = Pool::connect(&format!("{base}/{db}"))
+        .await
+        .expect("connect");
+    Some((fresh, db))
+}
+
+async fn drop_fresh_pg(pool: &Pool, fresh: Option<(Pool, String)>) {
+    if let Some((fresh, db)) = fresh {
+        fresh.close().await;
+        let _ = raw_execute_pool(pool, &format!("DROP DATABASE {db}"), Vec::new()).await;
+    }
+}
+
+/// A unique case-insensitive `email` refuses `a@X.COM` next to `A@x.com`.
+async fn assert_ci_unique(pool: &Pool, t: &str, column: &str) {
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'A@x.com')",
+        &[t, "id", column],
+    )
+    .await
+    .unwrap();
+    assert!(
+        exec(
+            pool,
+            "INSERT INTO {} ({}, {}) VALUES (2, 'a@X.COM')",
+            &[t, "id", column]
+        )
+        .await
+        .is_err(),
+        "`{t}.{column}` is unique ignoring case on {}",
+        pool.dialect().name()
+    );
+}
+
+fn ci_email(name: &str) -> Value {
+    col(
+        name,
+        "string",
+        json!({"max_length": 100, "case_insensitive": true, "unique": true}),
+    )
+}
+
+/// CreateTable and AddColumn of a CITEXT column on a database without
+/// the extension: PG said `type "citext" does not exist`.
+async fn citext_column_on_a_fresh_database(shared: &Pool) {
+    let t = "mad_ci_user";
+    let steps: [&[Value]; 2] = [
+        &[json!({"tables": [table(t, vec![id(), ci_email("email")])]})],
+        &[
+            json!({"tables": [table(t, vec![id()])]}),
+            json!({"tables": [table(t, vec![id(), ci_email("email")])]}),
+        ],
+    ];
+    for (i, steps) in steps.into_iter().enumerate() {
+        let fresh = fresh_pg(shared, &format!("ci{i}")).await;
+        let pool = fresh.as_ref().map_or(shared, |(p, _)| p);
+        let chain = Chain::new(pool, &format!("ci{i}"), &[t]).await;
+        for s in steps {
+            chain
+                .step(pool, s.clone())
+                .await
+                .expect("the CITEXT column applies");
+        }
+        assert_ci_unique(pool, t, "email").await;
+        drop_fresh_pg(shared, fresh).await;
+    }
+}
+
+// ---------------------------------------------------------------- #2238
+
+/// A max_length or type change keeps a CITEXT column case-insensitive:
+/// PG turned it into VARCHAR or TEXT.
+async fn citext_survives_length_and_type_changes(pool: &Pool) {
+    let t = "mad_cl_user";
+    let chain = Chain::new(pool, "cl", &[t]).await;
+    let email =
+        |extra: Value| json!({"tables": [table(t, vec![id(), col("email", "string", extra)])]});
+    let ci = |n: u32| json!({"max_length": n, "case_insensitive": true, "unique": true});
+    chain.step(pool, email(ci(100))).await.expect("initial");
+    chain
+        .step(pool, email(ci(200)))
+        .await
+        .expect("the length change applies");
+    assert_ci_unique(pool, t, "email").await;
+
+    // No length, so the type change is the only op.
+    let t = "mad_ct_user";
+    let chain = Chain::new(pool, "ct", &[t]).await;
+    let c = |ty: &str, extra: Value| json!({"tables": [table(t, vec![id(), col("c", ty, extra)])]});
+    chain
+        .step(pool, c("i32", json!({})))
+        .await
+        .expect("initial");
+    chain
+        .step(pool, c("string", json!({"case_insensitive": true})))
+        .await
+        .expect("the type change applies");
+    assert_ci_equal(pool, t, "c").await;
+}
+
+/// `c = 'abc'` finds the row holding `ABC`.
+async fn assert_ci_equal(pool: &Pool, t: &str, column: &str) {
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'ABC')",
+        &[t, "id", column],
+    )
+    .await
+    .unwrap();
+    let sql = q(
+        pool,
+        "SELECT {} FROM {} WHERE {} = 'abc'",
+        &["id", t, column],
+    );
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        [(1,)],
+        "`{t}.{column}` compares ignoring case on {}",
+        pool.dialect().name()
+    );
+}
+
+// ---------------------------------------------------------------- #2239
+
+/// Turning `case_insensitive` on and off reaches the column; makemigrations
+/// wrote nothing for it.
+async fn case_insensitive_change_applies(pool: &Pool) {
+    let t = "mad_cf_user";
+    let chain = Chain::new(pool, "cif", &[t]).await;
+    let email = |ci: bool| {
+        json!({"tables": [table(t, vec![id(), col("email", "string",
+            json!({"max_length": 10, "case_insensitive": ci, "unique": true}))])]})
+    };
+    chain.step(pool, email(false)).await.expect("initial");
+    chain.step(pool, email(true)).await.expect("turned on");
+    assert_ci_unique(pool, t, "email").await;
+    chain.step(pool, email(false)).await.expect("turned off");
+    exec(pool, "DELETE FROM {}", &[t]).await.unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 'A@x.com')",
+        &[t, "id", "email"],
+    )
+    .await
+    .unwrap();
+    let other_case = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (2, 'a@X.COM')",
+        &[t, "id", "email"],
+    )
+    .await;
+    let distinct = by_dialect! { pool,
+        postgres => true, because "VARCHAR compares case-sensitively",
+        mysql => false, because "the database's default collation ignores case",
+        sqlite => true, because "the rebuilt column has no NOCASE",
+    };
+    assert_eq!(other_case.is_ok(), distinct.value, "{}", distinct.why);
+    let long = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (3, 'abcdefghijk')",
+        &[t, "id", "email"],
+    )
+    .await;
+    let enforced = by_dialect! { pool,
+        postgres => true, because "the column is VARCHAR(10) again, not TEXT",
+        mysql => true, because "the column is VARCHAR(10)",
+        sqlite => false, because "SQLite never enforces VARCHAR length",
+    };
+    assert_eq!(long.is_err(), enforced.value, "{}", enforced.why);
+}
+
+/// The column comment the catalog holds; `None` on SQLite.
+async fn column_comment(pool: &Pool, t: &str, column: &str) -> Option<String> {
+    let sql = match pool.dialect().name() {
+        "postgres" => format!(
+            "SELECT COALESCE(col_description('{t}'::regclass, ordinal_position::int), '') \
+             FROM information_schema.columns WHERE table_name = '{t}' AND column_name = '{column}' \
+             AND table_schema = current_schema()"
+        ),
+        "mysql" => format!(
+            "SELECT CAST(COLUMN_COMMENT AS CHAR) FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}' AND COLUMN_NAME = '{column}'"
+        ),
+        _ => return None,
+    };
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    Some(got[0].0.clone())
+}
+
+/// A `db_comment` change is applied, replaced, dropped and unapplied.
+async fn db_comment_change_applies(pool: &Pool) {
+    let t = "mad_cm_item";
+    let chain = Chain::new(pool, "cm", &[t]).await;
+    let with = |comment: Option<&str>| json!({"tables": [table(t, vec![id(), col("c", "i64", json!({"db_comment": comment}))])]});
+    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    chain.step(pool, with(None)).await.expect("initial");
+    chain.step(pool, with(Some("first"))).await.expect("added");
+    assert_eq!(column_comment(pool, t, "c").await, expect("first"));
+    let name = chain
+        .step(pool, with(Some("it's second")))
+        .await
+        .expect("changed");
+    assert_eq!(column_comment(pool, t, "c").await, expect("it's second"));
+    chain.undo(pool, &name).await.expect("unapply");
+    assert_eq!(column_comment(pool, t, "c").await, expect("first"));
+    chain.discard_head();
+    chain.step(pool, with(None)).await.expect("dropped");
+    assert_eq!(column_comment(pool, t, "c").await, expect(""));
+}
+
+/// Dropping the index an FK uses, then its whole table; MySQL refused
+/// both with 1553 (#2244).
+async fn fk_index_drops(pool: &Pool) {
+    let (a, b) = ("mad_fi_author", "mad_fi_book");
+    let chain = fk_index_chain(pool, "fi", a, b, false).await;
+    let dropped = chain
+        .step(pool, json!({"tables": [table(a, vec![id()]), book(a, b)]}))
+        .await
+        .expect("the FK's index drops");
+    orphan_refused(pool, b, "author_id").await;
+    chain.undo(pool, &dropped).await.expect("unapply");
+
+    // A failed run left the FK dropped; the step still brings it back.
+    let (a, b) = ("mad_fk_author", "mad_fk_book");
+    let chain = fk_index_chain(pool, "fk", a, b, false).await;
+    if pool.dialect().name() == "mysql" {
+        let fk_name = rustango::migrate::ddl::fk_constraint_name(b, "author_id");
+        exec(pool, "ALTER TABLE {} DROP FOREIGN KEY {}", &[b, &fk_name])
+            .await
+            .unwrap();
+    }
+    chain
+        .step(pool, json!({"tables": [table(a, vec![id()]), book(a, b)]}))
+        .await
+        .expect("the index drops");
+    orphan_refused(pool, b, "author_id").await;
+
+    let (a, b) = ("mad_fj_author", "mad_fj_book");
+    let chain = fk_index_chain(pool, "fj", a, b, false).await;
+    chain
+        .step(pool, json!({"tables": [table(a, vec![id()])]}))
+        .await
+        .expect("the table drops with its FK's index");
+}
+
+/// Another index serves the FK, so a plain DROP INDEX is enough: no FK
+/// drop and table-copy re-add, which an orphan row would now fail (#2244).
+async fn fk_index_drop_keeps_a_served_fk(pool: &Pool) {
+    let (a, b) = ("mad_fo_author", "mad_fo_book");
+    let chain = fk_index_chain(pool, "fo", a, b, true).await;
+    #[cfg(feature = "mysql")]
+    if let Some(my) = pool.as_mysql() {
+        let mut conn = my.acquire().await.unwrap();
+        for sql in [
+            "SET foreign_key_checks = 0".to_owned(),
+            q(
+                pool,
+                "INSERT INTO {} ({}, {}) VALUES (7, 99)",
+                &[b, "id", "author_id"],
+            ),
+            "SET foreign_key_checks = 1".to_owned(),
+        ] {
+            rustango::sql::sqlx::query(&sql)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+    }
+    let n_idx = json!([{"name": format!("{b}_author_n_idx"), "table": b,
+                        "columns": ["author_id", "n"], "unique": false}]);
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), book(a, b)], "indexes": n_idx}),
+        )
+        .await
+        .expect("a plain DROP INDEX, the FK untouched");
+}
+
+/// DropIndex, then an alter of the FK column in the same migration: the FK
+/// came back twice on MySQL (1826) (#2244).
+async fn fk_index_drop_then_alter(pool: &Pool) {
+    let (a, b) = ("mad_fa_author", "mad_fa_book");
+    let chain = fk_index_chain(pool, "fa", a, b, false).await;
+    let alter = SchemaChange::AlterColumnType {
+        table: b.into(),
+        column: "author_id".into(),
+        from: "i64".into(),
+        to: "i64".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), book(a, b)]}),
+        vec![drop_index(b), Operation::Schema(alter)],
+    );
+    chain.migrate(pool).await.expect("the FK comes back once");
+    orphan_refused(pool, b, "author_id").await;
+}
+
+/// An alter of the FK column, then DropIndex, in one migration: both
+/// re-added the FK on MySQL (1826) (#2244).
+async fn fk_alter_then_index_drop(pool: &Pool) {
+    let (a, b) = ("mad_fb_author", "mad_fb_book");
+    let chain = fk_index_chain(pool, "fb", a, b, false).await;
+    let alter = SchemaChange::AlterColumnType {
+        table: b.into(),
+        column: "author_id".into(),
+        from: "i64".into(),
+        to: "i64".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), book(a, b)]}),
+        vec![Operation::Schema(alter), drop_index(b)],
+    );
+    chain.migrate(pool).await.expect("the FK comes back once");
+    orphan_refused(pool, b, "author_id").await;
+}
+
+/// DropIndex, then a rename of the FK column in the same migration: the
+/// re-add named the old column on MySQL (1072) (#2244).
+async fn fk_index_drop_then_rename(pool: &Pool) {
+    let (a, b) = ("mad_fz_author", "mad_fz_book");
+    let chain = fk_index_chain(pool, "fz", a, b, false).await;
+    let renamed = table(
+        b,
+        vec![
+            id(),
+            col("writer_id", "i64", fk(a)),
+            col("n", "i32", json!({})),
+        ],
+    );
+    let rename = SchemaChange::RenameColumn {
+        table: b.into(),
+        old_column: "author_id".into(),
+        new_column: "writer_id".into(),
+    };
+    chain.write_hand(
+        json!({"tables": [table(a, vec![id()]), renamed]}),
+        vec![drop_index(b), Operation::Schema(rename)],
+    );
+    chain
+        .migrate(pool)
+        .await
+        .expect("the FK comes back on writer_id");
+    orphan_refused(pool, b, "writer_id").await;
+}
+
+/// A shape the runner cannot rebuild at the DropIndex is an error, not a
+/// reason to drop the FK for good (#2244).
+async fn fk_index_drop_refuses_an_unknown_shape(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return; // Only MySQL takes FKs off for an index drop.
+    }
+    let (a, b) = ("mad_fu_author", "mad_fu_book");
+    let chain = fk_index_chain(pool, "fu", a, b, false).await;
+    // `n` is altered, then dropped: its shape at the DropIndex is unknown.
+    let ops = vec![
+        drop_index(b),
+        Operation::Schema(SchemaChange::AlterColumnNullable {
+            table: b.into(),
+            column: "n".into(),
+            nullable: false,
+        }),
+        Operation::Schema(SchemaChange::DropColumn {
+            table: b.into(),
+            column: "n".into(),
+        }),
+    ];
+    let without_n = table(b, vec![id(), col("author_id", "i64", fk(a))]);
+    chain.write_hand(json!({"tables": [table(a, vec![id()]), without_n]}), ops);
+    assert!(chain.migrate(pool).await.is_err(), "refused");
+    orphan_refused(pool, b, "author_id").await;
+}
+
+/// `b`: an FK to `a`, and `n`.
+fn book(a: &str, b: &str) -> Value {
+    table(
+        b,
+        vec![
+            id(),
+            col("author_id", "i64", fk(a)),
+            col("n", "i32", json!({})),
+        ],
+    )
+}
+
+fn drop_index(b: &str) -> Operation {
+    Operation::Schema(SchemaChange::DropIndex {
+        name: format!("{b}_author_idx"),
+        table: b.into(),
+    })
+}
+
+/// An orphan in `t.column` fails on its FK, not on anything else.
+async fn orphan_refused(pool: &Pool, t: &str, column: &str) {
+    let got = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 99)",
+        &[t, "id", column],
+    )
+    .await;
+    let err = got.expect_err("an orphan row");
+    assert!(
+        err.to_lowercase().contains("foreign key"),
+        "{}: {err}",
+        pool.dialect().name()
+    );
+}
+
+/// [`book`] with an index on `author_id`, and one on `(author_id, n)` if
+/// `served`, applied.
+async fn fk_index_chain(pool: &Pool, tag: &str, a: &str, b: &str, served: bool) -> Chain {
+    let chain = Chain::new(pool, tag, &[b, a]).await;
+    let mut idx = vec![json!({"name": format!("{b}_author_idx"), "table": b,
+                              "columns": ["author_id"], "unique": false})];
+    if served {
+        idx.push(json!({"name": format!("{b}_author_n_idx"), "table": b,
+                        "columns": ["author_id", "n"], "unique": false}));
+    }
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), book(a, b)], "indexes": idx}),
+        )
+        .await
+        .expect("initial");
+    chain
+}
+
+/// An `Auto` PK widened to i64 hands out ids past 2^31; PG's sequence
+/// stayed `AS integer` (#2245).
+async fn auto_pk_widens_its_sequence(pool: &Pool) {
+    let t = "mad_aw_item";
+    let chain = Chain::new(pool, "aw", &[t]).await;
+    let with = |ty: &str| {
+        json!({"tables": [table(t, vec![
+            json!({"name": "id", "column": "id", "ty": ty, "nullable": false,
+                   "primary_key": true, "auto": true}),
+            col("n", "i32", json!({}))])]})
+    };
+    chain.step(pool, with("i32")).await.expect("initial");
+    chain.step(pool, with("i64")).await.expect("i32 → i64");
+    let jump = by_dialect! { pool,
+        postgres => "SELECT setval(pg_get_serial_sequence('{}', 'id'), 3000000000)",
+            because "PG's sequence must be bigint to take it",
+        mysql => "ALTER TABLE {} AUTO_INCREMENT = 3000000001",
+            because "MySQL's counter follows the column type",
+        sqlite => "INSERT INTO {} (id) VALUES (3000000000)",
+            because "SQLite's rowid is always 64-bit",
+    };
+    exec(pool, jump.value, &[t])
+        .await
+        .expect("the counter takes 3e9");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "n"])
+        .await
+        .expect("an id past 2^31");
+    let sql = q(pool, "SELECT MAX({}) FROM {}", &["id", t]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3_000_000_001,)]);
+}
+
+/// Two FKs whose names cut to the same 63 bytes are refused before any
+/// DDL; PG and MySQL failed mid-migration (#2245).
+async fn fk_name_collision_is_refused(pool: &Pool) {
+    let (a, b) = (
+        "mad_fn_author",
+        "mad_fn_book_with_a_rather_long_table_name_xxxx",
+    );
+    let chain = Chain::new(pool, "fn", &[b, a]).await;
+    let got = chain
+        .step(
+            pool,
+            json!({"tables": [table(a, vec![id()]), table(b, vec![id(),
+                col("author_reference_first", "i64", fk(a)),
+                col("author_reference_second", "i64", fk(a))])]}),
+        )
+        .await;
+    let refused = by_dialect! { pool,
+        postgres => true, because "PG wants FK names unique per table",
+        mysql => true, because "MySQL wants them unique per database",
+        sqlite => false, because "SQLite does not care",
+    };
+    match got {
+        Err(e) if refused.value => assert!(e.contains("rename a table or column"), "{e}"),
+        other => assert_eq!(other.is_ok(), !refused.value, "{}: {other:?}", refused.why),
+    }
+}
+
+/// A junction column renamed keeps its rows (#2245).
+async fn m2m_column_rename_keeps_rows(pool: &Pool) {
+    let (post, tag, through) = ("mad_mr_post", "mad_mr_tag", "mad_mr_post_tags");
+    let chain = Chain::new(pool, "mr", &[through, post, tag]).await;
+    let with = |dst_col: &str| {
+        json!({
+            "tables": [table(post, vec![id()]), table(tag, vec![id()])],
+            "m2m_tables": [{"through": through, "src_table": post, "src_col": "post_id",
+                            "dst_table": tag, "dst_col": dst_col}],
+        })
+    };
+    chain.step(pool, with("tag_id")).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[post, "id"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[tag, "id"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 7)",
+        &[through, "post_id", "tag_id"],
+    )
+    .await
+    .unwrap();
+    let name = chain
+        .step(pool, with("label_id"))
+        .await
+        .expect("the rename applies");
+    let sql = q(pool, "SELECT {} FROM {}", &["label_id", through]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)], "the row survived the rename");
+    chain.undo(pool, &name).await.expect("unapply");
+    let sql = q(pool, "SELECT {} FROM {}", &["tag_id", through]);
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(7,)], "and the unapply");
+}
+
+/// A `db_comment` lands with CreateTable and AddColumn too (#2270).
+async fn db_comment_on_create_and_add_column(pool: &Pool) {
+    let t = "mad_cc_item";
+    let chain = Chain::new(pool, "cc", &[t]).await;
+    let a = col("a", "i64", json!({"db_comment": "on create"}));
+    let b = col("b", "i64", json!({"db_comment": "on add"}));
+    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), a.clone()])]}))
+        .await
+        .expect("CreateTable");
+    assert_eq!(column_comment(pool, t, "a").await, expect("on create"));
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(t, vec![id(), a.clone(), b.clone()])]}),
+        )
+        .await
+        .expect("AddColumn");
+    assert_eq!(column_comment(pool, t, "b").await, expect("on add"));
+    // MySQL adds it nullable, then MODIFYs it, which kept no comment.
+    let d = col(
+        "d",
+        "uuid",
+        json!({"nullable": false, "default": "gen_random_uuid()", "db_comment": "uuid"}),
+    );
+    chain
+        .step(pool, json!({"tables": [table(t, vec![id(), a, b, d])]}))
+        .await
+        .expect("NOT NULL UUID AddColumn");
+    assert_eq!(column_comment(pool, t, "d").await, expect("uuid"));
+}
+
+// ---------------------------------------------------------------- #2241
+
+/// Unapplying a dropped EXCLUDE puts it back; it always errored.
+async fn dropped_exclude_unapplies(pool: &Pool) {
+    let t = "mad_xu_booking";
+    let chain = Chain::new(pool, "xu", &[t]).await;
+    let with = |exclude: bool| {
+        let excludes = if exclude {
+            json!([{"name": "mad_xu_no_overlap", "table": t, "using": "gist",
+                    "elements": [["during", "&&"]]}])
+        } else {
+            json!([])
+        };
+        json!({"tables": [table(t, vec![id(), col("during", "range_datetime", json!({}))])],
+               "excludes": excludes})
+    };
+    chain.step(pool, with(true)).await.expect("initial");
+    let name = chain.step(pool, with(false)).await.expect("dropped");
+    chain.undo(pool, &name).await.expect("unapply");
+    if pool.dialect().name() != "postgres" {
+        return;
+    }
+    for id in [1, 2] {
+        let overlap = exec(
+            pool,
+            &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({id}, '[2026-01-01,2026-01-02)')"),
+            &[t, "id", "during"],
+        )
+        .await;
+        assert_eq!(overlap.is_err(), id == 2, "the EXCLUDE is back");
+    }
+}
+
+// ---------------------------------------------------------------- #2242
+
+/// A type change on a column with a DEFAULT: PG said the default
+/// "cannot be cast automatically". The new default applies after.
+async fn type_change_with_a_default(pool: &Pool) {
+    let t = "mad_td_item";
+    let chain = Chain::new(pool, "td", &[t]).await;
+    let uuid0 = "'00000000-0000-0000-0000-000000000000'";
+    let with = |flag: (&str, &str), code: &str| {
+        json!({"tables": [table(t, vec![id(),
+            col("flag", flag.0, json!({"default": flag.1})),
+            col("code", code, json!({"default": uuid0}))])]})
+    };
+    let bools = by_dialect! { pool,
+        postgres => ("false", "true"), because "PG has a boolean type",
+        mysql => ("0", "1"), because "MySQL's BOOLEAN is TINYINT(1)",
+        sqlite => ("0", "1"), because "SQLite stores booleans as integers",
+    };
+    let (f, tr) = bools.value;
+    chain
+        .step(pool, with(("bool", f), "string"))
+        .await
+        .expect("initial");
+    exec(
+        pool,
+        &format!("INSERT INTO {{}} ({{}}, {{}}, {{}}) VALUES (1, {tr}, {uuid0})"),
+        &[t, "id", "flag", "code"],
+    )
+    .await
+    .unwrap();
+    let name = chain
+        .step(pool, with(("i32", "7"), "uuid"))
+        .await
+        .expect("bool → i32 and string → uuid apply with their defaults");
+    exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[t, "id"])
+        .await
+        .unwrap();
+    let sql = q(pool, "SELECT {} FROM {} ORDER BY {}", &["flag", t, "id"]);
+    let got: Vec<(i32,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(1,), (7,)], "the old value cast, the new default set");
+
+    // Undo: the old type comes back with its old default.
+    exec(pool, "DELETE FROM {} WHERE {} = 2", &[t, "id"])
+        .await
+        .unwrap();
+    chain.undo(pool, &name).await.expect("unapply");
+    exec(pool, "INSERT INTO {} ({}) VALUES (3)", &[t, "id"])
+        .await
+        .unwrap();
+    let sql = q(
+        pool,
+        &format!("SELECT {{}} FROM {{}} WHERE {{}} = {f} ORDER BY {{}}"),
+        &["id", t, "flag", "id"],
+    );
+    let got: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(got, [(3,)], "the old default is back");
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        type_change_with_a_default,
+        dropped_exclude_unapplies,
+        case_insensitive_change_applies,
+        db_comment_change_applies,
+        db_comment_on_create_and_add_column,
+        fk_index_drops,
+        fk_index_drop_keeps_a_served_fk,
+        fk_index_drop_then_alter,
+        fk_alter_then_index_drop,
+        fk_index_drop_then_rename,
+        fk_index_drop_refuses_an_unknown_shape,
+        auto_pk_widens_its_sequence,
+        fk_name_collision_is_refused,
+        m2m_column_rename_keeps_rows,
+        citext_survives_length_and_type_changes,
+        citext_column_on_a_fresh_database,
         on_delete_reaches_an_existing_table,
         on_delete_reaches_without_a_transaction,
         no_action_is_not_a_change,

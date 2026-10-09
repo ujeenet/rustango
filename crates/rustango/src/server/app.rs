@@ -160,7 +160,9 @@ impl AppBuilder {
     /// router.
     ///
     /// A handler panic is a logged 500, caught outside `api`: layers you
-    /// put on `api` (headers, request id) do not see that 500.
+    /// put on `api` (headers, request id) do not see that 500. To have
+    /// them see it, wrap your routes in [`catch_panics`](super::catch_panics)
+    /// before adding those layers.
     ///
     /// # Errors
     /// `bind` failure, or the underlying `axum::serve` returning
@@ -229,5 +231,37 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], crate::error::OPAQUE_SERVER_ERROR.as_bytes());
+    }
+
+    /// #2168 — a user layer added after `catch_panics` sees the panic 500.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_user_layer_outside_catch_panics_sees_the_panic_500() {
+        use tower::ServiceExt as _;
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let routes = Router::new().route(
+            "/boom",
+            axum::routing::get(|| async {
+                if std::hint::black_box(true) {
+                    panic!("boom-2168");
+                }
+                "unreachable"
+            }),
+        );
+        let api = crate::server::catch_panics(routes).layer(axum::middleware::map_response(
+            |mut resp: axum::response::Response| async move {
+                resp.headers_mut()
+                    .insert("x-user-layer", axum::http::HeaderValue::from_static("1"));
+                resp
+            },
+        ));
+        let app = AppBuilder::from_pool(pool).api(api).into_app();
+        let req = axum::http::Request::builder()
+            .uri("/boom")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers().get("x-user-layer").unwrap(), "1");
     }
 }

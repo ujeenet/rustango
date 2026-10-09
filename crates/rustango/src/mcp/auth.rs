@@ -107,6 +107,17 @@ pub async fn verify_agent_token(
     token: &str,
     expected_tenant: &str,
 ) -> Option<McpAgent> {
+    verify_agent_claims(jwt, token, expected_tenant)
+        .await
+        .map(|(agent, _)| agent)
+}
+
+/// [`verify_agent_token`] plus the token's `exp`, in unix seconds.
+async fn verify_agent_claims(
+    jwt: &JwtLifecycle,
+    token: &str,
+    expected_tenant: &str,
+) -> Option<(McpAgent, i64)> {
     let claims = jwt.verify_access(token).await?;
     if claims.get_custom::<String>(CLAIM_KIND).as_deref() != Some(KIND_AGENT) {
         return None;
@@ -117,7 +128,7 @@ pub async fn verify_agent_token(
     }
     // A token from before the claim existed cannot be checked for rotation.
     let secret_prefix = claims.get_custom::<String>(CLAIM_KEY_PREFIX)?;
-    Some(McpAgent {
+    let agent = McpAgent {
         agent_id: claims.sub,
         tenant,
         skills: claims
@@ -129,7 +140,8 @@ pub async fn verify_agent_token(
         user_id: claims.get_custom::<i64>(CLAIM_UID),
         jti: claims.jti,
         secret_prefix,
-    })
+    };
+    Some((agent, claims.exp))
 }
 
 // --------------------------------------------------------------- HTTP layer
@@ -323,8 +335,20 @@ pub(crate) async fn authenticate_bearer(
     slug: &str,
     token: &str,
 ) -> Result<McpAgent, BearerRejection> {
-    match verify_agent_token(jwt, token, slug).await {
-        Some(mut agent) => {
+    authenticate_bearer_until(jwt, pool, slug, token)
+        .await
+        .map(|(agent, _)| agent)
+}
+
+/// [`authenticate_bearer`] plus the JWT's `exp` (unix seconds); a raw key has none.
+pub(crate) async fn authenticate_bearer_until(
+    jwt: &JwtLifecycle,
+    pool: &crate::sql::Pool,
+    slug: &str,
+    token: &str,
+) -> Result<(McpAgent, Option<i64>), BearerRejection> {
+    match verify_agent_claims(jwt, token, slug).await {
+        Some((mut agent, exp)) => {
             // The JWT holds no state, so check here that the agent,
             // and the owner of a user-owned key, still exist and are
             // active, and that its secret was not rotated. A revoked
@@ -353,10 +377,10 @@ pub(crate) async fn authenticate_bearer(
                 None => crate::tenancy::resolve_agent_grants_pool(pool, agent.agent_id).await,
             };
             (agent.skills, agent.tools) = grants?;
-            Ok(agent)
+            Ok((agent, Some(exp)))
         }
         None => match verify_raw_agent_credential(pool, slug, token).await {
-            Ok(Some(agent)) => Ok(agent),
+            Ok(Some(agent)) => Ok((agent, None)),
             Ok(None) => Err(BearerRejection::Unauthorized),
             Err(e) => Err(e.into()),
         },
@@ -574,16 +598,25 @@ fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     let Ok(mut cache) = raw_key_cache().lock() else {
         return;
     };
-    if cache.len() >= RAW_KEY_CACHE_CAP {
-        // Drop the expired entries first. If that is not enough,
-        // clear the lot: this is only an optimization, and refilling
-        // costs one Argon2 per key.
+    if cache.len() >= RAW_KEY_CACHE_CAP && !cache.contains_key(&key) {
+        // Drop the expired entries first, then the oldest one; a full
+        // clear would send every active key back to Argon2 (#2301).
         cache.retain(|_, (_, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
         if cache.len() >= RAW_KEY_CACHE_CAP {
-            cache.clear();
+            let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
         }
     }
     cache.insert(key, (agent_id, std::time::Instant::now()));
+}
+
+/// One lock for every crate test that reads or writes the shared raw-key cache.
+#[cfg(test)]
+pub(crate) fn raw_key_cache_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 // There is deliberately no `invalidate_raw_key_cache(agent_id)`.
@@ -651,7 +684,8 @@ pub(crate) fn mount_base(
 /// A `401` whose `WWW-Authenticate` header carries a
 /// `resource_metadata` URL, so a standards-compliant client can find
 /// the authorization server. The URL follows the real mount prefix,
-/// not the origin root.
+/// not the origin root. The body is a JSON-RPC error, which MCP
+/// clients parse and show.
 pub(crate) fn unauthorized(
     headers: &HeaderMap,
     extensions: &axum::http::Extensions,
@@ -660,10 +694,17 @@ pub(crate) fn unauthorized(
     let base = mount_base(headers, extensions, original, "");
     let challenge =
         format!(r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource""#);
+    let body = super::types::JsonRpcResponse::failure(
+        serde_json::Value::Null,
+        super::types::JsonRpcError::new(
+            super::types::codes::UNAUTHORIZED,
+            "missing or invalid agent token",
+        ),
+    );
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, challenge)],
-        "missing or invalid agent token",
+        Json(body),
     )
         .into_response()
 }
@@ -896,12 +937,9 @@ mod tests {
         );
     }
 
-    /// The raw-key cache is shared, so these tests take turns.
-    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+    /// The raw-key cache is shared with the transport tests, so all take turns.
+    fn cache_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        super::raw_key_cache_test_lock().blocking_lock()
     }
 
     // Rotation and cross-tenant redemption are checked in
@@ -930,6 +968,32 @@ mod tests {
              paths call this so the next request re-runs Argon2 rather \
              than repeating the same refusal for the rest of the TTL",
         );
+    }
+
+    /// #2301 — a full cache drops its oldest entry, not every entry.
+    #[test]
+    fn a_full_cache_evicts_only_the_oldest() {
+        let _g = cache_lock();
+        raw_key_cache().lock().unwrap().clear();
+        let keys: Vec<_> = (0..=RAW_KEY_CACHE_CAP)
+            .map(|i| raw_key_cache_key("acme", &format!("pfx.{i}")))
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            raw_key_cache_put(*key, i as i64);
+        }
+        assert_eq!(raw_key_cache_get(&keys[0]), None, "oldest stays cached");
+        for (i, key) in keys.iter().enumerate().skip(1) {
+            assert_eq!(raw_key_cache_get(key), Some(i as i64), "entry {i} evicted");
+        }
+        // Re-putting a cached key at the cap evicts nothing.
+        let newest = keys.len() - 1;
+        raw_key_cache_put(keys[newest], newest as i64);
+        assert_eq!(
+            raw_key_cache_get(&keys[1]),
+            Some(1),
+            "re-put evicted the oldest"
+        );
+        raw_key_cache().lock().unwrap().clear();
     }
 
     #[test]

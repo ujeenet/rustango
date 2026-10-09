@@ -42,10 +42,16 @@ struct CallbackParams {
 /// [`SsoProvider`](super::sso_provider::SsoProvider), and
 /// `.../callback` completes it.
 pub(crate) fn sso_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/login/sso/{slug}", get(sso_begin))
-        .route("/login/sso/{slug}/callback", get(sso_callback))
-        .with_state(state)
+        .route("/login/sso/{slug}/callback", get(sso_callback));
+    // Outside `/login/sso/`, so no provider slug is shadowed.
+    #[cfg(feature = "totp")]
+    let router = router.route(
+        "/login/sso-totp",
+        axum::routing::post(second_factor::submit),
+    );
+    router.with_state(state)
 }
 
 fn login_path(state: &AppState) -> String {
@@ -214,13 +220,34 @@ async fn sso_callback(
     if !user.active {
         return login_error(&state, "inactive");
     }
+    // A confirmed device owes its code first, as on the password login (#2249).
+    #[cfg(feature = "totp")]
+    match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return second_factor::prompt(&state, &extensions, &headers, secret, &user).await
+        }
+        Err(e) => {
+            // Fail closed: an unreadable device is not "no second factor" (#1644).
+            tracing::error!(target: "rustango::admin::sso", user_id = uid, error = %e, "cannot read the TOTP device");
+            return login_error(&state, "config");
+        }
+    }
+    mint_session(&state, secret, &user)
+}
 
-    // Mint the normal admin session, bound to the user's stored
-    // password hash, exactly as a successful password login does.
+/// Mint the normal admin session, bound to the user's stored password
+/// hash, exactly as a successful password login does.
+fn mint_session(
+    state: &AppState,
+    secret: &session::AdminSessionSecret,
+    user: &AdminUser,
+) -> Response {
+    let uid = user.id.get().copied().unwrap_or_default();
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
     let cookie_value = session::encode(
         secret,
-        AdminSession::new(uid, user.username, user.is_superuser),
+        AdminSession::new(uid, user.username.clone(), user.is_superuser),
         &auth_hash,
         user.sessions_revoked_at,
     );
@@ -228,8 +255,6 @@ async fn sso_callback(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
         s = cookie_attrs(state.config.secure_cookies),
     );
-    // Clear the transient flow cookie.
-    let clear_flow = format!("{SSO_FLOW_COOKIE}=; Path=/; HttpOnly; Max-Age=0");
     let redirect_to = if state.config.admin_prefix.is_empty() {
         "/".to_owned()
     } else {
@@ -239,10 +264,185 @@ async fn sso_callback(
     if let Ok(v) = HeaderValue::from_str(&session_cookie) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&clear_flow) {
+    clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+    resp
+}
+
+/// Expire the transient cookie `name`.
+fn clear_cookie(resp: &mut Response, name: &str) {
+    if let Ok(v) = HeaderValue::from_str(&format!("{name}=; Path=/; HttpOnly; Max-Age=0")) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    resp
+}
+
+/// The TOTP step after an SSO sign-in (#2249). The IdP proved who the
+/// user is; a signed, short-lived cookie carries that to the code form.
+#[cfg(feature = "totp")]
+mod second_factor {
+    use super::*;
+    use crate::session::PasswordFingerprint;
+    use base64::Engine as _;
+
+    const PENDING_COOKIE: &str = "rustango_admin_sso_totp";
+    /// Domain tag: a pending cookie is never a valid MAC of a session.
+    const TAG: &[u8] = b"rustango-admin-sso-totp-v1.";
+    const TTL_SECS: i64 = 300;
+
+    /// Who finished SSO and still owes a code. Bound to the password hash,
+    /// so a password change in between ends it.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Pending {
+        uid: i64,
+        pwf: PasswordFingerprint,
+        exp: i64,
+    }
+
+    fn mac(secret: &session::AdminSessionSecret, body: &str) -> [u8; 32] {
+        crate::session::sign(secret, &[TAG, body.as_bytes()].concat())
+    }
+
+    fn seal(secret: &session::AdminSessionSecret, p: &Pending) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let body = b64.encode(serde_json::to_vec(p).unwrap_or_default());
+        let sig = b64.encode(mac(secret, &body));
+        format!("{body}.{sig}")
+    }
+
+    fn open(secret: &session::AdminSessionSecret, value: &str) -> Option<Pending> {
+        use subtle::ConstantTimeEq as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (body, sig) = value.split_once('.')?;
+        let sig = b64.decode(sig).ok()?;
+        if mac(secret, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
+            return None;
+        }
+        let p: Pending = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
+        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
+    }
+
+    /// Ask for the code: the TOTP-only login form plus the pending cookie.
+    pub(super) async fn prompt(
+        state: &AppState,
+        extensions: &axum::http::Extensions,
+        headers: &HeaderMap,
+        secret: &session::AdminSessionSecret,
+        user: &AdminUser,
+    ) -> Response {
+        let pending = Pending {
+            uid: user.id.get().copied().unwrap_or_default(),
+            pwf: PasswordFingerprint::of(secret, &user.password_hash),
+            exp: chrono::Utc::now().timestamp() + TTL_SECS,
+        };
+        let cookie = format!(
+            "{PENDING_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={TTL_SECS}{s}",
+            seal(secret, &pending),
+            s = cookie_attrs(state.config.secure_cookies),
+        );
+        let mut resp =
+            crate::admin::login_view::sso_totp_response(state, extensions, headers, None).await;
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+        clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+        resp
+    }
+
+    #[derive(serde::Deserialize)]
+    pub(super) struct CodeInput {
+        #[serde(rename = "_csrf", default)]
+        csrf_token: Option<String>,
+        #[serde(default)]
+        totp_code: Option<String>,
+    }
+
+    // POST /login/sso-totp: redeem the code, then mint the session.
+    pub(super) async fn submit(
+        State(state): State<AppState>,
+        ip: crate::login_throttle::ClientIp,
+        extensions: axum::http::Extensions,
+        headers: HeaderMap,
+        axum::Form(form): axum::Form<CodeInput>,
+    ) -> Response {
+        use crate::login_throttle::LoginScope;
+        let Some(secret) = state.config.session_secret.as_ref() else {
+            return login_error(&state, "disabled");
+        };
+        if !crate::forms::csrf::verify_form_token(&headers, form.csrf_token.as_deref()) {
+            return crate::admin::login_view::sso_totp_response(
+                &state,
+                &extensions,
+                &headers,
+                Some("Your session expired or the form was invalid. Please try again."),
+            )
+            .await;
+        }
+        let Some(pending) = crate::cookies::cookie_from_headers(&headers, PENDING_COOKIE)
+            .and_then(|v| open(secret, v))
+        else {
+            return login_error(&state, "expired");
+        };
+        let Ok(Some(user)) = AdminAccounts(&state.pool).user(pending.uid).await else {
+            return login_error(&state, "nouser");
+        };
+        if !user.active || !pending.pwf.matches(secret, &user.password_hash) {
+            return login_error(&state, "expired");
+        }
+        // Same lock and limits as the password login's code check.
+        let attempt = match crate::login_throttle::shared()
+            .begin(&LoginScope::Admin, &ip, &user.username)
+            .await
+        {
+            Ok(a) => a,
+            Err(refused) => return refused.into_response(),
+        };
+        let device = match super::super::totp_store::confirmed_secret_checked(
+            &state.pool,
+            pending.uid,
+        )
+        .await
+        {
+            Ok(Some(device)) => device,
+            Ok(None) | Err(_) => {
+                attempt.prompted().await;
+                return login_error(&state, "expired");
+            }
+        };
+        let code = form.totp_code.as_deref().unwrap_or("").trim();
+        let accepted = !code.is_empty()
+            && super::super::totp_store::redeem_code(&state.pool, pending.uid, &device, code)
+                .await
+                .unwrap_or(false);
+        if !accepted {
+            if code.is_empty() {
+                attempt.prompted().await;
+            } else {
+                attempt.failed().await;
+            }
+            use crate::signals::auth::{send_user_login_failed, AuthFailureReason};
+            send_user_login_failed(crate::signals::auth::UserLoginFailedContext {
+                source: "admin",
+                attempted_username: Some(user.username.clone()),
+                reason: AuthFailureReason::InvalidCredentials,
+                request: crate::signals::auth::meta_from_parts(
+                    &extensions,
+                    &headers,
+                    Some("/login/sso-totp"),
+                ),
+            })
+            .await;
+            return crate::admin::login_view::sso_totp_response(
+                &state,
+                &extensions,
+                &headers,
+                Some("Enter the 6-digit code from your authenticator app."),
+            )
+            .await;
+        }
+        attempt.succeeded().await;
+        let mut resp = mint_session(&state, secret, &user);
+        clear_cookie(&mut resp, PENDING_COOKIE);
+        resp
+    }
 }
 
 /// The bare admin's accounts. Every one is staff, so none links by email.

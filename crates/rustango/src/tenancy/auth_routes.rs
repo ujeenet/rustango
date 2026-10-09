@@ -389,13 +389,22 @@ fn login_claims(
 
 /// Router-owned claims that tie a refresh chain to one login (#1854).
 /// `jwt.refresh` copies custom claims, so every rotation carries them.
-struct RefreshSession {
+pub(crate) struct RefreshSession {
     /// Fingerprint of the password hash at login.
     pwf: crate::session::PasswordFingerprint,
     /// Session start: the login's `iat`, for the absolute cap.
     sat: i64,
     /// Family id, revoked when a rotated token is replayed.
     fam: String,
+}
+
+/// What a bearer path checks a login session against (#2247).
+pub(crate) struct SessionCheck<'a> {
+    pub(crate) pwf_secret: &'a crate::session::SessionSecret,
+    /// Where revoked families are recorded; `None` skips that check.
+    pub(crate) families: Option<&'a dyn crate::jti_store::JtiStore>,
+    /// The absolute cap; `None` where the backend does not know it.
+    pub(crate) cap_secs: Option<i64>,
 }
 
 impl RefreshSession {
@@ -420,31 +429,62 @@ impl RefreshSession {
     }
 
     /// `None` for a token minted before these claims existed.
-    fn read(claims: &crate::tenancy::jwt_lifecycle::JwtClaims) -> Option<Self> {
+    pub(crate) fn read(claims: &serde_json::Map<String, serde_json::Value>) -> Option<Self> {
+        fn get<T: serde::de::DeserializeOwned>(
+            claims: &serde_json::Map<String, serde_json::Value>,
+            key: &str,
+        ) -> Option<T> {
+            serde_json::from_value(claims.get(key)?.clone()).ok()
+        }
         Some(Self {
-            pwf: claims.get_custom(Self::PWF)?,
-            sat: claims.get_custom(Self::SAT)?,
-            fam: claims.get_custom(Self::FAM)?,
+            pwf: get(claims, Self::PWF)?,
+            sat: get(claims, Self::SAT)?,
+            fam: get(claims, Self::FAM)?,
         })
     }
 
-    /// The session of `claims` (access or refresh) while its family is
-    /// unrevoked and under the absolute cap; the one way in (#2119).
-    async fn live(
-        auth: &JwtAuth,
-        claims: &crate::tenancy::jwt_lifecycle::JwtClaims,
-    ) -> Option<Self> {
-        let session = Self::read(claims)?;
-        let capped = chrono::Utc::now().timestamp() >= session.ends_at(auth);
-        if capped || auth.0.jwt.family_revoked(&session.fam).await {
-            return None;
+    /// The one session check every bearer path runs: family unrevoked,
+    /// under the cap, and `user`'s row still admits it (#2119, #2247).
+    pub(crate) async fn admits(
+        &self,
+        check: &SessionCheck<'_>,
+        user: &crate::tenancy::auth::User,
+    ) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        if check
+            .cap_secs
+            .is_some_and(|cap| now >= self.sat.saturating_add(cap))
+        {
+            return false;
         }
-        Some(session)
+        if let Some(store) = check.families {
+            if crate::tenancy::jwt_lifecycle::family_revoked_in(store, &self.fam).await {
+                return false;
+            }
+        }
+        crate::tenancy::session::session_survives(
+            check.pwf_secret,
+            &self.pwf,
+            self.sat,
+            &user.password_hash,
+            user.password_changed_at,
+            user.sessions_revoked_at,
+        )
     }
 
     /// When the family stops mattering: the absolute cap.
     fn ends_at(&self, auth: &JwtAuth) -> i64 {
         self.sat.saturating_add(auth.0.session_cap_secs)
+    }
+}
+
+impl JwtAuth {
+    fn session_check(&self) -> SessionCheck<'_> {
+        SessionCheck {
+            pwf_secret: &self.0.pwf_secret,
+            families: Some(self.0.jwt.jti_store()),
+            cap_secs: Some(self.0.session_cap_secs),
+        }
     }
 }
 
@@ -682,11 +722,9 @@ async fn refresh_in(
         ));
     }
     // Pre-#1854 tokens carry no session claims: fail closed.
-    let session = RefreshSession::live(&auth, &claims)
-        .await
-        .ok_or_else(refused)?;
+    let session = RefreshSession::read(&claims.custom).ok_or_else(refused)?;
     // Audit P2 — re-check the account is still active (and exists) before
-    // minting a fresh pair; #1854 — and that its password is unchanged.
+    // minting a fresh pair; #1854 — and that its session is still live.
     // Same uniform 401 as other refresh failures.
     {
         use crate::core::Column as _;
@@ -697,19 +735,10 @@ async fn refresh_in(
             .fetch(t.pool())
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        let still_valid = users.into_iter().next().is_some_and(|u| {
-            u.active
-                // A logout anywhere ends chains started before it (#2036).
-                && crate::tenancy::session::session_survives(
-                    &auth.0.pwf_secret,
-                    &session.pwf,
-                    session.sat,
-                    &u.password_hash,
-                    u.password_changed_at,
-                    u.sessions_revoked_at,
-                )
-        });
-        if !still_valid {
+        let Some(user) = users.into_iter().next().filter(|u| u.active) else {
+            return Err(refused());
+        };
+        if !session.admits(&auth.session_check(), &user).await {
             return Err(refused());
         }
     }
@@ -789,7 +818,10 @@ async fn logout_in(
         }
     }
     // The family too, so every access token of this login ends (#2119).
-    if let Some(session) = claims.as_ref().and_then(RefreshSession::read) {
+    if let Some(session) = claims
+        .as_ref()
+        .and_then(|c| RefreshSession::read(&c.custom))
+    {
         jwt.revoke_family(&session.fam, session.ends_at(&auth))
             .await;
     }
@@ -1005,8 +1037,7 @@ async fn session_user_in(
         .user_id_in(UserTokenScope::Tenant(slug))
         .map_err(|_| SessionLookup::Refused)?;
     // Tokens the login route did not mint carry no session: fail closed.
-    // A revoked family or the cap ends the access tokens too (#2119).
-    let Some(session) = RefreshSession::live(auth, &claims).await else {
+    let Some(session) = RefreshSession::read(&claims.custom) else {
         return Ok(None);
     };
     let users: Vec<crate::tenancy::auth::User> = crate::tenancy::auth::User::objects()
@@ -1014,16 +1045,13 @@ async fn session_user_in(
         .fetch(pool)
         .await
         .map_err(SessionLookup::Db)?;
-    Ok(users.into_iter().next().filter(|u| {
-        crate::tenancy::session::session_survives(
-            &auth.0.pwf_secret,
-            &session.pwf,
-            session.sat,
-            &u.password_hash,
-            u.password_changed_at,
-            u.sessions_revoked_at,
-        )
-    }))
+    let Some(user) = users.into_iter().next() else {
+        return Ok(None);
+    };
+    Ok(session
+        .admits(&auth.session_check(), &user)
+        .await
+        .then_some(user))
 }
 
 fn unauthorized(msg: &'static str) -> Response {
@@ -1424,6 +1452,75 @@ mod tests {
         let (a, b) = tokio::join!(rotate(&auth, &pool, &first), rotate(&auth, &pool, &first));
         let winner = a.or(b).expect("one wins");
         assert!(rotate(&auth, &pool, &winner).await.is_some(), "chain alive");
+    }
+
+    /// #2247 — `JwtBackend` ends a login token with its session, like `require_bearer`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn jwt_backend_refuses_an_ended_login_session() {
+        use crate::tenancy::auth_backends::{AuthBackend as _, AuthError, JwtBackend};
+        let store: Arc<dyn crate::jti_store::JtiStore> =
+            Arc::new(crate::jti_store::InMemoryJtiStore::new());
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::testkit::user();
+        user.insert_pool(&pool).await.unwrap();
+        let id = *user.id.get().unwrap();
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            jti_store: Some(store.clone()),
+            refresh_reuse_grace_secs: 0,
+            ..Config::default()
+        });
+        let backend = JwtBackend::new(vec![7; 32]).with_jti_store(store);
+        let slug = crate::testkit::org().slug;
+        let check = |token: String| {
+            let (backend, pool, slug) = (&backend, &pool, slug.clone());
+            async move {
+                let (mut parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                parts.extensions.insert(crate::tenancy::TenantSlug(slug));
+                backend
+                    .authenticate(&parts, pool)
+                    .await
+                    .map(|u| u.map(|u| u.id))
+            }
+        };
+        let pair = |user: &crate::tenancy::auth::User| {
+            issue_login_pair(&auth, user, id, &crate::testkit::org().slug).unwrap()
+        };
+
+        let p = pair(&user);
+        assert_eq!(check(p.access.clone()).await.ok(), Some(Some(id)));
+        rotate(&auth, &pool, &p.refresh).await.expect("rotates");
+        assert_eq!(rotate(&auth, &pool, &p.refresh).await, None, "replay");
+        assert!(
+            matches!(check(p.access).await, Err(AuthError::InvalidToken)),
+            "family"
+        );
+
+        let access = pair(&user).access;
+        user.password_hash = "$argon2id$changed".into();
+        user.save_pool(&pool).await.unwrap();
+        assert!(
+            matches!(check(access).await, Err(AuthError::InvalidToken)),
+            "password"
+        );
+
+        let access = pair(&user).access;
+        assert_eq!(check(access.clone()).await.ok(), Some(Some(id)));
+        crate::session::revoke_sessions::<crate::tenancy::auth::User>(&pool, id, None, 0)
+            .await
+            .unwrap();
+        assert!(
+            matches!(check(access).await, Err(AuthError::InvalidToken)),
+            "logout-all"
+        );
     }
 
     /// A hook's `kind` claim would make every token refused, so login fails.

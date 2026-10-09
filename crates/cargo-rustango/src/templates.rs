@@ -10,6 +10,58 @@ use super::{Backend, Template};
 
 // ---------------- Cargo.toml ----------------
 
+/// `[dependencies]` of every generated project after `rustango`. The project
+/// name must not match one (#2287), so this list is the only copy.
+const DEPENDENCIES: &[(&str, &str)] = &[
+    (
+        "tokio",
+        r#"{ version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }"#,
+    ),
+    (
+        "axum",
+        r#"{ version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }"#,
+    ),
+    ("tower", r#"{ version = "0.5", features = ["util"] }"#),
+    ("serde", r#"{ version = "1", features = ["derive"] }"#),
+    ("serde_json", r#""1""#),
+    (
+        "chrono",
+        r#"{ version = "0.4", default-features = false, features = ["serde", "clock"] }"#,
+    ),
+    ("tracing", r#""0.1""#),
+    (
+        "tracing-subscriber",
+        r#"{ version = "0.3", features = ["env-filter"] }"#,
+    ),
+    ("dotenvy", r#""0.15""#),
+];
+
+/// Added only when the project gets `jobs`; see [`cargo_toml`].
+const ASYNC_TRAIT: &str = "async-trait";
+
+/// Every crate a generated `Cargo.toml` can name, `rustango` included.
+pub fn dependency_names() -> impl Iterator<Item = &'static str> {
+    ["rustango", ASYNC_TRAIT]
+        .into_iter()
+        .chain(DEPENDENCIES.iter().map(|(n, _)| *n))
+}
+
+/// `s` as a TOML basic string, so a Windows path or a quote stays data.
+pub fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 pub fn cargo_toml(
     name: &str,
     template: Template,
@@ -35,11 +87,18 @@ pub fn cargo_toml(
             .iter()
             .any(|f| f == "jobs" || f == "jobs-postgres" || f == "batteries");
     let async_trait_dep = if wants_jobs {
-        "\n# `rustango::jobs::Job` is an async trait — implementing one needs this.\n\
-         async-trait = \"0.1\""
+        format!(
+            "\n# `rustango::jobs::Job` is an async trait — implementing one needs this.\n\
+             {ASYNC_TRAIT} = \"0.1\""
+        )
     } else {
-        ""
+        String::new()
     };
+    let deps = DEPENDENCIES
+        .iter()
+        .map(|(n, v)| format!("{n} = {v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#"[package]
 name = "{name}"
@@ -59,15 +118,7 @@ edition = "2021"
 # Serializer / embed_migrations / main), so you do NOT need to depend
 # on `rustango-macros` directly. Use `rustango::Model` etc.
 rustango = {rustango_dep}
-tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }}
-axum = {{ version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }}
-tower = {{ version = "0.5", features = ["util"] }}
-serde = {{ version = "1", features = ["derive"] }}
-serde_json = "1"
-chrono = {{ version = "0.4", default-features = false, features = ["serde", "clock"] }}
-tracing = "0.1"
-tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
-dotenvy = "0.15"{async_trait_dep}
+{deps}{async_trait_dep}
 
 [dev-dependencies]
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
@@ -208,7 +259,8 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Loopback only: the password above is public.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rustango -d {name}_dev"]
       interval: 2s
@@ -233,7 +285,8 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
     volumes:
       - mysql-data:/var/lib/mysql
     ports:
-      - "3306:3306"
+      # Loopback only: the password above is public.
+      - "127.0.0.1:3306:3306"
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"]
       interval: 2s
@@ -594,7 +647,7 @@ const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unifie
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
@@ -634,7 +687,7 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
@@ -665,7 +718,7 @@ const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server s
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
-//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! `info,sqlx=warn`. Override with `RUST_LOG` (env, or `./.env`: the macro reads that key)
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
@@ -811,7 +864,7 @@ pub fn api() -> Router<()> {
 /// `cargo run -- create-admin <username>`.
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
-        .admin_prefix(\"/admin\") // must match the `.nest(\"/admin\", …)` in main.rs
+        .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
         .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }

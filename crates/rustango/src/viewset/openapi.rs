@@ -324,10 +324,11 @@ impl ViewSet {
                 .map_or_else(Schema::string, |fs| field_type_to_schema(fs.ty));
             out.push(
                 Parameter::query(f.clone(), field_schema).description(format!(
-                    "Exact filter. Lookups: `{f}__gt`, `__gte`, `__lt`, `__lte`, \
-                         `__ne`, `__in`, `__not_in`, `__contains`, `__icontains`, \
-                         `__startswith`, `__istartswith`, `__endswith`, `__iendswith`, \
-                         `__isnull`."
+                    "Exact filter. Lookups: `{f}__iexact`, `__gt`, `__gte`, `__lt`, \
+                         `__lte`, `__ne`, `__in`, `__not_in`, `__range`, `__contains`, \
+                         `__icontains`, `__startswith`, `__istartswith`, `__endswith`, \
+                         `__iendswith`, `__isnull`, and date parts (`__year`, \
+                         `__date__gte`, ...). An unknown lookup or bad value is a 400."
                 )),
             );
         }

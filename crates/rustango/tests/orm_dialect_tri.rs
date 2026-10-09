@@ -5,8 +5,8 @@
 
 use rustango::core::joins::aliased;
 use rustango::core::{
-    AggregateExpr, BulkInsertQuery, ConflictClause, InsertQuery, Model as _, Op, SearchClause,
-    SqlValue, WhereExpr,
+    AggregateExpr, BulkInsertQuery, ConflictClause, Filter, InsertQuery, Model as _, Op,
+    SearchClause, SqlValue, WhereExpr,
 };
 use rustango::sql::{
     Auto, CounterPool as _, FetcherPool as _, InsertReturningPool, Pool, UpdaterPool as _,
@@ -67,7 +67,18 @@ pub struct Reading {
     pub meas: rustango::sql::ForeignKey<Meas>,
 }
 
-/// Seed one `Meas` row at the RFC 3339 instant `at`.
+/// Comments ending in `\`, which closed nothing on MySQL (#2232).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_noted")]
+#[rustango(app = "orm_dialect_tri")]
+#[rustango(db_table_comment = "C:\\dir\\")]
+pub struct Noted {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(db_comment = "C:\\path 'q' \\'\\")]
+    pub n: i64,
+}
+
 /// Seed one `Meas` row at the RFC 3339 instant `at`, plus a `Reading`
 /// of it.
 async fn seed_meas(pool: &Pool, n: i64, at: &str) {
@@ -104,6 +115,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, Reading::SCHEMA.table).await;
     fresh_table::<Meas>(pool).await;
     fresh_table::<Reading>(pool).await;
+    fresh_table::<Noted>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -578,6 +590,115 @@ async fn values_decode_uuid_and_bytes(pool: &Pool) {
     assert_eq!(agg[0]["token"], want[0]);
 }
 
+/// #2229: search and `__icontains` on an int or UUID column failed on PG.
+async fn ilike_on_int_and_uuid_columns(pool: &Pool) {
+    let mut ids = Vec::new();
+    for tok in [
+        uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89"),
+        uuid::uuid!("00000000-0000-4000-8000-000000000000"),
+    ] {
+        let mut b = Blob {
+            id: Auto::default(),
+            token: tok,
+            data: vec![],
+        };
+        b.insert_pool(pool).await.expect("seed");
+        ids.push(*b.id.get().expect("id"));
+    }
+    let got = |rows: Vec<Blob>| -> Vec<i64> { rows.iter().map(|b| *b.id.get().unwrap()).collect() };
+
+    for (col, query, want) in [
+        ("id", ids[1].to_string(), ids[1]),
+        ("token", "2A4E-9B7D".to_owned(), ids[0]),
+    ] {
+        let mut q = Blob::objects().compile().expect("compile");
+        q.search = Some(SearchClause {
+            columns: vec![col],
+            query: query.clone(),
+        });
+        let rows = rustango::sql::select_rows_pool(pool, &q).await;
+        assert_eq!(got(rows.expect("search")), [want], "search {col}");
+
+        // The lookup builder rejects a string on these fields; the IR does not.
+        let mut q = Blob::objects().compile().expect("compile");
+        q.where_clause =
+            WhereExpr::Predicate(Filter::new(col, Op::ILikeEscaped, format!("%{query}%")));
+        let rows = rustango::sql::select_rows_pool(pool, &q).await;
+        assert_eq!(got(rows.expect("ilike")), [want], "ilike {col}");
+    }
+}
+
+/// #2263: case-sensitive LIKE, and any LIKE through a relation, on an
+/// int or UUID column failed on PG.
+async fn like_on_int_and_uuid_columns(pool: &Pool) {
+    seed_meas(pool, 14, "2024-01-06T10:00:00Z").await;
+    seed_meas(pool, 20, "2024-01-06T11:00:00Z").await;
+    let n = Meas::objects()
+        .where_(rustango::query::Q::like("n", "%4%"))
+        .count(pool)
+        .await;
+    assert_eq!(n.expect("Q::like"), 1);
+    for key in ["meas__n__contains", "meas__n__icontains"] {
+        let n = Reading::objects().filter(key, "4").count(pool).await;
+        assert_eq!(n.expect(key), 1, "{key}");
+    }
+
+    let tok = uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89");
+    let mut b = Blob {
+        id: Auto::default(),
+        token: tok,
+        data: vec![],
+    };
+    b.insert_pool(pool).await.expect("seed");
+    let mut q = Blob::objects().compile().expect("compile");
+    q.where_clause = WhereExpr::Predicate(Filter::new("token", Op::Like, "%2a4e-9b7d%"));
+    let rows: Result<Vec<Blob>, _> = rustango::sql::select_rows_pool(pool, &q).await;
+    assert_eq!(rows.expect("like uuid").len(), 1);
+}
+
+/// #2232: MySQL inlined the delimiter with only `'` doubled, so a `\`
+/// broke the statement.
+async fn string_agg_delimiter_with_backslash(pool: &Pool) {
+    seed(pool, &[("a", "x"), ("b", "y")]).await;
+    for delim in ["\\", "\\'), x", "'\\'"] {
+        let rows = Post::objects()
+            .aggregate()
+            .values(&[])
+            .annotate(
+                "t",
+                AggregateExpr::string_agg_ordered("title", delim, &[("title", false)]),
+            )
+            .fetch(pool)
+            .await
+            .expect("string_agg");
+        assert_eq!(
+            rows[0]["t"],
+            SqlValue::String(format!("x{delim}y")),
+            "{delim}"
+        );
+    }
+}
+
+/// #2232: a comment ending in `\` must create the table and read back as written.
+async fn comment_with_backslash(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return; // `setup` already created the table on every backend.
+    }
+    let sql = format!(
+        "SELECT CAST(COLUMN_COMMENT AS CHAR) FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {} AND COLUMN_NAME = 'n'",
+        pool.dialect().placeholder(1)
+    );
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(
+        &sql,
+        vec![SqlValue::String(Noted::SCHEMA.table.into())],
+        pool,
+    )
+    .await
+    .expect("read comment");
+    assert_eq!(got, [("C:\\path 'q' \\'\\".to_owned(),)]);
+}
+
 /// #2004: `values()` read date and timestamp cells as Null on PG and MySQL.
 async fn values_decode_dates_and_timestamps(pool: &Pool) {
     if pool.dialect().name() == "sqlite" {
@@ -656,6 +777,10 @@ tri_dialect_test! {
         paginate_orders_by_pk,
         paginated_distinct_counts_distinct_rows,
         values_decode_uuid_and_bytes,
+        ilike_on_int_and_uuid_columns,
+        like_on_int_and_uuid_columns,
+        string_agg_delimiter_with_backslash,
+        comment_with_backslash,
         values_decode_dates_and_timestamps,
         integer_division_truncates,
         second_lookup_truncates,

@@ -1259,7 +1259,7 @@ pub mod manage;
 
 /// `#[rustango::main]` — the application entrypoint. Wraps
 /// `#[tokio::main]` and boots `tracing-subscriber` from `RUST_LOG`,
-/// falling back to `info,sqlx=warn`.
+/// falling back to `info,sqlx=warn`. `RUSTANGO__LOGGING__FORMAT=json` logs JSON.
 #[cfg(feature = "runtime")]
 pub use rustango_macros::main;
 
@@ -1272,6 +1272,52 @@ pub mod __private_runtime {
     /// Lets `#[rustango::main]` resolve `tokio::main` through the rustango
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
+
+    /// `#[rustango::main]`'s default filter: `RUST_LOG` from `./.env`, else
+    /// `info,sqlx=warn` (#2204). Sets no env vars, searches no parent dirs.
+    pub fn main_default_filter() -> String {
+        dotenv_value("RUST_LOG")
+            .filter(|v| tracing_subscriber::EnvFilter::try_new(v).is_ok())
+            .unwrap_or_else(|| crate::logging::DEFAULT_FILTER.to_owned())
+    }
+
+    /// `#[rustango::main]`'s format: `RUSTANGO__LOGGING__FORMAT` from the
+    /// env, else from `./.env`; `full` when unset or unknown (#2258).
+    pub fn main_format() -> crate::logging::Format {
+        const KEY: &str = "RUSTANGO__LOGGING__FORMAT";
+        let Some(name) = std::env::var(KEY).ok().or_else(|| dotenv_value(KEY)) else {
+            return crate::logging::Format::Full;
+        };
+        crate::logging::Format::from_name(&name).unwrap_or_else(|| {
+            eprintln!("rustango: unknown {KEY}={name:?}; using full");
+            crate::logging::Format::Full
+        })
+    }
+
+    /// First `key` in `./.env`; none if the file is missing or has a
+    /// bad line, so a broken `.env` never stops startup.
+    fn dotenv_value(key: &str) -> Option<String> {
+        let iter = match dotenvy::from_path_iter(".env") {
+            Ok(iter) => iter,
+            Err(e) if e.not_found() => return None,
+            Err(e) => {
+                eprintln!("rustango: ignoring {key} in .env: {e}");
+                return None;
+            }
+        };
+        let mut found = None;
+        for item in iter {
+            match item {
+                Ok((k, value)) if k == key && found.is_none() => found = Some(value),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("rustango: ignoring {key} in .env: {e}");
+                    return None;
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Proc-macros crate, re-exported. End users normally reach

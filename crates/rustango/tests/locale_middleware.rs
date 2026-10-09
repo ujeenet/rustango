@@ -9,7 +9,7 @@
 //! send it — so it is spelled out verbatim and must not be renamed
 //! here.
 
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "_tower"))]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

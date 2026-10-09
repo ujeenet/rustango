@@ -80,3 +80,39 @@ async fn enable_sse_default_keeps_the_get_route() {
     let resp = app.oneshot(req).await.unwrap();
     assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+fn well_known() -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/.well-known/oauth-authorization-server")
+        .header("host", "app.example")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// #2299 — `rate_limit_per_minute = 0` means unlimited, not "refuse all".
+#[tokio::test]
+async fn rate_limit_zero_is_unlimited() {
+    let settings = McpSettings {
+        rate_limit_per_minute: Some(0),
+        ..Default::default()
+    };
+    let app = rustango::mcp::secure_tenant_router_from_settings(&settings);
+    for _ in 0..3 {
+        let resp = app.clone().oneshot(well_known()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn rate_limit_nonzero_still_limits() {
+    let settings = McpSettings {
+        rate_limit_per_minute: Some(1),
+        ..Default::default()
+    };
+    let app = rustango::mcp::secure_tenant_router_from_settings(&settings);
+    let first = app.clone().oneshot(well_known()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = app.oneshot(well_known()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}

@@ -1182,7 +1182,7 @@ fn write_aggregate_expr(
             match b.d.name() {
                 "mysql" => {
                     // `SEPARATOR` takes no bound parameter, so the
-                    // delimiter is inlined with its quotes doubled.
+                    // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
@@ -1190,9 +1190,9 @@ fn write_aggregate_expr(
                     }
                     b.write_ident(column);
                     b.sql.push_str(&order_sql);
-                    b.sql.push_str(" SEPARATOR '");
-                    b.sql.push_str(&delimiter.replace('\'', "''"));
-                    b.sql.push_str("')");
+                    b.sql.push_str(" SEPARATOR ");
+                    b.sql.push_str(&b.d.quote_literal(delimiter));
+                    b.sql.push(')');
                 }
                 "sqlite" => {
                     // A SQLite DISTINCT aggregate takes exactly one
@@ -3627,7 +3627,8 @@ pub(super) fn write_where_with_search(
                 qualified.push('.');
             }
             qualified.push_str(&b.d.quote_ident(col));
-            b.d.write_ilike(&mut b.sql, &qualified, &placeholder, false);
+            let ty = model.and_then(|m| m.field_by_column(col)).map(|f| f.ty);
+            b.d.write_ilike_typed(&mut b.sql, &qualified, ty, &placeholder, false);
             b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
         b.sql.push(')');
@@ -3819,8 +3820,6 @@ fn write_expr_compare(
         Op::Lte => Some(" <= "),
         Op::Gt => Some(" > "),
         Op::Gte => Some(" >= "),
-        Op::Like => Some(" LIKE "),
-        Op::NotLike => Some(" NOT LIKE "),
         _ => None,
     };
     if let Some(kw) = binary_op_str {
@@ -3829,13 +3828,20 @@ fn write_expr_compare(
         write_expr(b, rhs, None)?;
         return Ok(());
     }
-    // Like `Op::Like` plus the ESCAPE clause. Lookups that span a
-    // relation, such as `author__name__contains`, land here.
-    if matches!(op, Op::LikeEscaped) {
+    // Lookups that span a relation, such as `author__name__contains`,
+    // land here. The lhs is typed so Postgres can cast a non-text column.
+    if matches!(op, Op::Like | Op::NotLike | Op::LikeEscaped) {
+        let lhs_start = b.sql.len();
         write_expr(b, lhs, None)?;
-        b.sql.push_str(" LIKE ");
+        let lhs_str = b.sql.split_off(lhs_start);
+        let p_start = b.sql.len();
         write_expr(b, rhs, None)?;
-        b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+        let p = b.sql.split_off(p_start);
+        let ty = expr_type(b, lhs);
+        b.d.write_like_typed(&mut b.sql, &lhs_str, ty, &p, matches!(op, Op::NotLike));
+        if matches!(op, Op::LikeEscaped) {
+            b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+        }
         return Ok(());
     }
 
@@ -3875,7 +3881,8 @@ fn write_expr_compare(
             };
             b.params.push(v.clone());
             let p = b.d.placeholder(b.params.len());
-            b.d.write_ilike(&mut b.sql, &lhs_str, &p, matches!(op, Op::NotILike));
+            let ty = expr_type(b, lhs);
+            b.d.write_ilike_typed(&mut b.sql, &lhs_str, ty, &p, matches!(op, Op::NotILike));
             if matches!(op, Op::ILikeEscaped) {
                 b.sql.push_str(LIKE_ESCAPE_CLAUSE);
             }
@@ -4088,16 +4095,25 @@ fn write_filter(
         Op::Lte => simple_op(b, &qualified_col, " <= ", filter.value.clone(), cast),
         Op::Gt => simple_op(b, &qualified_col, " > ", filter.value.clone(), cast),
         Op::Gte => simple_op(b, &qualified_col, " >= ", filter.value.clone(), cast),
-        Op::Like => simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast),
-        Op::NotLike => simple_op(b, &qualified_col, " NOT LIKE ", filter.value.clone(), cast),
-        // The value here came from `core::escape_like`, so the ESCAPE
-        // clause is required: SQLite has no default escape character,
-        // and without the clause the escaping is simply wrong. `!` is
-        // the portable escape; MySQL eats a backslash as a string
-        // escape before LIKE ever sees it.
-        Op::LikeEscaped => {
-            simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast);
-            b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+        // The value of `LikeEscaped` came from `core::escape_like`, so
+        // the ESCAPE clause is required: SQLite has no default escape
+        // character. `!` is the portable escape; MySQL eats a backslash
+        // as a string escape before LIKE ever sees it.
+        Op::Like | Op::NotLike | Op::LikeEscaped => {
+            let p = b.bind(filter.value.clone());
+            let ty = model
+                .and_then(|m| m.field_by_column(filter.column))
+                .map(|f| f.ty);
+            b.d.write_like_typed(
+                &mut b.sql,
+                &qualified_col,
+                ty,
+                &p,
+                matches!(filter.op, Op::NotLike),
+            );
+            if matches!(filter.op, Op::LikeEscaped) {
+                b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+            }
         }
         // `ILikeEscaped` is `ILike` with an ESCAPE clause added.
         Op::ILike | Op::NotILike | Op::ILikeEscaped => {
@@ -4111,9 +4127,13 @@ fn write_filter(
             )?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            b.d.write_ilike(
+            let ty = model
+                .and_then(|m| m.field_by_column(filter.column))
+                .map(|f| f.ty);
+            b.d.write_ilike_typed(
                 &mut b.sql,
                 &qualified_col,
+                ty,
                 &p,
                 matches!(filter.op, Op::NotILike),
             );

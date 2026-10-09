@@ -6,7 +6,7 @@
 //! but the child carries `(content_type_id, object_pk)` columns instead
 //! of a typed FK, so the WHERE walks ContentType.
 
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "admin"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

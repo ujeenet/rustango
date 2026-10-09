@@ -145,6 +145,9 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     for model in models {
         ddl::check_on_delete(dialect, model).map_err(MigrateError::Validation)?;
     }
+    if let Some(sql) = ddl::ci_text_extension_sql(dialect, models) {
+        crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await?;
+    }
     for model in models {
         let sql = ddl::create_table_if_not_exists_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
@@ -173,16 +176,10 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     emit_indexes(pool, models, None).await
 }
 
-/// Generate the framework's system-app migrations from the current
-/// models and apply the **whole** set (registry + tenant scope) to
-/// `pool` — the complete framework schema (tables, FK constraints AND
-/// the composite-unique indexes that `create_framework_tables` /
-/// `apply_all_pool` don't emit), built exactly the way provisioning
-/// builds it.
+/// Apply every framework (`rustango_*`) table, registry + tenant scope,
+/// to `pool` from one snapshot: tables, indexes, then FK constraints.
 ///
-/// Use this in tests that need the full framework schema — e.g. the
-/// permission engine, which relies on the `(role_id, codename)` /
-/// `(user_id, codename)` unique indexes.
+/// Use this in tests that need the full framework schema in one call.
 ///
 /// # Errors
 /// Any generation or apply failure ([`MigrateError`]).
@@ -367,12 +364,9 @@ pub fn assert_strict_csp_html(html: &str, nonce: &str, what: &str) {
 /// Forget this process's cached host-table fingerprint.
 ///
 /// `RegisteredHostResolver` polls a fingerprint of `rustango_org_hosts` so
-/// one pod notices another pod's write. That state is process-global and
-/// keyed by nothing, so a test that resolves against one registry leaves a
-/// fingerprint behind that the next test's brand-new registry compares
-/// against — producing a spurious cache invalidation mid-test. Unlike the
-/// resolution cache, it cannot be side-stepped by using distinct hostnames
-/// per test.
+/// one pod notices another pod's write. That state is kept per registry
+/// pool; this resets it for every registry, so a test that reuses one pool
+/// starts from a clean fingerprint.
 ///
 /// Call this in any test that resolves through `RegisteredHostResolver`,
 /// alongside `invalidate_host_cache()`.

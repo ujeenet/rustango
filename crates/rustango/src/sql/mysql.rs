@@ -65,18 +65,23 @@ impl Dialect for MySql {
         format!("`{escaped}`")
     }
 
+    /// MySQL reads `\` as an escape inside a string literal under the
+    /// default `sql_mode`, so it is doubled along with `'` (#2232).
+    /// On a `NO_BACKSLASH_ESCAPES` server the `\` is stored doubled.
+    fn quote_literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    }
+
     /// MySQL writes a column comment inline, after the rest of the
-    /// column definition. Single quotes are doubled.
+    /// column definition.
     fn write_inline_column_comment(&self, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
-        Some(format!(" COMMENT '{escaped}'"))
+        Some(format!(" COMMENT {}", self.quote_literal(comment)))
     }
 
     /// MySQL writes a table comment as a `COMMENT='…'` trailer after
-    /// the closing paren. Single quotes are doubled.
+    /// the closing paren.
     fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
-        let escaped = comment.replace('\'', "''");
-        Some(format!(" COMMENT='{escaped}'"))
+        Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
     // `?` placeholders are the trait default.
@@ -324,6 +329,19 @@ impl Dialect for MySql {
              SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
              WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
              AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+        )
+    }
+
+    fn sole_leading_column_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.INDEX_NAME = ? \
+             AND s.SEQ_IN_INDEX = 1 AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.COLUMN_NAME = s.COLUMN_NAME AND o.SEQ_IN_INDEX = 1 \
+             AND o.INDEX_NAME <> s.INDEX_NAME \
+             AND o.SUB_PART IS NULL AND o.INDEX_TYPE = 'BTREE')",
         )
     }
 
@@ -851,6 +869,12 @@ mod tests {
     #[test]
     fn name_is_mysql() {
         assert_eq!(MySql.name(), "mysql");
+    }
+
+    #[test]
+    fn quote_literal_escapes_backslash_and_quote() {
+        assert_eq!(MySql.quote_literal(r"a\'b"), r"'a\\''b'");
+        assert_eq!(crate::sql::Postgres.quote_literal(r"a\'b"), r"'a\''b'");
     }
 
     #[test]

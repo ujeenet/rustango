@@ -13,8 +13,8 @@
 
 One `#[derive(Model)]` is the whole contract — from it Rustango emits typed queries, migration diffs, admin screens, serializers, and CRUD endpoints. A tri-dialect ORM, first-class auth, and every standard middleware ship in the box: all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** from the same source.
 
-📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
-🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
+📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](https://github.com/ujeenet/rustango/tree/main/docs/) · [API reference](https://docs.rs/rustango)
+🌍 **Also in:** [Deutsch](https://github.com/ujeenet/rustango/tree/main/docs/de/) · [Español](https://github.com/ujeenet/rustango/tree/main/docs/es/) · [Français](https://github.com/ujeenet/rustango/tree/main/docs/fr/) — every published guide, not a subset.
 🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---
@@ -35,7 +35,7 @@ rustango = { version = "0.60", default-features = false, features = ["mysql", "t
 
 Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.60" }` needs no extra wiring.
 
-**Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
+**Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
 
 ## An app on SQLite in 30 lines
 
@@ -163,7 +163,7 @@ cargo run -- make:viewset PostViewSet --model Post
 cargo run -- make:serializer PostSerializer --model Post
 ```
 
-Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](docs/scaffolding.md).
+Full walkthrough: [getting started](https://github.com/ujeenet/rustango/blob/main/docs/getting-started.md) · [scaffolding](https://github.com/ujeenet/rustango/blob/main/docs/scaffolding.md).
 
 ---
 
@@ -190,7 +190,7 @@ let stats = Post::objects()
 
 Supported: every field type (ints, floats, `String`, `bool`, `DateTime`/`Date`, `Uuid`, `Json`, `Decimal`, plus PG-only `Array`/`Range`/`HStore`/`Vector`/`Geometry`), nullable `Option<T>`, `Auto<T>` primary keys, `ForeignKey<T>` / one-to-one / many-to-many, generic FKs + composite-key FKs (ContentTypes), soft-delete, `unique_together` / `index_together`, container-level default scopes, subquery/`EXISTS` filters, bulk insert/update, transactions, and raw SQL escape hatches. `EXPLAIN` works on any queryset.
 
-📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md)
+📖 [ORM guide](https://github.com/ujeenet/rustango/blob/main/docs/orm.md) · [models](https://github.com/ujeenet/rustango/blob/main/docs/models.md) · [runnable ORM recipes](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md)
 
 ## Migrations
 
@@ -202,7 +202,7 @@ cargo run -- migrate
 cargo run -- downgrade                       # roll back the last migration
 ```
 
-📖 [Adopt an existing schema](docs/manage.md) with `manage inspectdb` — it emits `#[derive(Model)]` source for every table.
+📖 [Adopt an existing schema](https://github.com/ujeenet/rustango/blob/main/docs/manage.md) with `manage inspectdb` — it emits `#[derive(Model)]` source for every table.
 
 ## Auto-admin
 
@@ -214,7 +214,7 @@ An `admin(...)` block on a model gives you a full CRUD admin — `list_display`,
 
 Also included: a token-driven **theme system** with dark mode and per-tenant branding (logo/colors via the pluggable `Storage` trait — S3/R2/B2/MinIO/local), inline child editing (`register_admin_inline!`), a per-write **audit trail** with JSON diffs, a users/roles/permissions RBAC surface, a self-serve change-password page, and session invalidation on password rotation.
 
-📖 [Admin guide](docs/admin.md)
+📖 [Admin guide](https://github.com/ujeenet/rustango/blob/main/docs/admin.md)
 
 ## APIs — ViewSets, Serializers, JWT, OpenAPI
 
@@ -238,13 +238,13 @@ let app = Router::new().merge(PostViewSet::router("/api/posts", pool.clone()));
 
 `#[derive(Serializer)]` is a declarative JSON façade over a model (read-only / write-only / renamed / computed `method` fields, per-field `validate`, nested FK serialization, and `many` collections). JWT ships a full lifecycle (issue with custom claims, verify without a DB hit, refresh, re-check permissions, revoke/blacklist). OpenAPI 3.1 auto-derives from your serializers + viewsets. ViewSets answer in rustango's own shape (a `{count, page, results, …}` list envelope and `{error, message, status}` errors); `jsonapi` and `problem_details` are adapters you apply in your own handlers. The HTTP `QUERY` method (RFC 10008) is supported for body-carrying reads.
 
-📖 [ViewSets](docs/viewsets.md) · [serializers](docs/serializers.md) · [JWT](docs/auth-jwt-api.md) · [OpenAPI](docs/openapi.md) · [QUERY method](docs/query-method.md)
+📖 [ViewSets](https://github.com/ujeenet/rustango/blob/main/docs/viewsets.md) · [serializers](https://github.com/ujeenet/rustango/blob/main/docs/serializers.md) · [JWT](https://github.com/ujeenet/rustango/blob/main/docs/auth-jwt-api.md) · [OpenAPI](https://github.com/ujeenet/rustango/blob/main/docs/openapi.md) · [QUERY method](https://github.com/ujeenet/rustango/blob/main/docs/query-method.md)
 
 ## HTML views & forms
 
 Class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) render Tera templates with pagination, filters, bulk actions, FK-display, and business-validation hooks. `ModelForm`-style forms parse and validate against a model (auto-skipping DB-populated fields), aggregate per-field errors, and emit an insert query. Every view router with a POST route checks the CSRF token.
 
-📖 [HTML views](docs/html-views.md)
+📖 [HTML views](https://github.com/ujeenet/rustango/blob/main/docs/html-views.md)
 
 ## Multi-tenancy
 
@@ -263,32 +263,32 @@ Database-mode is the default and works identically everywhere; schema-mode is a 
 
 Pluggable auth backends (model / API-key / JWT — first to recognize the credential wins), argon2id password hashing, typed permission helpers (codename-based, superuser bypass), sessions, TOTP/2FA, API keys, and signed URLs (magic links / time-bounded file downloads).
 
-📖 [passwords](docs/auth-passwords.md) · [sessions](docs/auth-sessions.md) · [backends](docs/auth-backends.md) · [API keys](docs/auth-api-keys.md) · [decorators](docs/auth-decorators.md) · [flows](docs/auth-flows.md)
+📖 [passwords](https://github.com/ujeenet/rustango/blob/main/docs/auth-passwords.md) · [sessions](https://github.com/ujeenet/rustango/blob/main/docs/auth-sessions.md) · [backends](https://github.com/ujeenet/rustango/blob/main/docs/auth-backends.md) · [API keys](https://github.com/ujeenet/rustango/blob/main/docs/auth-api-keys.md) · [decorators](https://github.com/ujeenet/rustango/blob/main/docs/auth-decorators.md) · [flows](https://github.com/ujeenet/rustango/blob/main/docs/auth-flows.md)
 
 ## Security middleware
 
 One hardened middleware chain: request IDs, access logging, rate limiting (in-process or distributed via cache), CORS presets, security-header presets + custom/staged CSP, CSP report endpoint, IP allow/block, CSRF, and per-account lockout. `manage check --deploy` runs an automated pre-ship audit.
 
-📖 [Security guide](docs/security.md) · [middleware catalog](docs/middleware.md)
+📖 [Security guide](https://github.com/ujeenet/rustango/blob/main/docs/security.md) · [middleware catalog](https://github.com/ujeenet/rustango/blob/main/docs/middleware.md)
 
 ## Caching, email, storage, jobs
 
-- **Caching** — in-memory / Redis backends, `get_or_set` memoization, and per-view response caching (`CachePageLayer`). [caching](docs/caching.md)
-- **Email** — a renderer + `Mailable` + job-backed delivery pipeline with pluggable backends. [email](docs/email.md)
-- **Storage & media** — pluggable `Storage` (S3/R2/B2/MinIO/local), `Media` rows, presigned uploads, collections, and tags. [files](docs/files.md)
-- **Background jobs** — in-memory or DB queue (`FOR UPDATE SKIP LOCKED` on PG/MySQL 8+, transaction-bounded `UPDATE … RETURNING` on SQLite) plus scheduled tasks. [jobs](docs/jobs.md)
+- **Caching** — in-memory / Redis backends, `get_or_set` memoization, and per-view response caching (`CachePageLayer`). [caching](https://github.com/ujeenet/rustango/blob/main/docs/caching.md)
+- **Email** — a renderer + `Mailable` + job-backed delivery pipeline with pluggable backends. [email](https://github.com/ujeenet/rustango/blob/main/docs/email.md)
+- **Storage & media** — pluggable `Storage` (S3/R2/B2/MinIO/local), `Media` rows, presigned uploads, collections, and tags. [files](https://github.com/ujeenet/rustango/blob/main/docs/files.md)
+- **Background jobs** — in-memory or DB queue (`FOR UPDATE SKIP LOCKED` on PG/MySQL 8+, transaction-bounded `UPDATE … RETURNING` on SQLite) plus scheduled tasks. [jobs](https://github.com/ujeenet/rustango/blob/main/docs/jobs.md)
 
 ## Signals, i18n, MCP
 
 - **Signals** — model lifecycle (`pre_save` / `post_save` / `pre_delete` / `post_delete`) and request lifecycle (`request_started` / `request_finished` / `got_request_exception`).
-- **i18n** — `Translator` is a `gettext`-style translation API: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](docs/i18n.md)
-- **MCP server** — the `mcp` feature turns an app into a Model Context Protocol server: AI agents authenticate as tenant-scoped identities and call your framework-exposed tools over JSON-RPC 2.0. [mcp](docs/mcp.md)
+- **i18n** — `Translator` is a `gettext`-style translation API: per-locale catalogs, base-language fallback, `{name}` placeholders, CLDR pluralization, plus a DB-override layer and live admin translation editor. [i18n](https://github.com/ujeenet/rustango/blob/main/docs/i18n.md)
+- **MCP server** — the `mcp` feature turns an app into a Model Context Protocol server: AI agents authenticate as tenant-scoped identities and call your framework-exposed tools over JSON-RPC 2.0. [mcp](https://github.com/ujeenet/rustango/blob/main/docs/mcp.md)
 
 ## The `manage` CLI
 
 Your app's binary doubles as its admin CLI — `cargo run -- <cmd>`. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
 
-📖 [manage reference](docs/manage.md)
+📖 [manage reference](https://github.com/ujeenet/rustango/blob/main/docs/manage.md)
 
 ## Configuration
 
@@ -298,7 +298,7 @@ Layered config: a `<env>_settings.toml` pipeline (`default.toml` → `<env>_sett
 
 A `TestClient` drives the router as a tower service (no socket), a `RequestFactory` builds requests, and fixtures seed data. The cookbook's ~150 tests run against live Postgres, MySQL, and SQLite.
 
-📖 [testing](docs/testing.md)
+📖 [testing](https://github.com/ujeenet/rustango/blob/main/docs/testing.md)
 
 ---
 
@@ -418,9 +418,9 @@ list as the scaffolder sees it.
 
 - **Guides & tutorials**: <https://rustango.com>
 - **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
-- **In-repo guides** ([`docs/`](docs/)): [getting started](docs/getting-started.md) · [models](docs/models.md) · [ORM](docs/orm.md) · [migrations & CLI](docs/manage.md) · [admin](docs/admin.md) · [viewsets](docs/viewsets.md) · [serializers](docs/serializers.md) · [auth](docs/auth-flows.md) · [security](docs/security.md) · [middleware](docs/middleware.md) · [caching](docs/caching.md) · [email](docs/email.md) · [files](docs/files.md) · [jobs](docs/jobs.md) · [i18n](docs/i18n.md) · [MCP](docs/mcp.md) · [testing](docs/testing.md) · [glossary](docs/glossary.md)
+- **In-repo guides** ([`docs/`](https://github.com/ujeenet/rustango/tree/main/docs/)): [getting started](https://github.com/ujeenet/rustango/blob/main/docs/getting-started.md) · [models](https://github.com/ujeenet/rustango/blob/main/docs/models.md) · [ORM](https://github.com/ujeenet/rustango/blob/main/docs/orm.md) · [migrations & CLI](https://github.com/ujeenet/rustango/blob/main/docs/manage.md) · [admin](https://github.com/ujeenet/rustango/blob/main/docs/admin.md) · [viewsets](https://github.com/ujeenet/rustango/blob/main/docs/viewsets.md) · [serializers](https://github.com/ujeenet/rustango/blob/main/docs/serializers.md) · [auth](https://github.com/ujeenet/rustango/blob/main/docs/auth-flows.md) · [security](https://github.com/ujeenet/rustango/blob/main/docs/security.md) · [middleware](https://github.com/ujeenet/rustango/blob/main/docs/middleware.md) · [caching](https://github.com/ujeenet/rustango/blob/main/docs/caching.md) · [email](https://github.com/ujeenet/rustango/blob/main/docs/email.md) · [files](https://github.com/ujeenet/rustango/blob/main/docs/files.md) · [jobs](https://github.com/ujeenet/rustango/blob/main/docs/jobs.md) · [i18n](https://github.com/ujeenet/rustango/blob/main/docs/i18n.md) · [MCP](https://github.com/ujeenet/rustango/blob/main/docs/mcp.md) · [testing](https://github.com/ujeenet/rustango/blob/main/docs/testing.md) · [glossary](https://github.com/ujeenet/rustango/blob/main/docs/glossary.md)
 - **API reference**: <https://docs.rs/rustango>
-- **Changelog**: [`CHANGELOG.md`](CHANGELOG.md)
+- **Changelog**: [`CHANGELOG.md`](https://github.com/ujeenet/rustango/blob/main/CHANGELOG.md)
 
 ## Contributing
 
@@ -430,8 +430,8 @@ Git hooks (fmt + secret/debris scan on pre-commit; `cargo check --all-features` 
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([`LICENSE-MIT`](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](https://github.com/ujeenet/rustango/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([`LICENSE-MIT`](https://github.com/ujeenet/rustango/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 

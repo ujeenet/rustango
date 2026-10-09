@@ -198,7 +198,9 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 - `CreateM2MTable` / `DropM2MTable`
 
 **NOT auto-detected** (rename vs drop+add is ambiguous):
-- `RenameTable`, `RenameColumn` — use `--empty` and edit the JSON.
+- `RenameTable`, `RenameColumn` — use `--empty` and edit the JSON. One
+  exception: a changed M2M `src_col` / `dst_col` with the same `through` is
+  written as `RenameColumn`, so the junction keeps its rows.
 
 ### `makemigrations --app <app>`
 
@@ -724,7 +726,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.2
+rustango 0.60.3
 ```
 
 ### `about`
@@ -736,7 +738,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.2
+  version:        0.60.3
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -914,7 +916,7 @@ next boot, and a webhook retry with the same `event_id` runs again.
 Sets up a new tenant (customer/org) and applies the tenant migrations to
 it. The `<slug>` is its short identifier. **Not** safe to re-run: calling it
 again on an existing slug is refused up front with ``tenant slug `<slug>`
-already exists`` (tenancy/provision.rs:599), before anything else happens.
+already exists`` (`tenancy::provision::provision_tenant`), before anything else happens.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"

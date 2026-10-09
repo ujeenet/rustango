@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.60.2`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.60.3`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -306,7 +306,7 @@ Les migrations créent les tables de votre base de données, la même idée que 
 cargo run -- migrate
 ```
 
-La première compilation prend ~2 minutes (Rust compile tout depuis les sources). Un projet neuf n'expose encore aucun fichier de migration, donc vous verrez `nothing to migrate (already up to date)` — `migrate` met néanmoins en place la table de journal d'audit du framework afin que les modèles audités fonctionnent dès que vous les ajouterez. Vous générerez votre première vraie migration à l'étape 9.
+La première compilation prend ~2 minutes (Rust compile tout depuis les sources). Un projet neuf ne livre encore aucun fichier de migration à lui, mais `migrate` n'est pas sans effet : il génère d'abord les propres migrations du framework à partir des modèles compilés et les applique, vous verrez donc quelques lignes `applied …` plutôt que `nothing to migrate`. (Ce message n'apparaît qu'une fois que tout — framework et projet — est déjà à jour.) Il crée aussi la table du journal d'audit, afin que les modèles audités fonctionnent dès que vous les ajouterez. Vous générerez votre première migration de projet à l'étape 9.
 
 Vérifiez l'état des migrations :
 
@@ -513,25 +513,29 @@ Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lue
 
 ## Étape 11 : activer l'administration automatique
 
-**Rustango** fournit une interface d'administration générée pour vos modèles — un back-office prêt à parcourir et modifier vos données. Sa mise en place tient en deux petites étapes : un utilitaire qui transforme un pool en routeur d'administration, et un seul appel `.nest(...)` pour le monter.
+**Rustango** fournit une interface d'administration générée pour vos modèles — un back-office prêt à parcourir, rechercher et modifier vos données sans écrire de code. Le squelette fullstack la câble déjà : un utilitaire dans `src/urls.rs` transforme un pool en routeur d'administration, et `src/main.rs` l'imbrique sous `/admin`.
 
-Ajoutez vous-même cet utilitaire dans `src/urls.rs` — le générateur de squelette ne le crée pas, car rien de ce qu'il génère ne l'appellerait. Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
+L'utilitaire place l'administration derrière une connexion. Le `admin_prefix` doit correspondre au chemin sous lequel elle est imbriquée (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
 
 ```rust
 use rustango::admin;
+use rustango::session::SessionSecret;
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
-        .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
+        .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
+        .with_session_auth(SessionSecret::from_env_or_random())
         .build()
 }
 ```
 
+> **Conservez `.with_session_auth(...)`.** Sans lui, l'administration n'a pas de connexion : quiconque atteint `/admin` peut lire, modifier et supprimer chaque modèle. `check --deploy` avertit lorsqu'une administration est construite sans lui (voir [admin.md](admin.md)).
+
 `Builder::new` accepte le pool de n'importe quel backend : cet utilitaire ne nomme donc aucun pilote et fonctionne sur les trois.
 
-Ensuite, connectez un pool dans `src/main.rs` et imbriquez l'administration dans le routeur de l'API avant de la remettre au `Cli`. Conservez la ligne `mod blog;` de l'étape 7 — c'est elle qui enregistre votre modèle `Post` auprès de l'administration :
+`src/main.rs` remet l'utilitaire au `Cli`, qui construit l'administration à partir du pool avec lequel il sert : des verbes comme `makemigrations` tournent donc toujours sans base de données. Conservez la ligne `mod blog;` de l'étape 7 — c'est elle qui enregistre votre modèle `Post` auprès de l'administration :
 
 ```rust
 mod blog;
@@ -542,16 +546,19 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
-
-    let api = urls::api().nest("/admin", urls::admin_router(pool));
-
     rustango::manage::Cli::new()
-        .api(api)
+        .api(urls::api())
+        .nest_with("/admin", urls::admin_router)
         .with_health() // /health + /ready endpoints
         .run()
         .await
 }
+```
+
+Créez le compte avec lequel vous vous connecterez (le mot de passe vous est demandé) :
+
+```bash
+cargo run -- create-admin alice --superuser
 ```
 
 `Cli::new()...run()` est le même dispatcheur unifié généré par le squelette — il continue de servir chaque `cargo run -- <verb>` ; vous n'avez fait qu'enrichir le routeur qu'il sert au moment de `runserver`.
@@ -562,7 +569,7 @@ Exécutez-le :
 cargo run
 ```
 
-Ouvrez <http://localhost:8080/admin> (sans barre oblique finale). Vous verrez l'accueil de l'administration avec un lien `posts`. Cliquez sur celui-ci pour voir votre article brouillon dans la liste, cliquez sur l'article pour ouvrir son formulaire d'édition, puis enregistrez. L'onglet de piste d'audit enregistre chaque écriture.
+Ouvrez <http://localhost:8080/admin> (sans barre oblique finale) et connectez-vous en tant que `alice`. Vous verrez l'accueil de l'administration avec un lien `posts`. Cliquez sur celui-ci pour voir votre article brouillon dans la liste, cliquez sur l'article pour ouvrir son formulaire d'édition, puis enregistrez. L'onglet de piste d'audit enregistre chaque écriture.
 
 ---
 
@@ -878,7 +885,7 @@ export RUSTANGO_ENV=prod
 export DATABASE_URL=postgres://prod-host/myblog
 export RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
 
-# 2. Run migrations
+# 2. Run migrations (ship `migrations/` AND `system/migrations/` with the binary)
 cargo run --release -- migrate
 
 # 3. Audit
@@ -893,7 +900,7 @@ cargo build --release
 
 Assurez-vous que votre proxy inverse :
 - Termine le HTTPS
-- Transmet `X-Forwarded-For`, et l'app monte `RealIpLayer::trust_proxies([...])` avec ce proxy (`server::Builder::real_ip`), pour des IP précises dans `AccessLogLayer` et les throttles (voir [security.md](security.md))
+- Transmet `X-Forwarded-For`, et l'app monte `RealIpLayer::trust_proxies([...])` avec ce proxy (`Cli::with_trusted_proxies([...])?` ou `server::Builder::real_ip`), pour des IP précises dans `AccessLogLayer` et les throttles (voir [security.md](security.md))
 - Transmet `X-Forwarded-Host`, `X-Forwarded-Proto`
 - Utilise `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` afin que `ConnectInfo` soit renseigné pour la limitation de débit et le filtrage par IP
 

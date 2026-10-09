@@ -77,13 +77,35 @@ async fn login_response(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
+    login_page(state, extensions, headers, error, false).await
+}
+
+/// The authenticator-code step an SSO sign-in owes (#2249).
+#[cfg(all(feature = "admin-sso", feature = "totp"))]
+pub(super) async fn sso_totp_response(
+    state: &AppState,
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+    error: Option<&str>,
+) -> Response {
+    login_page(state, extensions, headers, error, true).await
+}
+
+/// `totp_step` renders only the code field, posting to the SSO step.
+async fn login_page(
+    state: &AppState,
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+    error: Option<&str>,
+    totp_step: bool,
+) -> Response {
     use crate::forms::csrf;
     // Under `protect_with_csrf` the outer layer already chose the token (#2131).
     let (token, set_cookie) = match super::session::current_csrf_token() {
         Some(token) => (token, None),
         None => csrf::ensure_token_under_layer(headers, extensions),
     };
-    let html = render_login_form(state, error, &csrf::csrf_input_html(&token)).await;
+    let html = render_login_form(state, error, &csrf::csrf_input_html(&token), totp_step).await;
     let mut resp = Html(html).into_response();
     if let Some(cookie) = set_cookie {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -93,7 +115,12 @@ async fn login_response(
     resp
 }
 
-async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
+async fn render_login_form(
+    state: &AppState,
+    error: Option<&str>,
+    csrf_input: &str,
+    totp_step: bool,
+) -> String {
     let admin_prefix = &state.config.admin_prefix;
     // One SSO button per enabled `SsoProvider` row.
     #[cfg(feature = "admin-sso")]
@@ -109,7 +136,12 @@ async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &s
     let sso_providers_json = serde_json::Value::Array(Vec::new());
     let ctx = serde_json::json!({
         "title": "Sign in",
-        "action": format!("{admin_prefix}/login"),
+        "action": if totp_step {
+            format!("{admin_prefix}/login/sso-totp")
+        } else {
+            format!("{admin_prefix}/login")
+        },
+        "totp_step": totp_step,
         "error": error,
         "csrf_input": csrf_input,
         "sso_enabled": sso_enabled,

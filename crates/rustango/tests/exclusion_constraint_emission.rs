@@ -200,22 +200,31 @@ fn invert_add_exclusion_yields_drop() {
     ));
 }
 
+/// The inverse comes from the predecessor snapshot (#2241).
 #[test]
-fn invert_drop_exclusion_errors_with_clear_message() {
+fn invert_drop_exclusion_rebuilds_it_from_the_snapshot() {
     use rustango::migrate::{invert, Operation, SchemaSnapshot};
     let drop = Operation::Schema(SchemaChange::DropExclusionConstraint {
         name: "n".into(),
         table: "t".into(),
     });
-    let prev = SchemaSnapshot::default();
-    let r = invert(&[drop], &prev);
-    assert!(
-        r.is_err(),
-        "drop inversion should fail (no snapshot record)"
-    );
-    let msg = format!("{}", r.unwrap_err());
-    assert!(
-        msg.contains("exclusion") && msg.contains("hand"),
-        "error should explain manual workaround: {msg}",
+    let msg = invert(&[drop.clone()], &SchemaSnapshot::default())
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("predecessor snapshot"), "{msg}");
+    let prev: SchemaSnapshot = serde_json::from_value(serde_json::json!({
+        "tables": [], "excludes": [{"name": "n", "table": "t", "using": "gist",
+            "elements": [["during", "&&"]], "where_clause": "id > 1"}]
+    }))
+    .unwrap();
+    assert_eq!(
+        invert(&[drop], &prev).unwrap(),
+        [Operation::Schema(SchemaChange::AddExclusionConstraint {
+            name: "n".into(),
+            table: "t".into(),
+            using: "gist".into(),
+            elements: vec![("during".into(), "&&".into())],
+            where_clause: Some("id > 1".into()),
+        })]
     );
 }

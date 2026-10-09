@@ -176,7 +176,7 @@ When exhausted: `429 Too Many Requests` with `Retry-After` header. Every success
 
 Every built-in password login (admin, operator console, tenant admin, JWT `/auth/login`) goes through `rustango::login_throttle` before the user lookup. It checks, in order, a per-username lock (5 failures, 15 min) that counts unknown usernames the same as real ones, a per-IP limit (20 failed logins/min; IPv6 counts per /64) and a global limit per login (600 failed logins/min each for the admin, the operator console and every tenant). A successful login does not count against the limits. Once the user row is found, the lock also follows the stored username, so spellings the database treats as equal (MySQL matches `alicé` to `alice`) share one lock. HTTP Basic and API keys have their own scope and only count failures. A refused login gets `429` with `Retry-After`, and the same answer whether or not the account exists.
 
-Behind a reverse proxy, mount `RealIpLayer` with your proxies as shown above. Without it every client has the proxy's address and shares one per-IP bucket; a warning is logged once when forwarding headers arrive.
+Behind a reverse proxy, mount `RealIpLayer` with your proxies as shown above; a `Cli` app calls `Cli::with_trusted_proxies(["127.0.0.1/32"])?` instead. Without it every client has the proxy's address and shares one per-IP bucket; a warning is logged once when forwarding headers arrive.
 
 Password hashing runs at most one job per CPU, shared by every login; HTTP Basic, API keys and agent secrets may use at most half the slots. A login that waits longer than `hash_wait_ms` (5 s) for a slot gets `503` with `Retry-After`, for known and unknown users alike.
 

@@ -488,8 +488,9 @@ impl JwtLifecycle {
             || self.jti_store.is_used(&grace_key(jti, bucket - 1)).await
     }
 
-    pub(crate) async fn family_revoked(&self, fam: &str) -> bool {
-        self.jti_store.is_used(&family_key(fam)).await
+    /// The store revocations and refresh families live in.
+    pub(crate) fn jti_store(&self) -> &dyn JtiStore {
+        &*self.jti_store
     }
 
     /// Signature and expiry, no store lookup. Expiry comes first, so an
@@ -589,7 +590,7 @@ impl JwtLifecycle {
         let _ = self.jti_store.mark_used(jti, expires_at).await;
     }
 
-    async fn is_blacklisted(&self, jti: &str) -> bool {
+    pub(crate) async fn is_blacklisted(&self, jti: &str) -> bool {
         // v0.48 — `JtiStore::is_used` doesn't filter by the entry's
         // expiry the way the pre-v0.48 in-line map did. That's a
         // tighter behaviour (a revoked-but-not-yet-pruned JTI stays
@@ -598,6 +599,11 @@ impl JwtLifecycle {
         // ever consulted.
         self.jti_store.is_used(jti).await
     }
+}
+
+/// `true` when refresh family `fam` was revoked in `store` (#1854).
+pub(crate) async fn family_revoked_in(store: &dyn JtiStore, fam: &str) -> bool {
+    store.is_used(&family_key(fam)).await
 }
 
 /// `:` never occurs in a base64url JTI, so the two key spaces cannot meet.
