@@ -1236,6 +1236,20 @@ async fn forget_pending_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    forget_pending_cmd_with(pool, dir, args, w, async { Ok(Vec::new()) }).await
+}
+
+/// [`forget_pending_cmd`], also refusing a migration any of `tenant_ledgers`
+/// (slug, applied names) records. Awaited only once a name is resolved (#2393).
+pub(crate) async fn forget_pending_cmd_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+    tenant_ledgers: impl std::future::Future<
+        Output = Result<Vec<(String, std::collections::HashSet<String>)>, MigrateError>,
+    >,
+) -> Result<(), MigrateError> {
     // --help / no args
     let target = match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | None => {
@@ -1311,6 +1325,17 @@ async fn forget_pending_cmd<W: Write>(
              `forget-pending` to drop the JSON.",
             migration.name,
             runner::LEDGER_TABLE,
+        )));
+    }
+    if let Some((slug, _)) = tenant_ledgers
+        .await?
+        .into_iter()
+        .find(|(_, applied)| applied.contains(&migration.name))
+    {
+        return Err(MigrateError::Validation(format!(
+            "forget-pending: migration `{}` is already applied on tenant `{slug}`. \
+             Unapply it there first.",
+            migration.name,
         )));
     }
 

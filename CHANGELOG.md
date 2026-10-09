@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `forget-pending` keeps a migration a tenant applied (#2393)
+
+In a tenancy project it checked only the registry ledger. It now refuses when any tenant's ledger records the migration.
+
 ### Fixed — `api::create_tenant` returns a failed migration (#2392)
 
 It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run.

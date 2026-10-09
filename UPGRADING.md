@@ -166,6 +166,10 @@ On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (
 
 `api::create_tenant` (and `create_tenant_if_missing`) now returns `Err` when the tenant's migrations fail, and leaves the tenant inactive. It no longer migrates the other tenants (#2392).
 
+### `forget-pending` reads every tenant ledger
+
+In a tenancy project `forget-pending` now refuses a migration any tenant applied, and fails if a tenant's ledger can't be read (#2393).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

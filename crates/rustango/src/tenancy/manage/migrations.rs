@@ -173,6 +173,46 @@ fn write_tenant_report<W: Write>(
     tenant_failures(report.failure_count(), report.tenants.len())
 }
 
+/// Every tenant's applied project migrations, inactive tenants included.
+/// A tenant that can't be read fails the whole call, so nothing is assumed (#2393).
+pub(super) async fn tenant_ledgers<DB: Database>(
+    pools: &TenantPools<DB>,
+) -> Result<Vec<(String, std::collections::HashSet<String>)>, rustango::migrate::MigrateError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::sql::FetcherPool as _;
+    use rustango::migrate::{MigrateError, LEDGER_TABLE};
+
+    let unreadable = |slug: &str, e: &dyn std::fmt::Display| {
+        MigrateError::Validation(format!(
+            "could not read tenant `{slug}`'s migration ledger: {e}"
+        ))
+    };
+    let orgs: Vec<crate::tenancy::org::Org> = crate::tenancy::org::Org::objects()
+        .fetch(&pools.registry_pool())
+        .await?;
+    let mut out = Vec::with_capacity(orgs.len());
+    for org in orgs {
+        let pool = pools
+            .scoped_pool_dyn(&org)
+            .await
+            .map_err(|e| unreadable(&org.slug, &e))?;
+        let has_ledger = rustango::migrate::try_table_exists_here(&pool, LEDGER_TABLE)
+            .await
+            .map_err(|e| unreadable(&org.slug, &e))?;
+        let applied = if has_ledger {
+            rustango::migrate::applied_set_pool(&pool)
+                .await
+                .map_err(|e| unreadable(&org.slug, &e))?
+        } else {
+            std::collections::HashSet::new()
+        };
+        out.push((org.slug, applied));
+    }
+    Ok(out)
+}
+
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
 pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
     if failed == 0 {
