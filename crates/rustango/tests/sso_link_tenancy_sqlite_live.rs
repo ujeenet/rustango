@@ -747,6 +747,47 @@ async fn check_deploy_runs_when_tenants_cannot_be_listed() {
     );
 }
 
+/// A tenant pool that won't open is reported without its database URL (#2359).
+#[tokio::test]
+async fn check_deploy_reports_an_unopenable_tenant_without_its_url() {
+    let _g = SUITE.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pools = TenantPools::<sqlx::Sqlite>::with_secrets(
+        sqlx::SqlitePool::connect(&url).await.unwrap(),
+        rustango::tenancy::EnvSecretsResolver,
+    );
+    let run = |verb: &str| {
+        let mut out = Vec::new();
+        let args: Vec<String> = verb.split(' ').map(str::to_owned).collect();
+        let pools = &pools;
+        let url = &url;
+        let dir = dir.path();
+        async move {
+            let res =
+                rustango::tenancy::manage::run_with_writer(pools, url, dir, args, &mut out).await;
+            (res, String::from_utf8(out).unwrap())
+        }
+    };
+    run("migrate-registry").await.0.expect("migrate-registry");
+    // `EnvSecretsResolver` wants `env://`; its error quotes the literal URL.
+    let mut org = Org {
+        slug: "acme".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some("sqlite:///tmp/acme-hunter2.db".into()),
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&pools.registry_pool()).await.unwrap();
+    let (_, out) = run("check --deploy").await;
+    assert!(
+        out.contains(
+            "[sso] tenant `acme`: could not check SSO providers: could not open the tenant pool"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("hunter2"), "{out}");
+}
+
 /// A table probe that fails is an error, not "no tables" (#2359).
 #[tokio::test]
 async fn check_reports_a_failed_table_probe() {

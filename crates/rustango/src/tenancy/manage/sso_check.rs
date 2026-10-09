@@ -118,7 +118,8 @@ where
 {
     let tenant = match pools.scoped_pool_dyn(org).await {
         Ok(p) => p,
-        Err(e) => return TenantFindings::failed(&org.slug, e),
+        // Not `{e}`: a secrets error can echo the database URL into CI logs.
+        Err(_) => return TenantFindings::failed(&org.slug, "could not open the tenant pool"),
     };
     #[cfg_attr(not(feature = "admin-sso"), allow(unused_mut))]
     let mut out = match check::tenant_providers(&tenant).await {
