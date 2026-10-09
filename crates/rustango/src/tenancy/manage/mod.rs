@@ -376,22 +376,15 @@ where
         }
         // The SSO providers live per tenant, which the registry pool can't see (#2359).
         #[cfg(feature = "sso")]
-        "check" => {
-            let extra = if args[1..].iter().any(|a| a == "--deploy") {
-                sso_check::findings(pools).await
-            } else {
-                rustango::migrate::manage::DeployAuditFindings::default()
-            };
-            rustango::migrate::manage::check_cmd_with(
-                &pools.registry_pool(),
-                dir,
-                &args[1..],
-                writer,
-                extra,
-            )
-            .await
-            .map_err(TenancyError::Migrate)
-        }
+        "check" => rustango::migrate::manage::check_cmd_with(
+            &pools.registry_pool(),
+            dir,
+            &args[1..],
+            writer,
+            sso_check::findings(pools),
+        )
+        .await
+        .map_err(TenancyError::Migrate),
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped

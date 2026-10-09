@@ -211,6 +211,13 @@ pub(crate) fn tenant_warning(tenant: &str, s: &Stranded) -> String {
     )
 }
 
+/// `check --deploy` line for a tenant that could not be checked.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub(crate) fn tenant_error(tenant: &str, why: impl std::fmt::Display) -> String {
+    format!("[sso] tenant `{tenant}`: could not check SSO providers: {why}")
+}
+
 /// `check --deploy` line for a shared provider, naming the tenants it refuses.
 #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
 #[must_use]

@@ -33,9 +33,7 @@ struct TenantFindings {
 impl TenantFindings {
     fn failed(slug: &str, why: impl std::fmt::Display) -> Self {
         Self {
-            warnings: vec![format!(
-                "[sso] tenant `{slug}`: could not check SSO providers: {why}"
-            )],
+            warnings: vec![check::tenant_error(slug, why)],
             ..Self::default()
         }
     }
@@ -151,10 +149,9 @@ where
     if let Some(rows) = shared {
         match check::shared_providers(rows, &tenant).await {
             Ok(found) => out.shared = found,
-            Err(e) => out.warnings.push(format!(
-                "[sso] tenant `{}`: could not check shared SSO providers: {e}",
-                org.slug
-            )),
+            Err(e) => out
+                .warnings
+                .push(check::tenant_error(&org.slug, format!("shared: {e}"))),
         }
     }
     out
