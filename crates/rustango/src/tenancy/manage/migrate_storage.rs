@@ -118,15 +118,11 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         ));
     }
 
-    // 2. Compute source / target connection details.
+    // 2. Compute source / target connection details. Secret references
+    // (`env://…`) resolve to connect, but the target's is stored as given (#2384).
     let source_url = match current {
         StorageMode::Schema => registry_url.to_owned(),
-        StorageMode::Database => org.database_url.clone().ok_or_else(|| {
-            TenancyError::Validation(format!(
-                "tenant `{}` has no database_url despite database mode",
-                parsed.slug
-            ))
-        })?,
+        StorageMode::Database => pools.resolved_database_url(&org).await?,
     };
     let source_schema = match current {
         StorageMode::Schema => Some(SchemaName::parse(org.effective_schema())?),
@@ -149,9 +145,11 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             )));
         }
     }
-    let target_url = match parsed.target {
-        StorageMode::Schema => registry_url.to_owned(),
-        StorageMode::Database => parsed.database_url.clone().expect("validated above"),
+    let target_url = match &parsed.database_url {
+        Some(reference) if parsed.target == StorageMode::Database => {
+            pools.resolve_secret(reference).await?
+        }
+        _ => registry_url.to_owned(),
     };
 
     writeln!(
@@ -245,7 +243,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     // 5. Update Org row.
     let new_storage_mode = parsed.target.as_str().into();
     let new_database_url = match parsed.target {
-        StorageMode::Database => Some(target_url.clone()),
+        StorageMode::Database => parsed.database_url.clone(),
         StorageMode::Schema => None,
     };
     let new_schema_name = match parsed.target {

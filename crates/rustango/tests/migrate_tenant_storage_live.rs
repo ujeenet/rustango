@@ -10,7 +10,9 @@ use std::sync::Arc;
 use rustango::core::Column as _;
 use rustango::sql::sqlx::PgPool;
 use rustango::sql::Auto;
-use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};
+use rustango::tenancy::{
+    manage::run_with_writer, ChainSecretsResolver, Org, StorageMode, TenantPools,
+};
 
 use tokio::sync::Mutex;
 
@@ -279,13 +281,15 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     )
     .await;
     let src_url = src_db.url().to_owned();
+    // Stored as a secret reference: the move resolves it (#2384).
+    std::env::set_var("RUSTANGO_T2384_SRC", &src_url);
     let mut org = Org {
         id: Auto::default(),
         slug: "t1864".into(),
         display_name: "Moved".into(),
         storage_mode: StorageMode::Database.as_str().into(),
         backend_kind: "postgres".to_owned(),
-        database_url: Some(src_url.clone()),
+        database_url: Some("env://RUSTANGO_T2384_SRC".into()),
         schema_name: None,
         host_pattern: None,
         port: None,
@@ -294,7 +298,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     };
     org.insert(&pool).await.unwrap();
 
-    let pools = TenantPools::new(pool.clone());
+    let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = || async {
         let mut out = Vec::<u8>::new();
         run_with_writer(
@@ -457,6 +461,8 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         sqlx_exec(&pool, stmt).await;
     }
     let dst_url = dst_db.url().to_owned();
+    // Resolved to connect, stored as given (#2384).
+    std::env::set_var("RUSTANGO_T2384_DST", &dst_url);
     let mut org = Org {
         id: Auto::default(),
         slug: "t2189".into(),
@@ -472,7 +478,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     };
     org.insert(&pool).await.unwrap();
 
-    let pools = TenantPools::new(pool.clone());
+    let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = || async {
         let mut out = Vec::<u8>::new();
         run_with_writer(
@@ -485,7 +491,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
                 "--to",
                 "database",
                 "--database-url",
-                &dst_url,
+                "env://RUSTANGO_T2384_DST",
             ]),
             &mut out,
         )
@@ -551,7 +557,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         .await
         .unwrap();
     assert_eq!(moved[0].storage_mode, StorageMode::Database.as_str());
-    assert_eq!(moved[0].database_url.as_deref(), Some(dst_url.as_str()));
+    assert_eq!(
+        moved[0].database_url.as_deref(),
+        Some("env://RUSTANGO_T2384_DST")
+    );
     pool.close().await;
     assert_eq!(
         extensions(&shared).await,
