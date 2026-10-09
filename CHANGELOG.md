@@ -12,6 +12,10 @@ The check moved into `checked_request` and the org edit path, and compares again
 
 A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_pool` now matches `acquire`.
 
+### Fixed — `db:dump` and `db:restore` no longer put the database password in argv (#2324)
+
+`pg_dump` and `psql` get it through `PGPASSWORD`, so `ps` no longer shows it.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
