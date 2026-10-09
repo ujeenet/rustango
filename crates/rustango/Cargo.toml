@@ -511,7 +511,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.60.3", path = "../rustango-macros" }
+rustango-macros = { version = "0.60.4", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -572,6 +572,8 @@ subtle           = { workspace = true }
 # Gating those would have silently removed transaction hooks from a bare-ORM
 # build; making the dependency honest costs no extra crate.
 tokio            = { workspace = true, features = ["time"] }
+# Already linked through sqlx; `check --deploy` walks tenants with `buffer_unordered`.
+futures-util     = { version = "0.3", default-features = false, features = ["alloc"] }
 tower            = { workspace = true, optional = true }
 tokio-util       = { version = "0.7", features = ["io"], optional = true }
 redis            = { workspace = true, optional = true }

@@ -1705,7 +1705,7 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 **When**: Always — `server::Builder` sets it for you. Only call manually if you're hand-rolling the inner admin router (e.g. mounting the admin alongside an unusual host shape).
 
-**API**: [`admin::Builder::tenant_mode`](../../src/admin/urls.rs); [`admin::AppState::scope_visible`](../../src/admin/urls.rs); [`ModelScope::Registry` / `Tenant`](../../src/core/schema.rs).
+**API**: [`admin::Builder::tenant_mode`](../../src/admin/urls.rs); [`admin::AppState::is_visible`](../../src/admin/urls.rs); [`ModelScope::Registry` / `Tenant`](../../src/core/schema.rs).
 
 **Recipe**: opt-out only — most apps don't touch this. The check fires both on inventory-walk (sidebar enumeration) and on URL resolution (`lookup_model`), so a hand-typed `/__admin/rustango_orgs` URL on the tenant side returns 404 instead of leaking registry rows.
 

@@ -245,6 +245,17 @@ async fn handshake(app: &Router, host: &str, login: &str, slug: &str) -> axum::r
     .await
 }
 
+/// The check ran to the end: the unset deploy env may fail it, nothing else.
+fn assert_check_ran<E: std::fmt::Display>(res: Result<(), E>, out: &str) {
+    if let Err(e) = res {
+        assert!(e.to_string().contains("system check(s) failed"), "{e}");
+    }
+    assert!(
+        out.contains("running rustango system check (deploy mode)"),
+        "{out}"
+    );
+}
+
 fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider {
     SsoProvider {
         id: Auto::default(),
@@ -421,6 +432,24 @@ impl Env {
 
     async fn sso(&self, slug: &str, sub: &str, email: &str) -> Result<i64, String> {
         self.sso_in(0, slug, sub, email).await
+    }
+
+    /// `check --deploy` output, through the tenancy dispatcher.
+    async fn check_deploy(&self) -> String {
+        let dir = self._dir.path();
+        let reg_url = format!("sqlite://{}?mode=rwc", dir.join("reg.db").display());
+        let mut out = Vec::new();
+        let res = rustango::tenancy::manage::run_with_writer(
+            self._pools.as_ref(),
+            &reg_url,
+            &dir.join("migrations"),
+            vec!["check".to_owned(), "--deploy".to_owned()],
+            &mut out,
+        )
+        .await;
+        let out = String::from_utf8(out).unwrap();
+        assert_check_ran(res, &out);
+        out
     }
 
     /// POST a tenant admin form as user `uid`; the response status.
@@ -670,6 +699,175 @@ async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
         env.sso("corp", "sub-ann", "ann@example.com").await,
         Err("nouser".into())
     );
+}
+
+/// `check --deploy` names the providers that refuse every existing user (#2359).
+#[tokio::test]
+async fn check_deploy_names_providers_that_refuse_every_user() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.shared_provider("team", false).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "no users, nobody refused: {out}");
+
+    let ann = env.user("ann", "ann@example.com", false).await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[warning] [sso] tenant `acme`: provider `corp` has allow_email_link off"),
+        "{out}"
+    );
+    assert!(
+        out.contains("[sso] shared provider `team` (tenant(s) acme) has allow_email_link off"),
+        "{out}"
+    );
+    assert!(!out.contains("`globex`"), "globex has no users: {out}");
+
+    // Linked once, the provider signs that user in: no warning.
+    let corp = rustango::sso::resolve_by_slug(env.pool(), "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    rustango::sso::link::create_link(env.pool(), &corp.key(LinkSource::Tenant), "sub-ann", ann)
+        .await
+        .unwrap();
+    env.set_shared_email_link(true).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "{out}");
+}
+
+/// A shared provider names every active tenant it refuses; a tenant without
+/// the links table has no links (#2359).
+#[tokio::test]
+async fn check_deploy_lists_every_refused_active_tenant() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.shared_provider("team", false).await;
+    env.user("ann", "ann@example.com", false).await;
+    env.user_in(1, "bob", "bob@example.com", false).await;
+    rustango::testkit::matrix::drop_table(&env.tenants[1].pool, "rustango_sso_links").await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[sso] shared provider `team` (tenant(s) acme, globex) has"),
+        "{out}"
+    );
+
+    let registry = env._pools.registry_pool();
+    let mut globex = Org::objects()
+        .filter("slug", "globex")
+        .fetch(&registry)
+        .await
+        .unwrap()
+        .remove(0);
+    globex.active = false;
+    globex.save_pool(&registry).await.unwrap();
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[sso] shared provider `team` (tenant(s) acme) has"),
+        "inactive globex is skipped: {out}"
+    );
+}
+
+/// A registry that can't list tenants is a warning; the rest of the check runs (#2359).
+#[tokio::test]
+async fn check_deploy_runs_when_tenants_cannot_be_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pools = TenantPools::<sqlx::Sqlite>::new(sqlx::SqlitePool::connect(&url).await.unwrap());
+    let mut out = Vec::new();
+    let _ = rustango::tenancy::manage::run_with_writer(
+        &pools,
+        &url,
+        dir.path(),
+        vec!["check".to_owned(), "--deploy".to_owned()],
+        &mut out,
+    )
+    .await;
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("running rustango system check"), "{out}");
+    assert!(
+        out.contains("[warning] [sso] could not list tenants"),
+        "{out}"
+    );
+}
+
+/// A tenant pool that won't open is reported without its database URL (#2359).
+#[tokio::test]
+async fn check_deploy_reports_an_unopenable_tenant_without_its_url() {
+    let _g = SUITE.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pools = TenantPools::<sqlx::Sqlite>::with_secrets(
+        sqlx::SqlitePool::connect(&url).await.unwrap(),
+        rustango::tenancy::EnvSecretsResolver,
+    );
+    let run = |verb: &str| {
+        let mut out = Vec::new();
+        let args: Vec<String> = verb.split(' ').map(str::to_owned).collect();
+        let pools = &pools;
+        let url = &url;
+        let dir = dir.path();
+        async move {
+            let res =
+                rustango::tenancy::manage::run_with_writer(pools, url, dir, args, &mut out).await;
+            (res, String::from_utf8(out).unwrap())
+        }
+    };
+    run("migrate-registry").await.0.expect("migrate-registry");
+    // `EnvSecretsResolver` wants `env://`; its error quotes the literal URL.
+    let mut org = Org {
+        slug: "acme".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some("sqlite:///tmp/acme-hunter2.db".into()),
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&pools.registry_pool()).await.unwrap();
+    let (_, out) = run("check --deploy").await;
+    assert!(
+        out.contains(
+            "[sso] tenant `acme`: could not check SSO providers: could not open the tenant pool"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("hunter2"), "{out}");
+}
+
+/// A table probe that fails is an error, not "no tables" (#2359).
+#[tokio::test]
+async fn check_reports_a_failed_table_probe() {
+    let pool = Pool::connect("sqlite::memory:").await.unwrap();
+    pool.close().await;
+    assert!(rustango::testkit::sso_check::tenant_providers(&pool)
+        .await
+        .is_err());
+}
+
+/// Email linking never signs in a privileged account, so a provider whose
+/// only users are privileged still refuses everyone (#2359).
+#[tokio::test]
+async fn check_deploy_names_an_email_linking_provider_with_only_privileged_users() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", true).await;
+    env.user("root", "root@example.com", true).await;
+    // No email, so nothing to link by.
+    env.user("noemail", "", false).await;
+    let staff = env.user("staff", "staff@example.com", false).await;
+    rustango::tenancy::permissions::set_user_perm_pool(staff, "post.change", true, env.pool())
+        .await
+        .unwrap();
+    let gone = env.user("gone", "gone@example.com", false).await;
+    env.deactivate(gone).await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains(
+            "[warning] [sso] tenant `acme`: provider `corp` has no SsoLink rows and every active user is privileged"
+        ),
+        "{out}"
+    );
+    env.user("ann", "ann@example.com", false).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "ann can link by email: {out}");
 }
 
 #[tokio::test]
@@ -971,6 +1169,41 @@ async fn bare_admin_never_links_by_email_and_signs_in_by_link() {
     root.save_pool(&pool).await.unwrap();
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp), "{}", location(&resp));
+}
+
+/// `check --deploy` names an admin provider with no links (#2359).
+#[tokio::test]
+async fn check_deploy_names_an_unlinked_admin_provider() {
+    let _g = SUITE.lock().await;
+    let (_app, pool, _idp) = bare_admin().await;
+    let check = || async {
+        let mut out = Vec::new();
+        let res = rustango::migrate::manage::run_with_writer(
+            &pool,
+            std::path::Path::new("/nonexistent"),
+            vec!["check".to_owned(), "--deploy".to_owned()],
+            &mut out,
+        )
+        .await;
+        let out = String::from_utf8(out).unwrap();
+        assert_check_ran(res, &out);
+        out
+    };
+    // `corp` allows email linking, which the admin ignores.
+    let out = check().await;
+    assert!(
+        out.contains("[warning] [sso] admin provider `corp` has no SsoLink rows"),
+        "{out}"
+    );
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", 1)
+        .await
+        .unwrap();
+    assert!(!check().await.contains("[sso]"));
 }
 
 /// A bare-admin SSO login gets `iat` = the logout cut-off + 1 (#1855).

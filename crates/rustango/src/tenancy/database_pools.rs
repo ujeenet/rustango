@@ -364,7 +364,8 @@ impl<DB: Database> DatabasePools<DB> {
     }
 }
 
-#[cfg(test)]
+// Every test here needs sqlite or mysql; a PG-only build has none (#2313).
+#[cfg(all(test, any(feature = "sqlite", feature = "mysql")))]
 mod tests {
     use super::*;
 

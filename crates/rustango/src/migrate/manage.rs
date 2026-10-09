@@ -174,7 +174,7 @@ pub async fn run_with_writer<W: Write + Send>(
         // to the unknown-subcommand error.
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
-        "flush" => flush_cmd(pool, &args[1..], writer).await,
+        "flush" => flush_cmd(pool, &args[1..], FlushScope::All, writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
         // Purges expired entries from a DatabaseCache-backed
@@ -485,16 +485,19 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      mirror pg_dump's flags. --no-owner skips OWNER lines.\n"
     )?;
-    writeln!(w, "  db:restore <file> [--clean]")?;
+    writeln!(w, "  db:restore <file> [--clean --yes]")?;
     writeln!(
         w,
-        "      Run psql against $DATABASE_URL with `\\i <file>`. With"
+        "      Run psql against $DATABASE_URL with `\\i <file>`, in one transaction. With"
     )?;
     writeln!(
         w,
         "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`"
     )?;
-    writeln!(w, "      so the restore lands on a clean database.\n")?;
+    writeln!(
+        w,
+        "      so the restore lands on a clean database; --yes confirms the drop.\n"
+    )?;
     writeln!(w, "  db:info")?;
     writeln!(
         w,
@@ -648,10 +651,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     // registry tables get their own file and user's tenant models
     // get theirs. Each scope is a no-op when nothing in that scope
     // changed; the user sees one or two "wrote ..." lines.
-    let has_registry_scoped = inventory::iter::<crate::core::ModelEntry>
-        .into_iter()
-        .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
-    if has_registry_scoped {
+    if has_registry_models() {
         let mut wrote_any = false;
         // Framework ("system app") migrations first — the framework's own
         // `rustango_*` tables are generated into `<project_root>/system/
@@ -717,6 +717,14 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         None => writeln!(w, "no changes — registry matches latest snapshot")?,
     }
     Ok(())
+}
+
+/// A migrated registry model marks a tenancy project. Unmanaged ones
+/// don't: `Translation` is registry-scoped in every build (#2360).
+fn has_registry_models() -> bool {
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .any(|e| e.schema.scope == crate::core::ModelScope::Registry && e.schema.managed)
 }
 
 fn write_scoped_migration<W: Write>(
@@ -905,16 +913,7 @@ where
     if applied.system.is_empty() && applied.project.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
     }
-    // Framework bootstrap table that isn't model-derived: the audit log
-    // is created via idempotent DDL (`CREATE TABLE IF NOT EXISTS`) so any
-    // model declaring `audit(track = ...)` can record writes the moment
-    // migrations are applied — the user never hand-creates it. Cheap and
-    // safe to re-run on every `migrate`.
-    crate::audit::ensure_table_pool(pool).await?;
-    // The admin login fails closed on a missing TOTP table (#1644), so a
-    // fresh install needs it before the first login, not at enrollment.
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    crate::admin::totp_store::ensure_table(pool).await?;
+    ensure_bootstrap_tables(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
@@ -942,6 +941,22 @@ where
         }
     }
     Ok(())
+}
+
+/// The `managed = false` framework tables, created by idempotent DDL on the
+/// database that holds them: the single database, or a tenancy registry.
+///
+/// # Errors
+/// Driver or SQL failures from the DDL.
+pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
+    // Writes to `audit(track = ...)` models record from the first migrate.
+    crate::audit::ensure_table_pool(pool).await?;
+    // The admin login fails closed on a missing TOTP table (#1644), so a
+    // fresh install needs it before the first login, not at enrollment.
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    crate::admin::totp_store::ensure_table(pool).await?;
+    // The admin lists translations wherever they live (#2360).
+    crate::i18n::db::ensure_table_pool(pool).await
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
@@ -1693,12 +1708,37 @@ fn collation_warning(collation: &str) -> Option<String> {
     }
 }
 
+/// Warn about bare-admin SSO providers that refuse every admin user (#2359).
+#[cfg(feature = "admin-sso")]
+async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
+    match crate::sso::check::admin_providers(pool).await {
+        Ok(slugs) => audit
+            .warnings
+            .extend(slugs.iter().map(|s| crate::sso::check::admin_warning(s))),
+        Err(e) => audit.warnings.push(format!(
+            "[sso] could not check the admin SSO providers: {e}"
+        )),
+    }
+}
+
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
     pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
+) -> Result<(), MigrateError> {
+    check_cmd_with(pool, dir, args, w, async { DeployAuditFindings::default() }).await
+}
+
+/// [`check_cmd`] plus `extra` deploy findings gathered elsewhere (the tenancy
+/// dispatcher's per-tenant ones), awaited only under `--deploy`.
+pub(crate) async fn check_cmd_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+    extra: impl std::future::Future<Output = DeployAuditFindings>,
 ) -> Result<(), MigrateError> {
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
@@ -1755,6 +1795,12 @@ async fn check_cmd<W: Write>(
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
         collation_audit(pool, &mut audit).await;
+        #[cfg(feature = "admin-sso")]
+        sso_link_audit(pool, &mut audit).await;
+        let extra = extra.await;
+        audit.info.extend(extra.info);
+        audit.warnings.extend(extra.warnings);
+        audit.errors.extend(extra.errors);
         // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
@@ -2991,14 +3037,17 @@ fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
 struct DbRestoreArgs {
     file: String,
     clean: bool,
+    yes: bool,
 }
 
 fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError> {
     let mut file: Option<String> = None;
     let mut clean = false;
+    let mut yes = false;
     for arg in args {
         match arg.as_str() {
             "--clean" => clean = true,
+            "--yes" => yes = true,
             other if other.starts_with('-') => {
                 return Err(MigrateError::Validation(format!("unknown flag: {other}")));
             }
@@ -3015,17 +3064,87 @@ fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError>
     let file = file.ok_or_else(|| {
         MigrateError::Validation("db:restore <file> requires a dump file path".into())
     })?;
-    Ok(DbRestoreArgs { file, clean })
+    Ok(DbRestoreArgs { file, clean, yes })
 }
 
-/// Build the psql argv given parsed args + URL. Pure function — easy
+/// A restore that may run: the dump is a readable file and any
+/// `--clean` was confirmed. Only [`RestorePlan::check`] builds one (#2283).
+#[derive(Debug)]
+struct RestorePlan {
+    file: String,
+    clean: bool,
+}
+
+impl RestorePlan {
+    /// `confirm` asks the user when `--clean` came without `--yes`.
+    fn check(
+        parsed: DbRestoreArgs,
+        confirm: impl FnOnce(&str) -> bool,
+    ) -> Result<Self, MigrateError> {
+        // Metadata only: opening a FIFO with no writer blocks. A pipe is fine
+        // for a plain load; `--clean` commits its DROP even for an empty dump.
+        let usable = std::fs::metadata(&parsed.file)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if !parsed.clean {
+                    Ok(())
+                } else if !m.is_file() {
+                    Err("--clean needs a regular file".to_owned())
+                } else if m.len() == 0 {
+                    Err("the file is empty".to_owned())
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(e) = usable {
+            return Err(MigrateError::Validation(format!(
+                "db:restore: cannot read `{}`: {e}",
+                parsed.file
+            )));
+        }
+        if parsed.clean && !parsed.yes && !confirm(&parsed.file) {
+            return Err(MigrateError::Validation(
+                "db:restore --clean drops schema `public` first: pass --yes to confirm".into(),
+            ));
+        }
+        Ok(Self {
+            file: parsed.file,
+            clean: parsed.clean,
+        })
+    }
+}
+
+/// Interactive yes for `--clean`; `false` off a terminal.
+fn confirm_clean_restore(file: &str) -> bool {
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    {
+        let prompt =
+            format!("db:restore --clean drops schema `public`, then loads {file}. Type `yes`: ");
+        answered_yes(crate::manage_interactive::ask(&prompt))
+    }
+    #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+/// Only a typed `yes` confirms; no terminal, EOF or anything else refuses.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
+    matches!(answer, Ok(Some(a)) if a == "yes")
+}
+
+/// Build the psql argv given a checked plan + URL. Pure function — easy
 /// to test.
-fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
+fn build_psql_argv(parsed: &RestorePlan, database_url: &str) -> Vec<String> {
     let mut argv = vec![database_url.to_owned()];
     // -v ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL
     // error, instead of plowing through and "succeeding" with garbage.
     argv.push("-v".into());
     argv.push("ON_ERROR_STOP=1".into());
+    // One transaction around the DROP and the load: a failed load rolls the DROP back (#2283).
+    argv.push("--single-transaction".into());
     if parsed.clean {
         argv.push("-c".into());
         argv.push("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;".into());
@@ -3036,7 +3155,7 @@ fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
 }
 
 fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let parsed = parse_db_restore_args(args)?;
+    let parsed = RestorePlan::check(parse_db_restore_args(args)?, confirm_clean_restore)?;
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         MigrateError::Validation(
             "DATABASE_URL must be set for db:restore (e.g. \
@@ -3044,7 +3163,16 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 .into(),
         )
     })?;
-    let argv = build_psql_argv(&parsed, &url);
+    run_psql_restore(&parsed, &url, w)
+}
+
+/// Split from [`db_restore_cmd`] so a test can aim it at a private database.
+fn run_psql_restore<W: Write>(
+    parsed: &RestorePlan,
+    url: &str,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let argv = build_psql_argv(parsed, url);
     writeln!(w, "running: psql {}", redact(&argv).join(" "))?;
     let status = std::process::Command::new("psql")
         .args(&argv)
@@ -4213,23 +4341,216 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
     Ok(out)
 }
 
+/// Which models `flush` may touch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FlushScope<'a> {
+    /// Every managed model: single-tenant `manage flush`.
+    All,
+    /// Tenant-scoped models only (#2284). `schema` names a schema-mode
+    /// tenant; PG names are qualified so `search_path` never falls through to `public`.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Tenant { schema: Option<&'a str> },
+}
+
+/// The DETAIL line of a Postgres error, if there is one.
+fn pg_error_detail(e: &crate::sql::ExecError) -> Option<String> {
+    #[cfg(feature = "postgres")]
+    if let crate::sql::ExecError::Driver(sqlx::Error::Database(db)) = e {
+        return db
+            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .and_then(|pg| pg.detail())
+            .map(str::to_owned);
+    }
+    let _ = e;
+    None
+}
+
+/// `flush` may touch this model: managed, not a view (#2285), in scope (#2284).
+fn flush_eligible(s: &crate::core::ModelSchema, scope: FlushScope<'_>) -> bool {
+    s.managed
+        && !s.is_view
+        && (matches!(scope, FlushScope::All) || s.scope == crate::core::ModelScope::Tenant)
+}
+
+/// Auto-created M2M junctions whose source or destination is a target.
+fn flush_junctions(
+    targets: &[&'static crate::core::ModelSchema],
+    scope: FlushScope<'_>,
+) -> Vec<&'static crate::core::ModelSchema> {
+    let is_target = |t: &str| targets.iter().any(|s| s.table == t);
+    let mut out: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    for entry in inventory::iter::<crate::core::ModelEntry>() {
+        let s = entry.schema;
+        if !flush_eligible(s, scope) {
+            continue;
+        }
+        for m in s.m2m {
+            if m.auto_create
+                && (is_target(s.table) || is_target(m.to))
+                && !is_target(m.through)
+                && !out.iter().any(|j| j.table == m.through)
+            {
+                out.push(crate::sql::m2m::junction(
+                    m.through,
+                    &[m.src_col, m.dst_col],
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// FK and one-to-one links out of `s`: the target table, and the column
+/// when it may be set to NULL. Composite links never can.
+fn fk_edges(
+    s: &crate::core::ModelSchema,
+) -> impl Iterator<Item = (&'static str, Option<&'static str>)> + '_ {
+    use crate::core::Relation;
+    let single = s.fields.iter().filter_map(|f| match f.relation {
+        Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) => {
+            Some((to, f.nullable.then_some(f.column)))
+        }
+        _ => None,
+    });
+    single.chain(s.composite_relations.iter().map(|c| (c.to, None)))
+}
+
+/// `nodes` with each table after every node that references it through an
+/// edge `binds` keeps (self-links never count). Returns the order and the
+/// nodes left in a cycle.
+fn children_first(
+    nodes: &[&'static crate::core::ModelSchema],
+    binds: impl Fn(Option<&'static str>) -> bool,
+) -> (
+    Vec<&'static crate::core::ModelSchema>,
+    Vec<&'static crate::core::ModelSchema>,
+) {
+    let links = |from: &crate::core::ModelSchema, to: &str| {
+        from.table != to && fk_edges(from).any(|(t, col)| t == to && binds(col))
+    };
+    let mut done = vec![false; nodes.len()];
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some(i) = (0..nodes.len()).find(|&i| {
+        !done[i] && !(0..nodes.len()).any(|j| !done[j] && links(nodes[j], nodes[i].table))
+    }) {
+        done[i] = true;
+        order.push(nodes[i]);
+    }
+    let stuck = (0..nodes.len())
+        .filter(|&i| !done[i])
+        .map(|i| nodes[i])
+        .collect();
+    (order, stuck)
+}
+
+/// How `flush` empties `targets` without a table-wide FK bypass.
+struct FlushPlan {
+    /// Nullable links to clear first: self-links, and links inside a cycle.
+    unlink: Vec<(&'static crate::core::ModelSchema, Vec<&'static str>)>,
+    /// Children before parents.
+    order: Vec<&'static crate::core::ModelSchema>,
+    /// Tables in a cycle of NOT NULL links: no delete order exists.
+    stuck: Vec<&'static str>,
+}
+
+fn flush_plan(targets: &[&'static crate::core::ModelSchema]) -> FlushPlan {
+    let (mut order, cyclic) = children_first(targets, |_| true);
+    // Inside a cycle only NOT NULL links bind; nullable ones are cleared first.
+    let (rest, stuck) = children_first(&cyclic, |col| col.is_none());
+    order.extend(rest);
+    order.extend(&stuck);
+    let in_cycle = |t: &str| cyclic.iter().any(|c| c.table == t);
+    let unlink = targets
+        .iter()
+        .map(|s| {
+            let cols: Vec<&'static str> = fk_edges(s)
+                .filter(|(to, _)| *to == s.table || (in_cycle(s.table) && in_cycle(to)))
+                .filter_map(|(_, col)| col)
+                .collect();
+            (*s, cols)
+        })
+        .filter(|(_, cols)| !cols.is_empty())
+        .collect();
+    FlushPlan {
+        unlink,
+        order,
+        stuck: stuck.iter().map(|s| s.table).collect(),
+    }
+}
+
+/// Run `plan` after clearing `junctions`, in one transaction; on error nothing commits.
+async fn delete_all_in_tx(
+    pool: &Pool,
+    junctions: &[&'static crate::core::ModelSchema],
+    plan: &FlushPlan,
+) -> Result<(), (String, String)> {
+    use crate::core::{Assignment, DeleteQuery, SqlValue, UpdateQuery, WhereExpr};
+    let defer = pool.dialect().defer_foreign_keys_sql();
+    if defer.is_none() && !plan.stuck.is_empty() {
+        let tables = plan.stuck.join(", ");
+        let why = "they reference each other through NOT NULL foreign keys; no delete order exists";
+        return Err((tables, why.to_owned()));
+    }
+    let mut tx = crate::sql::write_transaction_pool(pool)
+        .await
+        .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
+    // SQLite: FK checks wait for COMMIT, for this transaction only.
+    if let Some(sql) = defer {
+        crate::sql::raw_execute_tx(&mut tx, sql, Vec::new())
+            .await
+            .map_err(|e| ("BEGIN".to_owned(), e.to_string()))?;
+    }
+    // InnoDB checks each row as it goes: links inside a cycle, or to the
+    // row's own table, must go before the DELETEs.
+    for (schema, cols) in &plan.unlink {
+        let unlink = UpdateQuery {
+            model: schema,
+            set: cols
+                .iter()
+                .map(|c| Assignment::new(c, SqlValue::Null))
+                .collect(),
+            where_clause: WhereExpr::And(Vec::new()),
+        };
+        crate::sql::update_tx(&mut tx, &unlink)
+            .await
+            .map_err(|e| (schema.table.to_owned(), e.to_string()))?;
+    }
+    for schema in junctions.iter().chain(&plan.order) {
+        let all = DeleteQuery {
+            model: schema,
+            where_clause: WhereExpr::And(Vec::new()),
+        };
+        crate::sql::delete_tx(&mut tx, &all)
+            .await
+            .map_err(|e| (schema.table.to_owned(), e.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| ("COMMIT".to_owned(), e.to_string()))
+}
+
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
 /// all rows from registered model tables.
 /// Without `--yes`, prints what would happen and exits without
 /// touching the database (dry-run by default — a hand-typed
 /// `manage flush` doesn't accidentally nuke production).
 ///
-/// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY
-/// CASCADE` in a single statement so FK constraints resolve and
-/// sequences reset. On MySQL/SQLite, emits per-table `DELETE FROM
-/// <table>` in registration order; sequences are NOT reset
+/// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY` in a
+/// single statement so FK constraints resolve and sequences reset. On
+/// MySQL/SQLite, emits per-table `DELETE FROM <table>` in one
+/// transaction, children before parents; sequences are NOT reset
 /// (caller can `DROP SEQUENCE` + `CREATE SEQUENCE` manually if
 /// they need that). The migrations ledger is left untouched —
 /// flush wipes data, not schema or schema history.
 ///
 /// `--app <label>` / `--model <name>` filters narrow the wipe.
 /// Pass either flag multiple times to limit to a set.
-async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+pub(crate) async fn flush_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    scope: FlushScope<'_>,
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let parsed = parse_flush_args(args)?;
     if parsed.help {
         writeln!(w, "flush [--yes] [--app <label>] [--model <name>]")?;
@@ -4238,7 +4559,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             w,
             "  Wipe all rows from registered model tables. Schema + migrations ledger"
         )?;
-        writeln!(w, "  stay intact.")?;
+        writeln!(w, "  stay intact. Unmanaged models and views are skipped.")?;
         writeln!(w)?;
         writeln!(
             w,
@@ -4250,15 +4571,15 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         writeln!(w)?;
         writeln!(
             w,
-            "  Postgres runs TRUNCATE … RESTART IDENTITY CASCADE: ids restart, and tables"
+            "  Postgres runs TRUNCATE … RESTART IDENTITY: ids restart. A table outside"
         )?;
         writeln!(
             w,
-            "  that reference the targets are cleared too, even outside the filter."
+            "  the filter that references a target makes the flush fail; nothing is cleared."
         )?;
         writeln!(
             w,
-            "  MySQL / SQLite delete the rows and keep their id counters."
+            "  MySQL / SQLite delete the rows in one transaction and keep their id counters."
         )?;
         return Ok(());
     }
@@ -4267,6 +4588,9 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
     let mut targets: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
+        if !flush_eligible(schema, scope) {
+            continue;
+        }
         let app = entry.resolved_app_label().unwrap_or("");
         let dotted = if app.is_empty() {
             schema.name.to_owned()
@@ -4290,14 +4614,16 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
         writeln!(w, "flush: no tables match the filter (nothing to do)")?;
         return Ok(());
     }
+    // PG will not truncate a table an auto-created junction still references.
+    let junctions = flush_junctions(&targets, scope);
 
     if !parsed.yes {
         writeln!(
             w,
             "flush: would clear {} table(s) (run with --yes to execute):",
-            targets.len()
+            junctions.len() + targets.len()
         )?;
-        for t in &targets {
+        for t in junctions.iter().chain(&targets) {
             writeln!(w, "  - {}", t.table)?;
         }
         return Ok(());
@@ -4309,32 +4635,35 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
     let mut failures: Vec<(String, String)> = Vec::new();
     if dialect == "postgres" {
         // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
-        let quoted: Vec<String> = targets
+        let d = pool.dialect();
+        let prefix = match scope {
+            FlushScope::Tenant { schema: Some(s) } => format!("{}.", d.quote_ident(s)),
+            _ => String::new(),
+        };
+        let quoted: Vec<String> = junctions
             .iter()
-            .map(|t| pool.dialect().quote_ident(t.table))
+            .chain(&targets)
+            .map(|t| format!("{prefix}{}", d.quote_ident(t.table)))
             .collect();
-        let sql = format!(
-            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
-            quoted.join(", "),
-        );
+        // No CASCADE: a table outside the targets that references one makes PG refuse.
+        let sql = format!("TRUNCATE TABLE {} RESTART IDENTITY", quoted.join(", "));
         match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
-            Ok(_) => cleared = targets.len(),
-            Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
+            Ok(_) => cleared = quoted.len(),
+            // PG's DETAIL names the blocking table; the message alone does not.
+            Err(e) => failures.push((
+                "TRUNCATE".to_owned(),
+                match pg_error_detail(&e) {
+                    Some(detail) => format!("{e} ({detail})"),
+                    None => format!("{e} (tables: {})", quoted.join(", ")),
+                },
+            )),
         }
     } else {
-        // MySQL / SQLite: per-table DELETE in registration order, through
-        // the dialect's writer — hand-quoted `"t"` is a syntax error on
-        // MySQL (#1912). FK constraints from referencing tables may error;
-        // caller can scope with --app / --model.
-        for schema in &targets {
-            let all = crate::core::DeleteQuery {
-                model: schema,
-                where_clause: crate::core::WhereExpr::And(Vec::new()),
-            };
-            match crate::sql::delete_pool(pool, &all).await {
-                Ok(_) => cleared += 1,
-                Err(e) => failures.push((schema.table.to_owned(), e.to_string())),
-            }
+        // MySQL / SQLite: one transaction, junctions then children before
+        // parents, so a failure leaves every table as it was (#2285).
+        match delete_all_in_tx(pool, &junctions, &flush_plan(&targets)).await {
+            Ok(()) => cleared = junctions.len() + targets.len(),
+            Err(failed) => failures.push(failed),
         }
     }
 
@@ -4345,9 +4674,11 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             writeln!(w, "  - {t}: {e}")?;
         }
         // Surface as an error so the caller's exit code reflects partial failure.
+        let what: Vec<String> = failures.iter().map(|(t, e)| format!("{t}: {e}")).collect();
         return Err(MigrateError::Validation(format!(
-            "flush completed with {} failure(s)",
-            failures.len()
+            "flush completed with {} failure(s): {}",
+            failures.len(),
+            what.join("; ")
         )));
     }
     Ok(())
@@ -5273,6 +5604,19 @@ pub fn settings_audit_check(
 mod gen_tests {
     use super::*;
 
+    /// The registry-scoped `Translation` must not flip a single-database
+    /// build into two-scope `makemigrations` (#2360).
+    #[cfg(not(feature = "tenancy"))]
+    #[test]
+    fn unmanaged_registry_model_is_not_tenancy() {
+        use crate::core::Model as _;
+        assert_eq!(
+            crate::i18n::db::Translation::SCHEMA.scope,
+            crate::core::ModelScope::Registry
+        );
+        assert!(!has_registry_models());
+    }
+
     /// #1216 — the verbs that need no database must be dispatchable without
     /// one. `Cli` builds a pool before dispatch otherwise, and `connect_lazy`
     /// validates the URL scheme against the enabled backends, so a SQLite-only
@@ -5906,6 +6250,33 @@ mod gen_tests {
     fn parse_flush_args_help_short_circuits() {
         let p = parse_flush_args(&["--help".into()]).unwrap();
         assert!(p.help);
+    }
+
+    /// A cycle is broken at a nullable link; with none, its tables are named.
+    #[test]
+    fn flush_plan_breaks_cycles_at_nullable_links() {
+        use crate::core::{FieldSchema, FieldType, ModelSchema, Relation};
+        fn table(name: &'static str, to: &'static str, nullable: bool) -> &'static ModelSchema {
+            let mut f = FieldSchema::new("link", "link", FieldType::I64);
+            f.relation = Some(Relation::fk(to, "id"));
+            f.nullable = nullable;
+            let mut s = ModelSchema::new(name, name);
+            s.fields = Box::leak(Box::new([f]));
+            Box::leak(Box::new(s))
+        }
+        let stuck = flush_plan(&[table("a", "b", false), table("b", "a", false)]);
+        assert_eq!(stuck.stuck, ["a", "b"]);
+        let plan = flush_plan(&[table("a", "b", true), table("b", "a", false)]);
+        assert!(plan.stuck.is_empty());
+        let unlinked: Vec<_> = plan
+            .unlink
+            .iter()
+            .map(|(s, c)| (s.table, c.clone()))
+            .collect();
+        assert_eq!(unlinked, [("a", vec!["link"])]);
+        // b's NOT NULL link to a still binds: b goes first.
+        let order: Vec<_> = plan.order.iter().map(|s| s.table).collect();
+        assert_eq!(order, ["b", "a"]);
     }
 
     #[test]
@@ -7257,11 +7628,127 @@ mod db_cmd_tests {
         assert!(r.is_err());
     }
 
+    // -------- RestorePlan::check (#2283)
+
+    fn restore_args(file: &str, clean: bool, yes: bool) -> DbRestoreArgs {
+        DbRestoreArgs {
+            file: file.into(),
+            clean,
+            yes,
+        }
+    }
+
+    #[test]
+    fn restore_refuses_a_missing_file_before_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.sql");
+        let missing = missing.to_str().unwrap();
+        let err = RestorePlan::check(restore_args(missing, true, false), |_| {
+            panic!("asked to confirm a file that does not exist")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot read"), "{err}");
+        let dir_path = dir.path().to_str().unwrap();
+        assert!(RestorePlan::check(restore_args(dir_path, true, true), |_| true).is_err());
+    }
+
+    #[test]
+    fn restore_clean_needs_yes_or_a_confirm() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "SELECT 1;\n").unwrap();
+        let path = f.path().to_str().unwrap();
+        let err = RestorePlan::check(restore_args(path, true, false), |_| false).unwrap_err();
+        assert!(err.to_string().contains("--yes"), "{err}");
+        assert!(RestorePlan::check(restore_args(path, true, false), |_| true).is_ok());
+        assert!(RestorePlan::check(restore_args(path, true, true), |_| false).is_ok());
+        assert!(RestorePlan::check(restore_args(path, false, false), |_| false).is_ok());
+        let p = parse_db_restore_args(&args(&["--clean", "--yes", path])).unwrap();
+        assert!(p.clean && p.yes);
+    }
+
+    /// An empty dump under `--clean` would commit the DROP and load nothing.
+    #[test]
+    fn restore_clean_refuses_an_empty_file() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let err = RestorePlan::check(restore_args(path, true, true), |_| true).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+        assert!(RestorePlan::check(restore_args(path, false, false), |_| false).is_ok());
+    }
+
+    /// A plain load still takes a pipe; `--clean` does not.
+    #[cfg(unix)]
+    #[test]
+    fn restore_takes_a_pipe_only_without_clean() {
+        assert!(RestorePlan::check(restore_args("/dev/stdin", false, false), |_| false).is_ok());
+        let err = RestorePlan::check(restore_args("/dev/stdin", true, true), |_| true).unwrap_err();
+        assert!(err.to_string().contains("regular file"), "{err}");
+    }
+
+    #[test]
+    fn restore_prompt_needs_a_typed_yes() {
+        assert!(answered_yes(Ok(Some("yes".into()))));
+        for no in [Ok(Some("y".into())), Ok(Some("YES".into())), Ok(None)] {
+            assert!(!answered_yes(no));
+        }
+        assert!(!answered_yes(Err(std::io::Error::other("tty"))));
+    }
+
+    /// `--clean` with a failing dump rolls the DROP back. Runs on a database
+    /// it creates and drops, never the shared one (#2283).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn restore_clean_rolls_back_a_bad_dump_on_a_private_database() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set — skipping");
+            return;
+        };
+        assert!(
+            std::process::Command::new("psql")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success()),
+            "db:restore needs `psql` on PATH"
+        );
+        let db = format!("rustango_restore_{}", std::process::id());
+        let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
+        let private = format!("{base}/{db}");
+        let admin = sqlx::PgPool::connect(&url).await.expect("connect");
+        let drop_db = format!(r#"DROP DATABASE IF EXISTS "{db}" WITH (FORCE)"#);
+        sqlx::query(&drop_db).execute(&admin).await.unwrap();
+        sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let p = sqlx::PgPool::connect(&private).await.expect("private db");
+        for sql in ["CREATE TABLE keep (id int)", "INSERT INTO keep VALUES (1)"] {
+            sqlx::query(sql).execute(&p).await.unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.sql");
+        std::fs::write(
+            &bad,
+            "CREATE TABLE half (id int);\nSELECT * FROM no_such_table;\n",
+        )
+        .unwrap();
+
+        let plan = RestorePlan::check(restore_args(bad.to_str().unwrap(), true, true), |_| true)
+            .expect("plan");
+        let res = run_psql_restore(&plan, &private, &mut Vec::new());
+        let kept: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM keep")
+            .fetch_one(&p)
+            .await;
+        p.close().await;
+        sqlx::query(&drop_db).execute(&admin).await.unwrap();
+        assert_eq!(kept.ok(), Some(1), "the bad dump left the DROP committed");
+        assert!(res.unwrap_err().to_string().contains("psql exited"));
+    }
+
     // -------- build_psql_argv
 
     #[test]
     fn restore_argv_includes_on_error_stop() {
-        let parsed = DbRestoreArgs {
+        let parsed = RestorePlan {
             file: "/tmp/x.sql".into(),
             clean: false,
         };
@@ -7269,6 +7756,7 @@ mod db_cmd_tests {
         // ON_ERROR_STOP=1 prevents psql from continuing past errors
         // and silently "succeeding" with a half-restored DB.
         assert!(argv.contains(&"ON_ERROR_STOP=1".to_owned()));
+        assert!(argv.contains(&"--single-transaction".to_owned()));
         assert!(argv.contains(&"-f".to_owned()));
         assert!(argv.contains(&"/tmp/x.sql".to_owned()));
         assert!(!argv.iter().any(|a| a.contains("DROP SCHEMA")));
@@ -7276,7 +7764,7 @@ mod db_cmd_tests {
 
     #[test]
     fn restore_argv_with_clean_drops_schema() {
-        let parsed = DbRestoreArgs {
+        let parsed = RestorePlan {
             file: "/tmp/x.sql".into(),
             clean: true,
         };

@@ -959,6 +959,14 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Whether a limit or offset is set, on the query or its head branch.
+    pub(crate) fn is_sliced(&self) -> bool {
+        self.limit.is_some()
+            || self.offset.is_some()
+            || self.head_limit.is_some()
+            || self.head_offset.is_some()
+    }
+
     /// Whether any `ORDER BY` item is registered. The executor's
     /// `ensure_pk_ordering` uses it to spot "no ordering set" without
     /// looking at the entry variants.
@@ -2628,6 +2636,12 @@ fn lower_select_related(
                 prev_alias_owned = format!("{prev_alias_owned}__{hop}");
                 intern_join_alias(&prev_alias_owned)?
             };
+            // A hop shared with an earlier name is already joined (#2294).
+            if out.iter().any(|j| j.alias == alias) {
+                current = target;
+                prev_alias = alias;
+                continue;
+            }
             let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
             out.push(Join {
                 target,

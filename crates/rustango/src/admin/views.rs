@@ -73,9 +73,8 @@ fn render_json_path_cell(
 /// Render one generic-FK cell: read `(ct_column, pk_column)` off the
 /// JSON row and emit a link to the target.
 ///
-/// Output matches `contenttypes::render_generic_fk_link`, but this is
-/// synchronous. The list view preloads every ContentType on the page
-/// first, so there is no DB I/O per cell.
+/// Synchronous: the list and detail views preload the ContentTypes
+/// with [`gfk_ct_map`] first, so there is no DB I/O per cell.
 fn render_gfk_cell(
     row: &serde_json::Value,
     gr: &crate::core::GenericRelation,
@@ -94,7 +93,7 @@ fn render_gfk_cell(
         return "<em>NULL</em>".to_owned();
     }
     let Some(ct) = ct_map.get(&ct_id) else {
-        // CT stale or not seeded: same fallback `render_generic_fk_link` uses.
+        // CT stale, not seeded, or a table the user may not view.
         return format!("<em>(ct={ct_id}, pk={object_pk})</em>");
     };
     let label = format!("{}.{}", ct.app_label, ct.model_name);
@@ -109,6 +108,37 @@ fn render_gfk_cell(
     )
 }
 
+/// Content types of the GFK targets in `rows`, by id. A target table the
+/// user may not view is left out, so its cell gets no label or link (#2341).
+async fn gfk_ct_map(
+    state: &AppState,
+    rows: &[serde_json::Value],
+    relations: impl Iterator<Item = &'static crate::core::GenericRelation>,
+) -> HashMap<i64, crate::contenttypes::ContentType> {
+    use crate::sql::FetcherPool as _;
+    let mut needed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for gr in relations {
+        needed.extend(
+            rows.iter()
+                .filter_map(|row| row.get(gr.ct_column).and_then(serde_json::Value::as_i64)),
+        );
+    }
+    if needed.is_empty() {
+        return HashMap::new();
+    }
+    // One round trip; ids are bounded by the page size.
+    let ids = needed.into_iter().map(SqlValue::I64).collect();
+    let cts: Vec<crate::contenttypes::ContentType> = crate::contenttypes::ContentType::objects()
+        .filter_op("id", Op::In, SqlValue::List(ids))
+        .fetch(&state.pool)
+        .await
+        .unwrap_or_default();
+    cts.into_iter()
+        .filter(|ct| lookup_model(state, &ct.table).is_some())
+        .filter_map(|ct| Some((*ct.id.get()?, ct)))
+        .collect()
+}
+
 // ============================================================== INDEX
 
 pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
@@ -117,8 +147,6 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
     // from the module path. Models with no app label go to "Project".
     let mut entries: Vec<&'static ModelEntry> = super::helpers::inventory_entries_dedup_by_table()
         .into_iter()
-        // Registry-scoped models are hidden in tenant mode.
-        .filter(|e| state.scope_visible(e.schema.scope))
         .filter(|e| state.is_visible(e.schema.table))
         .collect();
     entries.sort_by_key(|e| e.schema.name);
@@ -567,31 +595,17 @@ pub(crate) async fn table_view(
 
     // Preload every ContentType used by a `DisplayItem::GenericFk`
     // cell, so the row loop reads a map instead of doing one async
-    // lookup per cell. The CT registry is process-cached, so this is
-    // at most one round-trip per distinct ct_id.
-    let gfk_ct_map: std::collections::HashMap<i64, crate::contenttypes::ContentType> = {
-        use std::collections::HashSet;
-        let mut needed: HashSet<i64> = HashSet::new();
-        for gr in model.generic_relations {
-            if display_items
+    // lookup per cell.
+    let gfk_ct_map = gfk_ct_map(
+        &state,
+        &rows,
+        model.generic_relations.iter().filter(|gr| {
+            display_items
                 .iter()
                 .any(|i| matches!(i, DisplayItem::GenericFk(g) if g.name == gr.name))
-            {
-                for row in &rows {
-                    if let Some(id) = row.get(gr.ct_column).and_then(serde_json::Value::as_i64) {
-                        needed.insert(id);
-                    }
-                }
-            }
-        }
-        let mut map = std::collections::HashMap::with_capacity(needed.len());
-        for id in needed {
-            if let Ok(Some(ct)) = crate::contenttypes::ContentType::by_id(&state.pool, id).await {
-                map.insert(id, ct);
-            }
-        }
-        map
-    };
+        }),
+    )
+    .await;
 
     // Per-column header label. The PK gets a `<small>(pk)</small>`
     // suffix. Computed fields show their declared label, or the bare
@@ -892,7 +906,9 @@ pub(crate) async fn table_view(
 ///
 /// Counts are within the list's filters and search, minus the facet's
 /// own field filter, as Django does (#2004). One ORM `GROUP BY` per
-/// facet, plus one lookup for an FK facet's display values.
+/// facet capped past `FACET_TRUNCATE`, plus one lookup for an FK facet's
+/// display values. A capped facet also counts its values and reads the
+/// active one.
 ///
 /// Clicking the active value clears that filter. Clicking another
 /// value sets it.
@@ -930,12 +946,49 @@ async fn compute_facets(
             .chain(other_filters.iter().cloned())
             .collect();
         let source = SelectQuery {
-            where_clause: WhereExpr::and_predicates(facet_filters),
+            where_clause: WhereExpr::and_predicates(facet_filters.clone()),
             search: search.cloned(),
             ..SelectQuery::new(model)
         };
         let is_bool = field.ty == crate::core::FieldType::Bool;
-        let mut facet_rows = fetch_facet_counts(state, source, field, is_bool).await?;
+        let show_all = show_all_facet == Some(field.name);
+        // One past the cap tells whether there are more (#2344).
+        let limit = (!show_all).then_some(FACET_TRUNCATE + 1);
+        let mut facet_rows =
+            fetch_facet_counts(state, source.clone(), field, is_bool, limit).await?;
+        let is_active = |r: &FacetRow| {
+            active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw))
+        };
+        let mut total_values = facet_rows.len();
+        if !show_all && total_values > FACET_TRUNCATE {
+            total_values = fetch_facet_value_total(state, source, field).await?;
+            // The active value may sit past the cut: read it on its own.
+            // The field's own filters select at most one value.
+            if !facet_rows.iter().any(is_active) {
+                let own: Vec<Filter> = field_filters
+                    .iter()
+                    .filter(|(name, _)| *name == field.name)
+                    .map(|(_, f)| f.clone())
+                    .collect();
+                if !own.is_empty() {
+                    let active_source = SelectQuery {
+                        where_clause: WhereExpr::and_predicates(
+                            facet_filters.into_iter().chain(own).collect(),
+                        ),
+                        search: search.cloned(),
+                        ..SelectQuery::new(model)
+                    };
+                    let extra =
+                        fetch_facet_counts(state, active_source, field, is_bool, Some(1)).await?;
+                    // `?author=01` names a shown value in another spelling.
+                    let extra: Vec<FacetRow> = extra
+                        .into_iter()
+                        .filter(|e| facet_rows.iter().all(|r| r.raw != e.raw))
+                        .collect();
+                    facet_rows.extend(extra);
+                }
+            }
+        }
         // An FK facet shows the target's display value: "Dr. Maeve O'Hara (3)", not "1 (3)".
         let fk_target = field.relation.and_then(|rel| match rel {
             crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
@@ -1002,8 +1055,6 @@ async fn compute_facets(
         // Truncate to FACET_TRUNCATE values unless "show all" is on
         // for this column. Active values always render, so one never
         // hides behind the cutoff. They count toward the budget.
-        let show_all = show_all_facet == Some(field.name);
-        let total_values = values.len();
         let mut more_count: usize = 0;
         if !show_all && total_values > FACET_TRUNCATE {
             // Keep every active value + as many of the rest as fit.
@@ -1062,12 +1113,45 @@ struct FacetRow {
     count: i64,
 }
 
-/// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used first.
+/// How many distinct values (NULL included) `field` takes over `source`'s rows.
+async fn fetch_facet_value_total(
+    state: &AppState,
+    source: SelectQuery,
+    field: &'static FieldSchema,
+) -> Result<usize, AdminError> {
+    use crate::core::{AggregateExpr, AggregateQuery};
+    let agg = AggregateQuery::over_select(
+        source,
+        vec![
+            (
+                "facet_distinct".into(),
+                AggregateExpr::CountDistinct(field.column),
+            ),
+            ("facet_rows".into(), AggregateExpr::Count(None)),
+            (
+                "facet_non_null".into(),
+                AggregateExpr::Count(Some(field.column)),
+            ),
+        ],
+    );
+    let row = crate::sql::fetch_aggregate_dict(&state.pool, &agg)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    // COUNT(DISTINCT) skips NULL, but GROUP BY gives it a value of its own.
+    let has_null = sql_int(row.get("facet_rows")) > sql_int(row.get("facet_non_null"));
+    Ok(usize::try_from(sql_int(row.get("facet_distinct"))).unwrap_or(0) + usize::from(has_null))
+}
+
+/// `SELECT <col>, COUNT(*) … GROUP BY <col>` over `source`'s rows, most used
+/// first, at most `limit` values.
 async fn fetch_facet_counts(
     state: &AppState,
     source: SelectQuery,
     field: &'static FieldSchema,
     is_bool: bool,
+    limit: Option<usize>,
 ) -> Result<Vec<FacetRow>, AdminError> {
     use crate::core::{AggregateExpr, AggregateQuery, Expr, OrderItem};
     let mut agg = AggregateQuery::over_select(
@@ -1079,6 +1163,7 @@ async fn fetch_facet_counts(
         OrderItem::expr(Expr::Aggregate(Box::new(AggregateExpr::Count(None))), true),
         OrderItem::column(field.column, false),
     ];
+    agg.limit = limit.and_then(|n| i64::try_from(n).ok());
     let rows = crate::sql::fetch_aggregate_dict(&state.pool, &agg).await?;
     Ok(rows
         .into_iter()
@@ -1678,22 +1763,16 @@ pub(crate) async fn detail_view(
     // the `(content_type_id, object_pk)` pair and render a link to
     // the target. A stale reference (CT not seeded, target deleted)
     // falls back to `(ct=N, pk=M)` instead of failing the page.
+    let gfk_cts = gfk_ct_map(
+        &state,
+        std::slice::from_ref(&row),
+        model.generic_relations.iter(),
+    )
+    .await;
     for gfk in model.generic_relations {
-        let ct_id = row
-            .get(gfk.ct_column)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let object_pk = row
-            .get(gfk.pk_column)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
-        let html = crate::contenttypes::render_generic_fk_link(&state.pool, g)
-            .await
-            .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
         cells_ctx.push(serde_json::json!({
             "label": gfk.name,
-            "value": html,
+            "value": render_gfk_cell(&row, gfk, &gfk_cts, &state.config.admin_prefix),
         }));
     }
 
@@ -1948,7 +2027,13 @@ pub(crate) async fn create_submit(
             pk.to_display_string()
         }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), false, Some(&write_error(&e)));
+            let html = render_form(
+                &state,
+                model,
+                Some(&form),
+                false,
+                Some(&write_error(model, &e)),
+            );
             return Ok(Html(html).into_response());
         }
     };
@@ -1964,14 +2049,45 @@ pub(crate) async fn create_submit(
     Ok(Redirect::to(&target).into_response())
 }
 
-/// The form error for a failed create or edit write.
-fn write_error(e: &crate::sql::ExecError) -> String {
-    match super::errors::missing_table(e) {
-        Some(t) if t == crate::audit::AUDIT_TABLE => {
-            "audit table missing — run `manage migrate`".to_owned()
-        }
-        _ => e.to_string(),
+/// The form error for a failed write. Never the driver's text: it holds
+/// table, constraint and SQL (#2345); that goes to the log under an id.
+fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecError) -> String {
+    use crate::sql::Refusal;
+    if super::errors::missing_table(e).is_some_and(|t| t == crate::audit::AUDIT_TABLE) {
+        return "audit table missing — run `manage migrate`".to_owned();
     }
+    // Checked before any SQL ran (max_length, min/max, validators): no driver text.
+    if let crate::sql::ExecError::Query(q) = e {
+        return q.to_string();
+    }
+    let refusal = e.refusal();
+    let id = super::errors::log_with_id("admin write refused", e, refusal.is_some());
+    let msg = match refusal {
+        Some(Refusal::Unique) => {
+            let unique: Vec<&str> = model
+                .scalar_fields()
+                .filter(|f| f.unique && !f.primary_key)
+                .map(|f| f.name)
+                .collect();
+            // A typed PK or a composite unique may be what clashed instead.
+            let other_keys = model.primary_key().is_none_or(|pk| !pk.auto)
+                || model.indexes.iter().any(|i| i.unique);
+            if unique.is_empty() || other_keys {
+                format!("A {} with these values already exists.", model.name)
+            } else {
+                format!(
+                    "A {} with this {} already exists.",
+                    model.name,
+                    unique.join(" or ")
+                )
+            }
+        }
+        Some(Refusal::ForeignKey) => "A related object it points to does not exist.".to_owned(),
+        Some(Refusal::NotNull) => "A required value is missing.".to_owned(),
+        Some(Refusal::Check) => "A value is outside what this table allows.".to_owned(),
+        None => "The change could not be saved.".to_owned(),
+    };
+    format!("{msg} (error id {id})")
 }
 
 /// Fill read-only, NOT NULL timestamps with no default: the form never
@@ -2273,7 +2389,15 @@ pub(crate) async fn update_submit(
     } else {
         crate::audit::DiffEmit::AfterCommit
     };
-    let written = crate::audit::update_one_with_row_diff(
+    // Parent and inline writes share one transaction: a refused inline
+    // row rolls the parent back too (#2339).
+    let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
+    let mut tx = match crate::sql::write_transaction_pool(&state.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return Ok(refused(write_error(model, &e)).into_response()),
+    };
+    let written = crate::audit::update_one_with_row_diff_tx(
+        &mut tx,
         &state.pool,
         &query,
         before_select,
@@ -2285,21 +2409,33 @@ pub(crate) async fn update_submit(
         emit,
     )
     .await;
-    match written {
-        Ok(crate::audit::RowDiffWrite::Written { deferred }) => {
-            if let Some(entry) = deferred {
-                super::audit::emit_best_effort(&state, &entry).await;
-            }
-        }
+    let deferred = match written {
+        Ok(crate::audit::RowDiffWrite::Written { deferred }) => deferred,
         Ok(crate::audit::RowDiffWrite::Gone) => {
-            return Err(AdminError::RowNotFound { table, pk: pk_raw })
+            rollback_quietly(tx, model.table).await;
+            return Err(AdminError::RowNotFound { table, pk: pk_raw });
         }
         Err(e) => {
-            let html = render_form(&state, model, Some(&form), true, Some(&write_error(&e)));
-            return Ok(Html(html).into_response());
+            rollback_quietly(tx, model.table).await;
+            return Ok(refused(write_error(model, &e)).into_response());
         }
+    };
+    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, inline_plan).await {
+        use super::inlines::InlineApplyError as E;
+        rollback_quietly(tx, model.table).await;
+        let why = match e {
+            E::Write { child, error } => write_error(child, &error),
+            E::MaxNum { child } => format!("{} allows no more rows here.", child.name),
+        };
+        return Ok(refused(format!("Nothing was saved: {why}")).into_response());
     }
-    // The `post_save` hook fires after the UPDATE and the audit
+    if let Err(e) = tx.commit().await {
+        return Ok(refused(write_error(model, &e.into())).into_response());
+    }
+    if let Some(entry) = deferred {
+        super::audit::emit_best_effort(&state, &entry).await;
+    }
+    // The `post_save` hook fires after the commit and the audit
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
@@ -2308,12 +2444,16 @@ pub(crate) async fn update_submit(
     })
     .await;
 
-    // Apply the inline writes. There is no transaction across rows: a
-    // per-row write failure is counted, not rolled back.
-    let _ = super::inlines::apply_plan(&state.pool, inline_plan).await;
-
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
+}
+
+/// A failed ROLLBACK must not replace the refusal with a 500; dropping
+/// the connection discards the tx anyway.
+async fn rollback_quietly(tx: crate::sql::PoolTx<'_>, table: &str) {
+    if let Err(e) = tx.rollback().await {
+        tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
+    }
 }
 
 // ============================================================== DELETE
@@ -2377,7 +2517,7 @@ pub(crate) async fn delete_submit(
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
         crate::sql::update_pool(&state.pool, &stamp).await?
     } else {
-        crate::sql::delete_pool(
+        let deleted = crate::sql::delete_pool(
             &state.pool,
             &DeleteQuery {
                 model,
@@ -2388,7 +2528,11 @@ pub(crate) async fn delete_submit(
                 }),
             },
         )
-        .await?
+        .await;
+        match deleted {
+            Ok(n) => n,
+            Err(e) => return refused_delete(&state, model, e),
+        }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
     if affected == 0 {
@@ -2432,6 +2576,62 @@ pub(crate) async fn delete_submit(
     Ok(Redirect::to(&list_url).into_response())
 }
 
+/// A failed hard delete: a 409 naming who still points at the row when
+/// the database refused on an FK (#2340), else the usual error.
+fn refused_delete(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    e: crate::sql::ExecError,
+) -> Result<Response, AdminError> {
+    if e.refusal() != Some(crate::sql::Refusal::ForeignKey) {
+        return Err(e.into());
+    }
+    // PG names the table; elsewhere list the models whose FK could block.
+    let named = e.fk_referencing_table().map(str::to_owned);
+    let exact = named.is_some();
+    let mut tables: Vec<String> =
+        named.map_or_else(|| blocking_referrers(model.table), |t| vec![t]);
+    let id = super::errors::log_with_id(
+        &format!("admin delete refused; referrers {tables:?}"),
+        &e,
+        true,
+    );
+    // Name only tables this user may open in the admin.
+    tables.retain(|t| lookup_model(state, t).is_some());
+    let by = match (tables.is_empty(), exact) {
+        (true, _) => "other rows".to_owned(),
+        (false, true) => format!("rows in {}", tables.join(", ")),
+        (false, false) => format!("other rows, possibly in {}", tables.join(", ")),
+    };
+    Ok(crate::api_errors::ApiError::conflict(format!(
+        "{} is still referenced by {by}; delete or change those first.",
+        model.name
+    ))
+    .with_details(serde_json::json!({
+        "table": model.table,
+        "referenced_by": tables,
+        "correlation_id": id,
+    }))
+    .into_response())
+}
+
+/// Tables whose FK onto `table` refuses a parent delete.
+fn blocking_referrers(table: &str) -> Vec<String> {
+    use crate::core::{OnDeleteAction as A, Relation};
+    let mut out: Vec<String> = super::helpers::inventory_entries_dedup_by_table()
+        .into_iter()
+        .filter(|entry| {
+            entry.schema.scalar_fields().any(|f| {
+                matches!(f.relation, Some(Relation::Fk { to, .. } | Relation::O2O { to, .. }) if to == table)
+                    && !matches!(f.fk_on_delete, Some(A::Cascade | A::SetNull | A::SetDefault))
+            })
+        })
+        .map(|entry| entry.schema.table.to_owned())
+        .collect();
+    out.sort();
+    out
+}
+
 // ============================================================== ACTIONS
 
 /// `POST /<table>/__action`: run a bulk action. Form payload:
@@ -2457,7 +2657,7 @@ pub(crate) async fn action_submit(
     // collapse the duplicate `_selected` keys into one, so read the
     // raw body into a `Vec` of pairs instead.
     let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
-        .map_err(|e| AdminError::Internal(format!("parse action form: {e}")))?;
+        .map_err(|e| bad_action_form("body", "form", String::new(), e.to_string()))?;
 
     // The bottom action bar posts `action_bottom` so it does not
     // clash with the top bar's empty default. The first non-empty
@@ -2499,10 +2699,13 @@ pub(crate) async fn action_submit(
 
     let admin_cfg = admin_config_or_default(model);
     if !admin_cfg.actions.iter().any(|a| *a == action) {
-        return Err(AdminError::Internal(format!(
-            "action `{action}` not registered for `{}`",
-            model.name
-        )));
+        // A client error (#2346): the allowlist is the model's own.
+        return Err(bad_action_form(
+            "action",
+            "action",
+            action,
+            format!("not an action of `{}`", model.name),
+        ));
     }
     // Pick and permission-check the write before any row signal (#1928).
     let Some(write) = BulkWrite::plan(&state, model, &action)? else {
@@ -2587,7 +2790,9 @@ pub(crate) async fn action_submit(
             Some(col) => Some(mark(col, Some(chrono::Utc::now())).await?),
             None => {
                 let query = DeleteQuery::by_pk_in(model, pk_field.column, pk_values.clone());
-                crate::sql::delete_pool(&state.pool, &query).await?;
+                if let Err(e) = crate::sql::delete_pool(&state.pool, &query).await {
+                    return refused_delete(&state, model, e);
+                }
                 None
             }
         },
@@ -2654,6 +2859,16 @@ pub(crate) async fn action_submit(
     send_row_signals(model.table, &row_pks, is_delete, false).await;
 
     back()
+}
+
+/// A malformed action POST: a 400, not a 500 (#2346).
+fn bad_action_form(field: &str, ty: &'static str, value: String, detail: String) -> AdminError {
+    AdminError::Form(forms::FormError::Parse {
+        field: field.to_owned(),
+        ty,
+        value,
+        detail,
+    })
 }
 
 /// The write a bulk action makes, chosen and permission-checked before

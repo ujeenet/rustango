@@ -291,7 +291,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cargo-rustango"
-version = "0.60.3"
+version = "0.60.4"
 dependencies = [
  "toml",
 ]
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.60.3"
+version = "0.60.4"
 dependencies = [
  "argon2",
  "async-stream",
@@ -2247,6 +2247,7 @@ dependencies = [
  "dotenvy",
  "flate2",
  "fs4",
+ "futures-util",
  "hmac",
  "http",
  "http-body",
@@ -2290,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.60.3"
+version = "0.60.4"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2301,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-orm-macros"
-version = "0.60.3"
+version = "0.60.4"
 dependencies = [
  "rustango",
  "rustango-macros",

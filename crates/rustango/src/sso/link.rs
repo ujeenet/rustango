@@ -232,6 +232,33 @@ pub async fn linked_user(
     Ok(Some(link))
 }
 
+/// Whether any identity is linked through `key`. The issuer is compared
+/// exactly, as in [`linked_user`]: SQL `=` is case-blind on MySQL `_ci`.
+#[cfg(any(feature = "tenancy", feature = "admin-sso"))]
+pub(crate) async fn any_link(pool: &Pool, key: &ProviderKey) -> Result<bool, ExecError> {
+    const PAGE: i64 = 500;
+    let mut offset = 0;
+    loop {
+        let issuers = SsoLink::objects()
+            .filter("provider_source", key.source.as_str())
+            .filter("provider_id", key.provider_id)
+            .filter("issuer", key.issuer.clone())
+            .order_by(&[("id", false)])
+            .limit(PAGE)
+            .offset(offset)
+            .values_list_flat("issuer")
+            .fetch::<String>(pool)
+            .await?;
+        if issuers.iter().any(|i| *i == key.issuer) {
+            return Ok(true);
+        }
+        if i64::try_from(issuers.len()).unwrap_or(PAGE) < PAGE {
+            return Ok(false);
+        }
+        offset += PAGE;
+    }
+}
+
 fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
     SsoLink {
         id: Auto::Unset,

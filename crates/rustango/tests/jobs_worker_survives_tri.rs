@@ -150,6 +150,40 @@ impl Job for Orphan {
     }
 }
 
+/// `MAX_ATTEMPTS = 0` must still run once (#2333).
+#[derive(Serialize, Deserialize)]
+struct NoAttempts {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for NoAttempts {
+    const NAME: &'static str = "tri2333:no_attempts";
+    const MAX_ATTEMPTS: u32 = 0;
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("again".into()))
+    }
+}
+
+/// Waits an hour before its retry (#2332).
+#[derive(Serialize, Deserialize)]
+struct SlowRetry {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for SlowRetry {
+    const NAME: &'static str = "tri2332:slow_retry";
+    fn retry_backoff(_: u32) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn run(&self) -> Result<(), JobError> {
+        start(&self.token);
+        Err(JobError::Retryable("later".into()))
+    }
+}
+
 async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     let q = PgJobQueue::with_workers_pool(pool.clone(), workers)
         .poll_interval(Duration::from_millis(20))
@@ -158,7 +192,97 @@ async fn queue(pool: &Pool, workers: usize, heartbeat: Duration) -> PgJobQueue {
     q.register::<Tick>().await;
     q.register::<Slow>().await;
     q.register::<FailFirst>().await;
+    q.register::<NoAttempts>().await;
+    q.register::<SlowRetry>().await;
     q
+}
+
+async fn a_jobs_backoff_hook_sets_its_retry_time(pool: &Pool) {
+    let tok = token(pool, "slow_retry");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.dispatch(&SlowRetry { token: tok.clone() }).await.unwrap();
+    q.start().await;
+    wait_for("the first run", || counts(&tok).0 == 1).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while the_row(pool).await.1 {
+        assert!(Instant::now() < deadline, "retry never scheduled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    q.shutdown().await;
+    let sql = format!(
+        "SELECT COUNT(*) FROM rustango_jobs WHERE run_at > {}",
+        pool.dialect().placeholder(1)
+    );
+    let later = chrono::Utc::now() + chrono::Duration::minutes(50);
+    let rows: Vec<(i64,)> =
+        rustango::sql::raw_query_pool(&sql, vec![SqlValue::DateTime(later)], pool)
+            .await
+            .expect("run_at");
+    assert_eq!(rows[0].0, 1, "retry not an hour out");
+}
+
+/// A database queue sends with the mailer it was registered with, not
+/// the process-wide fallback (#2334).
+async fn a_db_queue_sends_with_its_registered_mailer(pool: &Pool) {
+    #[cfg(feature = "email")]
+    {
+        use rustango::email::{Email, InMemoryMailer};
+        use rustango::email_jobs::{dispatch_email, register_email_job, EmailJobConfig};
+        let (mine, other) = (
+            Arc::new(InMemoryMailer::new()),
+            Arc::new(InMemoryMailer::new()),
+        );
+        let q = queue(pool, 1, Duration::from_secs(60)).await;
+        register_email_job(&q, EmailJobConfig::new(mine.clone())).await;
+        // Another queue overwrites the process-wide fallback.
+        let mem = rustango::jobs::InMemoryJobQueue::with_workers(1);
+        register_email_job(&mem, EmailJobConfig::new(other.clone())).await;
+        let email = Email::new()
+            .from("a@x.com")
+            .to("b@x.com")
+            .subject("s")
+            .body("b");
+        dispatch_email(&q, &email).await.unwrap();
+        q.start().await;
+        wait_for("the send", || mine.count() + other.count() > 0).await;
+        q.shutdown().await;
+        assert_eq!(
+            (mine.count(), other.count()),
+            (1, 0),
+            "sent by the fallback"
+        );
+    }
+    #[cfg(not(feature = "email"))]
+    let _ = pool;
+}
+
+async fn zero_max_attempts_runs_once(pool: &Pool) {
+    let tok = token(pool, "zero");
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    let dead = dead_letters(&q).await;
+    q.dispatch(&NoAttempts { token: tok.clone() })
+        .await
+        .unwrap();
+    let rows: Vec<(i32,)> =
+        rustango::sql::raw_query_pool("SELECT max_attempts FROM rustango_jobs", Vec::new(), pool)
+            .await
+            .expect("max_attempts");
+    assert_eq!(rows[0].0, 1, "stored as one run");
+    // A row queued before the fix still holds 0.
+    rustango::sql::raw_execute_pool(
+        pool,
+        "UPDATE rustango_jobs SET max_attempts = 0",
+        Vec::new(),
+    )
+    .await
+    .expect("old row");
+    q.start().await;
+    wait_for("the dead letter", || !dead.lock().unwrap().is_empty()).await;
+    q.shutdown().await;
+    assert_eq!(counts(&tok).0, 1, "ran once, no retry");
+    let dl = dead.lock().unwrap();
+    assert_eq!(dl[0].attempts, 1);
+    assert_eq!(dl[0].error, "again");
 }
 
 /// `(attempt, locked)` of the only row.
@@ -681,5 +805,8 @@ tri_dialect_test! {
         shutdown_releases_an_aborted_job,
         start_after_shutdown_runs_jobs,
         a_dropped_queue_stops_its_workers,
+        zero_max_attempts_runs_once,
+        a_jobs_backoff_hook_sets_its_retry_time,
+        a_db_queue_sends_with_its_registered_mailer,
     ],
 }

@@ -43,8 +43,13 @@
 //! ## Production note
 //!
 //! For multi-process deployments where the same job must run on exactly one
-//! node (not per-replica), pair this with the cache layer for distributed
-//! locks, or use an external scheduler (Kubernetes CronJob, GitHub Actions).
+//! node (not per-replica), tick often (say every 60s) and wrap the body in
+//! [`DistributedLock::once_per_period`] with the real period, or use an
+//! external scheduler (Kubernetes CronJob, GitHub Actions). `with_lock`
+//! is not enough, and neither is ticking once per period: each pod ticks
+//! from its own start time.
+//!
+//! [`DistributedLock::once_per_period`]: crate::distributed_lock::DistributedLock::once_per_period
 
 use std::future::Future;
 use std::pin::Pin;
@@ -446,5 +451,54 @@ mod tests {
         assert!(a_count.load(Ordering::SeqCst) >= 1);
         assert!(b_count.load(Ordering::SeqCst) >= 1);
         handle.shutdown().await;
+    }
+
+    /// The documented pattern across a rolling deploy: pod B boots after
+    /// pod A stops. Every window runs exactly once, none is skipped (#2330).
+    #[cfg(feature = "cache")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn staggered_pods_run_a_locked_job_once_per_window() {
+        use crate::cache::{BoxedCache, InMemoryCache};
+        use crate::distributed_lock::DistributedLock;
+        const PERIOD: Duration = Duration::from_millis(100);
+        // Ticks well inside the window; ticking once per period skips windows.
+        const TICK: Duration = Duration::from_millis(10);
+        let window = || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            now.as_millis() / PERIOD.as_millis()
+        };
+        let cache: BoxedCache = Arc::new(InMemoryCache::new());
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let pod = || {
+            let s = Scheduler::new();
+            let lock = DistributedLock::new(cache.clone());
+            let ran = ran.clone();
+            s.every("daily_report", TICK, move || {
+                let (lock, ran) = (lock.clone(), ran.clone());
+                async move {
+                    // What `once_per_period` does, with the window kept for the record.
+                    let w = window();
+                    lock.once_in_window("daily_report", PERIOD, w, || async {
+                        ran.lock().unwrap().push(w);
+                        Ok::<_, ()>(())
+                    })
+                    .await;
+                }
+            });
+            s.start()
+        };
+        let a = pod();
+        tokio::time::sleep(Duration::from_millis(470)).await;
+        a.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b = pod();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        b.shutdown().await;
+        let ran = ran.lock().unwrap().clone();
+        assert!(ran.len() >= 8, "too few runs: {ran:?}");
+        let expected: Vec<u128> = (ran[0]..=ran[ran.len() - 1]).collect();
+        assert_eq!(ran, expected, "a window ran twice or not at all");
     }
 }

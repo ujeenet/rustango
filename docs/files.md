@@ -263,6 +263,9 @@ permission codenames the admin already uses — `rustango_media.view` to read,
 without that every request is a `401`. Superusers skip the codename check —
 but **not** `allow_disks`, which binds them too: `is_superuser` elevates
 inside one tenant, and the object store is shared across all of them.
+Only a superuser may set another user's `uploaded_by_id`, and filing into a
+collection (upload, move or a nested collection) also needs
+`rustango_media_collections.view`.
 
 Three things it does not do:
 

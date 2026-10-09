@@ -45,6 +45,8 @@ pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 pub use dialect::Dialect;
+#[cfg(feature = "admin")]
+pub(crate) use error::Refusal;
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
@@ -63,9 +65,9 @@ pub use executor::row_to_json_sqlite;
 #[cfg(feature = "admin")]
 pub(crate) use executor::select_one_row_as_json_tx;
 pub use executor::{
-    atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
-    explain_pool, fetch_aggregate_dict, fetch_aggregate_pool, fetch_dates_pool,
-    fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
+    __rustango_require_join, atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool,
+    delete_pool, delete_tx, explain_pool, fetch_aggregate_dict, fetch_aggregate_pool,
+    fetch_dates_pool, fetch_datetimes_pool, fetch_paginated_pool, fetch_with_prefetch_filtered,
     fetch_with_prefetch_pool, get_or_create, insert_or_ignore, insert_pool, insert_returning_pool,
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_execute_tx,
     raw_query_pool, raw_query_tx, run_ddl_idempotent, select_one_row_as_json, select_one_row_pool,
@@ -77,7 +79,7 @@ pub use executor::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
     UpdaterPool,
 };
-pub(crate) use executor::{bulk_insert_pks_tx, inserted_pk};
+pub(crate) use executor::{bulk_insert_pks_tx, fetch_in_chunks, inserted_pk};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted

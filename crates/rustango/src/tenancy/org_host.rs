@@ -392,6 +392,31 @@ pub(crate) async fn port_claimed(
     Ok(other_org(&rows, except_org))
 }
 
+/// Does another schema-mode tenant live in `schema`, by name or slug default?
+/// A purge drops the schema, so two tenants must never share one (#2290).
+///
+/// # Errors
+/// Driver / query failures.
+pub(crate) async fn schema_claimed(
+    registry: &Pool,
+    schema: &str,
+    except_org: Option<i64>,
+) -> Result<bool, crate::sql::ExecError> {
+    let mut rows: Vec<super::Org> = super::Org::objects()
+        .where_(
+            super::Org::schema_name
+                .eq(Some(schema.to_owned()))
+                .or(super::Org::slug.eq(schema.to_owned())),
+        )
+        .fetch(registry)
+        .await?;
+    // Exact, and through the one rule: MySQL's `=` ignores case.
+    rows.retain(|o| {
+        o.storage_mode == super::StorageMode::Schema.as_str() && o.effective_schema() == schema
+    });
+    Ok(other_org(&rows, except_org))
+}
+
 fn other_org(rows: &[super::Org], except_org: Option<i64>) -> bool {
     rows.iter()
         .any(|o| except_org.is_none() || o.id.get().copied() != except_org)

@@ -45,6 +45,7 @@ mod agents;
 mod args;
 mod audit;
 mod edit;
+mod flush;
 mod hosts;
 mod inspect;
 mod menu;
@@ -55,6 +56,8 @@ mod operators;
 mod roles;
 mod scaffold;
 mod server;
+#[cfg(feature = "sso")]
+mod sso_check;
 mod tenants;
 mod users;
 mod wizard;
@@ -321,6 +324,13 @@ where
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
+        // The fall-through flush is scope-blind and ran on the registry pool (#2284).
+        "flush" => flush::flush_cmd(pools, &args[1..], writer).await,
+        // `public` holds the registry here; --clean would drop every org with it.
+        "db:restore" if args[1..].iter().any(|a| a == "--clean") => Err(TenancyError::Validation(
+            "db:restore --clean is refused in a tenancy project: schema `public` is the registry"
+                .into(),
+        )),
         "create-role" => roles::create_role_cmd(pools, &args[1..], writer).await,
         "list-roles" => roles::list_roles_cmd(pools, &args[1..], writer).await,
         "assign-role" => roles::assign_role_cmd(pools, &args[1..], writer).await,
@@ -364,6 +374,17 @@ where
         "unmap-skill-permission" => {
             agents::unmap_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
         }
+        // The SSO providers live per tenant, which the registry pool can't see (#2359).
+        #[cfg(feature = "sso")]
+        "check" => rustango::migrate::manage::check_cmd_with(
+            &pools.registry_pool(),
+            dir,
+            &args[1..],
+            writer,
+            sso_check::findings(pools),
+        )
+        .await
+        .map_err(TenancyError::Migrate),
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -787,6 +808,12 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                [--tenant <s>]  Scope to one tenant instead of all."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "DATA:")?;
+    writeln!(
+        w,
+        "  flush --tenant <s> [--yes]   Wipe one tenant's tables; the registry is never flushed."
     )?;
     writeln!(w)?;
     writeln!(w, "SERVER:")?;

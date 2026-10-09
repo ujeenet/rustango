@@ -324,6 +324,8 @@ fingerprint. Two places surface it:
 - The sidebar's **Activity** view (`GET /<prefix>/__audit`) is a cross-row feed,
   newest first, with facet cards for entity / operation / source and a cleanup
   form to purge entries older than N days (itself recorded as an audit entry).
+  Under `with_user_perms`, tables with a queryset or `view` hook show here
+  only to superusers.
 
 [![The Activity feed: every audited change across models with JSON diffs, facet cards by table/operation/source, and a cleanup form](img/admin-audit.png)](img/admin-audit.png)
 

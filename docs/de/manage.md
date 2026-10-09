@@ -608,19 +608,22 @@ Die Statuszeile `running: pg_dump …` geht auf **stderr** und bleibt damit
 aus der Umleitung und aus einer Pipe heraus. Bis [#1404](https://github.com/ujeenet/rustango/issues/1404)
 ging sie auf stdout und landete so in der ersten Zeile der `.sql`-Datei.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Lädt eine Dump-Datei zurück in Ihre Datenbank — das Gegenstück zu `db:dump`. Es
-lässt die Datei durch `psql` gegen `DATABASE_URL` mit `ON_ERROR_STOP=1` laufen,
-sodass es beim ersten Fehler stoppt. Fügen Sie `--clean` hinzu, um zuerst das
-bestehende Schema zu löschen (es stellt
-`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;` voran), damit die
-Wiederherstellung auf einer leeren Datenbank landet. Sie brauchen `psql` in
-Ihrem `PATH`.
+lässt die Datei durch `psql` gegen `DATABASE_URL` mit `ON_ERROR_STOP=1` in
+einer Transaktion laufen, sodass es beim ersten Fehler stoppt und nichts lädt.
+Fügen Sie `--clean --yes` hinzu, um zuerst das bestehende Schema zu löschen (es
+stellt `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;` voran),
+damit die Wiederherstellung auf einer leeren Datenbank landet; ein
+fehlgeschlagener Import macht das Löschen rückgängig. Mit `--clean` muss der
+Dump eine nicht leere reguläre Datei sein, geprüft bevor etwas läuft; ohne
+`--clean` liest es auch eine Pipe. Ein Tenancy-Projekt lehnt `--clean` ab, weil
+`public` die Registry enthält. Sie brauchen `psql` in Ihrem `PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---
@@ -633,7 +636,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.3
+rustango 0.60.4
 ```
 
 ### `about`
@@ -645,7 +648,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.3
+  version:        0.60.4
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1587,7 +1590,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
 | `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein. Ein fehlgeschlagener oder teilweiser Ladevorgang wird nicht zurückgerollt |
-| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Postgres nutzt `TRUNCATE … RESTART IDENTITY CASCADE` und leert dabei auch referenzierende Tabellen außerhalb des Filters; MySQL / SQLite löschen die Zeilen und behalten die ID-Zähler |
+| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein. Nicht verwaltete Models und Views werden übersprungen. Postgres nutzt `TRUNCATE … RESTART IDENTITY` und schlägt fehl, wenn eine Tabelle außerhalb des Filters ein Ziel referenziert; MySQL / SQLite löschen die Zeilen in einer Transaktion, Kinder zuerst, und behalten die ID-Zähler. Ein Tenancy-Projekt braucht `--tenant <slug>` und leert nur diesen Tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |
 | `db:dump` / `db:restore` / `db:info` | Natives Dump / Restore / Inspect |
 | `dbshell` | Führt den nativen Client aus (`psql` / `mysql` / `sqlite3`). Braucht nur `DATABASE_URL`, keinen funktionierenden Pool — es wird vor dem Pool-Aufbau behandelt und funktioniert daher auch, wenn sqlx nicht verbinden kann |

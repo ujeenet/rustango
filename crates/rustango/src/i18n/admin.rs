@@ -530,6 +530,28 @@ mod tests {
         assert_ne!(rows[0].updated_by, operator);
     }
 
+    /// #1863: with a session, only a superuser writes.
+    #[cfg(all(feature = "admin", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_non_superuser_cannot_write_translations() {
+        use crate::admin::session::AdminSession;
+        let pool: Pool = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap()
+            .into();
+        crate::i18n::db::ensure_table_pool(&pool).await.unwrap();
+        let mut req = axum::http::Request::post("/editor")
+            .body(axum::body::Body::from("tr:en:greeting=pwned"))
+            .unwrap();
+        req.extensions_mut()
+            .insert(AdminSession::new(5, "u", false));
+        let res = editor_post(pool.clone(), req).await;
+        assert_eq!(res.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(crate::i18n::db::all_pool(&pool).await.unwrap().is_empty());
+    }
+
     fn rows() -> Vec<(String, String, String)> {
         vec![
             ("en".into(), "greeting".into(), "Hello".into()),

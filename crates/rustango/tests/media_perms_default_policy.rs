@@ -736,3 +736,155 @@ async fn a_tenant_superuser_is_still_held_to_the_disk_allow_list() {
          the disk check swallowed the elevation instead of preceding it"
     );
 }
+
+async fn begin_upload(app: axum::Router, extra: &str) -> StatusCode {
+    let body = format!(
+        r#"{{"disk":"default","key_prefix":"t/","mime":"text/plain",
+            "original_filename":"x.txt","size_bytes":1{extra}}}"#
+    );
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/uploads/begin")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .expect("router answers")
+    .status()
+}
+
+// #2343: `rustango_media.add` cannot attribute an upload to another user.
+#[tokio::test]
+async fn an_upload_cannot_be_attributed_to_someone_else() {
+    let (mgr, pool) = setup().await;
+    let uid = make_user(&pool, "uploader", false).await;
+    let other = make_user(&pool, "victim", false).await;
+    grant(&pool, uid, "rustango_media.add").await;
+    let me = || app(mgr.clone(), pool.clone(), Some(principal(uid, false)));
+
+    assert_eq!(
+        begin_upload(me(), &format!(r#","uploaded_by_id":{other}"#)).await,
+        StatusCode::FORBIDDEN,
+        "an upload was attributed to another user"
+    );
+    // Past the gate; in-memory storage cannot presign, hence not 200.
+    assert_ne!(
+        begin_upload(me(), &format!(r#","uploaded_by_id":{uid}"#)).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_ne!(begin_upload(me(), "").await, StatusCode::FORBIDDEN);
+}
+
+// #2343: filing an upload into a collection needs view on collections.
+#[tokio::test]
+async fn an_upload_into_a_collection_needs_collection_view() {
+    let (mgr, pool) = setup().await;
+    let (cid, _) = collection_with_media(&mgr).await;
+    let uid = make_user(&pool, "uploader", false).await;
+    grant(&pool, uid, "rustango_media.add").await;
+    let me = || app(mgr.clone(), pool.clone(), Some(principal(uid, false)));
+    let into = format!(r#","collection_id":{cid}"#);
+
+    assert_eq!(
+        begin_upload(me(), &into).await,
+        StatusCode::FORBIDDEN,
+        "an upload landed in a collection the user cannot view"
+    );
+    grant(&pool, uid, "rustango_media_collections.view").await;
+    assert_ne!(begin_upload(me(), &into).await, StatusCode::FORBIDDEN);
+}
+
+// #2343 also covers a superuser, who may attribute an upload to anyone.
+#[tokio::test]
+async fn a_superuser_may_attribute_an_upload_to_someone_else() {
+    let (mgr, pool) = setup().await;
+    let uid = make_user(&pool, "admin", true).await;
+    let other = make_user(&pool, "member", false).await;
+    let me = app(mgr, pool, Some(principal(uid, true)));
+    assert_ne!(
+        begin_upload(me, &format!(r#","uploaded_by_id":{other}"#)).await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+async fn post_json(app: axum::Router, uri: &str, body: String) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .expect("router answers")
+    .status()
+}
+
+// Upload-then-move cannot file media into a collection #2343 refuses.
+#[tokio::test]
+async fn a_move_into_a_collection_needs_collection_view() {
+    let (mgr, pool) = setup().await;
+    let (cid, _) = collection_with_media(&mgr).await;
+    let mid = seed_media(&mgr).await;
+    let uid = make_user(&pool, "mover", false).await;
+    grant(&pool, uid, "rustango_media.change").await;
+    let me = || app(mgr.clone(), pool.clone(), Some(principal(uid, false)));
+    let uri = format!("/media/{mid}/move");
+
+    assert_eq!(
+        post_json(me(), &uri, format!(r#"{{"collection_id":{cid}}}"#)).await,
+        StatusCode::FORBIDDEN,
+        "media moved into a collection the user cannot view"
+    );
+    let row = mgr.get(mid).await.expect("get").expect("row");
+    assert_eq!(row.collection_id, None);
+    // To the root needs no collection grant.
+    assert_eq!(
+        post_json(me(), &uri, r#"{"collection_id":null}"#.into()).await,
+        StatusCode::NO_CONTENT
+    );
+    grant(&pool, uid, "rustango_media_collections.view").await;
+    assert_eq!(
+        post_json(me(), &uri, format!(r#"{{"collection_id":{cid}}}"#)).await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+// A new collection nested under a parent needs view on collections too.
+#[tokio::test]
+async fn a_nested_collection_needs_collection_view() {
+    let (mgr, pool) = setup().await;
+    let (cid, _) = collection_with_media(&mgr).await;
+    let uid = make_user(&pool, "maker", false).await;
+    grant(&pool, uid, "rustango_media_collections.add").await;
+    let me = || app(mgr.clone(), pool.clone(), Some(principal(uid, false)));
+    let body = |slug: &str, parent: &str| format!(r#"{{"name":"c","slug":"{slug}"{parent}}}"#);
+
+    assert_eq!(
+        post_json(
+            me(),
+            "/collections",
+            body("a", &format!(r#","parent_id":{cid}"#))
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "a collection was nested under one the user cannot view"
+    );
+    assert_eq!(
+        post_json(me(), "/collections", body("b", "")).await,
+        StatusCode::CREATED
+    );
+    grant(&pool, uid, "rustango_media_collections.view").await;
+    assert_eq!(
+        post_json(
+            me(),
+            "/collections",
+            body("c", &format!(r#","parent_id":{cid}"#))
+        )
+        .await,
+        StatusCode::CREATED
+    );
+}

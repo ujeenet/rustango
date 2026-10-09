@@ -249,10 +249,9 @@ where
 
 /// Backend-agnostic registry migration runner — counterpart of
 /// [`migrate_registry`] that takes a [`crate::sql::Pool`] enum
-/// directly instead of going through [`TenantPools`]. Routes the
-/// migration runner, audit-table bootstrap, and contenttype seed
-/// through their backend-agnostic `_pool` variants so a sqlite /
-/// mysql registry works end-to-end.
+/// directly instead of going through [`TenantPools`]. Runs the
+/// migrations, the `managed = false` table bootstrap and the
+/// contenttype seed on any backend.
 ///
 /// The PG-only password-changed-at ALTER stays gated to Postgres —
 /// it only matters for registries upgraded from pre-v0.28.4, and
@@ -267,9 +266,8 @@ pub async fn migrate_registry_pool(
     info!(target: "rustango::tenancy", "applying registry-scoped migrations");
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
     let project_dir = scoped_dir.path(dir);
-    // The framework's own registry tables (rustango_orgs, rustango_operators,
-    // rustango_admin_users) come from makemigrations-generated system-app
-    // migrations — no hand-written bootstrap/ensure/ALTER DDL.
+    // Model-derived registry tables come from system-app migrations; the
+    // `managed = false` ones from `ensure_bootstrap_tables` below.
     let chain = crate::migrate::make::SystemChain::for_migrations_dir(
         dir,
         &[crate::core::ModelScope::Registry],
@@ -284,6 +282,8 @@ pub async fn migrate_registry_pool(
         |held| crate::migrate::migrate_pool_locked(held, registry, project_dir, None),
     )
     .await?;
+    // Tenancy's `migrate` never reaches the single-database path (#2360).
+    crate::migrate::manage::ensure_bootstrap_tables(registry).await?;
     // (#89) Auto-seed the `rustango_content_types` registry-side
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable
@@ -833,7 +833,7 @@ async fn run_for_one_tenant(
     })?;
     match mode {
         StorageMode::Schema => {
-            let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
+            let schema = org.effective_schema().to_owned();
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
             // Framework tenant tables (rustango_users/roles/permissions/…)
             // come from the system-app migrations and MUST be applied

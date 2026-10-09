@@ -124,6 +124,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::cache_page` | Page-Cache-Middleware |
 | `rustango::cors` | CORS-Entscheidungen |
 | `rustango::email::smtp` | SMTP-Transport |
+| `rustango::email_jobs` | Zwei Queues auf einer Jobs-Tabelle mit verschiedenen Mailern |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
 | `rustango::hmac_auth` | Einrichtung der HMAC-Request-Authentifizierung |

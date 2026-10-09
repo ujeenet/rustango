@@ -191,10 +191,6 @@ pub(crate) fn sidebar_context(
 ) -> Vec<serde_json::Value> {
     let mut entries: Vec<&'static ModelEntry> = inventory_entries_dedup_by_table()
         .into_iter()
-        // v0.27.7 — filter registry-scoped models out of tenant
-        // admins (Org / Operator etc. don't live in the tenant
-        // pool and must not surface in the tenant sidebar).
-        .filter(|e| state.scope_visible(e.schema.scope))
         .filter(|e| state.is_visible(e.schema.table))
         .collect();
     entries.sort_by_key(|e| e.schema.name);
@@ -409,17 +405,22 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
     if !state.is_visible(table) {
         return None;
     }
-    let entry = inventory_entries_dedup_by_table()
+    served_entry(table).map(|e| e.schema)
+}
+
+/// The entry the admin renders for `table`: the richest one, as in
+/// [`inventory_entries_dedup_by_table`].
+pub(crate) fn served_entry(table: &str) -> Option<&'static ModelEntry> {
+    inventory::iter::<ModelEntry>
         .into_iter()
-        .find(|e| e.schema.table == table)?;
-    // v0.27.7 — apply the same scope filter the sidebar / index do
-    // so a curious user typing `/__admin/rustango_orgs` directly
-    // gets a 404 instead of leaking cross-tenant data via
-    // search_path on schema-mode tenants.
-    if !state.scope_visible(entry.schema.scope) {
-        return None;
-    }
-    Some(entry.schema)
+        .filter(|e| e.schema.table == table)
+        .reduce(|best, e| {
+            if e.schema.fields.len() > best.schema.fields.len() {
+                e
+            } else {
+                best
+            }
+        })
 }
 
 /// An FK / O2O column whose cell shows the target's display name.

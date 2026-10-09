@@ -568,3 +568,55 @@ async fn extensions(pool: &PgPool) -> Vec<String> {
 fn _force_use_arc() {
     let _: Option<Arc<TenantPools>> = None;
 }
+
+/// Moving into a schema another tenant uses is refused before any copy (#2290).
+#[tokio::test]
+async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    fresh(&pool).await;
+
+    // `NULL` schema_name: the slug is the schema.
+    let mut owner = Org {
+        slug: "taken_schema".into(),
+        display_name: "Owner".into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        schema_name: None,
+        ..rustango::testkit::org()
+    };
+    owner.insert(&pool).await.unwrap();
+    let mut mover = Org {
+        slug: "mover".into(),
+        display_name: "Mover".into(),
+        database_url: Some("postgres://example@db.example.com/mover".into()),
+        ..rustango::testkit::org()
+    };
+    mover.insert(&pool).await.unwrap();
+
+    let pools = TenantPools::new(pool.clone());
+    let registry_url = std::env::var("DATABASE_URL").unwrap();
+    let mut buf = Vec::<u8>::new();
+    let res = run_with_writer(
+        &pools,
+        &registry_url,
+        &std::env::temp_dir(),
+        args(&[
+            "migrate-tenant-storage",
+            "mover",
+            "--to",
+            "schema",
+            "--schema-name",
+            "taken_schema",
+            "--dry-run",
+        ]),
+        &mut buf,
+    )
+    .await;
+    let err = res.expect_err("a used schema must be refused");
+    assert!(err.to_string().contains("already used"), "{err}");
+
+    rustango::migrate::drop_all(&pool).await.unwrap();
+}

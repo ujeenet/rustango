@@ -150,6 +150,66 @@ untouched.
 
 ## Unreleased
 
+## 0.60.4
+
+### Tenant admin: TOTP and translations
+
+Run `migrate` once: it creates `rustango_translations` on the single database or the registry; a tenancy registry also gets `rustango_audit_log` and, with `totp`, `rustango_admin_totp`. `Translation` is now `scope = "registry"`: edit translations from a non-tenant admin, as a tenant admin no longer serves the editor or `export.json`. No admin lists `rustango_admin_totp` any more (#2360).
+
+### `check --deploy`: SSO providers that refuse every user
+
+New `[sso]` warnings name providers with no `SsoLink` rows that can't sign in any existing user (#2359). In a tenancy project `check --deploy` now opens every active tenant's pool to look, 8 at a time.
+
+### Admin write errors
+
+A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346). `InlineApplyOutcome::failed` is deprecated: it is always 0.
+
+### Scheduled jobs under a lock: use `once_per_period`
+
+`with_lock` inside `Scheduler::every` still runs once per pod per period. Tick often and wrap the body: `scheduler.every(name, Duration::from_secs(60), …)` calling `lock.once_per_period(name, day, body)` (#2330).
+
+### Job retries
+
+`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). Per-queue mailers hold for in-memory queues only; with database queues use one mailer per jobs table (#2334, #2338).
+
+### Admin audit feed: hook-scoped tables are superuser-only
+
+Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables with a queryset or `view` hook (#2342).
+
+### `MediaPerms`: upload attribution and collection checks
+
+`POST /uploads/begin` now answers 403 when `uploaded_by_id` is not the caller's id (superusers exempt), and a `collection_id` also needs `rustango_media_collections.view` (#2343). The same view is needed to move media into a collection and to create one under a `parent_id`. `required_codenames` returns the extra codename too, so policies built on it change the same way.
+
+Custom `MediaAuthorizer`s: `POST /media/{id}/move` now arrives as `Change(MediaMove { id, collection_id, .. })`, not `Change(Media(id))`; a policy ending in `_ => false` refuses moves until it gets an arm. `NewCollection` carries `parent_id`.
+
+### `values()` returns `Bool` and `Json` on MySQL and SQLite
+
+A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Code matching `I64` / `String` for these columns must match `Bool` / `Json` now, as on Postgres. Aggregate aliases keep their own type (#2296).
+
+### `db:restore --clean` needs `--yes`
+
+Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. `--clean` takes only a non-empty regular file, and a tenancy project refuses it. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).
+
+### `flush` on Postgres no longer cascades
+
+If a table outside the filter references a flushed one, the flush now fails and clears nothing; add that model with `--model` or `--app` (#2285). An `ON DELETE CASCADE` link from such a table still empties it on MySQL and SQLite, but Postgres refuses.
+
+### Tenancy `flush` needs `--tenant <slug>`
+
+In a tenancy project plain `flush` now errors; use `flush --tenant <slug> --yes`. It clears only that tenant's tables; the registry is never flushed (#2284).
+
+### Tenant PG pools set `application_name`
+
+Database-mode tenant pools connect as `rustango-tenant:<org id>`, overriding one in the URL. A purge ends those sessions; any other session open on the database makes it fail (#2291).
+
+### Tenant schemas are no longer shared
+
+`create-tenant`, the console, the webhook and `migrate-tenant-storage` refuse a schema another tenant uses (#2290). Rows that already share one are not touched; `purge-tenant` now refuses to drop a shared schema, or one with a name provisioning would refuse (e.g. `public`, uppercase). Drop those by hand.
+
+### A provisioning retry only resumes a never-activated tenant
+
+Activating an org, editing an active one, or deactivating it drops its link to failed provision runs. A half-provisioned tenant activated by hand can no longer be resumed; a replay fails as "slug already exists" (#2292).
+
 ## 0.60.3
 
 ### `makemigrations` renames an M2M junction's column

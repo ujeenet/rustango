@@ -21,7 +21,8 @@
 //! The table is created by [`ensure_table_pool`] across all three
 //! dialects (mirroring `audit` / `contenttypes`) rather than the
 //! migration graph, so it works for any app holding a [`Pool`] —
-//! tenancy or not. Tenancy apps create it on the registry pool.
+//! tenancy or not. `migrate` creates it; tenancy apps keep it on the
+//! registry pool.
 
 use crate::i18n::Translator;
 use crate::sql::{Auto, ExecError, Pool};
@@ -32,14 +33,18 @@ use crate::Model;
 /// locale.
 ///
 /// `managed = false`: created by [`ensure_table_pool`], not the
-/// migration graph.
+/// migration graph. `migrate` runs it on the single database or the
+/// tenancy registry.
+///
+/// Registry scope: the overrides are one process-wide map, so a tenant
+/// admin must not list them (#2360).
 ///
 /// `created_at` / `updated_at` carry the Slice 2 audit trail. Mapped
 /// onto the model as of #1464 so the ORM writes them: left DB-defaulted
 /// they arrived legacy-shaped forever on an upgraded SQLite file, whose
 /// `CURRENT_TIMESTAMP` default `ALTER TABLE` cannot replace.
 #[derive(Model, Debug, Clone, serde::Serialize)]
-#[rustango(table = "rustango_translations", managed = false)]
+#[rustango(table = "rustango_translations", managed = false, scope = "registry")]
 pub struct Translation {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
