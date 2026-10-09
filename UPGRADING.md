@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `values()` returns `Bool` and `Json` on MySQL and SQLite
+
+A bool column used to come back as `SqlValue::I64`, a JSON column as `Null` (MySQL) or `String` (SQLite). Code matching `I64` / `String` for these columns must match `Bool` / `Json` now, as on Postgres. Aggregate aliases keep their own type (#2296).
+
 ### `db:restore --clean` needs `--yes`
 
 Scripts must pass `--clean --yes`; without it the command asks on a terminal and errors otherwise. `--clean` takes only a non-empty regular file, and a tenancy project refuses it. Restores now run in one transaction, so a dump with its own `BEGIN`/`COMMIT` or non-transactional statements may need editing (#2283).

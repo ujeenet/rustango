@@ -1011,6 +1011,7 @@ jobs:
             --test audit_bulk_writes_tri \
             --test atomic_savepoints_tri \
             --test orm_bounded_dml_tri \
+            --test orm_relations_tri \
             --test orm_core_counts_tri \
             --test manage_data_verbs_tri \
             --test test_db_tri \
@@ -1304,6 +1305,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_list_state_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
+      - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri

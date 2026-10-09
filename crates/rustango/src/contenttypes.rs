@@ -664,14 +664,21 @@ where
         .copied()
         .map(crate::core::SqlValue::I64)
         .collect();
-    let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter_op(
-            target_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
-        )
-        .fetch(pool)
-        .await?;
+    let children: Vec<C> = crate::sql::fetch_in_chunks(
+        pool,
+        &crate::query::QuerySet::<C>::new(),
+        pk_values,
+        |keys| {
+            crate::query::QuerySet::<C>::new()
+                .filter_op(
+                    target_fk_column,
+                    crate::core::Op::In,
+                    crate::core::SqlValue::List(keys),
+                )
+                .fetch(pool)
+        },
+    )
+    .await?;
     let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
     for child in children {
         let key = extract(&child);
@@ -742,22 +749,33 @@ where
         .ok_or_else(|| ExecError::MissingPrimaryKey {
             table: C::SCHEMA.table,
         })?;
-    let rows: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter_op(
-            pk_field.column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
-        )
-        .fetch(pool)
-        .await?;
+    let rows: Vec<C> = crate::sql::fetch_in_chunks(
+        pool,
+        &crate::query::QuerySet::<C>::new(),
+        pk_values,
+        |keys| {
+            crate::query::QuerySet::<C>::new()
+                .filter_op(
+                    pk_field.column,
+                    crate::core::Op::In,
+                    crate::core::SqlValue::List(keys),
+                )
+                .fetch(pool)
+        },
+    )
+    .await?;
 
     let mut out: ::std::collections::HashMap<(i64, i64), C> =
         ::std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
-        let pk_value = <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row);
-        if let crate::core::SqlValue::I64(pk) = pk_value {
-            out.insert((target_ct_id, pk), row);
-        }
+        // Any integer PK widens to the i64 key; an `Auto<i32>` gives I32 (#2298).
+        let pk = match <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row) {
+            crate::core::SqlValue::I16(v) => i64::from(v),
+            crate::core::SqlValue::I32(v) => i64::from(v),
+            crate::core::SqlValue::I64(v) => v,
+            _ => continue,
+        };
+        out.insert((target_ct_id, pk), row);
     }
     Ok(out)
 }

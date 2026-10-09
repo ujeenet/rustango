@@ -160,10 +160,7 @@ impl M2MManager {
         pool: &Pool,
     ) -> Result<(), ExecError> {
         let src = self.src_key()?;
-        let dsts = ids
-            .iter()
-            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
-            .collect::<Result<Vec<_>, _>>()?;
+        let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let rows = dsts.iter().map(|d| vec![src.clone(), d.clone()]).collect();
         replace(
             self.junction(),
@@ -327,6 +324,26 @@ fn src_key(pk: &SqlValue, through: &'static str) -> Result<SqlValue, ExecError> 
         SqlValue::Null => Err(ExecError::M2mUnsavedSource { through }),
         v => Ok(v.clone()),
     }
+}
+
+/// [`dst_key`] for each id, first occurrence kept: a repeated id
+/// (`tags=1&tags=1`) would hit the junction's unique key in `set` (#2297).
+/// Exact match only: on MySQL's case-insensitive collation `"a"` and `"A"`
+/// still collide.
+fn dst_keys<K: Clone + Into<SqlValue>>(
+    ids: &[K],
+    through: &'static str,
+    dst_col: &'static str,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for k in ids {
+        let d = dst_key(k.clone(), through, dst_col)?;
+        if seen.insert(d.to_display_string()) {
+            out.push(d);
+        }
+    }
+    Ok(out)
 }
 
 /// A destination key bound as the `dst` column's type (#1950): integers widen to
@@ -536,10 +553,7 @@ impl GenericM2MManager {
         ids: &[K],
         pool: &Pool,
     ) -> Result<(), ExecError> {
-        let dsts = ids
-            .iter()
-            .map(|k| dst_key(k.clone(), self.through, self.dst_col))
-            .collect::<Result<Vec<_>, _>>()?;
+        let dsts = dst_keys(ids, self.through, self.dst_col)?;
         let owner = self.owner(pool).await?;
         let rows = dsts
             .iter()

@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `prefetch_generic` on an integer PK narrower than i64 (#2298)
+
+Targets with an `Auto<i32>` or `i16` PK were dropped from the result map.
+
+### Fixed — M2M `set` with a repeated id (#2297)
+
+Repeated ids (e.g. a form posting `tags=1&tags=1`) are linked once instead of failing the whole set.
+
+### Fixed — bulk_update and IN-list prefetches past the bind cap (#2295)
+
+`Model::bulk_update` batches inside one transaction; `in_bulk`, `fetch_with_prefetch*`, `prefetch_soft` and `prefetch_generic` split their `IN` lists, and return `ExecError::InListUnsplittable` when a limit or offset forbids it.
+
+### Fixed — `values()` keeps JSON and bool types on MySQL and SQLite (#2296)
+
+MySQL returned `Null` for a JSON column and `I64` for a bool; SQLite returned `I64` and `String`. All three now give `Json` and `Bool`.
+
+### Fixed — select_related chains sharing a hop (#2294)
+
+`.select_related("a").select_related("a__b")` joins `a` once; it emitted a duplicate alias every backend rejects.
+
+### Fixed — select_related on a NULL foreign key (#2293)
+
+A NULL FK now leaves the relation unloaded instead of failing the whole fetch; a set FK whose row is missing fails clearly on every backend.
+
 ### Fixed — `db:restore --clean` checks the file, asks, and rolls back (#2283)
 
 It dropped `public` before reading the dump. Now `--clean` needs a non-empty regular file and `--yes` (or a typed `yes`), is refused in tenancy projects, and psql runs in one transaction so a failed load keeps the old data. A plain restore still reads pipes.
