@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin: registry tables
+
+A plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them (#2365).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

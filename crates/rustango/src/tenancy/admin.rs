@@ -1772,9 +1772,7 @@ fn build_inner_admin_router(
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
-    // admin can't surface cross-tenant data. Standalone admins
-    // (single-tenant projects using `crate::admin::Builder::new`
-    // directly) leave the flag off and see every model.
+    // admin can't surface cross-tenant data.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
         // The tenancy session layer gates every route of this admin.

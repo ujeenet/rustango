@@ -213,10 +213,13 @@ async fn database_mode_tenant_admin(backend: Backend) {
 
     // The registry holds the translations the tenant admin no longer lists.
     let registry_admin = rustango::admin::Builder::new(registry.clone())
+        .registry_mode()
         .admin_prefix("/a")
         .build();
     let (status, _) = get(&registry_admin, "/rustango_translations").await;
     assert_eq!(status, StatusCode::OK, "registry rustango_translations");
+    let (status, _) = get(&registry_admin, "/rustango_orgs").await;
+    assert_eq!(status, StatusCode::OK, "registry rustango_orgs");
     // ...and serves the editor the tenant admin 404s.
     let (status, body) = get(&registry_admin, "/rustango_translations/editor").await;
     assert_eq!(status, StatusCode::OK, "registry editor: {body}");
@@ -235,11 +238,18 @@ async fn single_database_admin(backend: Backend) {
     rustango::migrate::manage::run_with_writer(&pool, &dir, ["migrate".to_owned()], &mut out)
         .await
         .expect("migrate");
-    let router = rustango::admin::Builder::new(pool)
+    let router = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("/a")
         .build();
-    let (status, _) = get(&router, "/rustango_translations").await;
-    assert_eq!(status, StatusCode::OK, "rustango_translations");
+    // Registry-only tables are not created here, so not listed (#2365).
+    let listed = assert_listed_tables_exist(&router, "single-database admin").await;
+    assert!(
+        listed.iter().any(|t| t == "rustango_translations"),
+        "{listed:?}"
+    );
+    assert!(!listed.iter().any(|t| t == "rustango_orgs"), "{listed:?}");
+    let (status, _) = get(&router, "/rustango_orgs").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "rustango_orgs");
 }
 
 macro_rules! per_backend {

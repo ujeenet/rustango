@@ -484,6 +484,7 @@ anders angegeben):
 | `tenant_brand_css(css)` | Mandantenspezifischer CSS-Variablen-Block. |
 | `impersonated_by(operator_id)` | Rendert ein Impersonations-Banner (Operator-Konsole). |
 | `tenant_mode()` | Verbirgt registry-scoped Modelle (automatisch für Mandanten-Admins gesetzt). |
+| `registry_mode()` | Bedient eine Tenancy-Registry: listet `Org`, `Operator` und die anderen Registry-Tabellen, die ein einfacher Admin verbirgt. |
 | `build()` | Finalisiert und gibt den `axum::Router` zurück. |
 
 ---
