@@ -852,6 +852,12 @@ async fn check_deploy_names_an_email_linking_provider_with_only_privileged_users
     env.user("root", "root@example.com", true).await;
     // No email, so nothing to link by.
     env.user("noemail", "", false).await;
+    let staff = env.user("staff", "staff@example.com", false).await;
+    rustango::tenancy::permissions::set_user_perm_pool(staff, "post.change", true, env.pool())
+        .await
+        .unwrap();
+    let gone = env.user("gone", "gone@example.com", false).await;
+    env.deactivate(gone).await;
     let out = env.check_deploy().await;
     assert!(
         out.contains(
