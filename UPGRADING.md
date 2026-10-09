@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.4
+
 ### Tenant admin: TOTP and translations
 
 Run `migrate` once: it creates `rustango_translations` on the single database or the registry; a tenancy registry also gets `rustango_audit_log` and, with `totp`, `rustango_admin_totp`. `Translation` is now `scope = "registry"`: edit translations from a non-tenant admin, as a tenant admin no longer serves the editor or `export.json`. No admin lists `rustango_admin_totp` any more (#2360).
