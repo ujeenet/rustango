@@ -451,7 +451,10 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         "CREATE EXTENSION IF NOT EXISTS citext",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
         "CREATE EXTENSION IF NOT EXISTS hstore",
+        "CREATE SCHEMA t2189_ext",
+        "CREATE EXTENSION earthdistance WITH SCHEMA t2189_ext CASCADE",
         "CREATE SCHEMA t2189_src",
+        "CREATE TABLE t2189_src.places (id INT, at t2189_ext.earth)",
         // Only an array of it: the extension is found through the element.
         "CREATE TABLE t2189_src.notes (id INT, kv hstore[])",
         "CREATE TABLE t2189_src.rustango_users (id BIGSERIAL PRIMARY KEY, username CITEXT NOT NULL)",
@@ -514,6 +517,18 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     .unwrap();
     assert_eq!(left, 0, "a refused move restored something");
     sqlx_exec(&dst, "DROP TABLE public.junk").await;
+    // An untrusted extension is refused only while the target lacks it (#2385).
+    let err = migrate().await.unwrap_err().to_string();
+    assert!(
+        err.contains("earthdistance") && err.contains("--allow-extension"),
+        "{err}"
+    );
+    for stmt in [
+        "CREATE SCHEMA t2189_ext",
+        "CREATE EXTENSION earthdistance WITH SCHEMA t2189_ext CASCADE",
+    ] {
+        sqlx_exec(&dst, stmt).await;
+    }
     dst.close().await;
     let out = migrate().await.unwrap_or_else(|e| panic!("{e}"));
     // Names the old schema, never `purge-tenant` (#2382).

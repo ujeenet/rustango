@@ -202,9 +202,12 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
                 .max_connections(1)
                 .connect(&target_url)
                 .await?;
-            let creating: Vec<&Extension> = used.iter().collect();
-            let refused =
-                refuse_untrusted(&pool, &creating, &parsed.allow_extensions, "the target").await;
+            // Only what the target lacks needs trust to create (#2385).
+            let refused = async {
+                let missing = missing_on(&pool, &used).await?;
+                refuse_untrusted(&pool, &missing, &parsed.allow_extensions, "the target").await
+            }
+            .await;
             pool.close().await;
             refused?;
             let before: Vec<String> = used.iter().flat_map(|e| e.create_in(&e.schema)).collect();
@@ -561,6 +564,21 @@ async fn extensions_used_by(
         i += 1;
     }
     Ok(used)
+}
+
+/// The extensions of `used` that `pool`'s database does not have.
+async fn missing_on<'e>(
+    pool: &crate::sql::sqlx::PgPool,
+    used: &'e [Extension],
+) -> Result<Vec<&'e Extension>, TenancyError> {
+    let sql = format!("{EXTENSIONS} WHERE e.extname = $1");
+    let mut missing = Vec::new();
+    for e in used {
+        if fetch_extensions(pool, &sql, &e.name).await?.is_empty() {
+            missing.push(e);
+        }
+    }
+    Ok(missing)
 }
 
 /// Refuse to create on `pool`'s server an extension it does not trust,
