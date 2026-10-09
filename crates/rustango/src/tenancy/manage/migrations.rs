@@ -215,9 +215,9 @@ where
     Ok(out)
 }
 
-/// The tenant's pool, but a SQLite file is opened read-only and never
-/// created: a missing file is unreadable, not empty (#2393). `true` when the
-/// pool is this call's own, to close.
+/// The tenant's pool, but a SQLite file is opened with `mode=rw`, which
+/// never creates it: a missing file is unreadable, not empty (#2393).
+/// `true` when the pool is this call's own, to close.
 async fn ledger_pool<DB: Database>(
     pools: &TenantPools<DB>,
     org: &crate::tenancy::org::Org,
@@ -225,22 +225,44 @@ async fn ledger_pool<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    #[cfg(feature = "sqlite")]
     if org.storage_mode == "database" && org.database_url.is_some() {
         let url = pools.resolved_database_url(org).await?;
         if url.starts_with("sqlite:") {
-            use std::str::FromStr as _;
-            let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
-                .create_if_missing(false)
-                .read_only(true);
-            let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(opts)
-                .await?;
-            return Ok((crate::sql::Pool::Sqlite(pool), true));
+            let pool = crate::sql::Pool::connect(&sqlite_without_create(&url))
+                .await
+                .map_err(|e| TenancyError::Validation(e.to_string()))?;
+            return Ok((pool, true));
         }
     }
     Ok((pools.scoped_pool_dyn(org).await?, false))
+}
+
+/// `url` with its `mode=` replaced by `rw`: open an existing file, never make one.
+fn sqlite_without_create(url: &str) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut params: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.is_empty() && !p.starts_with("mode="))
+        .collect();
+    params.push("mode=rw");
+    format!("{base}?{}", params.join("&"))
+}
+
+#[cfg(test)]
+mod sqlite_without_create_tests {
+    use super::sqlite_without_create;
+
+    #[test]
+    fn any_mode_becomes_rw() {
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db"),
+            "sqlite://a.db?mode=rw"
+        );
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db?mode=rwc&journal_mode=wal"),
+            "sqlite://a.db?journal_mode=wal&mode=rw"
+        );
+    }
 }
 
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
