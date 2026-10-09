@@ -12,6 +12,10 @@ A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. 
 
 With `tenancy` compiled in, a plain admin listed `Org`, `Operator` and other tables single-database `migrate` never creates. New `admin::Builder::registry_mode()` lists them on a registry.
 
+### Fixed — shared SSO sign-in works for a tenant without its own provider table (#2366)
+
+A missing `rustango_sso_providers` reads as no providers, at sign-in and in `check --deploy`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

@@ -461,6 +461,17 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
     );
 }
 
+/// A database without the provider table holds no providers, at sign-in and in
+/// `check --deploy` alike, so a tenant falls through to the shared set (#2366).
+async fn a_missing_provider_table_holds_no_providers(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_providers").await;
+    let found = resolve_by_slug(pool, "corp", "https://x/cb".into()).await;
+    assert!(matches!(found, Ok(None)), "{found:?}");
+    assert!(list_enabled(pool, "/login").await.is_empty());
+    assert!(tenant_stranded(pool).await.is_empty());
+    rustango::testkit::matrix::fresh_table::<SsoProvider>(pool).await;
+}
+
 /// The `check --deploy` scan: linking off, no link rows, existing users (#2359).
 async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
     use rustango::sql::FetcherPool as _;
@@ -593,6 +604,7 @@ tri_dialect_test!(
         provider_changes_drop_links,
         resolve_reads_row_secret_and_flag,
         a_table_without_the_flag_still_serves_logins,
+        a_missing_provider_table_holds_no_providers,
         check_finds_providers_that_refuse_every_user,
     ],
 );

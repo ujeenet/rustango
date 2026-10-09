@@ -154,6 +154,10 @@ untouched.
 
 No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it (#2364). A plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them (#2365).
 
+### SSO: missing provider table
+
+A missing `rustango_sso_providers` table now reads as no providers, so bare-admin `resolve_by_slug` returns `Ok(None)` instead of an error (#2366).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations
