@@ -781,6 +781,21 @@ impl Builder {
     }
 }
 
+/// Tables the generic admin never serves: the TOTP store holds raw
+/// secrets, and enrollment has its own pages.
+fn is_never_served(table: &str) -> bool {
+    #[cfg(feature = "totp")]
+    {
+        use crate::core::Model as _;
+        table == super::totp_store::AdminTotp::SCHEMA.table
+    }
+    #[cfg(not(feature = "totp"))]
+    {
+        let _ = table;
+        false
+    }
+}
+
 /// Per-request state: the pool plus the resolved `Config`. It is
 /// cloned on every request, which is cheap because `Config` is in
 /// an `Arc`.
@@ -791,13 +806,25 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    /// Whether this admin serves `table` at all. Index, sidebar, routes,
+    /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {
+        use crate::core::Model as _;
+        // A schema-mode tenant's `search_path` reaches the registry's
+        // copy, so registry tables must not be served there (#2360).
+        if super::helpers::served_entry(table).is_some_and(|e| !self.scope_visible(e.schema.scope))
+        {
+            return false;
+        }
+        if is_never_served(table) {
+            return false;
+        }
         // `rustango_admin_users` is the bare admin's credential
         // store, and its table exists only when the host opts into
         // `Builder::with_session_auth`. The derive on `AdminUser`
         // registers it either way, so a tenancy host would see a
         // dead surface in the model index. Hide it instead.
-        if table == "rustango_admin_users" && self.config.session_secret.is_none() {
+        if self.config.session_secret.is_none() && table == super::user::AdminUser::SCHEMA.table {
             return false;
         }
         let allowlist_ok = self
@@ -815,12 +842,12 @@ impl AppState {
         true
     }
 
-    /// Scope filter. With `tenant_mode` on, registry-only models
+    /// Scope filter, applied by [`Self::is_visible`]. With `tenant_mode` on, registry-only models
     /// (`#[rustango(scope = "registry")]`, such as `Org` and
     /// `Operator`) are hidden, so **cross-tenant data cannot
     /// surface inside a tenant subdomain**. Standalone admins
     /// return true for every scope.
-    pub(crate) fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
+    fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
         if !self.config.tenant_mode {
             return true;
         }
@@ -920,8 +947,8 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
             );
             continue;
         }
-        // A route on a hidden table would be unreachable anyway,
-        // and skipping it reads more clearly as "view not loaded".
+        // A hidden table, registry ones on a tenant admin included,
+        // gets no custom routes either.
         if !state.is_visible(view.table) {
             tracing::debug!(
                 target: "rustango::admin",
@@ -1035,6 +1062,9 @@ mod scope_filter_tests {
         let state = state_with(true);
         assert!(state.scope_visible(ModelScope::Tenant));
         assert!(!state.scope_visible(ModelScope::Registry));
+        // `is_visible` is the gate custom views and docs use too (#2360).
+        assert!(!state.is_visible("rustango_translations"));
+        assert!(state_with(false).is_visible("rustango_translations"));
     }
 
     #[tokio::test]
@@ -1055,6 +1085,8 @@ mod scope_filter_tests {
         // the table must be hidden.
         assert!(state.config.session_secret.is_none());
         assert!(!state.is_visible("rustango_admin_users"));
+        #[cfg(feature = "totp")]
+        assert!(!state.is_visible("rustango_admin_totp"));
         // Other tables still show.
         assert!(state.is_visible("rustango_users"));
         assert!(state.is_visible("post"));
@@ -1069,6 +1101,9 @@ mod scope_filter_tests {
             config: Arc::new(cfg),
         };
         assert!(state.is_visible("rustango_admin_users"));
+        // Raw TOTP secrets never show in the generic admin.
+        #[cfg(feature = "totp")]
+        assert!(!state.is_visible("rustango_admin_totp"));
     }
 
     // `admin_prefix`: the default is `/__admin`, the setter trims a

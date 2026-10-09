@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the tenant admin no longer lists tables no tenant has (#2360)
+
+`Translation` is registry-scoped, so a tenant admin serves neither its list nor the translations editor and export. The generic admin never lists `rustango_admin_totp`, which holds raw secrets. `migrate` now creates `rustango_translations`; the tenancy registry migrate also creates `rustango_audit_log` and, with `totp`, `rustango_admin_totp`.
+
 ### Fixed — `check --deploy` warns when an SSO provider will refuse every existing user (#2359)
 
 One line per enabled provider with no `SsoLink` rows and users in its table: a tenant or shared one with email linking off or only privileged users, or any admin one. The tenancy CLI checks every active tenant.

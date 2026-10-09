@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Tenant admin: TOTP and translations
+
+Run `migrate` once: it creates `rustango_translations` on the single database or the registry; a tenancy registry also gets `rustango_audit_log` and, with `totp`, `rustango_admin_totp`. `Translation` is now `scope = "registry"`: edit translations from a non-tenant admin, as a tenant admin no longer serves the editor or `export.json`. No admin lists `rustango_admin_totp` any more (#2360).
+
 ### `check --deploy`: SSO providers that refuse every user
 
 New `[sso]` warnings name providers with no `SsoLink` rows that can't sign in any existing user (#2359). In a tenancy project `check --deploy` now opens every active tenant's pool to look, 8 at a time.
