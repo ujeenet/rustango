@@ -162,6 +162,8 @@ Database-mode tenant pools connect as `rustango-tenant:<org id>`, overriding one
 
 Activating an org, editing an active one, or deactivating it drops its link to failed provision runs. A half-provisioned tenant activated by hand can no longer be resumed; a replay fails as "slug already exists" (#2292).
 
+## 0.60.3
+
 ### `makemigrations` renames an M2M junction's column
 
 Changing `src_col` / `dst_col` with the same `through` and tables now writes `RenameColumn` ops, so the rows stay. It was Drop + Create (#2245).
