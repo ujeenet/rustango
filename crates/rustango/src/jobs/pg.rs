@@ -211,6 +211,13 @@ CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
 }
 
 impl PgJobQueue {
+    /// `(database, queue)`: the jobs table this queue claims from, and
+    /// this queue across its clones.
+    #[cfg(feature = "email")]
+    pub(crate) fn identity(&self) -> (u64, usize) {
+        (self.pool.scope_key(), Arc::as_ptr(&self.registry) as usize)
+    }
+
     /// Build a queue from a [`crate::sql::Pool`] with `worker_count`
     /// worker tasks. Call [`Self::start`] to spawn them.
     #[must_use]
@@ -390,10 +397,19 @@ impl JobQueue for PgJobQueue {
         self.registry.lock().await.register::<T>();
     }
 
+    async fn register_with<T, F, Fut>(&self, run: F)
+    where
+        T: Job,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), JobError>> + Send + 'static,
+    {
+        self.registry.lock().await.register_with::<T, F, Fut>(run);
+    }
+
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
-        let max_attempts = i32::try_from(T::MAX_ATTEMPTS).unwrap_or(i32::MAX);
+        let max_attempts = i32::try_from(super::max_attempts::<T>()).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
         let (p1, p2, p3, p4, p5) = (
             dialect.placeholder(1),
@@ -709,24 +725,30 @@ async fn run_one(
     worker: &Worker,
     job: PickedJob,
 ) {
-    let handler = registry.lock().await.lookup_owned(&job.name);
-    let Some((handler, static_name)) = handler else {
+    let entry = registry.lock().await.lookup(&job.name);
+    let Some(entry) = entry else {
         // This process cannot run it; the pickup must not spend an attempt.
         tracing::warn!(job = %job.name, id = job.id, "no handler registered — leaving locked");
         give_back_attempt(pool, worker, job.id).await;
         return;
     };
+    let static_name = entry.name;
 
     // `attempt` already counts this run. Past the cap means earlier runs
     // died with their worker; running it again could crash the next one.
-    if job.attempt > job.max_attempts {
+    // Rows queued before #2333 may still hold 0.
+    let max_attempts = job.max_attempts.max(1);
+    if job.attempt > max_attempts {
         let msg = "no attempts left: an earlier run stopped without finishing";
         handle_dead_letter(pool, dead_letter, worker, &job, static_name, msg).await;
         return;
     }
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
-    let run = job.context.clone().install(handler(job.payload.clone()));
+    let run = job
+        .context
+        .clone()
+        .install((entry.handler)(job.payload.clone()));
     let (result, held) = run_with_heartbeat(pool, worker, job.id, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.
@@ -739,13 +761,12 @@ async fn run_one(
             finish_job(pool, worker, job.id).await;
         }
         Err(JobError::Retryable(msg)) => {
-            if job.attempt >= job.max_attempts {
+            if job.attempt >= max_attempts {
                 handle_dead_letter(pool, dead_letter, worker, &job, static_name, &msg).await;
             } else {
                 let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
-                let backoff_ms = super::retry_backoff_ms(failed);
-                let next_run: DateTime<Utc> = Utc::now()
-                    + chrono::Duration::milliseconds(i64::try_from(backoff_ms).unwrap_or(i64::MAX));
+                let backoff = chrono::Duration::from_std(entry.backoff(failed)).unwrap_or_default();
+                let next_run: DateTime<Utc> = Utc::now() + backoff;
                 schedule_retry(pool, worker, job.id, next_run, &msg).await;
             }
         }
@@ -954,18 +975,6 @@ async fn handle_dead_letter(
     finish_job(pool, worker, job.id).await;
 }
 
-// --------------------------------------------------------------------- helpers
-
-impl HandlerRegistry {
-    /// Like `lookup`, but also returns the registered `&'static str`.
-    /// `JobDeadLetter` needs a static name.
-    fn lookup_owned(&self, name: &str) -> Option<(super::HandlerFn, &'static str)> {
-        let (handler, _) = self.handlers.get(name)?;
-        let static_name = self.handlers.keys().find(|k| **k == name).copied()?;
-        Some((handler.clone(), static_name))
-    }
-}
-
 /// Best-effort hostname with no extra dependency: read the env var
 /// most container runtimes set.
 fn hostname() -> Option<String> {
@@ -1055,10 +1064,8 @@ mod tests {
 
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
         q.register::<Demo>().await;
-        let r = q.registry.lock().await.lookup_owned("demo:job");
-        assert!(r.is_some());
-        let (_, name) = r.unwrap();
-        assert_eq!(name, "demo:job");
+        let r = q.registry.lock().await.lookup("demo:job");
+        assert_eq!(r.expect("registered").name, "demo:job");
     }
 
     /// #1961: a job holding the only connection must not stall its heartbeat.
@@ -1095,6 +1102,6 @@ mod tests {
     #[tokio::test]
     async fn register_lookup_returns_none_for_unknown_name() {
         let q = PgJobQueue::with_workers_pool(dummy_pool(), 0);
-        assert!(q.registry.lock().await.lookup_owned("unknown").is_none());
+        assert!(q.registry.lock().await.lookup("unknown").is_none());
     }
 }

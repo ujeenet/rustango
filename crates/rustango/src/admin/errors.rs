@@ -142,6 +142,19 @@ pub(crate) fn missing_table(e: &crate::sql::ExecError) -> Option<String> {
     }
 }
 
+/// Log `raw` under a fresh correlation id and return the id, so a page
+/// can show the id and never the raw text. A client-caused refusal logs at
+/// warn, anything else at error.
+pub(crate) fn log_with_id(context: &str, raw: &dyn std::fmt::Display, client: bool) -> String {
+    let id = short_correlation_id();
+    if client {
+        tracing::warn!(target: "rustango::admin", correlation_id = %id, error = %raw, "{context}");
+    } else {
+        tracing::error!(target: "rustango::admin", correlation_id = %id, error = %raw, "{context}");
+    }
+    id
+}
+
 impl From<crate::sql::ExecError> for AdminError {
     fn from(e: crate::sql::ExecError) -> Self {
         // Unwrap the sqlx error so the per-dialect undefined-table
@@ -201,13 +214,7 @@ applied yet for this tenant / database.</p>
                 // column names and SQL, so it must not reach the
                 // client. The response carries only an id the operator
                 // can grep for in the logs.
-                let id = short_correlation_id();
-                tracing::error!(
-                    target: "rustango::admin",
-                    correlation_id = %id,
-                    error = %msg,
-                    "admin internal error"
-                );
+                let id = log_with_id("admin internal error", &msg, false);
                 ApiError::internal("internal server error")
                     .with_details(json!({ "correlation_id": id }))
                     .into_response()

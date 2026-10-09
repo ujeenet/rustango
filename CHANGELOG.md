@@ -7,6 +7,45 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed — `check --deploy` warns when an SSO provider will refuse every existing user (#2359)
 
 One line per enabled tenant, shared or admin provider with email linking off, no `SsoLink` rows and users in its table; the tenancy CLI checks every active tenant.
+### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
+
+A bad inline value re-renders the form before anything is written. The parent UPDATE and inline writes share one transaction: a refused row rolls the whole edit back and the form says so. `InlineApplyOutcome::failed` is always 0.
+
+### Fixed — admin: deleting a still-referenced row is a 409, not a 500 (#2340)
+
+Single delete and `delete_selected` name the referencing table when the user may open it in the admin. `pre_delete` signals have already fired by then; `post_delete` does not.
+
+### Fixed — admin forms show a plain message for a refused write, never driver text (#2345)
+
+A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logged under the error id the page shows.
+
+### Fixed — admin: an unknown or malformed bulk action is a 400, not a 500 (#2346)
+
+The 400 carries the reason; it was a logged 500.
+
+### Added — `DistributedLock::once_per_period`, `Job::retry_backoff`, `jobs::exponential_backoff`, `JobQueue::register_with` (#2330, #2332, #2334)
+
+`once_per_period` runs a body once per window counted from the Unix epoch (daily = 00:00 UTC); `register_with` registers a job with its own handler.
+
+### Fixed — a locked scheduler job ran once per pod (#2330)
+
+Tick often and wrap the body in `once_per_period`. A failed or panicking run frees its window for a later tick.
+
+### Changed — `EmailJob` retries for about ten minutes (#2332)
+
+`MAX_ATTEMPTS` 5 → 8, backoff 5s doubling; before, mail dead-lettered after ~15s.
+
+### Fixed — `MAX_ATTEMPTS = 0` never ran the job (#2333)
+
+Both queues treat 0 as one run, including rows already queued.
+
+### Fixed — `register_email_job` on a second in-memory queue rerouted all mail (#2334)
+
+Each in-memory queue's handler holds its own mailer. Database queues share `rustango_jobs`, so use one mailer per jobs table; a second one logs a warning (#2338).
+
+### Fixed — `FileMailer` processes overwrote each other's files (#2335)
+
+Names carry the pid and are opened with `create_new`, moving to the next number on a clash. On unix the files are 0600 and a new directory 0700.
 
 ### Fixed — admin list facets read only the values they show (#2344)
 

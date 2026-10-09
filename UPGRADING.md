@@ -153,6 +153,17 @@ untouched.
 ### `check --deploy`: SSO providers that refuse every user
 
 New `[sso]` warnings name providers with email linking off and no `SsoLink` rows (#2359). In a tenancy project `check` now opens every active tenant's pool to look.
+### Admin write errors
+
+A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346). `InlineApplyOutcome::failed` is deprecated: it is always 0.
+
+### Scheduled jobs under a lock: use `once_per_period`
+
+`with_lock` inside `Scheduler::every` still runs once per pod per period. Tick often and wrap the body: `scheduler.every(name, Duration::from_secs(60), …)` calling `lock.once_per_period(name, day, body)` (#2330).
+
+### Job retries
+
+`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). Per-queue mailers hold for in-memory queues only; with database queues use one mailer per jobs table (#2334, #2338).
 
 ### Admin audit feed: hook-scoped tables are superuser-only
 
