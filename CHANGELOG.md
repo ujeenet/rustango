@@ -16,6 +16,14 @@ PG and MySQL kept `<table>_<old>_fkey`. The runner drops the live FK by its cata
 
 The sequence lookup used the bare table name, so outside `search_path` it failed.
 
+### Fixed — `prefetch_reverse_generic_for` splits a large parent list across queries (#2318)
+
+It bound every parent id in one `IN` list and failed past the backend's bind limit.
+
+### Fixed — `values().annotate()` grouped by a joined bool reads as `Bool` on MySQL and SQLite (#2322)
+
+A `values(&["a.flag"])` group column, or a join's `project` column in `values_dict` / `values_list`, took no model type and came back as `I64`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

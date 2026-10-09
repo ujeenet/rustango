@@ -139,19 +139,21 @@ async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
 async fn tenant_extractor_reads_the_database_tenant_context() {
     use rustango::extractors::Tenant;
     use rustango::sql::CounterPool as _;
-    use rustango::tenancy::agents::Agent;
+    use rustango::tenancy::User;
 
     let _g = SUITE.lock().await;
     let env = boot().await;
-    rustango::tenancy::create_agent_pool(&env.tenant, "bot")
+    // A tenant table every feature set has; `rustango_agents` needs `mcp` (#2362).
+    rustango::testkit::user()
+        .insert_pool(&env.tenant)
         .await
-        .expect("agent");
+        .expect("user");
     let app = env.mount_db(Router::new().route(
         "/",
         axum::routing::get(|mut t: Tenant<sqlx::Sqlite>| async move {
-            let via_pool = Agent::objects().count(t.pool()).await.expect("t.pool()");
+            let via_pool = User::objects().count(t.pool()).await.expect("t.pool()");
             let conn = t.pool_conn().await.expect("deferred conn");
-            let via_conn: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_agents")
+            let via_conn: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_users")
                 .fetch_one(&mut **conn)
                 .await
                 .expect("pool_conn()");
