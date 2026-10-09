@@ -544,19 +544,26 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .await
             .unwrap()
             .remove(0);
-        SsoLink {
+        let link = |issuer: &str| SsoLink {
             id: Auto::default(),
             provider_source: "shared".into(),
             provider_id: team.id.get().copied().unwrap(),
-            issuer: "oidc|https://shared.example".into(),
+            issuer: issuer.into(),
             subject: "sub-1".into(),
-            key_sha256: rustango::sso::link::key_sha256("oidc|https://shared.example", "sub-1"),
+            key_sha256: rustango::sso::link::key_sha256(issuer, "sub-1"),
             user_id: 1,
             created_at: Auto::default(),
-        }
-        .insert_pool(pool)
-        .await
-        .unwrap();
+        };
+        // Sign-in matches the issuer exactly, so a case variant is no link (MySQL `_ci`).
+        link("oidc|https://SHARED.example")
+            .insert_pool(pool)
+            .await
+            .unwrap();
+        assert_eq!(shared_stranded(pool, pool).await, ["team"]);
+        link("oidc|https://shared.example")
+            .insert_pool(pool)
+            .await
+            .unwrap();
         assert!(shared_stranded(pool, pool).await.is_empty());
     }
 }
