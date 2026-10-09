@@ -308,6 +308,7 @@ pub(crate) fn rehash_update(
 
 /// [`rehash_update`] that also stamps `password_changed_at`: a password
 /// change, not a rehash.
+#[cfg(feature = "tenancy")]
 pub(crate) fn password_change_update(
     model: &'static crate::core::ModelSchema,
     id: i64,
