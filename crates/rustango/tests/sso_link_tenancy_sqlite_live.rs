@@ -724,6 +724,29 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
     assert!(!out.contains("[sso]"), "{out}");
 }
 
+/// A registry that can't list tenants is a warning; the rest of the check runs (#2359).
+#[tokio::test]
+async fn check_deploy_runs_when_tenants_cannot_be_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pools = TenantPools::<sqlx::Sqlite>::new(sqlx::SqlitePool::connect(&url).await.unwrap());
+    let mut out = Vec::new();
+    let _ = rustango::tenancy::manage::run_with_writer(
+        &pools,
+        &url,
+        dir.path(),
+        vec!["check".to_owned(), "--deploy".to_owned()],
+        &mut out,
+    )
+    .await;
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("running rustango system check"), "{out}");
+    assert!(
+        out.contains("[warning] [sso] could not list tenants"),
+        "{out}"
+    );
+}
+
 /// A table probe that fails is an error, not "no tables" (#2359).
 #[tokio::test]
 async fn check_reports_a_failed_table_probe() {

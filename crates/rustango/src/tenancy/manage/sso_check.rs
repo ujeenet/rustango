@@ -3,24 +3,30 @@
 use crate::migrate::manage::DeployAuditFindings;
 use crate::sql::{FetcherPool as _, Pool};
 use crate::sso::check;
-use crate::tenancy::error::TenancyError;
 use crate::tenancy::org::Org;
 use crate::tenancy::pools::TenantPools;
 
 /// Providers in each active tenant (own and shared) that refuse every existing user.
-pub(super) async fn findings<DB: sqlx::Database>(
-    pools: &TenantPools<DB>,
-) -> Result<DeployAuditFindings, TenancyError>
+pub(super) async fn findings<DB: sqlx::Database>(pools: &TenantPools<DB>) -> DeployAuditFindings
 where
     Pool: From<sqlx::Pool<DB>>,
 {
     use crate::core::Column as _;
     let registry = pools.registry_pool();
-    let orgs: Vec<Org> = Org::objects()
+    let mut out = DeployAuditFindings::default();
+    // The rest of `check` still runs and reports the registry itself.
+    let orgs: Vec<Org> = match Org::objects()
         .where_(Org::active.eq(true))
         .fetch(&registry)
-        .await?;
-    let mut out = DeployAuditFindings::default();
+        .await
+    {
+        Ok(orgs) => orgs,
+        Err(e) => {
+            out.warnings
+                .push(format!("[sso] could not list tenants: {e}"));
+            return out;
+        }
+    };
     #[cfg(feature = "admin-sso")]
     let shared_rows = match check::SharedProviders::load(&registry).await {
         Ok(rows) => Some(rows),
@@ -78,5 +84,5 @@ where
             .iter()
             .map(|((slug, why), tenants)| check::shared_warning(slug, *why, tenants)),
     );
-    Ok(out)
+    out
 }

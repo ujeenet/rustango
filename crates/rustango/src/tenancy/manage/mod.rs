@@ -378,7 +378,7 @@ where
         #[cfg(feature = "sso")]
         "check" => {
             let extra = if args[1..].iter().any(|a| a == "--deploy") {
-                sso_check::findings(pools).await?
+                sso_check::findings(pools).await
             } else {
                 rustango::migrate::manage::DeployAuditFindings::default()
             };
