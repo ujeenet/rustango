@@ -22,7 +22,8 @@ where
         .await?;
     let mut out = DeployAuditFindings::default();
     #[cfg(feature = "admin-sso")]
-    let mut shared: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut shared: std::collections::BTreeMap<(String, check::Refusal), Vec<String>> =
+        Default::default();
     for org in &orgs {
         let tenant = match pools.scoped_pool_dyn(org).await {
             Ok(p) => p,
@@ -35,9 +36,9 @@ where
             }
         };
         match check::tenant_providers(&tenant).await {
-            Ok(slugs) => out
+            Ok(found) => out
                 .warnings
-                .extend(slugs.iter().map(|s| check::tenant_warning(&org.slug, s))),
+                .extend(found.iter().map(|s| check::tenant_warning(&org.slug, s))),
             Err(e) => out.warnings.push(format!(
                 "[sso] tenant `{}`: could not check SSO providers: {e}",
                 org.slug
@@ -45,9 +46,12 @@ where
         }
         #[cfg(feature = "admin-sso")]
         match check::shared_providers(&registry, &tenant).await {
-            Ok(slugs) => {
-                for s in slugs {
-                    shared.entry(s).or_default().push(org.slug.clone());
+            Ok(found) => {
+                for s in found {
+                    shared
+                        .entry((s.slug, s.why))
+                        .or_default()
+                        .push(org.slug.clone());
                 }
             }
             Err(e) => out.warnings.push(format!(
@@ -60,7 +64,7 @@ where
     out.warnings.extend(
         shared
             .iter()
-            .map(|(slug, tenants)| check::shared_warning(slug, tenants)),
+            .map(|((slug, why), tenants)| check::shared_warning(slug, *why, tenants)),
     );
     Ok(out)
 }

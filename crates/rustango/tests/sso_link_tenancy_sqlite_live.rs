@@ -706,7 +706,7 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
         "{out}"
     );
     assert!(
-        out.contains("[sso] shared provider `team` has allow_email_link off and no SsoLink rows in tenant(s) acme, so"),
+        out.contains("[sso] shared provider `team` (tenant(s) acme) has allow_email_link off"),
         "{out}"
     );
     assert!(!out.contains("`globex`"), "globex has no users: {out}");
@@ -722,6 +722,26 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
     env.set_shared_email_link(true).await;
     let out = env.check_deploy().await;
     assert!(!out.contains("[sso]"), "{out}");
+}
+
+/// Email linking never signs in a privileged account, so a provider whose
+/// only users are privileged still refuses everyone (#2359).
+#[tokio::test]
+async fn check_deploy_names_an_email_linking_provider_with_only_privileged_users() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", true).await;
+    env.user("root", "root@example.com", true).await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains(
+            "[warning] [sso] tenant `acme`: provider `corp` has no SsoLink rows and every active user is privileged"
+        ),
+        "{out}"
+    );
+    env.user("ann", "ann@example.com", false).await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "ann can link by email: {out}");
 }
 
 #[tokio::test]

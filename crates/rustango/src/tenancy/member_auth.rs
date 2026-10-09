@@ -844,12 +844,33 @@ impl TenantAccounts<'_> {
         let Some(user_id) = user.id.get().copied() else {
             return Ok(None);
         };
-        let privileged = user.is_superuser
-            || crate::tenancy::permissions::user_permissions_pool(user_id, self.0)
-                .await
-                .map_or(true, |perms| !perms.is_empty());
+        let privileged = user.is_superuser || holds_permissions(self.0, user_id).await;
         Ok(Some(Account::new(user_id, privileged, user.active)))
     }
+}
+
+/// Whether `user_id` holds any permission; a read error counts as yes.
+async fn holds_permissions(pool: &Pool, user_id: i64) -> bool {
+    crate::tenancy::permissions::user_permissions_pool(user_id, pool)
+        .await
+        .map_or(true, |perms| !perms.is_empty())
+}
+
+/// Whether some active user is not privileged, so email linking could sign
+/// them in (#2359).
+pub(crate) async fn any_email_linkable(pool: &Pool) -> Result<bool, crate::sql::ExecError> {
+    let ids = crate::query::QuerySet::<User>::new()
+        .filter("active", true)
+        .filter("is_superuser", false)
+        .values_list_flat("id")
+        .fetch::<i64>(pool)
+        .await?;
+    for id in ids {
+        if !holds_permissions(pool, id).await {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl AccountLookup for TenantAccounts<'_> {

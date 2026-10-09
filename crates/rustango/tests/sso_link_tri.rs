@@ -145,6 +145,23 @@ async fn user(pool: &Pool, name: &str, email: &str) -> i64 {
     u.id.get().copied().unwrap()
 }
 
+/// Slugs `check --deploy` reports for this tenant's own providers.
+async fn tenant_stranded(pool: &Pool) -> Vec<String> {
+    let found = rustango::testkit::sso_check::tenant_providers(pool)
+        .await
+        .unwrap();
+    found.into_iter().map(|s| s.slug).collect()
+}
+
+/// Slugs `check --deploy` reports for the shared providers in this tenant.
+#[cfg(feature = "admin-sso")]
+async fn shared_stranded(registry: &Pool, tenant: &Pool) -> Vec<String> {
+    let found = rustango::testkit::sso_check::shared_providers(registry, tenant)
+        .await
+        .unwrap();
+    found.into_iter().map(|s| s.slug).collect()
+}
+
 async fn key_matches_every_part(pool: &Pool) {
     provider(pool, "corp", false).await;
     let p = resolve_by_slug(pool, "corp", "https://x/cb".into())
@@ -430,12 +447,7 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
         .unwrap()
         .as_nanos();
     user(pool, &format!("old{n}"), &format!("old{n}@example.com")).await;
-    assert_eq!(
-        rustango::testkit::sso_check::tenant_providers(pool)
-            .await
-            .unwrap(),
-        ["old"]
-    );
+    assert_eq!(tenant_stranded(pool).await, ["old"]);
     let key = p.key(LinkSource::Tenant);
     create_link(pool, &key, "sub-old", 9).await.unwrap();
     let ok = One(Some(Account::new(9, false, true)));
@@ -476,11 +488,11 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
     create_link(pool, &corp.key(LinkSource::Shared), "sub-1", 1)
         .await
         .unwrap();
-    assert_eq!(check::tenant_providers(pool).await.unwrap(), ["corp"]);
+    assert_eq!(tenant_stranded(pool).await, ["corp"]);
     create_link(pool, &corp.key(LinkSource::Tenant), "sub-1", 1)
         .await
         .unwrap();
-    assert!(check::tenant_providers(pool).await.unwrap().is_empty());
+    assert!(tenant_stranded(pool).await.is_empty());
 
     #[cfg(feature = "admin-sso")]
     {
@@ -525,7 +537,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .unwrap();
         }
         // `corp` is the tenant's own enabled row, so the shared one is never used here.
-        assert_eq!(check::shared_providers(pool, pool).await.unwrap(), ["team"]);
+        assert_eq!(shared_stranded(pool, pool).await, ["team"]);
         let team = SharedSsoProvider::objects()
             .filter("slug", "team")
             .fetch(pool)
@@ -545,10 +557,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
         .insert_pool(pool)
         .await
         .unwrap();
-        assert!(check::shared_providers(pool, pool)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(shared_stranded(pool, pool).await.is_empty());
     }
 }
 
