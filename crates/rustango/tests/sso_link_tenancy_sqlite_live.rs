@@ -850,6 +850,8 @@ async fn check_deploy_names_an_email_linking_provider_with_only_privileged_users
     let env = boot().await;
     env.tenant_provider("corp", true).await;
     env.user("root", "root@example.com", true).await;
+    // No email, so nothing to link by.
+    env.user("noemail", "", false).await;
     let out = env.check_deploy().await;
     assert!(
         out.contains(

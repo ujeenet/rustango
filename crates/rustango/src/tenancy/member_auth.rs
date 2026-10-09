@@ -856,12 +856,14 @@ async fn holds_permissions(pool: &Pool, user_id: i64) -> bool {
         .map_or(true, |perms| !perms.is_empty())
 }
 
-/// Whether some active user is not privileged, so email linking could sign
-/// them in (#2359).
+/// Whether some active user with an email is not privileged, so email
+/// linking could sign them in (#2359).
 pub(crate) async fn any_email_linkable(pool: &Pool) -> Result<bool, crate::sql::ExecError> {
     let ids = crate::query::QuerySet::<User>::new()
         .filter("active", true)
         .filter("is_superuser", false)
+        .filter("email__isnull", false)
+        .exclude("email", "")
         .values_list_flat("id")
         .fetch::<i64>(pool)
         .await?;
