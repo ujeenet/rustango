@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `Translation` is registry-scoped, so a tenant admin serves neither its list nor the translations editor and export. The generic admin never lists `rustango_admin_totp`, which holds raw secrets. `migrate` now creates `rustango_translations`; the tenancy registry migrate also creates `rustango_audit_log` and, with `totp`, `rustango_admin_totp`.
 
+### Fixed — `check --deploy` warns when an SSO provider will refuse every existing user (#2359)
+
+One line per enabled provider with no `SsoLink` rows and users in its table: a tenant or shared one with email linking off or only privileged users, or any admin one. The tenancy CLI checks every active tenant.
+
 ### Fixed — admin inline rows that fail to parse or write are no longer dropped silently (#2339)
 
 A bad inline value re-renders the form before anything is written. The parent UPDATE and inline writes share one transaction: a refused row rolls the whole edit back and the form says so. `InlineApplyOutcome::failed` is always 0.

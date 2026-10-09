@@ -154,6 +154,10 @@ untouched.
 
 Run `migrate` once: it creates `rustango_translations` on the single database or the registry; a tenancy registry also gets `rustango_audit_log` and, with `totp`, `rustango_admin_totp`. `Translation` is now `scope = "registry"`: edit translations from a non-tenant admin, as a tenant admin no longer serves the editor or `export.json`. No admin lists `rustango_admin_totp` any more (#2360).
 
+### `check --deploy`: SSO providers that refuse every user
+
+New `[sso]` warnings name providers with no `SsoLink` rows that can't sign in any existing user (#2359). In a tenancy project `check --deploy` now opens every active tenant's pool to look, 8 at a time.
+
 ### Admin write errors
 
 A bad inline row now refuses the edit and rolls back the parent UPDATE and all inline writes; the edit's `post_save` fires after that commit (#2339). Deleting a referenced row returns 409, after `pre_delete` signals but with no `post_delete` (#2340). Form errors no longer carry driver text (#2345); an unknown action is a 400 (#2346). `InlineApplyOutcome::failed` is deprecated: it is always 0.

@@ -56,6 +56,8 @@ mod operators;
 mod roles;
 mod scaffold;
 mod server;
+#[cfg(feature = "sso")]
+mod sso_check;
 mod tenants;
 mod users;
 mod wizard;
@@ -372,6 +374,17 @@ where
         "unmap-skill-permission" => {
             agents::unmap_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
         }
+        // The SSO providers live per tenant, which the registry pool can't see (#2359).
+        #[cfg(feature = "sso")]
+        "check" => rustango::migrate::manage::check_cmd_with(
+            &pools.registry_pool(),
+            dir,
+            &args[1..],
+            writer,
+            sso_check::findings(pools),
+        )
+        .await
+        .map_err(TenancyError::Migrate),
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
