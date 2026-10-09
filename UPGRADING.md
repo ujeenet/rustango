@@ -152,7 +152,7 @@ untouched.
 
 ### Admin: passkeys and registry tables
 
-No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it (#2364). A plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them (#2365).
+No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it on the single database or on each tenant, never the registry (#2364). With `tenancy` compiled in, a plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them, and lists only registry tables (#2365).
 
 ### SSO: missing provider table
 

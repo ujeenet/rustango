@@ -164,7 +164,10 @@ impl AdminDatabase {
                 !in_system_chain(schema, ModelScope::Registry)
                     || in_system_chain(schema, ModelScope::Tenant)
             }
-            Self::Registry => true,
+            Self::Registry => {
+                schema.scope == ModelScope::Registry
+                    || in_system_chain(schema, ModelScope::Registry)
+            }
             Self::Tenant => schema.scope == ModelScope::Tenant,
         }
     }
@@ -536,13 +539,10 @@ impl Builder {
         self
     }
 
-    /// Hide registry-scoped models (`#[rustango(scope =
-    /// "registry")]`) from the sidebar and index.
-    /// `TenantAdminBuilder::build()` sets it; standalone admins
-    /// leave it false. Without it, models like `Org` and `Operator`
-    /// show inside a tenant admin, and on a schema-mode tenant
-    /// clicking one can **leak cross-tenant data**: the registry's
-    /// `public.rustango_orgs` resolves through `search_path`.
+    /// Serve one tenant: list only tenant-scope models.
+    /// `TenantAdminBuilder::build()` sets it. On a schema-mode tenant a
+    /// registry model would **leak cross-tenant data** through `search_path`.
+    /// The last of `tenant_mode` / `registry_mode` called wins.
     #[must_use]
     pub fn tenant_mode(mut self) -> Self {
         self.config.database = AdminDatabase::Tenant;
@@ -552,6 +552,7 @@ impl Builder {
     /// Serve a tenancy registry: list registry models such as `Org` and
     /// `Operator`. A plain admin is a single-database one and hides them,
     /// because single-database `migrate` never creates their tables.
+    /// The last of `tenant_mode` / `registry_mode` called wins.
     #[must_use]
     pub fn registry_mode(mut self) -> Self {
         self.config.database = AdminDatabase::Registry;
@@ -820,6 +821,7 @@ impl Builder {
 /// secrets, and a passkey row signs in as its `user_id` (#2364).
 /// Enrollment has its own pages.
 fn is_never_served(table: &str) -> bool {
+    #[cfg(not(any(feature = "totp", feature = "passkey")))]
     let _ = table;
     #[cfg(feature = "totp")]
     if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
@@ -1077,6 +1079,9 @@ mod scope_filter_tests {
         assert!(state.is_visible("rustango_users"));
         #[cfg(feature = "tenancy")]
         assert!(state_with(AdminDatabase::Registry).is_visible("rustango_orgs"));
+        // A registry holds no tenant tables.
+        assert!(!state_with(AdminDatabase::Registry).is_visible("rustango_users"));
+        assert!(state_with(AdminDatabase::Registry).is_visible("rustango_audit_log"));
     }
 
     #[tokio::test]

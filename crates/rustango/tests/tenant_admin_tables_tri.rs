@@ -214,6 +214,8 @@ async fn database_mode_tenant_admin(backend: Backend) {
         .registry_mode()
         .admin_prefix("/a")
         .build();
+    let listed = assert_listed_tables_exist(&registry_admin, "registry admin").await;
+    assert!(!listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
     let (status, _) = get(&registry_admin, "/rustango_translations").await;
     assert_eq!(status, StatusCode::OK, "registry rustango_translations");
     let (status, _) = get(&registry_admin, "/rustango_orgs").await;
@@ -242,10 +244,14 @@ async fn single_database_admin(backend: Backend) {
         .build();
     // Registry-only tables are not created here, so not listed (#2365).
     let listed = assert_listed_tables_exist(&router, "single-database admin").await;
-    assert!(
-        listed.iter().any(|t| t == "rustango_translations"),
-        "{listed:?}"
-    );
+    // Shared system tables stay listed (#2365).
+    for t in [
+        "rustango_translations",
+        "rustango_audit_log",
+        "rustango_content_types",
+    ] {
+        assert!(listed.iter().any(|l| l == t), "{t} missing: {listed:?}");
+    }
     assert!(!listed.iter().any(|t| t == "rustango_orgs"), "{listed:?}");
     let (status, _) = get(&router, "/rustango_orgs").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "rustango_orgs");
