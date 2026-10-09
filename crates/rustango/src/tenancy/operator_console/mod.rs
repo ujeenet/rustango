@@ -1495,6 +1495,15 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
         }
     }
+    emit_registry_audit(
+        &state.registry,
+        "rustango_operators",
+        &op_id.to_string(),
+        op_id,
+        "change_password",
+        serde_json::Map::new(),
+    )
+    .await;
     redir("ok=Password+updated")
 }
 
@@ -1623,7 +1632,7 @@ async fn sso_shared_list(
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_create(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     Form(form): Form<SharedSsoForm>,
 ) -> Response<Body> {
     let mut row = super::sso::SharedSsoProvider {
@@ -1644,7 +1653,38 @@ async fn sso_shared_create(
     if let Err(e) = row.insert_pool(&state.registry).await {
         return server_error("create failed", &e);
     }
+    let mut detail = serde_json::Map::new();
+    detail.insert("slug".into(), serde_json::json!(row.slug));
+    detail.insert("kind".into(), serde_json::json!(row.kind));
+    detail.insert("enabled".into(), serde_json::json!(row.enabled));
+    detail.insert(
+        "allow_email_link".into(),
+        serde_json::json!(row.allow_email_link),
+    );
+    let id = row.id.get().copied().unwrap_or_default();
+    sso_shared_audit(&state, &op, id, "sso_shared_create", detail).await;
     Redirect::to("/sso-shared").into_response()
+}
+
+/// Audit a shared provider change; these rows decide sign-in for every tenant.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_audit(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    id: i64,
+    verb: &str,
+    detail: serde_json::Map<String, serde_json::Value>,
+) {
+    use crate::core::Model as _;
+    emit_registry_audit(
+        &state.registry,
+        super::sso::SharedSsoProvider::SCHEMA.table,
+        &id.to_string(),
+        op.id.get().copied().unwrap_or(0),
+        verb,
+        detail,
+    )
+    .await;
 }
 
 /// The wanted `allow_email_link` value, `on` or `off`.
@@ -1658,7 +1698,7 @@ struct EmailLinkForm {
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_set_email_link(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Form(form): Form<EmailLinkForm>,
 ) -> Response<Body> {
@@ -1681,7 +1721,12 @@ async fn sso_shared_set_email_link(
         .execute_pool(&state.registry)
         .await
     {
-        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(1) => {
+            let mut detail = serde_json::Map::new();
+            detail.insert("allow_email_link".into(), serde_json::json!(allow));
+            sso_shared_audit(&state, &op, id, "sso_shared_email_link", detail).await;
+            Redirect::to("/sso-shared").into_response()
+        }
         Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
         Err(e) => server_error("update failed", &e),
     }
@@ -1690,18 +1735,26 @@ async fn sso_shared_set_email_link(
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_delete(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Response<Body> {
-    let row = super::sso::SharedSsoProvider::objects()
+    let row = match super::sso::SharedSsoProvider::objects()
         .filter("id", id)
         .fetch(&state.registry)
         .await
-        .ok()
-        .and_then(|v| v.into_iter().next());
-    if let Some(r) = row {
-        let _ = r.delete_pool(&state.registry).await;
+    {
+        Ok(v) => v.into_iter().next(),
+        Err(e) => return server_error("delete failed", &e),
+    };
+    let Some(r) = row else {
+        return (StatusCode::NOT_FOUND, "no such shared provider").into_response();
+    };
+    if let Err(e) = r.delete_pool(&state.registry).await {
+        return server_error("delete failed", &e);
     }
+    let mut detail = serde_json::Map::new();
+    detail.insert("slug".into(), serde_json::json!(r.slug));
+    sso_shared_audit(&state, &op, id, "sso_shared_delete", detail).await;
     Redirect::to("/sso-shared").into_response()
 }
 

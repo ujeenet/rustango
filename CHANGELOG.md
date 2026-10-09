@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — operator console audits shared SSO changes and password changes (#2424)
+
+Creating, re-linking and deleting a shared SSO provider, and an operator's own password change, now write audit rows; a failed delete reports the error instead of a success redirect.
+
 ### Security — impersonation links default to https (#2425)
 
 With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); `check --deploy` warns when the variable is unset or not `https`.
