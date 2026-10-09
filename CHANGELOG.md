@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — two tenants can no longer share one schema (#2290)
+
+Provisioning and `migrate-tenant-storage` refuse a schema another tenant uses, by `schema_name` or slug default; a purge of one dropped both. A schema-mode purge now refuses a schema another tenant still uses, or a reserved one such as `public`.
+
+### Fixed — a database-mode purge no longer fails on other pods' connections (#2291)
+
+Tenant PG pools connect as `application_name = rustango-tenant:<org id>`; a purge ends only those sessions, on any pod. Any other session, a URL naming the registry's database, or another tenant on the same database refuses the purge before the org is touched.
+
+### Fixed — a provisioning retry no longer revives a suspended tenant (#2292)
+
+Activating a tenant by edit, or deactivating it, unlinks the failed run that made it, so a webhook replay stops resuming it.
+
 ## [0.60.3] — 2026-10-08
 
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)

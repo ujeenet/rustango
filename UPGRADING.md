@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### Tenant PG pools set `application_name`
+
+Database-mode tenant pools connect as `rustango-tenant:<org id>`, overriding one in the URL. A purge ends those sessions; any other session open on the database makes it fail (#2291).
+
+### Tenant schemas are no longer shared
+
+`create-tenant`, the console, the webhook and `migrate-tenant-storage` refuse a schema another tenant uses (#2290). Rows that already share one are not touched; `purge-tenant` now refuses to drop a shared schema, or one with a name provisioning would refuse (e.g. `public`, uppercase). Drop those by hand.
+
+### A provisioning retry only resumes a never-activated tenant
+
+Activating an org, editing an active one, or deactivating it drops its link to failed provision runs. A half-provisioned tenant activated by hand can no longer be resumed; a replay fails as "slug already exists" (#2292).
+
 ## 0.60.3
 
 ### `makemigrations` renames an M2M junction's column
