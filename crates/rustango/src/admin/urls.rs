@@ -1077,11 +1077,14 @@ mod scope_filter_tests {
         // Unmanaged and tenant-scope framework tables are there.
         assert!(state.is_visible("rustango_translations"));
         assert!(state.is_visible("rustango_users"));
+        // A registry holds its own tables and no tenant ones.
         #[cfg(feature = "tenancy")]
-        assert!(state_with(AdminDatabase::Registry).is_visible("rustango_orgs"));
-        // A registry holds no tenant tables.
-        assert!(!state_with(AdminDatabase::Registry).is_visible("rustango_users"));
-        assert!(state_with(AdminDatabase::Registry).is_visible("rustango_audit_log"));
+        {
+            let registry = state_with(AdminDatabase::Registry);
+            assert!(registry.is_visible("rustango_orgs"));
+            assert!(!registry.is_visible("rustango_users"));
+            assert!(registry.is_visible("rustango_audit_log"));
+        }
     }
 
     #[tokio::test]
