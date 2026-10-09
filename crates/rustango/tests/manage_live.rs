@@ -1419,3 +1419,56 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `check --deploy` reports a tenant whose database never answers, without
+/// waiting out the pool's 30 s acquire timeout (#2359).
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn check_deploy_does_not_wait_on_a_silent_tenant() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    // Accepts connections and never answers.
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((s, _)) = silent.accept().await {
+            open.push(s);
+        }
+    });
+    let slug = unique("silent");
+    let mut org = Org {
+        slug: slug.clone(),
+        display_name: slug.clone(),
+        database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        .await
+        .unwrap();
+
+    let pools = TenantPools::new(pool.clone());
+    let dir = fresh_dir("sso_silent");
+    let start = std::time::Instant::now();
+    let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
+    held.abort();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(
+        out.contains(&format!(
+            "[sso] tenant `{slug}`: could not check SSO providers: timed out"
+        )),
+        "{out}"
+    );
+    rmig::drop_all(&pool).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
