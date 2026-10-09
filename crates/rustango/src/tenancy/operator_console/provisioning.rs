@@ -306,7 +306,7 @@ pub(super) async fn test_connection(
     // most confident wording, the mistake that ran the tenant
     // migration chain over the registry.
     if let Some(p) = state.provisioner.as_ref() {
-        if let Err(msg) = provision::refuse_registry_url(url, &p.registry_url()) {
+        if let Err(msg) = provision::refuse_registry(url, &p.registry(), &p.registry_url()) {
             return probe_bad(&msg);
         }
     }

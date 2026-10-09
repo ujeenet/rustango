@@ -157,7 +157,7 @@ The template's reclaim after `shutdown` never ran for a killed worker. In a work
 
 ### Tenant database URLs (#2320)
 
-Creating or editing a tenant now refuses a `database_url` sqlx cannot parse, such as a secret reference with no `scheme://`.
+Creating or editing a tenant now refuses a `postgres://`, `mysql://`, `mariadb://` or `sqlite:` URL that sqlx cannot parse. Secret references are not resolved there, so they pass unchecked.
 
 ### Scoped pools quote the schema (#2325)
 

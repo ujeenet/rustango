@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
-The check moved into `checked_request` and the org edit path. It reads the URL with the backend's sqlx parser, so `?host=`, sockets, default ports and `mariadb://` match the registry pool; an unreadable URL is refused.
+The check moved into `checked_request` and the org edit path. It reads the URL with the backend's sqlx parser, so `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.
 
 ### Fixed — a scoped tenant pool quotes its schema in `search_path` (#2325)
 

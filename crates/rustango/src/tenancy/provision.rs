@@ -1101,9 +1101,7 @@ pub(crate) async fn checked_request(
 ) -> Result<ProvisionRequest, TenancyError> {
     let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
     if let Some(url) = &normalized.database_url {
-        refuse_registry_pool(url, registry)
-            .and_then(|()| refuse_registry_url(url, registry_url))
-            .map_err(TenancyError::Validation)?;
+        refuse_registry(url, registry, registry_url).map_err(TenancyError::Validation)?;
     }
     if let Some(clash) = routing_clash(registry, &normalized).await? {
         return Err(TenancyError::Validation(format!(
@@ -1161,6 +1159,16 @@ pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Resul
     }
 }
 
+/// Both refusals: the pool's endpoint, then the configured registry URL.
+pub(crate) fn refuse_registry(
+    tenant_url: &str,
+    registry: &crate::sql::Pool,
+    registry_url: &str,
+) -> Result<(), String> {
+    refuse_registry_pool(tenant_url, registry)
+        .and_then(|()| refuse_registry_url(tenant_url, registry_url))
+}
+
 /// [`refuse_registry_url`] against the database the registry pool is
 /// connected to (#2320).
 pub(crate) fn refuse_registry_pool(
@@ -1212,12 +1220,12 @@ impl Endpoint {
         BackendKind::parse(&url.split(':').next()?.to_ascii_lowercase()).ok()
     }
 
-    /// `Ok(None)` for another backend's URL. Any other scheme (a secret
-    /// reference) is read as `kind`, since sqlx ignores the scheme.
+    /// `Ok(None)` for another backend's URL, and for a secret reference:
+    /// org edits have no resolver, so its target is unknown here.
     fn of_url(url: &str, kind: BackendKind) -> Result<Option<Self>, String> {
         match Self::scheme_kind(url) {
-            Some(other) if other != kind => Ok(None),
-            _ => Self::parse(url, kind).map(Some),
+            Some(k) if k == kind => Self::parse(url, kind).map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -1236,7 +1244,7 @@ impl Endpoint {
             #[cfg(feature = "sqlite")]
             BackendKind::Sqlite => url
                 .parse::<sqlx::sqlite::SqliteConnectOptions>()
-                .map(|o| Self::Sqlite(file_identity(o.get_filename())))
+                .map(|o| Self::Sqlite(sqlite_file(o.get_filename())))
                 .map_err(|e| e.to_string()),
             #[allow(unreachable_patterns)]
             other => Err(format!("this build has no {} backend", other.as_str())),
@@ -1256,7 +1264,7 @@ impl Endpoint {
             #[cfg(feature = "sqlite")]
             crate::sql::Pool::Sqlite(p) => (
                 BackendKind::Sqlite,
-                Self::Sqlite(file_identity(p.connect_options().get_filename())),
+                Self::Sqlite(sqlite_file(p.connect_options().get_filename())),
             ),
         }
     }
@@ -1288,12 +1296,33 @@ impl Endpoint {
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 impl Place {
+    /// sqlx keeps a default or `PGHOST` socket dir in `host`, a `?host=/dir` one in `socket`.
     fn of(socket: Option<&std::path::PathBuf>, host: &str) -> Self {
         match socket {
             Some(s) => Self::Socket(file_identity(s)),
-            None => Self::Host(host.to_ascii_lowercase()),
+            None if host.starts_with('/') => Self::Socket(file_identity(Path::new(host))),
+            None => {
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                Self::Host(host.trim_end_matches('.').to_ascii_lowercase())
+            }
         }
     }
+}
+
+/// The file SQLite opens: a `file:` URI names its path, percent-encoded, before `?`.
+#[cfg(feature = "sqlite")]
+fn sqlite_file(name: &Path) -> std::path::PathBuf {
+    let name = name.to_string_lossy();
+    let Some(uri) = name.strip_prefix("file:") else {
+        return file_identity(Path::new(&*name));
+    };
+    let uri = uri.split(['?', '#']).next().unwrap_or_default();
+    // `file://host/path`: only an empty or `localhost` authority is legal.
+    let path = match uri.strip_prefix("//") {
+        Some(rest) => rest.find('/').map_or("", |i| &rest[i..]),
+        None => uri,
+    };
+    file_identity(Path::new(&crate::url_codec::percent_decode_path(path)))
 }
 
 /// `path` resolved against the working directory and symlinks, as far as it exists.
@@ -2196,6 +2225,46 @@ mod registry_endpoint_tests {
         assert!(refuse_registry_url("postgres://h:x/reg", "postgres://h:5432/reg").is_err());
     }
 
+    /// Org edits have no secrets resolver, so a reference passes unchecked.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_secret_reference_is_not_refused() {
+        let pool = pg("postgres://app@db.internal:5432/reg");
+        for reference in [
+            "acme-db",
+            "env://TENANT_DB",
+            "aws-sm://arn:aws:secretsmanager:eu:1:secret:db",
+        ] {
+            assert!(
+                refuse_registry_pool(reference, &pool).is_ok(),
+                "{reference}"
+            );
+        }
+    }
+
+    /// A default or `PGHOST` socket dir sits in `host`; `?host=/dir` in `socket`.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_socket_dir_matches_in_either_spelling() {
+        let opts = sqlx::postgres::PgConnectOptions::new_without_pgpass()
+            .host("/tmp")
+            .port(5432)
+            .database("reg");
+        let pool = crate::sql::Pool::Postgres(sqlx::PgPool::connect_lazy_with(opts));
+        assert!(refuse_registry_pool("postgres://x:5432/reg?host=/tmp", &pool).is_err());
+        assert!(refuse_registry_pool("postgres://x:5432/reg?host=/tmp/", &pool).is_err());
+        assert!(refuse_registry_pool("postgres://x:5432/t?host=/tmp", &pool).is_ok());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_trailing_dot_or_brackets_name_the_same_host() {
+        let pool = pg("postgres://app@db.internal:5432/reg");
+        assert!(refuse_registry_pool("postgres://db.internal.:5432/reg", &pool).is_err());
+        let v6 = pg("postgres://app@[::1]:5432/reg");
+        assert!(refuse_registry_pool("postgres://x:5432/reg?host=::1", &v6).is_err());
+    }
+
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn a_relative_sqlite_path_is_the_same_file() {
@@ -2212,6 +2281,14 @@ mod registry_endpoint_tests {
         for same in [format!("sqlite:{rel}"), format!("sqlite://{rel}?mode=rwc")] {
             assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
             assert!(refuse_registry_url(&same, &format!("sqlite://{}", abs.display())).is_err());
+        }
+        let abs_s = abs.display();
+        for uri in [
+            format!("sqlite:file:{rel}"),
+            format!("sqlite:file:{abs_s}?mode=rwc"),
+            format!("sqlite://file://{abs_s}"),
+        ] {
+            assert!(refuse_registry_pool(&uri, &pool).is_err(), "{uri}");
         }
         let sibling = format!("sqlite:{}", dir.path().join("t.db").display());
         assert!(refuse_registry_pool(&sibling, &pool).is_ok());

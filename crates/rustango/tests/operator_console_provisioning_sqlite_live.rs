@@ -41,6 +41,11 @@ struct Booted {
 }
 
 async fn boot() -> Booted {
+    boot_with(None).await
+}
+
+/// `provisioner_url`: the registry URL the provisioner is told, if not the pool's.
+async fn boot_with(provisioner_url: Option<&str>) -> Booted {
     let tmp = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
     let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
@@ -73,7 +78,8 @@ async fn boot() -> Booted {
     };
     op.insert_pool(&registry).await.expect("seed operator");
 
-    let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
+    let told = provisioner_url.map_or_else(|| url.clone(), ToOwned::to_owned);
+    let provisioner = Provisioner::new(pools.clone(), told, migrations.path()).erased();
     let app = router_with_provisioning(
         registry.clone(),
         pools.clone(),
@@ -406,6 +412,34 @@ async fn the_probe_refuses_the_registry_instead_of_blessing_it() {
         !html.contains("migrations will run"),
         "the success wording must not appear: {html}"
     );
+}
+
+/// A provisioner told a secret reference still knows its pool's file (#2320).
+#[tokio::test]
+async fn the_probe_refuses_the_registry_pool_when_its_url_is_a_reference() {
+    let b = boot_with(Some("env://REGISTRY_DATABASE_URL")).await;
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .uri("/orgs/test-connection")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "database_url={}",
+                    form_encode(&b.registry_url)
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_of(resp).await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(!html.contains("migrations will run"), "{html}");
 }
 
 /// The whole path: submit the form, get redirected to the run, and
