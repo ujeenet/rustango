@@ -724,6 +724,16 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
     assert!(!out.contains("[sso]"), "{out}");
 }
 
+/// A table probe that fails is an error, not "no tables" (#2359).
+#[tokio::test]
+async fn check_reports_a_failed_table_probe() {
+    let pool = Pool::connect("sqlite::memory:").await.unwrap();
+    pool.close().await;
+    assert!(rustango::testkit::sso_check::tenant_providers(&pool)
+        .await
+        .is_err());
+}
+
 /// Email linking never signs in a privileged account, so a provider whose
 /// only users are privileged still refuses everyone (#2359).
 #[tokio::test]

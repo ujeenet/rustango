@@ -5,7 +5,7 @@
 //! it: privileged accounts never link by email.
 
 use crate::core::Model;
-use crate::migrate::table_exists_here;
+use crate::migrate::try_table_exists_here;
 use crate::query::QuerySet;
 use crate::sql::{ExecError, ExistsPool as _, Pool};
 
@@ -57,8 +57,8 @@ async fn unlinked<P: Model + Send, U: Model + Send>(
     source: LinkSource,
     users: &Pool,
 ) -> Result<Vec<Unlinked>, ExecError> {
-    if !table_exists_here(providers, P::SCHEMA.table).await
-        || !table_exists_here(users, U::SCHEMA.table).await
+    if !try_table_exists_here(providers, P::SCHEMA.table).await?
+        || !try_table_exists_here(users, U::SCHEMA.table).await?
         || !QuerySet::<U>::new().exists(users).await?
     {
         return Ok(Vec::new());
@@ -69,7 +69,7 @@ async fn unlinked<P: Model + Send, U: Model + Send>(
     } else {
         email_linking::<P>(providers).await
     };
-    let has_links = table_exists_here(users, super::SsoLink::SCHEMA.table).await;
+    let has_links = try_table_exists_here(users, super::SsoLink::SCHEMA.table).await?;
     let mut out = Vec::new();
     for row in load_rows(QuerySet::<P>::new().filter("enabled", true), providers).await? {
         let key = ProviderKey::for_row(source, row.id, &row.kind, row.issuer_url.as_deref());
@@ -135,7 +135,7 @@ pub async fn shared_providers(registry: &Pool, tenant: &Pool) -> Result<Vec<Stra
     let mut rows =
         unlinked::<SharedSsoProvider, crate::tenancy::User>(registry, LinkSource::Shared, tenant)
             .await?;
-    if !rows.is_empty() && table_exists_here(tenant, super::SsoProvider::SCHEMA.table).await {
+    if !rows.is_empty() && try_table_exists_here(tenant, super::SsoProvider::SCHEMA.table).await? {
         let own = load_rows(QuerySet::<super::SsoProvider>::new(), tenant).await?;
         rows.retain(|u| !own.iter().any(|r| r.enabled && r.slug == u.slug));
     }
