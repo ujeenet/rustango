@@ -1487,7 +1487,15 @@ async fn change_password_submit(
             ))
         }
     };
-    match super::password::store_new_hash(&state.registry, &op_row, new_hash).await {
+    match crate::passwords::store_password_change(
+        &state.registry,
+        <auth::Operator as crate::core::Model>::SCHEMA,
+        &op_row.id,
+        &op_row.password_hash,
+        &new_hash,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
         Err(e) => {

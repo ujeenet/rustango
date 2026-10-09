@@ -463,7 +463,15 @@ where
             "reset-operator-password: no operator named `{username}`"
         ))
     })?;
-    if !crate::tenancy::password::store_new_hash(&registry, &op, hash).await? {
+    if !crate::passwords::store_password_change(
+        &registry,
+        <crate::tenancy::Operator as crate::core::Model>::SCHEMA,
+        &op.id,
+        &op.password_hash,
+        &hash,
+    )
+    .await?
+    {
         return Err(TenancyError::Validation(format!(
             "reset-operator-password: `{username}`'s password changed meanwhile; try again"
         )));
@@ -559,7 +567,15 @@ where
         ));
     }
     let hash = crate::tenancy::password::hash_async(&new_plain).await?;
-    if !crate::tenancy::password::store_new_hash(&pool, &user, hash).await? {
+    if !crate::passwords::store_password_change(
+        &pool,
+        <crate::tenancy::User as crate::core::Model>::SCHEMA,
+        &user.id,
+        &user.password_hash,
+        &hash,
+    )
+    .await?
+    {
         return Err(TenancyError::Validation(format!(
             "change-password: `{username}`'s password changed meanwhile; try again"
         )));
@@ -654,7 +670,15 @@ where
         ));
     }
     let hash = crate::tenancy::password::hash_async(&new_plain).await?;
-    if !crate::tenancy::password::store_new_hash(&registry, &op, hash).await? {
+    if !crate::passwords::store_password_change(
+        &registry,
+        <crate::tenancy::Operator as crate::core::Model>::SCHEMA,
+        &op.id,
+        &op.password_hash,
+        &hash,
+    )
+    .await?
+    {
         return Err(TenancyError::Validation(format!(
             "change-operator-password: `{username}`'s password changed meanwhile; try again"
         )));

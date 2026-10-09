@@ -1686,7 +1686,15 @@ async fn change_password_submit(
             return redir_err("Could not update the password; please try again.");
         }
     };
-    match super::password::store_new_hash(tenant_pool, &user, new_hash).await {
+    match crate::passwords::store_password_change(
+        tenant_pool,
+        <super::auth::User as crate::core::Model>::SCHEMA,
+        &user.id,
+        &user.password_hash,
+        &new_hash,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
         Err(e) => {

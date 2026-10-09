@@ -263,6 +263,10 @@ pub enum ExecError {
         column: &'static str,
     },
 
+    /// A write keyed on the primary key of a row never saved (#2467).
+    #[error("`{table}` row has no primary key yet; save it first")]
+    UnsavedRow { table: &'static str },
+
     /// `insert_returning` was called with an `InsertQuery` carrying no
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]

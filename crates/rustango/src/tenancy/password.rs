@@ -187,52 +187,6 @@ pub(crate) async fn first_verified<T>(
     Ok(None)
 }
 
-/// A row with `password_hash` and `password_changed_at` columns.
-pub(crate) trait PasswordRow: crate::core::Model {
-    fn pk(&self) -> i64;
-    fn stored_hash(&self) -> &str;
-}
-
-impl PasswordRow for super::User {
-    fn pk(&self) -> i64 {
-        self.id.get().copied().unwrap_or_default()
-    }
-    fn stored_hash(&self) -> &str {
-        &self.password_hash
-    }
-}
-
-impl PasswordRow for super::Operator {
-    fn pk(&self) -> i64 {
-        self.id.get().copied().unwrap_or_default()
-    }
-    fn stored_hash(&self) -> &str {
-        &self.password_hash
-    }
-}
-
-/// Store `new_hash` on `row` and stamp `password_changed_at`, only while
-/// the hash is still the one `row` was read with. Writes no other column,
-/// so a deactivate or demote landing meanwhile stands (#2467). `false`
-/// when the password changed meanwhile.
-///
-/// # Errors
-/// Driver failures.
-pub(crate) async fn store_new_hash<M: PasswordRow>(
-    pool: &crate::sql::Pool,
-    row: &M,
-    new_hash: String,
-) -> Result<bool, crate::sql::ExecError> {
-    let q = crate::passwords::password_change_update(
-        M::SCHEMA,
-        row.pk(),
-        row.stored_hash(),
-        &new_hash,
-        chrono::Utc::now(),
-    );
-    Ok(crate::sql::update_pool(pool, &q).await? == 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +237,38 @@ mod tests {
             .remove(0)
     }
 
+    /// Change `row`'s password to `NEW` the way the console and CLI do.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    async fn change(
+        pool: &crate::sql::Pool,
+        row: &super::super::User,
+    ) -> Result<bool, crate::sql::ExecError> {
+        use crate::core::Model as _;
+        crate::passwords::store_password_change(
+            pool,
+            super::super::User::SCHEMA,
+            &row.id,
+            &row.password_hash,
+            "NEW",
+        )
+        .await
+    }
+
+    /// #2467 — an unsaved row is an error, not an UPDATE of id 0.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_password_change_on_an_unsaved_row_errors() {
+        let (pool, _) = user_row().await;
+        let unsaved = super::super::User {
+            password_hash: "OLD".into(),
+            ..crate::testkit::user()
+        };
+        assert!(matches!(
+            change(&pool, &unsaved).await,
+            Err(crate::sql::ExecError::UnsavedRow { .. })
+        ));
+    }
+
     /// #2467 — a deactivate landing while the hash runs must stand.
     #[cfg(all(feature = "sqlite", feature = "testkit"))]
     #[tokio::test]
@@ -297,7 +283,7 @@ mod tests {
             .execute_pool(&pool)
             .await
             .unwrap();
-        assert!(store_new_hash(&pool, &stale, "NEW".into()).await.unwrap());
+        assert!(change(&pool, &stale).await.unwrap());
         let now = reread(&pool, id).await;
         assert!(!now.active, "the password write undid the deactivate");
         assert_eq!(now.password_hash, "NEW");
@@ -318,7 +304,7 @@ mod tests {
             .execute_pool(&pool)
             .await
             .unwrap();
-        assert!(!store_new_hash(&pool, &stale, "NEW".into()).await.unwrap());
+        assert!(!change(&pool, &stale).await.unwrap());
         assert_eq!(reread(&pool, id).await.password_hash, "OTHER");
     }
 

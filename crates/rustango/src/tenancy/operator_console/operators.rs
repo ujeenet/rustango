@@ -364,7 +364,15 @@ pub(super) async fn operator_reset_password(
 
     // The new hash is what signs them out: sessions carry a fingerprint
     // of the old one.
-    match password::store_new_hash(&state.registry, &target, hash).await {
+    match crate::passwords::store_password_change(
+        &state.registry,
+        <auth::Operator as crate::core::Model>::SCHEMA,
+        &target.id,
+        &target.password_hash,
+        &hash,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => {
             return back_err(&state, &op, "The password changed meanwhile; try again.").await
