@@ -20,6 +20,8 @@ A unique, FK, NOT NULL or check refusal maps to a message; the raw error is logg
 
 The 400 carries the reason; it was a logged 500.
 
+## [0.60.3] — 2026-10-08
+
 ### Fixed — migration gaps on long names, wide PKs and M2M columns (#2245)
 
 On PG an `Auto` PK widened to i64 also widens its sequence. FK names that cut to one 63-byte name are refused before any DDL. A changed M2M junction column is renamed, not dropped with its rows.
