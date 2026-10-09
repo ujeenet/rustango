@@ -3580,7 +3580,9 @@ pub(super) fn write_where_with_search(
     qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    let has_search = search.is_some_and(|s| !s.columns.is_empty() && !s.query.is_empty());
+    // A query with no column to match it matches nothing (#2391).
+    let search = search.filter(|s| !s.query.is_empty());
+    let has_search = search.is_some();
     let has_where = !where_clause.is_empty();
     if !has_where && !has_search {
         return Ok(());
@@ -3597,10 +3599,13 @@ pub(super) fn write_where_with_search(
             b.sql.push(')');
         }
     }
-    if has_search {
-        let s = search.expect("checked above");
+    if let Some(s) = search {
         if has_where {
             b.sql.push_str(" AND ");
+        }
+        if s.columns.is_empty() {
+            b.sql.push_str("1 = 0");
+            return Ok(());
         }
         // `write_ilike` picks each backend's case-insensitive LIKE:
         // native `ILIKE` on PG, `LOWER(col) LIKE LOWER(?)` elsewhere.

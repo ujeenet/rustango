@@ -150,6 +150,20 @@ untouched.
 
 ## Unreleased
 
+### `SearchClause` with no columns
+
+A `SearchClause` with a non-empty query and no columns now matches no rows (`WHERE 1 = 0`); it used to be dropped. A ViewSet without `search_fields` still ignores `?search=` (#2391).
+
+### Admin: inline delete of a `soft_delete` child
+
+Ticking DELETE on an inline row of a `soft_delete` model now stamps its column, as the main delete does; it used to remove the row (#2453).
+
+### Admin: audit in the write's transaction
+
+An inline row of an `audit(...)` child model now writes its audit row in the edit's transaction; if that write fails, the edit is not saved (#2389).
+
+The same holds for admin delete, soft delete, `delete_selected` and `restore_selected` on an `audit(...)` model: a missing or failing audit table now refuses the delete (a 500 or the missing-table page) where it used to delete and log a warning (#2390).
+
 ### `migrate-tenant-storage` takes the tenant offline
 
 The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. A suspension made during the move is undone when it ends; suspend again afterwards. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).

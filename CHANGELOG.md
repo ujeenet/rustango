@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an admin inline DELETE stamps a `soft_delete` child instead of removing it (#2453)
+
+As the main admin delete does; trashed children no longer count toward the inline's `max_num`.
+
+### Fixed — an admin search on a model with no searchable column returns no rows (#2391)
+
+The changelist and autocomplete returned every row. A `SearchClause` with a query and no columns now matches nothing.
+
+### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
+
+For an `audit(...)` model a failed audit write now refuses the write instead of logging a warning. Custom actions still audit after their handler.
+
+### Fixed — admin inline rows of an `audit(...)` model are audited (#2389)
+
+Inline updates, deletes and inserts write their audit rows in the parent edit's transaction; a failed audit write saves nothing.
+
 ### Fixed — `migrate-tenant-storage` no longer advises `purge-tenant` for the old copy (#2382)
 
 That would drop the new storage and the Org row. The message now names the old schema or database to drop by hand.
