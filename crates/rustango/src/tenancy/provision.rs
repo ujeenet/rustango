@@ -2281,7 +2281,8 @@ mod registry_endpoint_tests {
         assert!(refuse_registry_pool("postgres://x:5432/reg?host=::1", &v6).is_err());
     }
 
-    #[cfg(feature = "sqlite")]
+    /// Unix only: a Windows canonical path starts `\\?\`, which a URL reads as a query.
+    #[cfg(all(feature = "sqlite", unix))]
     #[tokio::test]
     async fn a_relative_sqlite_path_is_the_same_file() {
         let dir = tempfile::tempdir_in(".").expect("tempdir");
