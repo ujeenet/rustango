@@ -283,12 +283,20 @@ where
     let slug = parsed.required(0, USAGE)?;
     let username = parsed.required(1, USAGE)?;
     let label = parsed.value("--label")?.unwrap_or_default().to_owned();
-    let expires_days = parsed
+    let expires_at = parsed
         .value("--expires-days")?
         .map(|raw| {
-            raw.parse::<i64>().map_err(|_| {
-                TenancyError::Validation(format!("--expires-days expects an integer, got `{raw}`"))
-            })
+            // Checked: a huge count used to panic in chrono (#2395).
+            raw.parse::<i64>()
+                .ok()
+                .filter(|d| *d > 0)
+                .and_then(chrono::Duration::try_days)
+                .and_then(|d| chrono::Utc::now().checked_add_signed(d))
+                .ok_or_else(|| {
+                    TenancyError::Validation(format!(
+                        "--expires-days expects a positive number of days, got `{raw}`"
+                    ))
+                })
         })
         .transpose()?;
 
@@ -297,7 +305,6 @@ where
         .await
         .map_err(TenancyError::Driver)?;
     let user_id = user_id_by_username(&username, &pool).await?;
-    let expires_at = expires_days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
     let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool).await?;
 
     writeln!(w, "API key for `{username}` on tenant `{slug}`:")?;

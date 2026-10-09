@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `create-api-key --expires-days` no longer panics on a huge value (#2395)
+
+A count of zero, below zero or past chrono's range is now a validation error.
+
 ### Fixed — `forget-pending` keeps a migration a tenant applied (#2393)
 
 In a tenancy project it checked only the registry ledger. It now refuses when any tenant's ledger records the migration.
