@@ -59,6 +59,9 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
     }
 }
 
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+use crate::core::joins::joined_label;
+
 /// A leading result column: its output name and the type its model declares.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 type TypedCol = (
@@ -91,15 +94,23 @@ fn column_types<R: sqlx::Row>(
     })
 }
 
-/// The model columns a SELECT emits first: its projection, else every field.
+/// The model columns a SELECT emits first: its projection, else every
+/// field, then each join's projected `alias__col`.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     let model = query.model;
     let typed = |c: &'static str| (c.into(), model.field_by_column(c).map(|f| f.ty));
-    match &query.projection {
+    let mut cols: Vec<TypedCol> = match &query.projection {
         Some(cols) => cols.iter().copied().map(typed).collect(),
         None => model.scalar_fields().map(|f| typed(f.column)).collect(),
+    };
+    for j in &query.joins {
+        cols.extend(j.project.iter().map(|&c| {
+            let ty = j.target.field_by_column(c).map(|f| f.ty);
+            (joined_label(j.alias, c).into(), ty)
+        }));
     }
+    cols
 }
 
 /// An aggregate's group columns. A joined `alias.col` comes back as
@@ -125,7 +136,7 @@ fn aggregate_group_cols(query: &AggregateQuery) -> Vec<TypedCol> {
                         .map(|j| j.target)
                 };
                 let ty = target.and_then(|m| m.field_by_column(c)).map(|f| f.ty);
-                (format!("{alias}__{c}").into(), ty)
+                (joined_label(alias, c).into(), ty)
             }
         })
         .collect()

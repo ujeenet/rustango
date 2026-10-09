@@ -51,6 +51,17 @@ pub struct Post {
     pub meta: Option<serde_json::Value>,
 }
 
+/// Joined to `Post` by id, so a join reads another model's columns.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "values_tri_author")]
+#[rustango(app = "values_tri")]
+#[allow(dead_code)]
+pub struct Author {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub active: bool,
+}
+
 /// Rebuild the table and seed the four rows every scenario reads.
 ///
 /// Row order is load-bearing: the flat-column assertions below compare
@@ -74,6 +85,34 @@ async fn seeded(pool: &Pool) {
         };
         p.insert_pool(pool).await.expect("seed row");
     }
+    rustango::testkit::matrix::fresh_table::<Author>(pool).await;
+    for (id, active) in [(1, false), (2, false), (3, true), (4, true)] {
+        Author { id, active }
+            .insert_pool(pool)
+            .await
+            .expect("seed author");
+    }
+}
+
+/// `Post` joined to its same-id `Author` as `a`, projecting `project`.
+fn author_join(project: Vec<&'static str>) -> Join {
+    Join {
+        target: Author::SCHEMA,
+        alias: "a",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("a", "id"),
+            op: Op::Eq,
+            rhs: aliased("values_tri_post", "id"),
+        },
+        project,
+    }
+}
+
+/// Sorted, so row order does not matter.
+fn sorted(mut v: Vec<SqlValue>) -> Vec<SqlValue> {
+    v.sort_by_key(|v| format!("{v:?}"));
+    v
 }
 
 /// `values_dict` returns one map per row, carrying only the listed
@@ -235,38 +274,69 @@ async fn aggregate_alias_does_not_take_the_column_type(pool: &Pool) {
 /// A bool grouped through a join reads as `Bool`, with and without a
 /// derived table; MySQL and SQLite gave `I64` (#2322).
 async fn joined_group_bool_keeps_its_type(pool: &Pool) {
-    let self_join = Join {
-        target: Post::SCHEMA,
-        alias: "p",
-        kind: JoinKind::Inner,
-        on: WhereExpr::ExprCompare {
-            lhs: aliased("p", "id"),
-            op: Op::Eq,
-            rhs: aliased("values_tri_post", "id"),
-        },
-        project: vec![],
-    };
+    let both = [SqlValue::Bool(false), SqlValue::Bool(true)];
     for distinct in [false, true] {
-        let mut qs = Post::objects().join(self_join.clone());
-        if distinct {
-            qs = qs.distinct();
-        }
-        let mut flags: Vec<SqlValue> = qs
-            .values(&["p.published"])
-            .annotate("n", AggregateExpr::Count(None))
-            .fetch(pool)
-            .await
-            .expect("joined group")
-            .into_iter()
-            .map(|r| r["p__published"].clone())
-            .collect();
-        flags.sort_by_key(|v| format!("{v:?}"));
+        let qs = || {
+            let qs = Post::objects().join(author_join(vec![]));
+            if distinct {
+                qs.distinct()
+            } else {
+                qs
+            }
+        };
+        let group = |col: &'static str, key: &'static str| {
+            let qs = qs();
+            async move {
+                let rows = qs
+                    .values(&[col])
+                    .annotate("n", AggregateExpr::Count(None))
+                    .fetch(pool)
+                    .await
+                    .expect("joined group");
+                sorted(rows.into_iter().map(|r| r[key].clone()).collect())
+            }
+        };
         assert_eq!(
-            flags,
-            [SqlValue::Bool(false), SqlValue::Bool(true)],
+            group("a.active", "a__active").await,
+            both,
+            "distinct={distinct}"
+        );
+        // The base table's own dotted name.
+        assert_eq!(
+            group("values_tri_post.published", "values_tri_post__published").await,
+            both,
             "distinct={distinct}"
         );
     }
+}
+
+/// A joined column a `values` projection carries reads as `Bool` too (#2322).
+async fn joined_projection_bool_keeps_its_type(pool: &Pool) {
+    let want = vec![
+        SqlValue::Bool(false),
+        SqlValue::Bool(false),
+        SqlValue::Bool(true),
+        SqlValue::Bool(true),
+    ];
+    let qs = || Post::objects().join(author_join(vec!["active"]));
+    let dict = qs()
+        .values_dict(&["title"])
+        .fetch(pool)
+        .await
+        .expect("dict");
+    assert_eq!(
+        sorted(dict.into_iter().map(|r| r["a__active"].clone()).collect()),
+        want
+    );
+    let list = qs()
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("list");
+    assert_eq!(
+        sorted(list.into_iter().map(|r| r[1].clone()).collect()),
+        want
+    );
 }
 
 /// NULL must error into a bare `i64` and read as `None` into
@@ -327,5 +397,6 @@ tri_dialect_test! {
         values_keep_bool_and_json_types,
         aggregate_alias_does_not_take_the_column_type,
         joined_group_bool_keeps_its_type,
+        joined_projection_bool_keeps_its_type,
     ],
 }
