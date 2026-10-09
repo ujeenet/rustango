@@ -170,6 +170,10 @@ On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (
 
 In a tenancy project `forget-pending` now refuses a migration any tenant applied, and fails if a tenant's ledger can't be read (#2393).
 
+### Schema-mode tenants need a new schema
+
+Creating a schema-mode tenant now fails if its schema already exists. Drop it or pick another `--schema-name` (#2394).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

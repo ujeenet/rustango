@@ -253,6 +253,138 @@ async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
     assert!(file.exists(), "the JSON was deleted");
 }
 
+#[cfg(feature = "postgres")]
+async fn schema_exists(pool: &rustango::sql::sqlx::PgPool, schema: &str) -> bool {
+    rustango::sql::sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn schema_opts(schema: &str) -> CreateTenantOpts {
+    CreateTenantOpts {
+        mode: StorageMode::Schema,
+        schema_name: Some(schema.to_owned()),
+        no_migrate: true,
+        ..CreateTenantOpts::default()
+    }
+}
+
+/// #2394 — a schema-mode tenant does not adopt a schema that exists.
+async fn an_existing_schema_is_not_adopted(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        let schema = format!("mt_app_{}", std::process::id());
+        for sql in [
+            format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
+            format!("CREATE SCHEMA {schema}"),
+            format!("CREATE TABLE {schema}.keep (id INT)"),
+        ] {
+            rustango::sql::sqlx::query(&sql).execute(pg).await.unwrap();
+        }
+        let dir = Path::new("no-migrations");
+
+        let slug = name("adopt");
+        let err = create(pool, dir, &slug, schema_opts(&schema))
+            .await
+            .expect_err("create_tenant adopted the schema");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(org_by_slug(pool, &slug).await.is_none());
+
+        let request = rustango::tenancy::provision::ProvisionRequest {
+            slug: name("adopt2"),
+            mode: StorageMode::Schema,
+            backend: BackendKind::Postgres,
+            display_name: None,
+            database_url: None,
+            schema_name: Some(schema.clone()),
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            run_migrations: false,
+            preflight: rustango::tenancy::preflight::Preflight::default(),
+        };
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let r = rustango::tenancy::provision::provision_tenant(
+            &TenantPools::new(pg.clone()),
+            &url,
+            dir,
+            &request,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(&r, Err(e) if e.to_string().contains("already exists")),
+            "provision adopted the schema: {r:?}"
+        );
+
+        let kept: i64 =
+            rustango::sql::sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {schema}.keep"))
+                .fetch_one(pg)
+                .await
+                .expect("the app's table is untouched");
+        assert_eq!(kept, 0);
+        rustango::sql::sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(pg)
+            .await
+            .unwrap();
+    }
+    let _ = pool;
+}
+
+/// #2394 — when the Org row fails, the schema just made is dropped, so a
+/// retry is not refused as taken.
+async fn a_failed_insert_releases_its_schema(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        use rustango::sql::Auto;
+        use rustango::tenancy::OrgHost;
+
+        let mut owner = Org {
+            slug: name("race-a"),
+            display_name: "a".into(),
+            database_url: Some(std::env::var("DATABASE_URL").unwrap()),
+            ..rustango::testkit::org()
+        };
+        owner.save_pool(pool).await.expect("owner");
+        let host = format!("{}.example.test", name("race"));
+        let schema = format!("mt_race_{}", std::process::id());
+
+        // Hold an uncommitted claim on `host`, so the INSERT loses the race.
+        let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+        let mut row = OrgHost {
+            id: Auto::Unset,
+            org_id: *owner.id.get().unwrap(),
+            hostname: host.clone(),
+            enabled: true,
+            created_at: Auto::Unset,
+        };
+        row.insert_tx(&mut tx).await.expect("held host");
+        let opts = CreateTenantOpts {
+            host_pattern: Some(host.clone()),
+            ..schema_opts(&schema)
+        };
+        let (p, slug) = (pool.clone(), name("race-b"));
+        let create =
+            tokio::spawn(async move { create(&p, Path::new("no-migrations"), &slug, opts).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tx.commit().await.expect("commit");
+        let r = create.await.expect("join");
+        assert!(
+            matches!(&r, Err(e) if e.to_string().contains("already used")),
+            "{r:?}"
+        );
+        assert!(
+            !schema_exists(pg, &schema).await,
+            "the new schema was left behind"
+        );
+    }
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -260,5 +392,7 @@ tri_dialect_test! {
         create_tenant_returns_a_failed_migration,
         create_tenant_activates_after_migrating,
         forget_pending_refuses_a_tenant_applied_migration,
+        an_existing_schema_is_not_adopted,
+        a_failed_insert_releases_its_schema,
     ],
 }

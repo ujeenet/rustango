@@ -175,11 +175,6 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     // crate.)
     let slug = unique("acme");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
-    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     run(
@@ -197,6 +192,8 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     )
     .await
     .unwrap();
+    // After: create-tenant refuses a schema that exists (#2394).
+    create_users_in_schema(&pool, &slug).await;
 
     // Create a per-tenant user.
     let user = unique("alice");
@@ -270,11 +267,6 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
 
     let slug = unique("acme-hw");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
-    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     let op_user = unique("operator_only");
@@ -301,6 +293,8 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     )
     .await
     .unwrap();
+    // After: create-tenant refuses a schema that exists (#2394).
+    create_users_in_schema(&pool, &slug).await;
 
     let org = lookup_org(pools.registry(), &slug).await;
     let mut conn = pools.acquire(&org).await.unwrap();
@@ -330,11 +324,6 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
 
     let slug = unique("acme-hw2");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
-    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     run(
@@ -352,6 +341,8 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
     )
     .await
     .unwrap();
+    // After: create-tenant refuses a schema that exists (#2394).
+    create_users_in_schema(&pool, &slug).await;
     let user = unique("tenant_super");
     run(
         &pools,

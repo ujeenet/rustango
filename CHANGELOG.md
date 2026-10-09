@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
+
+Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.
+
 ### Fixed — a new project keeps `migrations/` in git (#2396)
 
 The scaffolder writes `migrations/.gitkeep`, so a clone made before the first `makemigrations` still builds the image.

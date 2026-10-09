@@ -15,9 +15,8 @@
 //!    written. See [`preflight`](crate::tenancy::preflight). Schema
 //!    mode skips it; those tenants live in the registry's own
 //!    database.
-//! 3. [`ProvisionStorage`][step] — `CREATE SCHEMA` for schema mode.
-//!    Before the row lands, so a failed `INSERT` leaves no orphan
-//!    schema.
+//! 3. [`ProvisionStorage`][step] — `CREATE SCHEMA` for schema mode,
+//!    refusing one that exists. A failed `INSERT` drops it again.
 //! 4. [`RegisterOrg`][step] — the `rustango_orgs` row, written
 //!    **inactive**.
 //! 5. [`Migrate`][step] — this tenant's schema, via
@@ -706,7 +705,7 @@ where
     // ---- 3. Provision storage ----
     //
     // Before the row, not after: a failed `INSERT` must not leave an
-    // orphan schema behind. Idempotent via `IF NOT EXISTS`.
+    // orphan schema behind. An existing schema is refused (#2394).
     provision_storage(pools, schema_name.as_deref(), rep).await?;
 
     // ---- 4. Register the org ----
@@ -714,6 +713,9 @@ where
         .await;
     let mut org = new_org_row(request, schema_name);
     if let Err(e) = super::org_host::insert_org(&registry, &mut org).await {
+        if let Some(schema) = org.schema_name.as_deref() {
+            release_schema(pools, schema).await;
+        }
         return rep.fail(ProvisionStep::RegisterOrg, e).await;
     }
     // This pod sees the new tenant immediately; others converge on the
@@ -1323,7 +1325,9 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
     }
 }
 
-/// `CREATE SCHEMA IF NOT EXISTS` on the registry.
+/// `CREATE SCHEMA` on the registry. An existing schema is refused, not
+/// adopted: it may hold another app's data, and `purge-tenant` drops it (#2394).
+/// A resumed run never gets here; its schema is already in place.
 ///
 /// Schema mode is Postgres-only: `CREATE SCHEMA` and `SET search_path`
 /// do not exist on SQLite or MySQL. There are two separate refusals:
@@ -1347,14 +1351,20 @@ pub(crate) async fn provision_schema<DB: Database>(
             })?;
         // Use the dialect's quoter, not a local copy: it doubles any
         // embedded `"`.
-        let sql = format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            crate::sql::Postgres.quote_ident(schema)
-        );
-        rustango::sql::sqlx::query(&sql)
+        let sql = format!("CREATE SCHEMA {}", crate::sql::Postgres.quote_ident(schema));
+        match rustango::sql::sqlx::query(&sql)
             .execute(pg_pools.registry())
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            // duplicate_schema
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P06") => {
+                Err(TenancyError::Validation(format!(
+                    "schema `{schema}` already exists — choose another schema name"
+                )))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
     #[cfg(not(feature = "postgres"))]
     {
@@ -1363,6 +1373,28 @@ pub(crate) async fn provision_schema<DB: Database>(
             "schema mode is not available on this server — choose the database storage mode".into(),
         ))
     }
+}
+
+/// Drop the schema [`provision_schema`] just made when its `Org` row failed,
+/// so a retry is not refused as taken. `RESTRICT`: an empty schema only.
+pub(crate) async fn release_schema<DB: Database>(pools: &TenantPools<DB>, schema: &str) {
+    #[cfg(feature = "postgres")]
+    if let Some(pg_pools) =
+        (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+    {
+        use crate::sql::Dialect as _;
+        let sql = format!(
+            "DROP SCHEMA {} RESTRICT",
+            crate::sql::Postgres.quote_ident(schema)
+        );
+        if let Err(e) = rustango::sql::sqlx::query(&sql)
+            .execute(pg_pools.registry())
+            .await
+        {
+            tracing::warn!(target: "rustango::tenancy::provision", schema, error = %e, "could not drop the new schema");
+        }
+    }
+    let _ = (pools, schema);
 }
 
 /// Flip the tenant live.

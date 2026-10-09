@@ -164,7 +164,12 @@ where
         primary_color: None,
         theme_mode: None,
     };
-    crate::tenancy::org_host::insert_org(&pools.registry_pool(), &mut org).await?;
+    if let Err(e) = crate::tenancy::org_host::insert_org(&pools.registry_pool(), &mut org).await {
+        if let Some(schema) = org.schema_name.as_deref() {
+            crate::tenancy::provision::release_schema(pools, schema).await;
+        }
+        return Err(e);
+    }
 
     if !opts.no_migrate {
         // This tenant only, and a failure is the caller's error (#2392).
