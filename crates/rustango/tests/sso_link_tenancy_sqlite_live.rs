@@ -736,6 +736,38 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
     assert!(!out.contains("[sso]"), "{out}");
 }
 
+/// A shared provider names every active tenant it refuses; a tenant without
+/// the links table has no links (#2359).
+#[tokio::test]
+async fn check_deploy_lists_every_refused_active_tenant() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.shared_provider("team", false).await;
+    env.user("ann", "ann@example.com", false).await;
+    env.user_in(1, "bob", "bob@example.com", false).await;
+    rustango::testkit::matrix::drop_table(&env.tenants[1].pool, "rustango_sso_links").await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[sso] shared provider `team` (tenant(s) acme, globex) has"),
+        "{out}"
+    );
+
+    let registry = env._pools.registry_pool();
+    let mut globex = Org::objects()
+        .filter("slug", "globex")
+        .fetch(&registry)
+        .await
+        .unwrap()
+        .remove(0);
+    globex.active = false;
+    globex.save_pool(&registry).await.unwrap();
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("[sso] shared provider `team` (tenant(s) acme) has"),
+        "inactive globex is skipped: {out}"
+    );
+}
+
 /// A registry that can't list tenants is a warning; the rest of the check runs (#2359).
 #[tokio::test]
 async fn check_deploy_runs_when_tenants_cannot_be_listed() {

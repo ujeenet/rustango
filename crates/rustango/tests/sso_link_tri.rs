@@ -159,7 +159,9 @@ async fn shared_stranded(registry: &Pool, tenant: &Pool) -> Vec<String> {
     use rustango::testkit::sso_check::{shared_providers, SharedProviders};
     let shared = SharedProviders::load(registry).await.unwrap();
     let found = shared_providers(&shared, tenant).await.unwrap();
-    found.into_iter().map(|s| s.slug).collect()
+    let mut slugs: Vec<String> = found.into_iter().map(|s| s.slug).collect();
+    slugs.sort();
+    slugs
 }
 
 async fn key_matches_every_part(pool: &Pool) {
@@ -515,7 +517,12 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
 
         use check::SharedSsoProvider;
         rustango::testkit::matrix::fresh_table::<SharedSsoProvider>(pool).await;
-        for (slug, allow) in [("team", false), ("corp", false), ("free", true)] {
+        for (slug, allow) in [
+            ("team", false),
+            ("corp", false),
+            ("free", true),
+            ("off", false),
+        ] {
             SharedSsoProvider {
                 id: Auto::default(),
                 slug: slug.into(),
@@ -536,8 +543,9 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .await
             .unwrap();
         }
-        // `corp` is the tenant's own enabled row, so the shared one is never used here.
-        assert_eq!(shared_stranded(pool, pool).await, ["team"]);
+        // `corp` is the tenant's own enabled row, so the shared one is never
+        // used here; the tenant's `off` row is disabled, so the shared one is.
+        assert_eq!(shared_stranded(pool, pool).await, ["off", "team"]);
         let team = SharedSsoProvider::objects()
             .filter("slug", "team")
             .fetch(pool)
@@ -559,12 +567,12 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .insert_pool(pool)
             .await
             .unwrap();
-        assert_eq!(shared_stranded(pool, pool).await, ["team"]);
+        assert_eq!(shared_stranded(pool, pool).await, ["off", "team"]);
         link("oidc|https://shared.example")
             .insert_pool(pool)
             .await
             .unwrap();
-        assert!(shared_stranded(pool, pool).await.is_empty());
+        assert_eq!(shared_stranded(pool, pool).await, ["off"]);
         // Other suites on this database recreate it through the migrations.
         rustango::testkit::matrix::drop_table(pool, "rustango_shared_sso_providers").await;
     }
