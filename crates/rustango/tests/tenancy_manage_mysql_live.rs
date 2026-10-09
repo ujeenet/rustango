@@ -200,6 +200,35 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
         out.contains("acme"),
         "list-tenants should mention `acme`, got:\n{out}"
     );
+
+    // Step 5: flush --tenant clears the tenant database, never the registry (#2284).
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let pools = &pools;
+        let (url, dir) = (url.clone(), migrations_dir.path().to_owned());
+        async move {
+            let mut buf: Vec<u8> = Vec::new();
+            rustango::tenancy::manage::run_with_writer(pools, &url, &dir, args, &mut buf)
+                .await
+                .map(|()| String::from_utf8_lossy(&buf).into_owned())
+        }
+    };
+    let user = format!("flush-{}", std::process::id());
+    run(&["create-user", "acme", &user, "--password", "pw"])
+        .await
+        .expect("create-user");
+    let out = run(&["flush", "--tenant", "acme", "--yes"])
+        .await
+        .expect("flush --tenant acme");
+    assert!(out.contains("cleared"), "{out}");
+    assert!(
+        run(&["set-superuser", "acme", &user, "--off"])
+            .await
+            .is_err(),
+        "the tenant's user survived the flush"
+    );
+    let out = run(&["list-tenants"]).await.expect("list-tenants");
+    assert!(out.contains("acme"), "flush touched the registry: {out}");
 }
 
 #[tokio::test]
