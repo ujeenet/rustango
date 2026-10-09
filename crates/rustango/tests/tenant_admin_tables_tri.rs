@@ -100,7 +100,8 @@ fn listed_tables(index: &str) -> Vec<String> {
         .split("href=\"/a/")
         .skip(1)
         .filter_map(|s| s.split('"').next())
-        .filter(|t| !t.is_empty() && !t.contains('/'))
+        // `__audit` and `__docs` are admin pages, not tables.
+        .filter(|t| !t.is_empty() && !t.contains('/') && !t.starts_with("__"))
         .map(str::to_owned)
         .collect();
     out.sort();
@@ -108,8 +109,7 @@ fn listed_tables(index: &str) -> Vec<String> {
     out
 }
 
-/// Every table the admin lists opens without "isn't in this database
-/// yet" (a 503).
+/// Every table the admin lists opens with a 200.
 async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<String> {
     let (status, index) = get(router, "/").await;
     assert_eq!(status, StatusCode::OK, "{what}: index");
@@ -122,13 +122,13 @@ async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<St
         .filter(|t| *t != "rustango_webauthn_credentials")
     {
         let (status, _) = get(router, &format!("/{t}")).await;
-        if status == StatusCode::SERVICE_UNAVAILABLE {
-            missing.push(t.clone());
+        if status != StatusCode::OK {
+            missing.push(format!("{t}: {status}"));
         }
     }
     assert!(
         missing.is_empty(),
-        "{what}: the admin lists tables that do not exist: {missing:?}"
+        "{what}: listed tables that do not open: {missing:?}"
     );
     tables
 }
@@ -304,4 +304,21 @@ async fn schema_mode_tenant_admin() {
     let listed = assert_listed_tables_exist(&router, "schema-mode tenant admin").await;
     assert_no_registry_tables(&listed);
     assert_no_translations_editor(&router, &registry).await;
+
+    // `search_path` falls back to `public`, so a 200 alone can't show
+    // the table is the tenant's own. No public introspection API exists.
+    let in_t1: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 't1'",
+    )
+    .fetch_all(pg)
+    .await
+    .unwrap();
+    let foreign: Vec<&String> = listed
+        .iter()
+        .filter(|t| *t != "rustango_webauthn_credentials" && !in_t1.contains(t))
+        .collect();
+    assert!(
+        foreign.is_empty(),
+        "listed but not in schema t1: {foreign:?}"
+    );
 }
