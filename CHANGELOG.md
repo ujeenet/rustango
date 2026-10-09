@@ -18,7 +18,7 @@ An untrusted extension pre-installed on the target, in the schema the registry h
 
 ### Fixed — `migrate-tenant-storage` no longer loses writes made during the move (#2383)
 
-The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The Org row stays locked until the switch, so a suspension or edit made meanwhile wins; the update writes only the storage columns. Ctrl-C and failures reactivate the tenant; otherwise the output names `edit-tenant <slug> --activate`.
+The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The switch writes only the storage columns and `active`, guarded by `active = false`, so an edit made meanwhile survives. Ctrl-C and failures reactivate the tenant; otherwise the output names `edit-tenant <slug> --activate`.
 
 ### Fixed — `migrate-tenant-storage --to database` moves an extension in the tenant's own schema (#2386)
 

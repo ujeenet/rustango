@@ -32,10 +32,10 @@
 //!      both emptiness and the right to drop it are checked first.
 //! 3. Deactivate the tenant and wait `--drain-secs` (default: the tenant
 //!    cache TTL) so servers stop writing the old copy. Requests already
-//!    running and workers that bypass the resolver are not stopped. The
-//!    Org row stays locked until step 5, so a suspension made meanwhile
-//!    wins; `active` comes back on success, failure and Ctrl-C. If the
-//!    process dies, `edit-tenant <slug> --activate` brings it back.
+//!    running and workers that bypass the resolver are not stopped.
+//!    `active` comes back on success, failure and Ctrl-C, by an update
+//!    guarded by `active = false`, so a suspension made during the move is
+//!    still undone. If the process dies, `edit-tenant <slug> --activate`.
 //!
 //!    `pg_dump` the source (schema-scoped or full DB), pipe into
 //!    `psql` against the target. Into a schema it goes through a
@@ -43,7 +43,7 @@
 //! 4. Smoke check: `SELECT 1 FROM <schema>.rustango_users LIMIT 1`
 //!    against the new location, before the Org row moves.
 //! 5. `UPDATE rustango_orgs SET storage_mode, database_url, schema_name
-//!    (, active)` — only those columns, by id, in the locking transaction.
+//!    (, active)` — only those columns, one short guarded update.
 //! 6. `TenantPools::invalidate(slug)` so the next request rebuilds
 //!    the cached pool against the new storage.
 //!
@@ -364,63 +364,55 @@ struct MoveCtx<'a> {
 }
 
 impl MoveCtx<'_> {
-    /// Holds the Org row locked to the end, so a suspension or edit made
-    /// meanwhile waits and then wins (#2383).
+    /// No lock is held across the move: the switch and the reactivation
+    /// are short updates guarded by `active = false`. A suspension made
+    /// during the move is still undone by them; a "moved by migrate"
+    /// marker column would fix that (0.61.0).
     async fn run<W: Write + Send>(
         self,
         restore: Restore,
         interrupt: &mut Interrupt,
         writer: &mut W,
     ) -> Result<(), TenancyError> {
-        let mut tx = self
-            .pools
-            .registry()
-            .begin()
-            .await
-            .map_err(|e| self.left_inactive(e))?;
-        let locked: Vec<Org> = Org::objects()
-            .where_(Org::id.eq(self.id))
-            .select_for_update()
-            .fetch_on(&mut *tx)
-            .await
-            .map_err(|e| self.left_inactive(e))?;
-        if locked.is_empty() {
-            return Err(gone(&self.parsed.slug));
-        }
         let done = tokio::select! {
             r = self.copy(restore, writer) => r,
             () = interrupt.recv() => Err(TenancyError::Validation("interrupted".into())),
         };
         let done = match done {
-            Ok(()) => self.switch(&mut tx).await,
+            Ok(()) => self.switch().await,
             Err(e) => Err(e),
         };
         let result = match done {
-            Ok(()) => tx.commit().await.map_err(|e| self.left_inactive(e)),
-            Err(e) => {
-                let back = async {
-                    if self.reactivate {
-                        let n = Org::objects()
-                            .where_(Org::id.eq(self.id))
-                            .update()
-                            .set_typed(Org::active.set(true))
-                            .execute_on(&mut *tx)
-                            .await?;
-                        expect_one(n, &self.parsed.slug)?;
-                    }
-                    tx.commit().await?;
-                    Ok::<(), TenancyError>(())
-                }
-                .await;
-                Err(match back {
-                    Ok(()) => e,
-                    Err(again) => self.left_inactive(format!("{e}; {again}")),
-                })
-            }
+            Ok(()) => Ok(()),
+            Err(e) if self.reactivate => match self.come_back().await {
+                Ok(()) => Err(e),
+                Err(again) => Err(self.left_inactive(format!("{e}; {again}"))),
+            },
+            Err(e) => Err(e),
         };
         crate::tenancy::invalidate_org_cache();
         self.pools.invalidate(&self.parsed.slug).await;
         result
+    }
+
+    /// The move's own `active = false`, guarded the same way as the switch.
+    fn offline(&self) -> crate::query::QuerySet<Org> {
+        let rows = Org::objects().where_(Org::id.eq(self.id));
+        if self.reactivate {
+            rows.where_(Org::active.eq(false))
+        } else {
+            rows
+        }
+    }
+
+    async fn come_back(&self) -> Result<(), TenancyError> {
+        let n = self
+            .offline()
+            .update()
+            .set_typed(Org::active.set(true))
+            .execute_pool(&self.pools.registry_pool())
+            .await?;
+        expect_one(n, &self.parsed.slug)
     }
 
     /// `e`, plus the way back when the move left the tenant inactive.
@@ -484,17 +476,14 @@ impl MoveCtx<'_> {
         Ok(())
     }
 
-    /// 5. Only the storage columns (and `active`), in the locking transaction.
-    async fn switch(
-        &self,
-        tx: &mut crate::sql::sqlx::Transaction<'_, crate::sql::sqlx::Postgres>,
-    ) -> Result<(), TenancyError> {
+    /// 5. Only the storage columns (and `active`), one guarded update.
+    async fn switch(&self) -> Result<(), TenancyError> {
         let (database_url, schema_name) = match self.parsed.target {
             StorageMode::Database => (self.parsed.database_url.clone(), None),
             StorageMode::Schema => (None, self.target_schema.map(|s| s.0.clone())),
         };
-        let mut update = Org::objects()
-            .where_(Org::id.eq(self.id))
+        let mut update = self
+            .offline()
             .update()
             .set_typed(Org::storage_mode.set(self.parsed.target.as_str().to_owned()))
             .set_typed(Org::database_url.set(database_url))
@@ -502,7 +491,8 @@ impl MoveCtx<'_> {
         if self.reactivate {
             update = update.set_typed(Org::active.set(true));
         }
-        expect_one(update.execute_on(&mut **tx).await?, &self.parsed.slug)
+        let n = update.execute_pool(&self.pools.registry_pool()).await?;
+        expect_one(n, &self.parsed.slug)
     }
 }
 
@@ -524,16 +514,15 @@ async fn set_active(
     expect_one(n, slug)
 }
 
-/// An Org row update must hit exactly the tenant's row.
+/// An Org row update must hit exactly the tenant's row: none means it was
+/// deleted, or reactivated during the move.
 fn expect_one(updated: u64, slug: &str) -> Result<(), TenancyError> {
     if updated == 1 {
         return Ok(());
     }
-    Err(gone(slug))
-}
-
-fn gone(slug: &str) -> TenancyError {
-    TenancyError::Validation(format!("tenant `{slug}` is gone from the registry"))
+    Err(TenancyError::Validation(format!(
+        "tenant `{slug}` was deleted or reactivated meanwhile; its Org row was not updated"
+    )))
 }
 
 /// A URL or keyword conninfo, its password masked.
@@ -1305,7 +1294,7 @@ mod tests {
     fn expect_one_refuses_a_missing_row() {
         assert!(expect_one(1, "acme").is_ok());
         let err = expect_one(0, "acme").unwrap_err().to_string();
-        assert!(err.contains("`acme` is gone"), "{err}");
+        assert!(err.contains("`acme` was deleted or reactivated"), "{err}");
     }
 
     /// pg_dump reads `--schema` as a pattern; only literal names pass.

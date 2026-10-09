@@ -152,7 +152,7 @@ untouched.
 
 ### `migrate-tenant-storage` takes the tenant offline
 
-The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. The Org row stays locked meanwhile, so edits to it wait for the move. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).
+The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. A suspension made during the move is undone when it ends; suspend again afterwards. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).
 
 ### Admin: passkeys and registry tables
 
