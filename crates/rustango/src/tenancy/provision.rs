@@ -669,7 +669,7 @@ where
         return migrate_and_activate(pools, registry_url, dir, request, &org, rep).await;
     }
 
-    let normalized = match checked_request(&registry, request).await {
+    let normalized = match checked_request(&registry, registry_url, request).await {
         Ok(r) => r,
         Err(e) => return rep.fail(ProvisionStep::Validate, e).await,
     };
@@ -1096,11 +1096,14 @@ pub(crate) fn validate_port(port: i32) -> Result<(), String> {
 /// request with `host_pattern` normalized; shared with `api::create_tenant` (#2097).
 pub(crate) async fn checked_request(
     registry: &crate::sql::Pool,
+    registry_url: &str,
     request: &ProvisionRequest,
 ) -> Result<ProvisionRequest, TenancyError> {
     let normalized = validate_fields(request).map_err(TenancyError::Validation)?;
     if let Some(url) = &normalized.database_url {
-        refuse_registry_pool(url, registry).map_err(TenancyError::Validation)?;
+        refuse_registry_pool(url, registry)
+            .and_then(|()| refuse_registry_url(url, registry_url))
+            .map_err(TenancyError::Validation)?;
     }
     if let Some(clash) = routing_clash(registry, &normalized).await? {
         return Err(TenancyError::Validation(format!(
@@ -1146,30 +1149,163 @@ async fn routing_clash(
 /// the registry's own ledger. Any destructive tenant migration would
 /// then run against the registry.
 ///
-/// Compares the endpoint only — scheme, host, port, database — because
-/// two URLs may name the same database with different credentials.
+/// Compares the [`Endpoint`] only, because two URLs may name the same
+/// database with different credentials.
 pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
-    refuse_endpoint(tenant_url, &endpoint_identity(registry_url))
+    let Some(kind) = Endpoint::scheme_kind(registry_url) else {
+        return Ok(());
+    };
+    match Endpoint::parse(registry_url, kind) {
+        Ok(registry) => refuse_endpoint(tenant_url, kind, &registry),
+        Err(_) => Ok(()),
+    }
 }
 
 /// [`refuse_registry_url`] against the database the registry pool is
-/// connected to, for callers that have no registry URL (#2320).
+/// connected to (#2320).
 pub(crate) fn refuse_registry_pool(
     tenant_url: &str,
     registry: &crate::sql::Pool,
 ) -> Result<(), String> {
-    refuse_endpoint(tenant_url, &pool_endpoint(registry))
+    let (kind, endpoint) = Endpoint::of_pool(registry);
+    refuse_endpoint(tenant_url, kind, &endpoint)
 }
 
-fn refuse_endpoint(tenant_url: &str, registry: &str) -> Result<(), String> {
-    if endpoint_identity(tenant_url) == registry {
+fn refuse_endpoint(tenant_url: &str, kind: BackendKind, registry: &Endpoint) -> Result<(), String> {
+    let shown = crate::sql::connect_diagnosis::redact(tenant_url);
+    let tenant = Endpoint::of_url(tenant_url, kind).map_err(|e| {
+        format!("cannot read {shown} ({e}), so cannot tell it from the registry's own database")
+    })?;
+    if tenant.as_ref() == Some(registry) {
         return Err(format!(
-            "this is the registry's own database ({}). A tenant needs its own — pointing one \
-             here would run the tenant migrations over the registry",
-            crate::sql::connect_diagnosis::redact(tenant_url)
+            "this is the registry's own database ({shown}). A tenant needs its own — pointing one \
+             here would run the tenant migrations over the registry"
         ));
     }
     Ok(())
+}
+
+/// Where a connection lands, as the backend's sqlx options read it, so
+/// `?host=`, sockets, `PG*` env and default ports resolve as the pool did (#2320).
+#[derive(Debug, PartialEq, Eq)]
+enum Endpoint {
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    Server {
+        place: Place,
+        port: u16,
+        database: Option<String>,
+    },
+    #[cfg(feature = "sqlite")]
+    Sqlite(std::path::PathBuf),
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[derive(Debug, PartialEq, Eq)]
+enum Place {
+    /// Lowercased.
+    Host(String),
+    Socket(std::path::PathBuf),
+}
+
+impl Endpoint {
+    fn scheme_kind(url: &str) -> Option<BackendKind> {
+        BackendKind::parse(&url.split(':').next()?.to_ascii_lowercase()).ok()
+    }
+
+    /// `Ok(None)` for another backend's URL. Any other scheme (a secret
+    /// reference) is read as `kind`, since sqlx ignores the scheme.
+    fn of_url(url: &str, kind: BackendKind) -> Result<Option<Self>, String> {
+        match Self::scheme_kind(url) {
+            Some(other) if other != kind => Ok(None),
+            _ => Self::parse(url, kind).map(Some),
+        }
+    }
+
+    fn parse(url: &str, kind: BackendKind) -> Result<Self, String> {
+        match kind {
+            #[cfg(feature = "postgres")]
+            BackendKind::Postgres => url
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .map(|o| Self::of_pg(&o))
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "mysql")]
+            BackendKind::MySql => url
+                .parse::<sqlx::mysql::MySqlConnectOptions>()
+                .map(|o| Self::of_mysql(&o))
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "sqlite")]
+            BackendKind::Sqlite => url
+                .parse::<sqlx::sqlite::SqliteConnectOptions>()
+                .map(|o| Self::Sqlite(file_identity(o.get_filename())))
+                .map_err(|e| e.to_string()),
+            #[allow(unreachable_patterns)]
+            other => Err(format!("this build has no {} backend", other.as_str())),
+        }
+    }
+
+    fn of_pool(pool: &crate::sql::Pool) -> (BackendKind, Self) {
+        match pool {
+            #[cfg(feature = "postgres")]
+            crate::sql::Pool::Postgres(p) => {
+                (BackendKind::Postgres, Self::of_pg(&p.connect_options()))
+            }
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(p) => {
+                (BackendKind::MySql, Self::of_mysql(&p.connect_options()))
+            }
+            #[cfg(feature = "sqlite")]
+            crate::sql::Pool::Sqlite(p) => (
+                BackendKind::Sqlite,
+                Self::Sqlite(file_identity(p.connect_options().get_filename())),
+            ),
+        }
+    }
+
+    /// No database means the server picks the user's name.
+    #[cfg(feature = "postgres")]
+    fn of_pg(o: &sqlx::postgres::PgConnectOptions) -> Self {
+        Self::Server {
+            place: Place::of(o.get_socket(), o.get_host()),
+            port: o.get_port(),
+            database: Some(o.get_database().unwrap_or(o.get_username()).to_owned()),
+        }
+    }
+
+    /// A MySQL socket is the whole address; the port is unused.
+    #[cfg(feature = "mysql")]
+    fn of_mysql(o: &sqlx::mysql::MySqlConnectOptions) -> Self {
+        Self::Server {
+            port: if o.get_socket().is_some() {
+                0
+            } else {
+                o.get_port()
+            },
+            place: Place::of(o.get_socket(), o.get_host()),
+            database: o.get_database().map(str::to_owned),
+        }
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+impl Place {
+    fn of(socket: Option<&std::path::PathBuf>, host: &str) -> Self {
+        match socket {
+            Some(s) => Self::Socket(file_identity(s)),
+            None => Self::Host(host.to_ascii_lowercase()),
+        }
+    }
+}
+
+/// `path` resolved against the working directory and symlinks, as far as it exists.
+fn file_identity(path: &Path) -> std::path::PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    let abs = std::env::current_dir().map_or_else(|_| path.to_owned(), |d| d.join(path));
+    match (abs.parent().map(std::fs::canonicalize), abs.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => abs,
+    }
 }
 
 /// Build a tenant URL on the same server as the registry, naming
@@ -1250,86 +1386,6 @@ const TLS_QUERY_KEYS: &[&str] = &[
     "sslkey",
     "ssl-key",
 ];
-
-/// Scheme + host + port + database, lowercased, credentials and query
-/// dropped. Two URLs naming the same database compare equal even when
-/// they authenticate differently.
-fn endpoint_identity(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or_else(|| {
-        // `sqlite:path` has no authority — the whole tail is the file.
-        url.split_once(':').unwrap_or(("", url))
-    });
-    // Drop userinfo (everything before the last `@` of the authority).
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
-    // Drop the query string: `?mode=rwc` does not change which database
-    // this is. A Postgres `dbname=` does, and sqlx lets it win over the path.
-    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
-    // sqlx reads `postgresql://` as `postgres://`.
-    let scheme = match scheme.to_ascii_lowercase().as_str() {
-        "postgresql" => "postgres".to_owned(),
-        other => other.to_owned(),
-    };
-    let dbname = if scheme == "postgres" {
-        crate::urls::parse_query_pairs(query)
-            .into_iter()
-            .rev()
-            .find(|(k, _)| k == "dbname")
-            .map(|(_, v)| v)
-    } else {
-        None
-    };
-    let rest = match dbname {
-        Some(db) => {
-            let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
-            format!("{authority}/{db}")
-        }
-        None => rest.to_owned(),
-    };
-    // A pool always knows its port; a URL may leave the default out.
-    let default_port = match scheme.as_str() {
-        "postgres" => Some(5432),
-        "mysql" | "mariadb" => Some(3306),
-        _ => None,
-    };
-    let rest = match (default_port, rest.split_once('/')) {
-        (Some(port), Some((authority, db))) if !has_port(authority) => {
-            format!("{authority}:{port}/{db}")
-        }
-        _ => rest,
-    };
-    format!("{scheme}://{}", rest.to_ascii_lowercase())
-}
-
-/// `host:port` or `[::1]:port`, not a bare host or `[::1]`.
-fn has_port(authority: &str) -> bool {
-    authority
-        .rsplit_once(']')
-        .map_or(authority, |(_, after)| after)
-        .contains(':')
-}
-
-/// [`endpoint_identity`] of the database `pool` is connected to.
-fn pool_endpoint(pool: &crate::sql::Pool) -> String {
-    let endpoint = match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(p) => {
-            let o = p.connect_options();
-            let db = o.get_database().unwrap_or_else(|| o.get_username());
-            format!("postgres://{}:{}/{db}", o.get_host(), o.get_port())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(p) => {
-            let o = p.connect_options();
-            let db = o.get_database().unwrap_or_default();
-            format!("mysql://{}:{}/{db}", o.get_host(), o.get_port())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(p) => {
-            format!("sqlite://{}", p.connect_options().get_filename().display())
-        }
-    };
-    endpoint.to_ascii_lowercase()
-}
 
 /// The schema a schema-mode tenant lives in: whatever the request
 /// named, or the slug. `None` in database-mode, which has no schema.
@@ -1852,6 +1908,7 @@ mod validation_tests {
 
     /// The critical QA finding: a tenant pointed at the registry's own
     /// database ran the tenant migration chain over the registry.
+    #[cfg(feature = "postgres")]
     #[test]
     fn a_tenant_url_naming_the_registry_database_is_refused() {
         let registry = "postgres://rustango:rustango@localhost:5432/orgdemo_dev";
@@ -1863,6 +1920,7 @@ mod validation_tests {
 
     /// Different credentials, same database, is still the same
     /// database — which is the case a naive string compare misses.
+    #[cfg(feature = "postgres")]
     #[test]
     fn different_credentials_for_the_same_database_are_still_refused() {
         assert!(refuse_registry_url(
@@ -1874,6 +1932,7 @@ mod validation_tests {
 
     /// And a query string does not make it a different database —
     /// sqlite's `?mode=rwc` in particular.
+    #[cfg(feature = "sqlite")]
     #[test]
     fn a_query_string_does_not_disguise_the_same_database() {
         assert!(refuse_registry_url(
@@ -1970,6 +2029,7 @@ mod validation_tests {
     }
 
     /// A tenant URL whose `dbname=` names the registry is the registry.
+    #[cfg(feature = "postgres")]
     #[test]
     fn a_dbname_query_naming_the_registry_is_refused() {
         let registry = "postgres://app:pw@db:5432/reg";
@@ -2066,43 +2126,94 @@ mod validation_tests {
             );
         }
     }
+}
 
-    /// #2320: the pool knows its default port; the tenant URL may omit it.
+/// #2320: the registry refusal reads a tenant URL the way the pool did.
+/// Every URL names its port or shares the pool's default, so `PG*` env can't skew it.
+#[cfg(test)]
+mod registry_endpoint_tests {
+    use super::*;
+
+    #[cfg(feature = "postgres")]
+    fn pg(url: &str) -> crate::sql::Pool {
+        crate::sql::Pool::Postgres(sqlx::PgPool::connect_lazy(url).expect("lazy"))
+    }
+
     #[cfg(feature = "postgres")]
     #[tokio::test]
-    async fn the_registry_pool_is_refused_by_endpoint() {
-        let pool = crate::sql::Pool::Postgres(
-            sqlx::PgPool::connect_lazy("postgres://app:pw@db.internal/reg").expect("lazy"),
-        );
+    async fn an_empty_host_is_the_same_default_host() {
+        let pool = pg("postgres:///reg?user=app");
+        assert!(refuse_registry_pool("postgres:///reg", &pool).is_err());
+        assert!(refuse_registry_pool("postgres:///reg?user=other&password=pw", &pool).is_err());
+        assert!(refuse_registry_pool("postgres:///tenant", &pool).is_ok());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn query_host_port_and_socket_overrides_are_read() {
+        let pool = pg("postgres://app@db.internal:5432/reg");
         for same in [
-            "postgres://other:x@DB.internal/reg",
-            "postgresql://db.internal:5432/x?dbname=reg",
+            "postgres://elsewhere:5432/x?host=db.internal&dbname=reg",
+            "postgres://db.internal:6000/reg?port=5432",
+            "postgres://DB.internal:5432/reg",
         ] {
             assert!(refuse_registry_pool(same, &pool).is_err(), "{same}");
         }
         for other in [
-            "postgres://db.internal/tenant",
             "postgres://db.internal:5433/reg",
-            "postgres://elsewhere/reg",
+            "postgres://db.internal:5432/tenant",
+            "postgres://db.internal:5432/reg?host=elsewhere",
+            "mysql://db.internal:5432/reg",
         ] {
             assert!(refuse_registry_pool(other, &pool).is_ok(), "{other}");
         }
+        let socket = pg("postgres://app@%2Fcloudsql%2Fp:5432/reg");
+        assert!(refuse_registry_pool("postgres://x:5432/reg?host=/cloudsql/p", &socket).is_err());
     }
 
     #[cfg(feature = "mysql")]
     #[tokio::test]
-    async fn the_mysql_registry_pool_is_refused_by_endpoint() {
+    async fn mariadb_is_mysql() {
         let pool = crate::sql::Pool::Mysql(
             sqlx::MySqlPool::connect_lazy("mysql://app:pw@db:3306/reg").expect("lazy"),
         );
+        assert!(refuse_registry_pool("mariadb://x@db:3306/reg", &pool).is_err());
         assert!(refuse_registry_pool("mysql://x@db/reg", &pool).is_err());
-        assert!(refuse_registry_pool("mysql://x@db/tenant", &pool).is_ok());
+        assert!(refuse_registry_pool("mysql://x@db:3306/tenant", &pool).is_ok());
     }
 
-    #[test]
-    fn a_default_port_is_the_same_endpoint() {
-        assert!(refuse_registry_url("postgres://h/reg", "postgres://h:5432/reg").is_err());
-        assert!(refuse_registry_url("mysql://[::1]/reg", "mysql://[::1]:3306/reg").is_err());
-        assert!(refuse_registry_url("postgres://h:5433/reg", "postgres://h/reg").is_ok());
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn an_unreadable_url_is_refused() {
+        let pool = pg("postgres://app@db.internal:5432/reg");
+        for bad in [
+            "postgres://db.internal:notaport/reg",
+            "postgres://db.internal:5432/reg?port=x",
+        ] {
+            let err = refuse_registry_pool(bad, &pool).expect_err(bad);
+            assert!(err.contains("cannot read"), "{err}");
+        }
+        assert!(refuse_registry_url("postgres://h:x/reg", "postgres://h:5432/reg").is_err());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_relative_sqlite_path_is_the_same_file() {
+        let dir = tempfile::tempdir_in(".").expect("tempdir");
+        let file = dir.path().join("reg.db");
+        std::fs::write(&file, b"").unwrap();
+        let abs = std::fs::canonicalize(&file).unwrap();
+        let pool = crate::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy(&format!("sqlite://{}", abs.display())).expect("lazy"),
+        );
+        let cwd = std::env::current_dir().unwrap();
+        let rel = std::path::Path::new(".").join(abs.strip_prefix(&cwd).unwrap());
+        let rel = rel.display();
+        for same in [format!("sqlite:{rel}"), format!("sqlite://{rel}?mode=rwc")] {
+            assert!(refuse_registry_pool(&same, &pool).is_err(), "{same}");
+            assert!(refuse_registry_url(&same, &format!("sqlite://{}", abs.display())).is_err());
+        }
+        let sibling = format!("sqlite:{}", dir.path().join("t.db").display());
+        assert!(refuse_registry_pool(&sibling, &pool).is_ok());
     }
 }

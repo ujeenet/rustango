@@ -98,6 +98,15 @@ impl Booted {
             .next()
             .expect("the org")
     }
+
+    async fn has_org(&self, slug: &str) -> bool {
+        !Org::objects()
+            .where_(Org::slug.eq(slug.to_owned()))
+            .fetch(&self.registry)
+            .await
+            .expect("read org")
+            .is_empty()
+    }
 }
 
 #[tokio::test]
@@ -449,6 +458,10 @@ async fn no_path_points_a_tenant_at_the_registry_database() {
     .await
     .expect_err("create on the registry");
     assert!(err.to_string().contains("registry's own database"), "{err}");
+    assert!(
+        !b.has_org("globex").await,
+        "no Org row for a refused create"
+    );
 
     let err = b
         .run(&[
@@ -465,4 +478,8 @@ async fn no_path_points_a_tenant_at_the_registry_database() {
         .await
         .expect_err("CLI create on the registry");
     assert!(err.contains("registry's own database"), "{err}");
+    assert!(
+        !b.has_org("initech").await,
+        "no Org row for a refused create"
+    );
 }
