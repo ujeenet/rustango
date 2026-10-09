@@ -135,12 +135,9 @@ where
         },
     )
     .await?;
+    let schema_name = crate::tenancy::provision::schema_name_for(&checked);
     let host_pattern = checked.host_pattern;
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
-    let schema_name = match opts.mode {
-        StorageMode::Schema => Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned())),
-        StorageMode::Database => None,
-    };
 
     if let StorageMode::Schema = opts.mode {
         #[cfg(feature = "postgres")]

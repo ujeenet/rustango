@@ -87,7 +87,7 @@ fn normalize_host(host: &str) -> String {
 }
 
 /// Held by tests that set or read [`ALLOW_ENV`].
-#[cfg(test)]
+#[cfg(all(test, feature = "webhook-delivery"))]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Which addresses a target may resolve to.

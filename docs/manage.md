@@ -93,7 +93,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `dumpdata` | Export rows as JSON fixtures |
 | `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in. A failed or partial load is not rolled back |
-| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set. Postgres uses `TRUNCATE … RESTART IDENTITY CASCADE`, which also clears referencing tables outside the filter; MySQL / SQLite delete rows and keep id counters |
+| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set. Unmanaged models and views are skipped. Postgres uses `TRUNCATE … RESTART IDENTITY` and fails if a table outside the filter references a target (an `ON DELETE CASCADE` link from it still empties it on MySQL / SQLite); MySQL / SQLite delete rows in one transaction, children first, and keep id counters. A tenancy project needs `--tenant <slug>` and clears only that tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |
 | `db:dump` / `db:restore` / `db:info` | Native dump / restore / inspect |
 | `dbshell` | Exec the native client (`psql` / `mysql` / `sqlite3`). Needs only `DATABASE_URL`, not a working pool — it is handled before the pool is built, so it works when sqlx cannot connect |
@@ -702,18 +702,22 @@ The `running: pg_dump …` status line goes to **stderr**, so it stays out
 of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
 it went to stdout, which put it on the first line of the `.sql` file.
 
-### `db:restore <path> [--clean]`
+### `db:restore <path> [--clean --yes]`
 
 Loads a dump file back into your database — the counterpart to
 `db:dump`. It runs the file through `psql` against `DATABASE_URL` with
-`ON_ERROR_STOP=1`, so it stops at the first error. Add `--clean` to wipe
-the existing schema first (it prepends
-`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) so the
-restore lands on an empty database. You need `psql` on your `PATH`.
+`ON_ERROR_STOP=1` in one transaction, so it stops at the first error and
+loads nothing. Add `--clean --yes` to wipe the existing schema first (it
+prepends `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`) so
+the restore lands on an empty database; a failed load rolls the drop back.
+With `--clean` the dump must be a non-empty regular file, checked before
+anything runs; a plain restore also reads a pipe. A tenancy project refuses
+`--clean`, because `public` holds the registry. You need `psql` on your
+`PATH`.
 
 ```bash
 cargo run -- db:restore backups/before-migrate.sql
-cargo run -- db:restore backups/before-migrate.sql --clean
+cargo run -- db:restore backups/before-migrate.sql --clean --yes
 ```
 
 ---

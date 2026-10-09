@@ -788,7 +788,8 @@ pub async fn release_for_retry(
 }
 
 /// The provision run that created `org_id` did not finish, so a retry
-/// may pick the tenant up where it stopped.
+/// may pick the tenant up where it stopped. An operator edit of an active org,
+/// an activation or a deactivation unlinks the run.
 ///
 /// # Errors
 /// A registry read failure.
@@ -803,6 +804,22 @@ pub async fn org_left_by_failed_run(registry: &Pool, org_id: i64) -> Result<bool
         .into_iter()
         .next();
     Ok(creator.is_some_and(|r| RunState::parse(&r.state) == RunState::Failed))
+}
+
+/// Unlink `org_id` from every provision run that did not succeed: a running
+/// one can still end failed. Called once the org is activated, so a retry
+/// never resumes it (#2292).
+pub(crate) fn forget_unsucceeded_runs(
+    org_id: i64,
+) -> Result<crate::core::UpdateQuery, crate::sql::ExecError> {
+    ProvisioningRun::objects()
+        .where_(ProvisioningRun::org_id.eq(Some(org_id)))
+        .where_(ProvisioningRun::kind.eq(RunKind::Provision.as_str().to_owned()))
+        .where_(ProvisioningRun::state.ne(RunState::Succeeded.as_str().to_owned()))
+        .update()
+        .set("org_id", None::<i64>)
+        .compile()
+        .map_err(crate::sql::ExecError::from)
 }
 
 /// Delete finished runs older than `cutoff`, and their events.

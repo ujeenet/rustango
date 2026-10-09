@@ -978,6 +978,54 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
+/// Guard before decoding a `select_related` target (#2293): a NULL nullable
+/// FK leaves the relation unloaded; a set FK whose row is missing is an error.
+fn join_guard_tokens(rel: &FkRelation, receiver: &TokenStream2) -> TokenStream2 {
+    let root = rustango_root();
+    let parent_ty = &rel.parent_type;
+    let field_ident = &rel.field_ident;
+    let null_fk = if rel.nullable {
+        quote! {
+            if #receiver.#field_ident.is_none() {
+                return ::core::result::Result::Ok(false);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    quote! {
+        #null_fk
+        #root::sql::__rustango_require_join(
+            row, <#parent_ty as #root::core::Model>::SCHEMA, alias,
+        )?;
+    }
+}
+
+/// A target an earlier chain already loaded (`a__b` before `a__c`) is
+/// reused, and the deeper chain stitched into it; re-decoding it would
+/// drop what that chain loaded.
+fn loaded_reuse_tokens(
+    rel: &FkRelation,
+    receiver: &TokenStream2,
+    load: &TokenStream2,
+) -> TokenStream2 {
+    let root = rustango_root();
+    let field_ident = &rel.field_ident;
+    let pattern = if rel.nullable {
+        quote!(::core::option::Option::Some(#root::sql::ForeignKey::Loaded { value: __loaded, .. }))
+    } else {
+        quote!(#root::sql::ForeignKey::Loaded { value: __loaded, .. })
+    };
+    quote! {
+        if let #pattern = &mut #receiver.#field_ident {
+            if let ::core::option::Option::Some(__r) = __rest {
+                let _ = #load(&mut **__loaded, row, __r, &__next_alias)?;
+            }
+            return ::core::result::Result::Ok(true);
+        }
+    }
+}
+
 /// Emit `impl LoadRelated for #StructName` — slice 9.0d. Pattern-
 /// matches `field_name` against the model's FK fields and, for a
 /// match, decodes the FK target via the parent's macro-generated
@@ -996,6 +1044,12 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(self),
+            &quote!(#root::sql::LoadRelated::__rustango_load_related),
+        );
         let assign = if rel.nullable {
             quote! {
                 self.#field_ident = ::core::option::Option::Some(
@@ -1009,6 +1063,8 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         };
         quote! {
             #fk_col => {
+                #guard
+                #reuse
                 let mut _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
                 // Audit #451 — multi-hop `select_related("a__b__c")`:
                 // stitch the deeper relation onto this parent first,
@@ -1100,6 +1156,12 @@ fn load_related_impl_my_tokens(
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(__self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(__self),
+            &quote!(#root::sql::LoadRelatedMy::__rustango_load_related_my),
+        );
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1117,6 +1179,8 @@ fn load_related_impl_my_tokens(
         // and let the macro_rules rebind it to the receiver.
         quote! {
             #fk_col => {
+                #guard
+                #reuse
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
@@ -1169,6 +1233,12 @@ fn load_related_impl_sqlite_tokens(
         let fk_name = ident_name(field_ident);
         let fk_col = fk_name.as_str();
         let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let guard = join_guard_tokens(rel, &quote!(__self));
+        let reuse = loaded_reuse_tokens(
+            rel,
+            &quote!(__self),
+            &quote!(#root::sql::LoadRelatedSqlite::__rustango_load_related_sqlite),
+        );
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
@@ -1182,6 +1252,8 @@ fn load_related_impl_sqlite_tokens(
         };
         quote! {
             #fk_col => {
+                #guard
+                #reuse
                 let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
                 // Audit #451 — multi-hop: stitch the deeper relation onto
@@ -7530,8 +7602,9 @@ fn inherent_impl_tokens(
             }
             quote! {
                 /// Write per-row-different values for the named `fields`
-                /// across every object in `objs` in a single statement,
-                /// matched by primary key.
+                /// across every object in `objs`, matched by primary key.
+                /// Past the backend's bind cap the rows go in batches inside
+                /// one transaction, so the update is all or none.
                 ///
                 /// `fields` names the **columns** to update. The primary
                 /// key identifies each row and cannot itself be updated
@@ -7541,7 +7614,7 @@ fn inherent_impl_tokens(
                 /// Objects whose PK matches no row are simply not updated.
                 /// Returns the number of rows affected.
                 ///
-                /// Tri-dialect: lowers to one
+                /// Tri-dialect: lowers to a
                 /// [`#root::core::BulkUpdateQuery`] and dispatches
                 /// per-backend — `UPDATE … FROM (VALUES …)` on Postgres,
                 /// a CTE + correlated subquery on SQLite, an inner

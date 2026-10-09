@@ -707,7 +707,7 @@ where
     //
     // Before the row, not after: a failed `INSERT` must not leave an
     // orphan schema behind. Idempotent via `IF NOT EXISTS`.
-    provision_storage(pools, request, schema_name.as_deref(), rep).await?;
+    provision_storage(pools, schema_name.as_deref(), rep).await?;
 
     // ---- 4. Register the org ----
     rep.step(ProvisionStep::RegisterOrg, Progress::Started)
@@ -845,22 +845,21 @@ async fn check_connection(
 /// schema.
 async fn provision_storage<DB: Database>(
     pools: &TenantPools<DB>,
-    request: &ProvisionRequest,
     schema_name: Option<&str>,
     rep: &Reporter<'_>,
 ) -> Result<(), TenancyError> {
-    if request.mode != StorageMode::Schema {
+    // `schema_name_for` is `Some` exactly in schema mode.
+    let Some(schema) = schema_name else {
         rep.step(
             ProvisionStep::ProvisionStorage,
             Progress::Skipped("database-mode tenants bring their own database"),
         )
         .await;
         return Ok(());
-    }
+    };
 
     rep.step(ProvisionStep::ProvisionStorage, Progress::Started)
         .await;
-    let schema = schema_name.unwrap_or(&request.slug);
     if let Err(e) = provision_schema(pools, schema).await {
         return rep.fail(ProvisionStep::ProvisionStorage, e).await;
     }
@@ -1115,12 +1114,17 @@ pub(crate) async fn checked_request(
     Ok(normalized)
 }
 
-/// The host, path prefix or port of `request` another tenant routes on.
+/// The schema, host, path prefix or port of `request` another tenant uses.
 async fn routing_clash(
     registry: &crate::sql::Pool,
     request: &ProvisionRequest,
 ) -> Result<Option<String>, crate::sql::ExecError> {
-    use super::org_host::{host_claimed, port_claimed, prefix_claimed};
+    use super::org_host::{host_claimed, port_claimed, prefix_claimed, schema_claimed};
+    if let Some(schema) = schema_name_for(request) {
+        if schema_claimed(registry, &schema, None).await? {
+            return Ok(Some(format!("schema `{schema}`")));
+        }
+    }
     if let Some(host) = &request.host_pattern {
         if host_claimed(registry, host, None).await? {
             return Ok(Some(format!("host `{host}`")));
@@ -1277,13 +1281,10 @@ fn endpoint_identity(url: &str) -> String {
 
 /// The schema a schema-mode tenant lives in: whatever the request
 /// named, or the slug. `None` in database-mode, which has no schema.
-fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
+pub(crate) fn schema_name_for(request: &ProvisionRequest) -> Option<String> {
     match request.mode {
         StorageMode::Schema => Some(
-            request
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| request.slug.clone()),
+            super::org::effective_schema(request.schema_name.as_deref(), &request.slug).to_owned(),
         ),
         StorageMode::Database => None,
     }
