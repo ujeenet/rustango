@@ -2003,11 +2003,7 @@ pub(crate) async fn create_submit(
     })
     .await;
     // An `audit(...)` model's entry commits with the INSERT, as on edit (#2101).
-    let emit = if model.audit_track.is_some() {
-        crate::audit::DiffEmit::InTx
-    } else {
-        crate::audit::DiffEmit::AfterCommit
-    };
+    let emit = crate::audit::DiffEmit::for_model(model);
     let written = crate::audit::insert_one_with_entry(
         &state.pool,
         &query,
@@ -2142,7 +2138,7 @@ const SECRET_SET: &str = "[set]";
 
 /// What the audit log records for a write: the form without secrets, a
 /// marker for each secret written, and timestamps the server stamped.
-fn audit_form(
+pub(super) fn audit_form(
     model: &'static crate::core::ModelSchema,
     admin_cfg: &crate::core::AdminConfig,
     form: &HashMap<String, String>,
@@ -2174,7 +2170,7 @@ fn audit_form(
 }
 
 /// `row` with each set secret replaced by a marker, for the audit log.
-fn mask_secrets(
+pub(super) fn mask_secrets(
     model: &'static crate::core::ModelSchema,
     admin_cfg: &crate::core::AdminConfig,
     row: &serde_json::Value,
@@ -2384,11 +2380,7 @@ pub(crate) async fn update_submit(
     // `with_source(User { id })` gives a "who changed what" trail. An
     // `audit(...)` model's entry commits with the UPDATE (#2060); others
     // keep the best-effort emit after it.
-    let emit = if model.audit_track.is_some() {
-        crate::audit::DiffEmit::InTx
-    } else {
-        crate::audit::DiffEmit::AfterCommit
-    };
+    let emit = crate::audit::DiffEmit::for_model(model);
     // Parent and inline writes share one transaction: a refused inline
     // row rolls the parent back too (#2339).
     let refused = |msg: String| Html(render_form(&state, model, Some(&form), true, Some(&msg)));
@@ -2420,7 +2412,7 @@ pub(crate) async fn update_submit(
             return Ok(refused(write_error(model, &e)).into_response());
         }
     };
-    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, inline_plan).await {
+    if let Err(e) = super::inlines::apply_plan_tx(&mut tx, &state.pool, inline_plan).await {
         use super::inlines::InlineApplyError as E;
         rollback_quietly(tx, model.table).await;
         let why = match e {

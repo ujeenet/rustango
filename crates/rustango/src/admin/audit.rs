@@ -466,6 +466,33 @@ pub(crate) fn admin_audit_entry(
     }
 }
 
+/// Snapshot of a whole stored row, secrets masked, as a delete or a bulk
+/// action records it. `action` tags a custom action's name.
+pub(crate) fn admin_row_snapshot_entry(
+    model: &'static crate::core::ModelSchema,
+    pk_str: String,
+    op: crate::audit::AuditOp,
+    row: &Value,
+    action: Option<&str>,
+) -> crate::audit::PendingEntry {
+    let cfg = super::helpers::admin_config_or_default(model);
+    let row = super::views::mask_secrets(model, &cfg, row);
+    let mut pairs: Vec<(&str, Value)> = model
+        .scalar_fields()
+        .map(|f| (f.name, render::read_value_as_json_from_json(&row, f)))
+        .collect();
+    if let Some(name) = action {
+        pairs.push(("__action", Value::String(name.to_owned())));
+    }
+    crate::audit::PendingEntry {
+        entity_table: model.table,
+        entity_pk: pk_str,
+        operation: op,
+        source: crate::audit::current_source(),
+        changes: crate::audit::snapshot_changes(&pairs),
+    }
+}
+
 /// Split the `__action` marker out of a `changes` object. Returns
 /// `(action_name, cleaned_changes)`, so the panel can show the action
 /// as a badge instead of as a changed field.

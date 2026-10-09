@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin inline rows of an `audit(...)` model are audited (#2389)
+
+Inline updates, deletes and inserts write their audit rows in the parent edit's transaction; a failed audit write saves nothing.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.

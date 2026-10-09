@@ -1312,6 +1312,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_list_state_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_write_errors_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test admin_audit_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri

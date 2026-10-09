@@ -1162,15 +1162,35 @@ pub(crate) struct InlinePlan {
 /// One inline's writes: existing rows first, then inserts.
 struct TargetPlan {
     child: &'static ModelSchema,
+    pk: &'static FieldSchema,
     existing: Vec<InlineWrite>,
-    inserts: Vec<crate::core::InsertQuery>,
+    inserts: Vec<InlineInsert>,
     /// Deletes the inserts rely on to stay within `max_num`.
     deletes_needed: usize,
 }
 
+/// Each `audit` is `Some` only for an `audit(...)` child (#2389).
 enum InlineWrite {
-    Update(crate::core::UpdateQuery),
-    Delete(crate::core::DeleteQuery),
+    Update {
+        query: crate::core::UpdateQuery,
+        audit: Option<ChildAudit>,
+    },
+    Delete {
+        query: crate::core::DeleteQuery,
+        entry: Option<crate::audit::PendingEntry>,
+    },
+}
+
+struct InlineInsert {
+    query: crate::core::InsertQuery,
+    /// The audit form of an `audit(...)` child.
+    audit: Option<HashMap<String, String>>,
+}
+
+/// What an audited child UPDATE diffs its locked row against.
+struct ChildAudit {
+    pk: String,
+    form: HashMap<String, String>,
 }
 
 /// Check every submitted inline row (FK and generic) against the child
@@ -1303,8 +1323,11 @@ async fn plan_target(
     // inserts rather than updates (#1717).
     let initial = crate::forms::formset::initial_forms(form, table);
     let natural_pk = (!target.pk.auto).then_some(target.pk);
+    let cfg = admin_config_or_default(target.child);
+    let audited = target.child.audit_track.is_some();
     let mut out = TargetPlan {
         child: target.child,
+        pk: target.pk,
         existing: Vec::new(),
         inserts: Vec::new(),
         deletes_needed: 0,
@@ -1348,11 +1371,26 @@ async fn plan_target(
             }
             // Schema-driven INSERT: nothing else supplies these (#1464).
             crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
-            out.inserts.push(crate::core::InsertQuery::new(
-                target.child,
-                columns,
-                sql_values,
-            ));
+            let audit = audited.then(|| {
+                let written: Vec<(&'static str, SqlValue)> = columns
+                    .iter()
+                    .copied()
+                    .zip(sql_values.iter().cloned())
+                    .collect();
+                // The pins are not form input; the snapshot still names the parent.
+                let mut row = row.clone();
+                for (column, value) in &target.scope.0 {
+                    if let Some(f) = target.child.field_by_column(column) {
+                        row.insert(f.name.to_owned(), value.to_display_string());
+                    }
+                }
+                super::views::audit_form(target.child, &cfg, &row, &written)
+            });
+            let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
+            if audited {
+                query.returning = vec![target.pk.column];
+            }
+            out.inserts.push(InlineInsert { query, audit });
             continue;
         }
 
@@ -1372,11 +1410,19 @@ async fn plan_target(
             {
                 return Err(refused("delete").into());
             }
-            out.existing
-                .push(InlineWrite::Delete(crate::core::DeleteQuery::new(
+            let entry = audited.then(|| {
+                super::audit::admin_row_snapshot_entry(
                     target.child,
-                    target.row_where(pk),
-                )));
+                    pk.to_display_string(),
+                    crate::audit::AuditOp::Delete,
+                    &before,
+                    None,
+                )
+            });
+            out.existing.push(InlineWrite::Delete {
+                query: crate::core::DeleteQuery::new(target.child, target.row_where(pk)),
+                entry,
+            });
             continue;
         }
 
@@ -1398,16 +1444,18 @@ async fn plan_target(
         if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
             return Err(refused("change").into());
         }
+        let audit = audited.then(|| ChildAudit {
+            pk: pk.to_display_string(),
+            form: super::views::audit_form(target.child, &cfg, &row, &values),
+        });
         let set = values
             .into_iter()
             .map(|(column, value)| crate::core::Assignment::new(column, value))
             .collect();
-        out.existing
-            .push(InlineWrite::Update(crate::core::UpdateQuery::new(
-                target.child,
-                set,
-                target.row_where(pk),
-            )));
+        out.existing.push(InlineWrite::Update {
+            query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk)),
+            audit,
+        });
     }
     // `max_num` caps the rows a POST that adds any may leave (#1717):
     // every row of the parent, not only those the hooks show.
@@ -1423,7 +1471,7 @@ async fn plan_target(
         let deletes = out
             .existing
             .iter()
-            .filter(|w| matches!(w, InlineWrite::Delete(_)))
+            .filter(|w| matches!(w, InlineWrite::Delete { .. }))
             .count();
         out.deletes_needed = existing
             .saturating_add(out.inserts.len())
@@ -1450,10 +1498,13 @@ pub(crate) enum InlineApplyError {
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
+/// An `audit(...)` child's entries are written in `tx` too (#2389).
 pub(crate) async fn apply_plan_tx(
     tx: &mut crate::sql::PoolTx<'_>,
+    pool: &Pool,
     plan: InlinePlan,
 ) -> Result<InlineApplyOutcome, InlineApplyError> {
+    use crate::audit::{AuditOp, DiffEmit};
     let mut outcome = InlineApplyOutcome::default();
     for target in plan.targets {
         let child = target.child;
@@ -1461,14 +1512,51 @@ pub(crate) async fn apply_plan_tx(
         let mut deleted = 0usize;
         for write in target.existing {
             match write {
-                InlineWrite::Update(q) => {
-                    crate::sql::update_tx(tx, &q).await.map_err(refused)?;
+                InlineWrite::Update { query, audit: None } => {
+                    crate::sql::update_tx(tx, &query).await.map_err(refused)?;
+                    outcome.updated += 1;
+                }
+                InlineWrite::Update {
+                    query,
+                    audit: Some(audit),
+                } => {
+                    // The diff reads the row locked in `tx`, as the parent's does.
+                    let before = SelectQuery {
+                        where_clause: query.where_clause.clone(),
+                        ..SelectQuery::new(child)
+                    };
+                    let fields: Vec<&'static FieldSchema> = child.scalar_fields().collect();
+                    let cfg = admin_config_or_default(child);
+                    crate::audit::update_one_with_row_diff_tx(
+                        tx,
+                        pool,
+                        &query,
+                        before,
+                        &fields,
+                        |row| {
+                            let row = super::views::mask_secrets(child, &cfg, row);
+                            super::audit::admin_audit_diff_entry(
+                                child,
+                                &audit.pk,
+                                &row,
+                                &audit.form,
+                            )
+                        },
+                        DiffEmit::InTx,
+                    )
+                    .await
+                    .map_err(refused)?;
                     outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
-                InlineWrite::Delete(q) => {
-                    if crate::sql::delete_tx(tx, &q).await.map_err(refused)? > 0 {
+                InlineWrite::Delete { query, entry } => {
+                    if crate::sql::delete_tx(tx, &query).await.map_err(refused)? > 0 {
                         deleted += 1;
+                        if let Some(entry) = entry {
+                            crate::audit::emit_in_tx(tx, pool, &[entry])
+                                .await
+                                .map_err(refused)?;
+                        }
                     }
                 }
             }
@@ -1478,8 +1566,27 @@ pub(crate) async fn apply_plan_tx(
         if deleted < target.deletes_needed {
             return Err(InlineApplyError::MaxNum { child });
         }
-        for q in target.inserts {
-            crate::sql::insert_tx(tx, &q).await.map_err(refused)?;
+        for insert in target.inserts {
+            match insert.audit {
+                None => crate::sql::insert_tx(tx, &insert.query)
+                    .await
+                    .map_err(refused)?,
+                Some(form) => {
+                    crate::audit::insert_one_with_entry_tx(
+                        tx,
+                        pool,
+                        &insert.query,
+                        target.pk,
+                        |pk| {
+                            let pk = pk.to_display_string();
+                            super::audit::admin_audit_entry(child, &pk, AuditOp::Create, &form)
+                        },
+                        DiffEmit::InTx,
+                    )
+                    .await
+                    .map_err(refused)?;
+                }
+            }
             outcome.inserted += 1;
         }
     }

@@ -1441,6 +1441,28 @@ pub(crate) enum DiffEmit {
     AfterCommit,
 }
 
+#[cfg(feature = "admin")]
+impl DiffEmit {
+    /// An `audit(...)` model audits in the write's tx; others best-effort.
+    pub(crate) fn for_model(model: &crate::core::ModelSchema) -> Self {
+        if model.audit_track.is_some() {
+            Self::InTx
+        } else {
+            Self::AfterCommit
+        }
+    }
+}
+
+/// Write `entries` in the caller's `tx`: a failed emit fails the write.
+#[cfg(feature = "admin")]
+pub(crate) async fn emit_in_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    pool: &crate::sql::Pool,
+    entries: &[PendingEntry],
+) -> Result<(), crate::sql::ExecError> {
+    emit_many_tx(tx, Via::Pool(pool), entries).await
+}
+
 /// Outcome of [`update_one_with_row_diff_tx`].
 #[cfg(feature = "admin")]
 #[derive(Debug)]
@@ -1496,13 +1518,27 @@ pub(crate) async fn insert_one_with_entry(
     emit: DiffEmit,
 ) -> Result<(crate::core::SqlValue, Option<PendingEntry>), crate::sql::ExecError> {
     let mut tx = crate::sql::write_transaction_pool(pool).await?;
-    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    let written = insert_one_with_entry_tx(&mut tx, pool, query, pk_field, entry_of, emit).await?;
+    tx.commit().await?;
+    Ok(written)
+}
+
+/// [`insert_one_with_entry`] in the caller's `tx`; the caller commits.
+#[cfg(feature = "admin")]
+pub(crate) async fn insert_one_with_entry_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    pool: &crate::sql::Pool,
+    query: &crate::core::InsertQuery,
+    pk_field: &crate::core::FieldSchema,
+    entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
+    emit: DiffEmit,
+) -> Result<(crate::core::SqlValue, Option<PendingEntry>), crate::sql::ExecError> {
+    let returning = crate::sql::insert_returning_tx(tx, query).await?;
     let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     let entry = entry_of(&pk);
     if emit == DiffEmit::InTx {
-        emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
+        emit_one_tx(tx, Via::Pool(pool), &entry).await?;
     }
-    tx.commit().await?;
     Ok((pk, (emit == DiffEmit::AfterCommit).then_some(entry)))
 }
 
