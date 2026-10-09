@@ -531,9 +531,11 @@ impl Mailer for InMemoryMailer {
 /// development without wiring an SMTP relay or piping stdout into a
 /// log file.
 ///
-/// File names are `YYYYMMDDHHMMSS-<seq>.eml` so a burst of emails
-/// inside the same second still get unique paths. The directory is
-/// created on `send` if it doesn't yet exist.
+/// File names are `YYYYMMDDHHMMSS-<pid>-<seq>.eml`, and a send never
+/// overwrites an existing file, so several processes can share one
+/// directory. The directory is created on `send` if it doesn't yet exist.
+/// On unix files are 0600 and a new directory 0700; an existing directory
+/// keeps its mode.
 pub struct FileMailer {
     dir: std::path::PathBuf,
     seq: std::sync::atomic::AtomicU64,
@@ -621,15 +623,41 @@ fn serialize_eml(email: &Email) -> String {
 impl Mailer for FileMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
         email.validate()?;
-        std::fs::create_dir_all(&self.dir)
+        // Owner-only: the files hold reset links and other tokens.
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+        dir.create(&self.dir)
             .map_err(|e| MailError::Transport(format!("create_dir_all: {e}")))?;
-        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-        let name = format!("{stamp}-{seq:04}.eml");
-        let path = self.dir.join(name);
-        std::fs::write(&path, serialize_eml(email))
-            .map_err(|e| MailError::Transport(format!("write {}: {e}", path.display())))?;
-        Ok(())
+        let pid = std::process::id();
+        // `create_new` never overwrites: another process (or a container
+        // with the same pid) writing this name makes us take the next seq.
+        loop {
+            let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = self.dir.join(format!("{stamp}-{pid}-{seq:04}.eml"));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let file = opts.open(&path);
+            match file {
+                Ok(mut f) => {
+                    use std::io::Write as _;
+                    return f.write_all(serialize_eml(email).as_bytes()).map_err(|e| {
+                        MailError::Transport(format!("write {}: {e}", path.display()))
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(MailError::Transport(format!(
+                        "write {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
     }
 }
 
@@ -876,6 +904,40 @@ mod tests {
         assert_eq!(e.to, vec!["a@x.com", "b@x.com"]);
         assert_eq!(e.from.as_deref(), Some("noreply@my.app"));
         assert_eq!(e.subject, "hi");
+    }
+
+    /// Two mailers on one directory stand in for two processes: each
+    /// starts at seq 0, so neither may overwrite the other (#2335).
+    #[tokio::test]
+    async fn file_mailers_sharing_a_dir_never_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (FileMailer::new(dir.path()), FileMailer::new(dir.path()));
+        let e = Email::new().to("a@x.com").subject("s").body("b");
+        for _ in 0..5 {
+            a.send(&e).await.unwrap();
+            b.send(&e).await.unwrap();
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 10);
+    }
+
+    /// Mail files hold reset tokens: owner-only dir and files.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_mailer_writes_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mail");
+        let e = Email::new().to("a@x.com").subject("s").body("b");
+        FileMailer::new(&dir).send(&e).await.unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(mode(&file), 0o600);
     }
 
     #[tokio::test]

@@ -150,6 +150,14 @@ untouched.
 
 ## Unreleased
 
+### Scheduled jobs under a lock: use `once_per_period`
+
+`with_lock` inside `Scheduler::every` still runs once per pod per period. Tick often and wrap the body: `scheduler.every(name, Duration::from_secs(60), …)` calling `lock.once_per_period(name, day, body)` (#2330).
+
+### Job retries
+
+`EmailJob` now makes 8 runs with 5s doubling backoff, about ten minutes (#2332). `MAX_ATTEMPTS = 0` now means one run (#2333). Per-queue mailers hold for in-memory queues only; with database queues use one mailer per jobs table (#2334, #2338).
+
 ### Admin audit feed: hook-scoped tables are superuser-only
 
 Under `with_user_perms`, `/__audit` and the home "recent actions" skip tables with a queryset or `view` hook (#2342).

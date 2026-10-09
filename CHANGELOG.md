@@ -4,6 +4,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `DistributedLock::once_per_period`, `Job::retry_backoff`, `jobs::exponential_backoff`, `JobQueue::register_with` (#2330, #2332, #2334)
+
+`once_per_period` runs a body once per window counted from the Unix epoch (daily = 00:00 UTC); `register_with` registers a job with its own handler.
+
+### Fixed — a locked scheduler job ran once per pod (#2330)
+
+Tick often and wrap the body in `once_per_period`. A failed or panicking run frees its window for a later tick.
+
+### Changed — `EmailJob` retries for about ten minutes (#2332)
+
+`MAX_ATTEMPTS` 5 → 8, backoff 5s doubling; before, mail dead-lettered after ~15s.
+
+### Fixed — `MAX_ATTEMPTS = 0` never ran the job (#2333)
+
+Both queues treat 0 as one run, including rows already queued.
+
+### Fixed — `register_email_job` on a second in-memory queue rerouted all mail (#2334)
+
+Each in-memory queue's handler holds its own mailer. Database queues share `rustango_jobs`, so use one mailer per jobs table; a second one logs a warning (#2338).
+
+### Fixed — `FileMailer` processes overwrote each other's files (#2335)
+
+Names carry the pid and are opened with `create_new`, moving to the next number on a clash. On unix the files are 0600 and a new directory 0700.
+
 ### Fixed — admin list facets read only the values they show (#2344)
 
 The `GROUP BY` stops one past the cap unless `facet_show_all`; a count query keeps "+N more" exact, and an active value past the cut is read on its own.

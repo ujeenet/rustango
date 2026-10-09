@@ -33,9 +33,8 @@
 //!   the queue backs off and retries; a rejected message is
 //!   [`crate::jobs::JobError::Fatal`]. A job that runs out of attempts
 //!   goes to the dead-letter callback.
-//! - The worker reads the [`crate::email::Mailer`] from a static
-//!   registry keyed by job name. Registering again replaces it, which
-//!   is handy in tests.
+//! - Each queue's handler holds the [`crate::email::Mailer`] it was
+//!   registered with, so two queues can send through two mailers.
 //!
 //! [`Email`]: crate::email::Email
 
@@ -46,9 +45,8 @@ use serde::{Deserialize, Serialize};
 use crate::email::{BoxedMailer, Email};
 use crate::jobs::{Job, JobError, JobQueue};
 
-/// Mailers by [`Job::NAME`]. The worker looks one up here so the
-/// mailer stays out of the job payload, which would need
-/// `Mailer: Serialize`.
+/// Fallback mailer for a custom [`JobQueue`] that does not override
+/// `register_with`; the built-in queues keep the mailer in the handler.
 fn mailer_registry() -> &'static RwLock<std::collections::HashMap<&'static str, BoxedMailer>> {
     static REG: OnceLock<RwLock<std::collections::HashMap<&'static str, BoxedMailer>>> =
         OnceLock::new();
@@ -78,9 +76,13 @@ pub struct EmailJob {
 #[async_trait::async_trait]
 impl Job for EmailJob {
     const NAME: &'static str = "rustango.send_email";
-    /// 5 attempts at the queue's `1s · 2^attempt` backoff, about a
-    /// minute in all.
-    const MAX_ATTEMPTS: u32 = 5;
+    /// 8 runs, 5s doubling between them: about ten minutes, enough to
+    /// ride out a relay restart.
+    const MAX_ATTEMPTS: u32 = 8;
+
+    fn retry_backoff(failed_attempt: u32) -> std::time::Duration {
+        crate::jobs::exponential_backoff(std::time::Duration::from_secs(5), failed_attempt)
+    }
 
     async fn run(&self) -> Result<(), JobError> {
         let mailer = mailer_registry()
@@ -93,24 +95,79 @@ impl Job for EmailJob {
                     "EmailJob: no mailer registered (call register_email_job at startup)".into(),
                 )
             })?;
-        mailer.send(&self.email).await.map_err(|e| {
-            if e.is_retryable() {
-                JobError::Retryable(format!("mailer: {e}"))
-            } else {
-                JobError::Fatal(format!("mailer: {e}"))
-            }
-        })
+        send(&mailer, &self.email).await
     }
 }
 
+async fn send(mailer: &BoxedMailer, email: &Email) -> Result<(), JobError> {
+    mailer.send(email).await.map_err(|e| {
+        if e.is_retryable() {
+            JobError::Retryable(format!("mailer: {e}"))
+        } else {
+            JobError::Fatal(format!("mailer: {e}"))
+        }
+    })
+}
+
 /// Register the email job and its mailer on `queue`, once at startup.
-/// Calling it again replaces the mailer.
+/// Calling it again on the same queue replaces the mailer.
+///
+/// Each in-memory queue keeps its own mailer (#2334). Database queues
+/// share one `rustango_jobs` table, so any of them may send any queued
+/// mail: use one mailer per jobs table (#2338).
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
+    #[cfg(feature = "jobs-postgres")]
+    warn_on_second_db_mailer(queue, &cfg.mailer);
+    // Only for a custom queue that does not override `register_with`.
     mailer_registry()
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(EmailJob::NAME, cfg.mailer);
-    queue.register::<EmailJob>().await;
+        .insert(EmailJob::NAME, cfg.mailer.clone());
+    let mailer = cfg.mailer;
+    queue
+        .register_with(move |job: EmailJob| {
+            let mailer = mailer.clone();
+            async move { send(&mailer, &job.email).await }
+        })
+        .await;
+}
+
+/// Warn once per database when two of its queues get different mailers.
+#[cfg(feature = "jobs-postgres")]
+fn warn_on_second_db_mailer<Q: JobQueue>(queue: &Q, mailer: &BoxedMailer) {
+    let any: &dyn std::any::Any = queue;
+    let Some(q) = any.downcast_ref::<crate::jobs::pg::PgJobQueue>() else {
+        return;
+    };
+    let (db, queue_id) = q.identity();
+    if mixed_db_mailers(db, queue_id, mailer) {
+        tracing::warn!(
+            target: "rustango::email_jobs",
+            "register_email_job: two queues on one jobs table have different mailers; \
+             either may send any queued mail (#2338)"
+        );
+    }
+}
+
+/// Record `mailer` for `queue_id` on `db`. `true` the first time the
+/// queues of `db` disagree on their mailer.
+#[cfg(feature = "jobs-postgres")]
+fn mixed_db_mailers(db: u64, queue_id: usize, mailer: &BoxedMailer) -> bool {
+    use std::collections::HashMap;
+    type Seen = HashMap<u64, (HashMap<usize, BoxedMailer>, bool)>;
+    static SEEN: OnceLock<std::sync::Mutex<Seen>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (queues, warned) = seen.entry(db).or_default();
+    queues.insert(queue_id, mailer.clone());
+    let mixed = queues.values().any(|m| !std::sync::Arc::ptr_eq(m, mailer));
+    if mixed && !*warned {
+        *warned = true;
+        return true;
+    }
+    false
 }
 
 /// Queue an email and return at once; a worker delivers it.
@@ -243,6 +300,67 @@ mod tests {
         assert_eq!(m2.count(), 1, "new mailer should receive");
 
         q.shutdown().await;
+    }
+
+    /// Two queues keep their own mailers; the second registration must
+    /// not reroute the first queue's mail (#2334).
+    #[tokio::test]
+    async fn two_queues_send_through_their_own_mailers() {
+        let _g = lock().lock().await;
+        reset_mailer_registry();
+        let (m1, m2) = (
+            StdArc::new(InMemoryMailer::new()),
+            StdArc::new(InMemoryMailer::new()),
+        );
+        let (q1, q2) = (
+            InMemoryJobQueue::with_workers(1),
+            InMemoryJobQueue::with_workers(1),
+        );
+        register_email_job(&q1, EmailJobConfig::new(m1.clone())).await;
+        register_email_job(&q2, EmailJobConfig::new(m2.clone())).await;
+        q1.start().await;
+        q2.start().await;
+
+        dispatch_email(&q1, &email()).await.unwrap();
+        for _ in 0..50 {
+            if m1.count() + m2.count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!((m1.count(), m2.count()), (1, 0), "sent by the wrong mailer");
+        q1.shutdown().await;
+        q2.shutdown().await;
+    }
+
+    /// The warning fires once per database, only when two of its queues
+    /// have different mailers.
+    #[cfg(feature = "jobs-postgres")]
+    #[test]
+    fn mixed_db_mailers_warns_once_per_database() {
+        let (m1, m2): (BoxedMailer, BoxedMailer) =
+            (StdArc::new(NullMailer), StdArc::new(NullMailer));
+        // Distinct `db` keys keep this test apart from any other.
+        let db = 0xD8_2337;
+        assert!(!mixed_db_mailers(db, 1, &m1), "first queue");
+        assert!(!mixed_db_mailers(db, 1, &m2), "same queue re-registered");
+        assert!(!mixed_db_mailers(db + 1, 2, &m1), "own database");
+        assert!(!mixed_db_mailers(db, 2, &m2), "same mailer on the database");
+        assert!(mixed_db_mailers(db, 3, &m1), "two mailers on one table");
+        assert!(!mixed_db_mailers(db, 4, &m1), "warned once");
+    }
+
+    /// Retries span minutes, so a short relay outage does not dead-letter
+    /// the mail (#2332).
+    #[test]
+    fn email_retries_span_several_minutes() {
+        let total: Duration = (0..EmailJob::MAX_ATTEMPTS - 1)
+            .map(EmailJob::retry_backoff)
+            .sum();
+        assert!(
+            total >= Duration::from_secs(300),
+            "gives up after {total:?}"
+        );
     }
 
     /// Rejects every message and counts the calls.
