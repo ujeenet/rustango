@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### HMAC auth on a tenant-resolved app (#2492)
+
+The tenant header and port are still unsigned by default. Behind `HeaderResolver`, add `.signed_headers(["x-org"])` or `.tenant_header("x-org", ..)`; behind `PortResolver`, `.sign_port()`. Clients then sign with `RequestToSign::header` / `port`.
+
 ### `ViewSetPerms` is all-of (#2522)
 
 A user now needs every codename listed for an action, not any one. A list meant as alternatives needs a role that grants them together.

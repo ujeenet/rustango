@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
+
+A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::signed_headers`, `sign_port` and `tenant_header`, and `RequestToSign` for clients.
+
 ### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
 
 It allowed on the first match, so a second codename widened access instead of narrowing it.
