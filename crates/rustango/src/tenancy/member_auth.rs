@@ -397,7 +397,7 @@ pub struct MemberAuthConfig {
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
     /// time it's seen. When `false`, an unknown email is refused.
-    /// Default `true`.
+    /// Default `false`: the provider rows are shared with the tenant console.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -408,7 +408,7 @@ impl Default for MemberAuthConfig {
         Self {
             login_base: "/auth".to_owned(),
             landing_url: "/".to_owned(),
-            auto_provision: true,
+            auto_provision: false,
             session_ttl: 7 * 24 * 60 * 60,
         }
     }
@@ -1095,6 +1095,12 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
+    /// #2560 — provisioning a user from any verified email is opt-in.
+    #[test]
+    fn member_sso_does_not_auto_provision_by_default() {
+        assert!(!MemberAuthConfig::default().auto_provision);
     }
 
     /// #2144: the SSO error page passes a strict CSP: no style attribute,

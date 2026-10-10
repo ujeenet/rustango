@@ -396,7 +396,11 @@ async fn member_sso_router_serves_a_non_default_backend() {
     };
     provider.insert_pool(&env.tenant).await.unwrap();
     let app = env.mount(
-        member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default()).route(
+        member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+            auto_provision: true,
+            ..MemberAuthConfig::default()
+        })
+        .route(
             "/whoami",
             get(|m: CurrentMember| async move { m.0.map(|u| u.username).unwrap_or_default() }),
         ),

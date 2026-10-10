@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — member SSO auto-provisioning is opt-in (#2560)
+
+`MemberAuthConfig::auto_provision` defaults to `false`, so a provider added for console SSO no longer creates a user for any verified email.
+
 ### Security — a scoped MCP user key no longer widens when its last skill is revoked (#2537)
 
 The key records that it is scoped in `Agent.data`; with no grants left it gets no tools instead of the owner's full entitlement.

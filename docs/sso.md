@@ -178,7 +178,7 @@ It mounts two per-slug routes off `login_base`:
 
 Differences from the admin flow:
 
-- **Auto-provisioning.** With `auto_provision = true` (the default), a
+- **Auto-provisioning.** With `auto_provision = true` (opt-in; the default is `false`), a
   verified IdP email with no matching `rustango_users` row **creates**
   one — username from the email local-part (deduped on a clash), a real
   but unusable random password hash (SSO users can't password-login) —

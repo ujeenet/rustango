@@ -1453,7 +1453,21 @@ async fn member_callback_signs_in_by_link_only() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx));
+    // #2560: the default refuses an unknown email.
+    let strict = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx.clone()));
+    env.idp.assert("sub-stranger", "stranger@example.com");
+    let resp = handshake(&strict, &env.tenants[0].host, "/auth", "corp").await;
+    assert!(
+        !set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "default config provisioned a stranger"
+    );
+    let app = member_sso_router(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
     let member = |sub: &'static str, email: &'static str| {
         let app = app.clone();
         let env = &env;
@@ -1510,8 +1524,11 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
-        .layer(axum::Extension(ctx));
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
     let begin = send(
         &app,
         Request::builder()
