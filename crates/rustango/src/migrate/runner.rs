@@ -2633,6 +2633,26 @@ pub(crate) async fn try_table_exists_here(
     Ok(n > 0)
 }
 
+/// Whether `schema.table` exists, by name: unlike [`try_table_exists_here`]
+/// a missing schema never falls back to the search path (#2569).
+#[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
+pub(crate) async fn try_table_exists_in_schema(
+    pg: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_one(pg)
+    .await?;
+    Ok(n > 0)
+}
+
 /// Record `mig` as applied **without running its `forward` ops**, and
 /// tombstone every migration it `replaces`.
 ///

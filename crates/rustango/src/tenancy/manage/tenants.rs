@@ -504,6 +504,9 @@ where
     for note in &report.notes {
         writeln!(w, "  {note}")?;
     }
+    for (disk, key) in &report.media_left {
+        writeln!(w, "  media left in storage: disk `{disk}`, key `{key}`")?;
+    }
     if report.row_deleted {
         writeln!(w, "  removed Org row")?;
     }
