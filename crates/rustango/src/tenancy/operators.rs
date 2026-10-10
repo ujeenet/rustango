@@ -151,7 +151,7 @@ pub async fn set_active(
 #[cfg(all(test, feature = "sqlite", feature = "testkit"))]
 mod tests {
     use super::*;
-    use crate::sql::{Auto, UpdaterPool as _};
+    use crate::sql::Auto;
 
     async fn operator(pool: &Pool, username: &str) -> Operator {
         let mut op = Operator {
