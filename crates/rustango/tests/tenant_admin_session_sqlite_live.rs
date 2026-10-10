@@ -321,6 +321,25 @@ async fn impersonating_a_port_routed_org_lands_on_its_port() {
     );
 }
 
+/// #2425 — with Secure cookies and no `RUSTANGO_TENANT_SCHEME`, the
+/// handoff (a one-time login) goes to https.
+#[tokio::test]
+async fn the_handoff_uses_https_when_cookies_are_secure() {
+    let env = boot().await;
+    // Process-wide and set once; skip if an earlier test fixed it off.
+    let ours = rustango::session::set_secure_cookies(true);
+    if (!ours && !rustango::session::secure_cookies())
+        || std::env::var("RUSTANGO_TENANT_SCHEME").is_ok_and(|s| !s.is_empty())
+    {
+        return;
+    }
+    let (_, location) = start_impersonation(&env).await;
+    assert!(
+        location.starts_with(&format!("https://{}", env.host)),
+        "got {location}"
+    );
+}
+
 /// The handoff token is a live login: the info log names the URL, not it (#2107).
 #[tokio::test]
 async fn the_handoff_token_is_not_logged() {

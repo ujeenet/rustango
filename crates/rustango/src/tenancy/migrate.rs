@@ -812,6 +812,42 @@ where
     migrate_tenants_db_opts(pools, dir, registry_url, observer).await
 }
 
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+const PASSKEY_TABLE: &str = "rustango_webauthn_credentials";
+
+/// `table` in this pool's own schema; a failed probe counts as missing.
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+async fn existed_here(pool: &crate::sql::Pool, table: &str) -> bool {
+    crate::migrate::try_table_exists_here(pool, table)
+        .await
+        .unwrap_or(false)
+}
+
+/// A pre-existing tenant's new passkey table shadows `public`'s on the
+/// search path, so passkeys kept there stop working (#2518). Rows are not copied: user
+/// ids overlap across tenants, so only the operator knows whose they are.
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+async fn warn_hidden_public_passkeys(registry: &crate::sql::Pool, slug: &str, schema: &str) {
+    use crate::sql::CounterPool as _;
+    if !existed_here(registry, PASSKEY_TABLE).await {
+        return;
+    }
+    let rows = crate::passkey::WebauthnCredential::objects()
+        .count(registry)
+        .await
+        .unwrap_or(0);
+    if rows > 0 {
+        tracing::warn!(
+            target: "rustango::tenancy",
+            slug,
+            rows,
+            "tenant `{slug}` now has its own {PASSKEY_TABLE}, which hides the {rows} row(s) in \
+             public.{PASSKEY_TABLE}: move this tenant's rows into \"{schema}\".{PASSKEY_TABLE} \
+             by hand (see UPGRADING, 0.60.5)"
+        );
+    }
+}
+
 #[cfg(feature = "postgres")]
 async fn run_for_one_tenant(
     pools: &TenantPools,
@@ -842,6 +878,11 @@ async fn run_for_one_tenant(
             // (issue #1171). Applying user migrations first breaks a fresh
             // tenant whose model references e.g. rustango_users.
             let dbpool: crate::sql::Pool = pool.clone().into();
+            // A tenant with users before this run that has no passkey table
+            // read its passkeys from `public` (#2518).
+            #[cfg(feature = "passkey")]
+            let reads_public_passkeys = existed_here(&dbpool, "rustango_users").await
+                && !existed_here(&dbpool, PASSKEY_TABLE).await;
             let applied = migrate_with_system(
                 &dbpool,
                 chain,
@@ -859,6 +900,10 @@ async fn run_for_one_tenant(
             .await?;
             // Lands in the tenant schema, not `public` (#2364).
             crate::migrate::manage::ensure_tenant_bootstrap_tables(&dbpool).await?;
+            #[cfg(feature = "passkey")]
+            if reads_public_passkeys {
+                warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
+            }
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.

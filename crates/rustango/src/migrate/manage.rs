@@ -6954,6 +6954,20 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         }
     }
 
+    /// #2425 — the tenant-scheme warning is the tenancy dispatcher's, so a
+    /// single-database deploy never sees it.
+    #[test]
+    fn deploy_audit_says_nothing_about_the_tenant_scheme() {
+        let r = run(&good_prod_env());
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("RUSTANGO_TENANT_SCHEME")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     /// #1627 — an admin built without session auth is named.
     #[test]
     fn deploy_audit_warns_on_an_ungated_admin() {

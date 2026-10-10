@@ -224,7 +224,7 @@ impl PasswordVerified<User> {
         if let Some(new) = upgrade {
             let model = <User as crate::core::Model>::SCHEMA;
             let id = row.id.get().copied().unwrap_or_default();
-            let q = crate::passwords::rehash_update(model, id, &row.password_hash, &new);
+            let q = crate::passwords::rehash_update(model, id, &row.password_hash, &new, None);
             let applied = crate::sql::update_on(&mut *conn, &q).await;
             row.password_hash =
                 crate::passwords::rehash_applied(applied, model, id, &row.password_hash, new);

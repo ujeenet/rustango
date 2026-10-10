@@ -274,16 +274,41 @@ pub(crate) async fn store_rehash(
     stored: &str,
     new: String,
 ) -> String {
-    let applied = crate::sql::update_pool(pool, &rehash_update(model, id, stored, &new)).await;
+    let q = rehash_update(model, id, stored, &new, None);
+    let applied = crate::sql::update_pool(pool, &q).await;
     rehash_applied(applied, model, id, stored, new)
 }
 
-/// `UPDATE model SET password_hash = new WHERE id = ? AND password_hash = old`.
+/// A password change: store `new` over `old` and stamp `password_changed_at`,
+/// writing no other column, so a deactivate or demote meanwhile stands
+/// (#2467). `false` when the password changed meanwhile.
+///
+/// # Errors
+/// [`crate::sql::ExecError::UnsavedRow`] for a row never saved; driver failures.
+#[cfg(feature = "tenancy")]
+pub(crate) async fn store_password_change(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    id: &crate::sql::Auto<i64>,
+    old: &str,
+    new: &str,
+) -> Result<bool, crate::sql::ExecError> {
+    let id = id
+        .get()
+        .copied()
+        .ok_or(crate::sql::ExecError::UnsavedRow { table: model.table })?;
+    let q = rehash_update(model, id, old, new, Some(chrono::Utc::now()));
+    Ok(crate::sql::update_pool(pool, &q).await? == 1)
+}
+
+/// `UPDATE model SET password_hash = new WHERE id = ? AND password_hash = old`,
+/// also stamping `password_changed_at` when `changed_at` is given.
 pub(crate) fn rehash_update(
     model: &'static crate::core::ModelSchema,
     id: i64,
     old: &str,
     new: &str,
+    changed_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> crate::core::UpdateQuery {
     use crate::core::{Assignment, Expr, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
     let eq = |column, value| {
@@ -293,12 +318,19 @@ pub(crate) fn rehash_update(
             value,
         })
     };
+    let mut set = vec![Assignment {
+        column: "password_hash",
+        value: Expr::Literal(SqlValue::String(new.to_owned())),
+    }];
+    if let Some(at) = changed_at {
+        set.push(Assignment::new(
+            "password_changed_at",
+            SqlValue::DateTime(at),
+        ));
+    }
     UpdateQuery {
         model,
-        set: vec![Assignment {
-            column: "password_hash",
-            value: Expr::Literal(SqlValue::String(new.to_owned())),
-        }],
+        set,
         where_clause: WhereExpr::And(vec![
             eq("id", SqlValue::I64(id)),
             eq("password_hash", SqlValue::String(old.to_owned())),

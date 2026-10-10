@@ -810,6 +810,101 @@ async fn logout_ends_every_access_token_of_the_login() {
         .await;
 }
 
+/// #2419 — logout with a dead access token and a rotated refresh still
+/// ends the refresh family, so a thief's rotated token stops refreshing.
+#[tokio::test]
+async fn logout_with_a_rotated_refresh_ends_the_family() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("fam");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let stolen = login["refresh"].as_str().unwrap().to_owned();
+    // The thief rotates the stolen token first.
+    let r = env.refresh(&stolen).await;
+    assert_eq!(r.status(), StatusCode::OK, "thief rotates");
+    let thief = json_body(r).await["refresh"].as_str().unwrap().to_owned();
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, "Bearer expired.access.token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "refresh": stolen }).to_string(),
+        ))
+        .unwrap();
+    let r = send(&env.api, &next_ip(), logout).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    let r = env.refresh(&thief).await;
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "thief's token still refreshes"
+    );
+}
+
+/// #2419 — logout with only an expired, signed access token ends its
+/// family: the thief's rotated refresh stops refreshing.
+#[tokio::test]
+async fn logout_with_an_expired_access_token_ends_the_family() {
+    let _g = SUITE.lock().await;
+    let env = boot_with(|c| c.access_ttl_secs = 1).await;
+    let name = unique("exp");
+    env.user(&name).await;
+    let login = json_body(env.jwt_login(&next_ip(), &name, PASS).await).await;
+    let access = login["access"].as_str().unwrap().to_owned();
+    let r = env.refresh(login["refresh"].as_str().unwrap()).await;
+    assert_eq!(r.status(), StatusCode::OK, "thief rotates");
+    let thief = json_body(r).await["refresh"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    env.assert_bearer(&access, StatusCode::UNAUTHORIZED, "expired")
+        .await;
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, format!("Bearer {access}"))
+        .body(Body::empty())
+        .unwrap();
+    let r = send(&env.api, &next_ip(), logout).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    let r = env.refresh(&thief).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "family still alive");
+}
+
+/// #2419 — another tenant's refresh token posted to this tenant's logout
+/// does not end its family, even when both share one JTI store.
+#[tokio::test]
+async fn logout_does_not_end_another_tenants_family() {
+    let _g = SUITE.lock().await;
+    let store: Arc<dyn rustango::jti_store::JtiStore> =
+        Arc::new(rustango::jti_store::InMemoryJtiStore::new());
+    let acme = boot_with(|c| c.jti_store = Some(store.clone())).await;
+    let globex = boot_with(|c| c.jti_store = Some(store.clone())).await;
+    let name = unique("xf");
+    globex.user(&name).await;
+    let login = json_body(globex.jwt_login(&next_ip(), &name, PASS).await).await;
+    let refresh = login["refresh"].as_str().unwrap().to_owned();
+
+    let logout = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(header::AUTHORIZATION, "Bearer junk")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "refresh": refresh }).to_string(),
+        ))
+        .unwrap();
+    let _ = send(&acme.api, &next_ip(), logout).await;
+    let r = globex.refresh(&refresh).await;
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "acme's logout ended globex's family"
+    );
+}
+
 async fn json_body(r: axum::response::Response) -> serde_json::Value {
     let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     serde_json::from_slice(&b).unwrap()

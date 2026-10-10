@@ -24,6 +24,30 @@ In a tenancy project it checked only the registry ledger. It now refuses when an
 
 It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run; `create_tenant_if_missing` finishes one that failed.
 
+### Fixed — migrate warns when a tenant's passkey table hides `public` passkeys (#2518)
+
+On PG schema-mode tenants the new per-tenant `rustango_webauthn_credentials` shadows `public`'s; `migrate-tenants` now logs a warning naming the table and the rows to move.
+
+### Security — logout ends the refresh family even with an expired access token (#2419)
+
+The family is read from any token signed for the tenant, expired or already rotated, so a thief's rotated refresh token stops working at logout.
+
+### Fixed — operator console audits shared SSO changes and password changes (#2424)
+
+Creating, re-linking and deleting a shared SSO provider, and an operator's own password change, now write audit rows; a failed delete reports the error instead of a success redirect.
+
+### Security — impersonation links default to https (#2425)
+
+With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); the tenancy `check --deploy` warns when the variable is unset or not `https`.
+
+### Fixed — a password change no longer undoes a concurrent deactivate or demote (#2467)
+
+The tenant admin, operator console and CLI password writes, and operator activate/deactivate, update only their own columns; a password write is guarded by the old hash.
+
+### Security — reset, verify and magic links are tenant-bound (#2472)
+
+`PasswordReset`, `EmailVerification` and `MagicLink` sign a `LinkScope` and refuse a link redeemed under another one, so a link from one tenant can no longer reset the same user id in another.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.

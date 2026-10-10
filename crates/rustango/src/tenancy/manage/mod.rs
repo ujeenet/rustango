@@ -375,13 +375,12 @@ where
             agents::unmap_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
         }
         // The SSO providers live per tenant, which the registry pool can't see (#2359).
-        #[cfg(feature = "sso")]
         "check" => rustango::migrate::manage::check_cmd_with(
             &pools.registry_pool(),
             dir,
             &args[1..],
             writer,
-            sso_check::findings(pools),
+            tenancy_deploy_findings(pools),
         )
         .await
         .map_err(TenancyError::Migrate),
@@ -863,4 +862,65 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "Run any verb with --help for verb-specific flags + details."
     )?;
     Ok(())
+}
+
+/// `check --deploy` findings only a tenancy deploy has.
+async fn tenancy_deploy_findings<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+) -> rustango::migrate::manage::DeployAuditFindings
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    #[cfg(feature = "sso")]
+    let mut out = sso_check::findings(pools).await;
+    #[cfg(not(feature = "sso"))]
+    let mut out = {
+        let _ = pools;
+        rustango::migrate::manage::DeployAuditFindings::default()
+    };
+    tenant_scheme_audit(
+        crate::tenancy::server::tenant_scheme_setting().as_deref(),
+        &mut out,
+    );
+    out
+}
+
+/// The impersonation handoff carries a one-time superuser login (#2425).
+fn tenant_scheme_audit(
+    setting: Option<&str>,
+    out: &mut rustango::migrate::manage::DeployAuditFindings,
+) {
+    match setting {
+        Some("https") => {}
+        Some(other) => out.warnings.push(format!(
+            "RUSTANGO_TENANT_SCHEME is `{other}` — impersonation handoff tokens go out in \
+             clear; set it to `https`"
+        )),
+        None => out.warnings.push(
+            "RUSTANGO_TENANT_SCHEME is unset — impersonation links use https only while \
+             cookies are Secure; set it to `https`"
+                .into(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod deploy_tests {
+    use super::*;
+
+    /// #2425 — an unset or non-https tenant scheme is flagged; https is not.
+    #[test]
+    fn a_tenant_scheme_that_is_not_https_is_flagged() {
+        for (setting, flagged) in [(None, true), (Some("http"), true), (Some("https"), false)] {
+            let mut out = rustango::migrate::manage::DeployAuditFindings::default();
+            tenant_scheme_audit(setting, &mut out);
+            assert_eq!(
+                out.warnings
+                    .iter()
+                    .any(|w| w.contains("RUSTANGO_TENANT_SCHEME")),
+                flagged,
+                "{setting:?}"
+            );
+        }
+    }
 }
