@@ -64,10 +64,7 @@ pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
 pub use runner::migrate_pool_with_progress;
-#[cfg(any(
-    all(feature = "sso", any(feature = "tenancy", feature = "admin-sso")),
-    all(feature = "passkey", feature = "tenancy", feature = "postgres")
-))]
+#[cfg(any(feature = "tenancy", feature = "admin-sso"))]
 pub(crate) use runner::try_table_exists_here;
 pub use runner::unapply_pool_with_ledger;
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};

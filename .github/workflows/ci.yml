@@ -1039,6 +1039,7 @@ jobs:
             --test i18n_admin_editor_sqlite_live \
             --test i18n_admin_editor_tri \
             --test org_host_claims_tri \
+            --test tenancy_manage_tri \
             --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
@@ -1329,6 +1330,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test tenancy_manage_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri

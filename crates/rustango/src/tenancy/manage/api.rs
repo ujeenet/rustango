@@ -88,7 +88,7 @@ where
 /// * `TenancyError::Validation` for duplicate slug or bad
 ///   schema/database options.
 /// * Driver / SQL failures during schema creation, the Org INSERT, or
-///   the tenant migration pass.
+///   the tenant migration pass. A failed migration leaves the Org inactive.
 pub async fn create_tenant<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -140,32 +140,30 @@ where
     let host_pattern = checked.host_pattern;
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
 
-    if let StorageMode::Schema = opts.mode {
-        #[cfg(feature = "postgres")]
-        {
-            let pg_pools = (pools as &dyn std::any::Any)
-                .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "schema-mode tenants require a Postgres registry".into(),
-                    )
-                })?;
-            let schema = schema_name.as_deref().unwrap_or(slug);
-            let sql = format!(
-                "CREATE SCHEMA IF NOT EXISTS {}",
-                super::args::quote_ident(schema)
-            );
-            rustango::sql::sqlx::query(&sql)
-                .execute(pg_pools.registry())
-                .await?;
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            return Err(TenancyError::Validation(
-                "schema-mode tenants require the `postgres` feature".into(),
-            ));
-        }
+    if let Some(schema) = schema_name.as_deref() {
+        crate::tenancy::provision::provision_schema(pools, schema).await?;
     }
+
+    // A run record lets `create_tenant_if_missing` tell a failed create
+    // from a suspended tenant. Best effort: bookkeeping must not block a create.
+    let registry = pools.registry_pool();
+    let run_id = match crate::tenancy::provision_store::open_run(
+        &registry,
+        slug,
+        opts.mode.as_str(),
+        opts.backend.as_str(),
+        opts.database_url.as_deref(),
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(run) => run.id.get().copied(),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not record the create run");
+            None
+        }
+    };
 
     let mut org = Org {
         id: Auto::default(),
@@ -178,7 +176,8 @@ where
         host_pattern,
         port: opts.port,
         path_prefix: opts.path_prefix.clone(),
-        active: true,
+        // Activated only once its migrations applied (#2392).
+        active: false,
         created_at: chrono::Utc::now(),
         brand_name: None,
         brand_tagline: None,
@@ -187,28 +186,40 @@ where
         primary_color: None,
         theme_mode: None,
     };
-    crate::tenancy::org_host::insert_org(&pools.registry_pool(), &mut org).await?;
-
-    if !opts.no_migrate {
-        for dir in resolve_migration_dirs(migrations_dir) {
-            // PG path runs schema-mode + database-mode; non-PG runs
-            // database-mode only via migrate_tenants_db.
-            #[cfg(feature = "postgres")]
-            {
-                if let Some(pg_pools) =
-                    (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-                {
-                    let _ = tenant_migrate::migrate_tenants(pg_pools, &dir, registry_url).await?;
-                } else {
-                    let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
-                }
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
-            }
+    use crate::tenancy::provision_store::{self as store, RunState, RunText};
+    if let Err(e) = crate::tenancy::org_host::insert_org(&registry, &mut org).await {
+        if let Some(schema) = org.schema_name.as_deref() {
+            crate::tenancy::provision::release_schema(pools, schema).await;
+        }
+        if let Some(run) = run_id {
+            let text =
+                RunText::user_facing(&e).unwrap_or(RunText::fixed("registering the tenant failed"));
+            let _ = store::finish_run_text(&registry, run, RunState::Failed, Some(&text)).await;
+        }
+        return Err(e);
+    }
+    let org_id = org.id.get().copied().unwrap_or_default();
+    if let Some(run) = run_id {
+        if let Err(e) = store::attach_org(&registry, run, org_id).await {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
         }
     }
+
+    let result =
+        migrate_and_activate(pools, registry_url, migrations_dir, &org, !opts.no_migrate).await;
+    if let Some(run) = run_id {
+        let (state, text) = match &result {
+            Ok(()) => (RunState::Succeeded, None),
+            Err(e) => (
+                RunState::Failed,
+                Some(RunText::user_facing(e).unwrap_or(RunText::fixed("tenant migrations failed"))),
+            ),
+        };
+        if let Err(e) = store::finish_run_text(&registry, run, state, text.as_ref()).await {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close the create run");
+        }
+    }
+    result?;
 
     // Re-fetch so the returned Org has whatever the runner / triggers
     // wrote back; cheap, and lets callers chain `pools.acquire(&org)`
@@ -222,7 +233,8 @@ where
 
 /// Idempotent variant of [`create_tenant`]: returns the existing org
 /// if one already has this slug, otherwise creates + returns the new
-/// one. The seed/bootstrap default.
+/// one. The seed/bootstrap default. An org whose create failed at
+/// migrate is migrated and activated instead.
 ///
 /// # Errors
 /// Driver / SQL failures, or [`create_tenant`]'s validation errors
@@ -237,10 +249,52 @@ pub async fn create_tenant_if_missing<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    if let Some(existing) = find_org(pools, slug).await? {
+    let Some(existing) = find_org(pools, slug).await? else {
+        return create_tenant(pools, registry_url, migrations_dir, slug, opts).await;
+    };
+    // Finish a create whose migrations failed; a suspended tenant stays as is.
+    let registry = pools.registry_pool();
+    let org_id = existing.id.get().copied().unwrap_or_default();
+    if existing.active
+        || !crate::tenancy::provision_store::org_left_by_failed_run(&registry, org_id).await?
+    {
         return Ok(existing);
     }
-    create_tenant(pools, registry_url, migrations_dir, slug, opts).await
+    migrate_and_activate(
+        pools,
+        registry_url,
+        migrations_dir,
+        &existing,
+        !opts.no_migrate,
+    )
+    .await?;
+    let forget = crate::tenancy::provision_store::forget_unsucceeded_runs(org_id)?;
+    crate::sql::update_pool(&registry, &forget).await?;
+    find_org(pools, slug)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("create_tenant: tenant `{slug}` vanished")))
+}
+
+/// Migrate `org` alone, then activate it (#2392).
+async fn migrate_and_activate<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    migrations_dir: &Path,
+    org: &Org,
+    migrate: bool,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    if migrate {
+        for dir in resolve_migration_dirs(migrations_dir) {
+            tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, None).await?;
+        }
+    }
+    let org_id = org.id.get().copied().unwrap_or_default();
+    crate::tenancy::provision::activate(&pools.registry_pool(), org_id).await?;
+    crate::tenancy::invalidate_org_cache();
+    Ok(())
 }
 
 /// Idempotent variant of `create-operator`: creates the operator if

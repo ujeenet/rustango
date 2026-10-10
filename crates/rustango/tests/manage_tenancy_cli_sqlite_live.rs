@@ -375,6 +375,26 @@ async fn password_and_key_verbs_take_flags_anywhere() {
         .is_err());
 }
 
+/// `--expires-days` out of range is a validation error, not a panic (#2395).
+#[tokio::test]
+async fn api_key_expiry_out_of_range_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    b.run(&["create-user", "acme", "bob", "--password", "pw"])
+        .await
+        .expect("user");
+    for days in ["999999999999", "0", "-3"] {
+        let err = b
+            .run(&["create-api-key", "acme", "bob", "--expires-days", days])
+            .await
+            .expect_err(days);
+        assert!(err.contains("positive number of days"), "{days}: {err}");
+    }
+    b.run(&["create-api-key", "acme", "bob", "--expires-days", "30"])
+        .await
+        .expect("a sane expiry");
+}
+
 /// `flush` never wipes the registry; `--tenant` clears that tenant only (#2284).
 #[tokio::test]
 async fn flush_never_touches_the_registry() {

@@ -173,6 +173,98 @@ fn write_tenant_report<W: Write>(
     tenant_failures(report.failure_count(), report.tenants.len())
 }
 
+/// Every tenant's applied project migrations, inactive tenants included.
+/// A tenant that can't be read fails the whole call, so nothing is assumed (#2393).
+pub(super) async fn tenant_ledgers<DB: Database>(
+    pools: &TenantPools<DB>,
+) -> Result<Vec<(String, std::collections::HashSet<String>)>, rustango::migrate::MigrateError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::sql::FetcherPool as _;
+    use rustango::migrate::{MigrateError, LEDGER_TABLE};
+
+    let unreadable = |slug: &str, e: &dyn std::fmt::Display| {
+        MigrateError::Validation(format!(
+            "could not read tenant `{slug}`'s migration ledger: {e}"
+        ))
+    };
+    let orgs: Vec<crate::tenancy::org::Org> = crate::tenancy::org::Org::objects()
+        .fetch(&pools.registry_pool())
+        .await?;
+    let mut out = Vec::with_capacity(orgs.len());
+    for org in orgs {
+        let (pool, own) = ledger_pool(pools, &org)
+            .await
+            .map_err(|e| unreadable(&org.slug, &e))?;
+        let has_ledger = rustango::migrate::try_table_exists_here(&pool, LEDGER_TABLE)
+            .await
+            .map_err(|e| unreadable(&org.slug, &e))?;
+        let applied = if has_ledger {
+            rustango::migrate::applied_set_pool(&pool)
+                .await
+                .map_err(|e| unreadable(&org.slug, &e))?
+        } else {
+            std::collections::HashSet::new()
+        };
+        if own {
+            pool.close().await;
+        }
+        out.push((org.slug, applied));
+    }
+    Ok(out)
+}
+
+/// The tenant's pool, but a SQLite file is opened with `mode=rw`, which
+/// never creates it: a missing file is unreadable, not empty (#2393).
+/// `true` when the pool is this call's own, to close.
+async fn ledger_pool<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &crate::tenancy::org::Org,
+) -> Result<(crate::sql::Pool, bool), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    if org.storage_mode == "database" && org.database_url.is_some() {
+        let url = pools.resolved_database_url(org).await?;
+        if url.starts_with("sqlite:") {
+            let pool = crate::sql::Pool::connect(&sqlite_without_create(&url))
+                .await
+                .map_err(|e| TenancyError::Validation(e.to_string()))?;
+            return Ok((pool, true));
+        }
+    }
+    Ok((pools.scoped_pool_dyn(org).await?, false))
+}
+
+/// `url` with its `mode=` replaced by `rw`: open an existing file, never make one.
+fn sqlite_without_create(url: &str) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut params: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.is_empty() && !p.starts_with("mode="))
+        .collect();
+    params.push("mode=rw");
+    format!("{base}?{}", params.join("&"))
+}
+
+#[cfg(test)]
+mod sqlite_without_create_tests {
+    use super::sqlite_without_create;
+
+    #[test]
+    fn any_mode_becomes_rw() {
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db"),
+            "sqlite://a.db?mode=rw"
+        );
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db?mode=rwc&journal_mode=wal"),
+            "sqlite://a.db?journal_mode=wal&mode=rw"
+        );
+    }
+}
+
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
 pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
     if failed == 0 {

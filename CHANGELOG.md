@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
+
+Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.
+
+### Fixed — a new project keeps `migrations/` in git (#2396)
+
+The scaffolder writes `migrations/.gitkeep`, so a clone made before the first `makemigrations` still builds the image.
+
+### Fixed — `create-api-key --expires-days` no longer panics on a huge value (#2395)
+
+A count of zero, below zero or past chrono's range is now a validation error.
+
+### Fixed — `forget-pending` keeps a migration a tenant applied (#2393)
+
+In a tenancy project it checked only the registry ledger. It now refuses when any tenant's ledger records the migration.
+
+### Fixed — `api::create_tenant` returns a failed migration (#2392)
+
+It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run; `create_tenant_if_missing` finishes one that failed.
+
 ### Fixed — migrate warns when a tenant's passkey table hides `public` passkeys (#2518)
 
 On PG schema-mode tenants the new per-tenant `rustango_webauthn_credentials` shadows `public`'s; `migrate-tenants` now logs a warning naming the table and the rows to move.

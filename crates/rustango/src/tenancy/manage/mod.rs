@@ -384,6 +384,16 @@ where
         )
         .await
         .map_err(TenancyError::Migrate),
+        // Tenant-scoped migrations are recorded in the tenant ledgers (#2393).
+        "forget-pending" => rustango::migrate::manage::forget_pending_cmd_with(
+            &pools.registry_pool(),
+            dir,
+            &args[1..],
+            writer,
+            migrations::tenant_ledgers(pools),
+        )
+        .await
+        .map_err(TenancyError::Migrate),
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
