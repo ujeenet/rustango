@@ -3423,7 +3423,8 @@ fn resolve_span_chain(
                     alias_path = format!("{alias_path}__{seg}");
                     intern_join_alias(&alias_path)?
                 };
-                let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+                // A span only filters or orders, so it projects nothing:
+                // extra columns broke DISTINCT, values() and IN subqueries (#2412).
                 joins.push(Join {
                     target,
                     alias,
@@ -3436,7 +3437,7 @@ fn resolve_span_chain(
                         op: Op::Eq,
                         rhs: Expr::AliasedColumn { alias, column: on },
                     },
-                    project,
+                    project: Vec::new(),
                 });
                 current = target;
                 prev_alias = alias;
@@ -4547,7 +4548,7 @@ impl<T: Model> DateTimesQuerySet<T> {
 /// column list, then delegates to `QuerySet::compile` and stamps the
 /// projection onto the resulting [`SelectQuery`].
 fn compile_values_select<T: Model>(
-    qs: QuerySet<T>,
+    mut qs: QuerySet<T>,
     cols: Vec<&'static str>,
 ) -> Result<SelectQuery, QueryError> {
     if cols.is_empty() {
@@ -4562,6 +4563,8 @@ fn compile_values_select<T: Model>(
             });
         }
     }
+    // A projection reads no related row, so `select_related` adds nothing.
+    qs.select_related.clear();
     let mut q = qs.compile()?;
     project_every_branch(&mut q, &cols);
     Ok(q)

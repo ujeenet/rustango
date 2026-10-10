@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Relation filters project nothing (#2412)
+
+A typed fetch filtered or ordered through `author__x` no longer loads `author` as a side effect, and `values()` drops `select_related`. Add `select_related("author")` where the code reads the loaded relation.
+
 ### `filter(field, None)` (#2413)
 
 `filter("parent", None)` and `filter("parent__exact", None)` now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `__ne` with `None` means `IS NOT NULL`.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a relation filter no longer adds the joined columns to the SELECT (#2412)
+
+Joins from `filter("author__x", ..)` and `order_by("author__x")` project nothing and no longer load `author`; `values()` ignores `select_related`. DISTINCT, value rows and IN subqueries see only the asked columns.
+
 ### Fixed — `filter(field, None)` matches NULL rows (#2413)
 
 An exact `None`, bare or through a relation span, now writes `IS NULL` (`ne` writes `IS NOT NULL`, `exclude` negates it); it wrote `= NULL`, which matches nothing.

@@ -2,7 +2,8 @@
 //! shared select_related hops (#2294), bind-cap batching (#2295), M2M `set`
 //! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298),
 //! reverse-generic prefetch batching (#2318), bare columns under joins
-//! (#2411) and `None` as `IS NULL` (#2413).
+//! (#2411), filter-only joins projecting nothing (#2412) and `None` as
+//! `IS NULL` (#2413).
 //!
 //! The cap tests use 33k rows (x2 binds = 66k) or 70k keys: past SQLite's
 //! 32,766 and PG/MySQL's 65,535.
@@ -516,6 +517,68 @@ async fn bare_columns_qualified_under_joins(pool: &Pool) {
     assert_eq!(shifts.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
 }
 
+/// A join only used to filter adds no columns, even with `values()` (#2412).
+async fn filter_joins_project_nothing(pool: &Pool) {
+    seed_articles(pool).await;
+    // Two editors named Ada, each with a "dup" article: a projected
+    // join column would split the DISTINCT row in two.
+    Editor {
+        id: 2,
+        name: "Ada".into(),
+        profile: ForeignKey::unloaded(1),
+        agency: None,
+    }
+    .insert_pool(pool)
+    .await
+    .expect("editor 2");
+    for id in [3, 4] {
+        Article {
+            id,
+            title: "dup".into(),
+            editor: Some(ForeignKey::unloaded(id - 2)),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("article");
+    }
+    let rows = Article::objects()
+        .filter("editor__name", "Ada")
+        .distinct()
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values over a span filter");
+    let mut titles: Vec<SqlValue> = rows.into_iter().flatten().collect();
+    titles.sort_by_key(|v| format!("{v:?}"));
+    assert_eq!(titles, vec![SqlValue::from("a2"), SqlValue::from("dup")]);
+
+    let dicts = Article::objects()
+        .select_related("editor")
+        .filter("id", 2_i64)
+        .values_dict(&["title"])
+        .fetch(pool)
+        .await
+        .expect("values beside select_related");
+    assert_eq!(dicts.len(), 1);
+    assert_eq!(dicts[0].keys().collect::<Vec<_>>(), vec!["title"]);
+
+    let sub = Article::objects()
+        .filter("editor__name", "Ada")
+        .values_list_flat("editor")
+        .compile()
+        .expect("subquery");
+    let mut eds: Vec<i64> = Editor::objects()
+        .where_in_subquery("id", sub)
+        .fetch(pool)
+        .await
+        .expect("span-filtered IN subquery has one column")
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    eds.sort_unstable();
+    assert_eq!(eds, vec![1, 2]);
+}
+
 /// `None` as a filter value means `IS NULL`, as in Django (#2413).
 async fn none_filter_is_null(pool: &Pool) {
     seed_articles(pool).await;
@@ -855,6 +918,7 @@ tri_dialect_test! {
         null_fk_on_a_deeper_hop,
         isnull_across_a_null_fk,
         bare_columns_qualified_under_joins,
+        filter_joins_project_nothing,
         none_filter_is_null,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
