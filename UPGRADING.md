@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Scoped MCP user keys stay scoped
+
+`create_user_key_pool` records `"scoped": true` in a scoped key's `Agent.data`; such a key with no grants left resolves to no tools instead of the owner's full set (#2537). Keys minted earlier lack the flag: an old scoped key whose grants are all gone still counts as unscoped, so revoke and reissue it.
+
 ### Passkeys in `public` on schema-mode tenants
 
 `migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.

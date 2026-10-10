@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — a scoped MCP user key no longer widens when its last skill is revoked (#2537)
+
+The key records that it is scoped in `Agent.data`; with no grants left it gets no tools instead of the owner's full entitlement.
+
 ### Security — media stores malformed MIME types as octet-stream (#2570)
 
 A type/subtype with non-token characters (a space, a control byte) or `multipart/x-mixed-replace` is stored and signed as `application/octet-stream`, so a browser can't sniff the body into HTML.

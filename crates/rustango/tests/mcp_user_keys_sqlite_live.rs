@@ -458,3 +458,56 @@ async fn user_key_can_be_scoped_to_a_skillset() {
         "scoping to an un-entitled skill must be refused"
     );
 }
+
+/// #2537 — revoking a scoped key's last pinned skill leaves it with
+/// nothing, not the owner's full entitlement.
+#[tokio::test]
+async fn scoped_key_without_grants_gets_nothing() {
+    let pool = world().await;
+    let uid = make_user(&pool, "fay").await;
+    create_skill_pool(&pool, "coach", "Coach", "", "", &["log_set".into()])
+        .await
+        .expect("coach");
+    create_skill_pool(
+        &pool,
+        "billing",
+        "Billing",
+        "",
+        "",
+        &["invoice.create".into()],
+    )
+    .await
+    .expect("billing");
+    for (skill, perm) in [("coach", "mcp.coach"), ("billing", "mcp.billing")] {
+        map_skill_to_permission_pool(&pool, skill, perm)
+            .await
+            .expect("map");
+        set_user_perm_pool(uid, perm, true, &pool)
+            .await
+            .expect("perm");
+    }
+
+    let scoped = create_user_key_pool(&pool, uid, "coach-only", &["coach".into()])
+        .await
+        .expect("scoped");
+    let agent_id = scoped.agent.id.get().copied().unwrap();
+    rustango::tenancy::revoke_skill_pool(&pool, "", &scoped.agent.name, "coach")
+        .await
+        .expect("revoke last skill");
+    let (skills, tools) = resolve_user_agent_grants_pool(&pool, agent_id, uid)
+        .await
+        .expect("resolve");
+    assert!(skills.is_empty(), "scoped key widened to {skills:?}");
+    assert!(tools.is_empty(), "scoped key widened to {tools:?}");
+
+    // An unscoped key still gets the full entitlement.
+    let full = create_user_key_pool(&pool, uid, "full", &[])
+        .await
+        .expect("full");
+    let (mut fs, _) =
+        resolve_user_agent_grants_pool(&pool, full.agent.id.get().copied().unwrap(), uid)
+            .await
+            .expect("resolve full");
+    fs.sort();
+    assert_eq!(fs, vec!["billing", "coach"]);
+}
