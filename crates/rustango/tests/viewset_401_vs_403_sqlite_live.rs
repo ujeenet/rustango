@@ -138,3 +138,71 @@ async fn ungated_viewset_still_serves_anonymous() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+/// Every codename in an action's list is required, not any one (#2522).
+#[tokio::test]
+async fn every_codename_is_required() {
+    use rustango::core::{InsertQuery, SqlValue};
+    use rustango::tenancy::permissions::set_user_perm_pool;
+    let pool = pool().await;
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("framework tables");
+    let user = InsertQuery::new(
+        rustango::tenancy::User::SCHEMA,
+        vec![
+            "id",
+            "username",
+            "password_hash",
+            "is_superuser",
+            "active",
+            "created_at",
+        ],
+        vec![
+            SqlValue::I64(7),
+            SqlValue::from("member".to_owned()),
+            SqlValue::from(String::new()),
+            SqlValue::Bool(false),
+            SqlValue::Bool(true),
+            SqlValue::DateTime(chrono::Utc::now()),
+        ],
+    );
+    rustango::sql::insert_pool(&pool, &user).await.unwrap();
+    set_user_perm_pool(7, "vs_401_app.view_note", true, &pool)
+        .await
+        .unwrap();
+
+    let app = |pool: Pool| {
+        ViewSet::for_model(Note::SCHEMA)
+            .permissions(ViewSetPerms {
+                list: vec![
+                    "vs_401_app.view_note".to_owned(),
+                    "vs_401_app.audit_note".to_owned(),
+                ],
+                ..ViewSetPerms::default()
+            })
+            .router_pool("/notes", pool)
+    };
+    let list = || {
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/notes")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(rustango::tenancy::middleware::AuthenticatedUser {
+                id: 7,
+                username: "member".to_owned(),
+                is_superuser: false,
+            });
+        req
+    };
+    let res = app(pool.clone()).oneshot(list()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "one of two let it in");
+
+    set_user_perm_pool(7, "vs_401_app.audit_note", true, &pool)
+        .await
+        .unwrap();
+    let res = app(pool).oneshot(list()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}

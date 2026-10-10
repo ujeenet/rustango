@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `ViewSetPerms` is all-of (#2522)
+
+A user now needs every codename listed for an action, not any one. A list meant as alternatives needs a role that grants them together.
+
 ### Admin superuser-only fields (#2520, #2521)
 
 `user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.

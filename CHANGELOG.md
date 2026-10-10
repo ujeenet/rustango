@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
+
+It allowed on the first match, so a second codename widened access instead of narrowing it.
+
 ### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
 
 `is_superuser` is superuser-only on add and edit; `password_hash` and `email` on edit.
