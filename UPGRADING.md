@@ -164,7 +164,7 @@ ViewSet PUT/PATCH, template `UpdateView`, `ModelForm` updates and `ModelFormFor:
 
 ### ViewSet field-rule errors (#2529)
 
-A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `400` with `details` keyed by field.
+A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `422 validation_failed` with `details` keyed by field, the same shape as serializer errors. Template views show the shorter messages for `choices` and validators too.
 
 
 ### Passkeys in `public` on schema-mode tenants

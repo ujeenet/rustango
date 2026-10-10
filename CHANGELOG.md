@@ -20,9 +20,9 @@ The field is left out of the INSERT, and the OpenAPI create body no longer marks
 
 The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping helper.
 
-### Fixed — a ViewSet write that breaks a field rule is a `400`, not a `500` (#2529)
+### Fixed — a ViewSet write that breaks a field rule is a `422`, not a `500` (#2529)
 
-`choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `400` with `details: {field: [message]}`. New `QueryError::value_rejection`.
+`choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `422 validation_failed` with `details: {field: [message]}`, as serializer errors do.
 
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

@@ -1645,6 +1645,11 @@ fn json_server_error(context: &str, e: &dyn std::fmt::Display) -> Response {
 /// A `422` from serializer validation, as every `validation_failed` is.
 /// `details` is `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
+    json_form_errors_msg("invalid input", errs)
+}
+
+/// [`json_form_errors`] with its own message.
+fn json_form_errors_msg(message: &str, errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
     for (field, msgs) in errs.fields() {
         map.insert(field.clone(), json!(msgs));
@@ -1652,7 +1657,7 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     if !errs.non_field().is_empty() {
         map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
     }
-    crate::api_errors::ApiError::validation("invalid input")
+    crate::api_errors::ApiError::validation(message)
         .with_details(Value::Object(map))
         .into_response()
 }
@@ -2004,7 +2009,8 @@ impl From<FormError> for Refusal {
 }
 
 impl Refusal {
-    /// The `400`, under the field names the API publishes; `entry` prefixes a bulk index.
+    /// A parse error is a `400`, a field-rule refusal a `422` like a
+    /// serializer's, under the names the API publishes; `entry` is a bulk index.
     fn into_response(self, state: &ViewSetState, entry: Option<usize>) -> Response {
         let prefix = entry
             .map(|i| format!("bulk entry {i}: "))
@@ -2015,10 +2021,12 @@ impl Refusal {
                 &format!("{prefix}{}", public_form_error(state, e)),
             ),
             Self::Invalid { field, message } => {
-                let key = serializer_public_field_name(state, field).unwrap_or(field);
-                crate::api_errors::ApiError::bad_request(format!("{prefix}invalid input"))
-                    .with_details(json!({ key: [message] }))
-                    .into_response()
+                let mut errs = crate::forms::FormErrors::default();
+                errs.add(
+                    serializer_public_field_name(state, field).unwrap_or(field),
+                    message,
+                );
+                json_form_errors_msg(&format!("{prefix}invalid input"), &errs)
             }
         }
     }
@@ -3241,14 +3249,10 @@ async fn insert_and_fetch_one(
 }
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
-/// rejection or field-rule refusal a `400`, driver text withheld; anything else is a logged `500`.
+/// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
+/// Field rules are checked before the write, by `WriteSet::check`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
-    use crate::sql::ExecError;
-    let client_caused = match e {
-        ExecError::Driver(sqlx::Error::Database(_)) => true,
-        ExecError::Query(q) => q.value_rejection().is_some(),
-        _ => false,
-    };
+    let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
     let body = crate::error::client_error_body(context, e, client_caused);
     let status = if e.is_unique_violation() {
         StatusCode::CONFLICT

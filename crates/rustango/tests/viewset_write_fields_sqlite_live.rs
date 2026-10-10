@@ -359,9 +359,9 @@ async fn new_item(app: &axum::Router) -> i64 {
     v["id"].as_i64().expect("id")
 }
 
-/// #2529: a value the model's rules reject is the client's 400, per field.
+/// #2529: a value the model's rules reject is a 422 per field, as a serializer's is.
 #[tokio::test]
-async fn model_validation_failure_is_a_400_field_error() {
+async fn model_validation_failure_is_a_422_field_error() {
     let sq = item_pool().await;
     let app = items(&sq);
     for (body, field) in [
@@ -376,13 +376,22 @@ async fn model_validation_failure_is_a_400_field_error() {
         ),
     ] {
         let (status, v) = send(&app, req(Method::POST, "/items", body, None)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {v}");
         assert!(v["details"][field].is_array(), "{body}: {v}");
     }
     let bulk = r#"[{"title":"t","settings":{}},{"title":"t","status":"bogus","settings":{}}]"#;
     let (status, v) = send(&app, req(Method::POST, "/items", bulk, None)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert!(v["details"]["status"].is_array(), "{v}");
+    assert!(
+        v["message"].as_str().unwrap_or("").contains("bulk entry 1"),
+        "{v}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vs_wf_item")
+        .fetch_one(&sq)
+        .await
+        .expect("count");
+    assert_eq!(n, 0, "no entry of a refused bulk is written");
 
     let id = new_item(&app).await;
     let uri = format!("/items/{id}");
@@ -391,7 +400,7 @@ async fn model_validation_failure_is_a_400_field_error() {
         req(Method::PATCH, &uri, r#"{"status":"bogus"}"#, None),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert!(v["details"]["status"].is_array(), "{v}");
 }
 
