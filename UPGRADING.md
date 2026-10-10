@@ -156,7 +156,7 @@ A queryset with `union`, `intersection` or `difference` now fails `update()` and
 
 ### `post.author` after a relation filter (#2412)
 
-A typed fetch filtered or ordered through `author__x` no longer loads `author`; reading it is one more query. Add `select_related("author")` where the code reads it. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. A hand-built `SelectQuery` passed to `select_rows_pool_with_related` must list its related joins in the new `select_related` field.
+A typed fetch filtered or ordered through `author__x` no longer loads `author`; reading it is one more query. Add `select_related("author")` where the code reads it. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. A hand-built `SelectQuery` with joins must set the new `select_related` field to their aliases, or the related rows stay unloaded.
 
 ### `filter(field, None)` (#2413)
 

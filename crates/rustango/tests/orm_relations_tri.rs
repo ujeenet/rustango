@@ -668,6 +668,29 @@ async fn distinct_order_by_relation(pool: &Pool) {
             .is_some_and(|fk| fk.value().is_none()),
         "an ordering span does not load the relation"
     );
+    // The helper column the ORDER BY needs stays out of value rows.
+    let distinct = || {
+        Article::objects()
+            .distinct()
+            .order_by(&[("editor__name", false), ("title", false)])
+    };
+    let list = distinct()
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values_list ordered by a relation");
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert!(list.iter().all(|r| r.len() == 1), "{list:?}");
+    let dicts = distinct()
+        .values_dict(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values_dict ordered by a relation");
+    assert_eq!(dicts.len(), 2);
+    assert!(
+        dicts.iter().all(|r| r.keys().eq(["title"].iter())),
+        "{dicts:?}"
+    );
 }
 
 /// A relation filter on the tx and executor paths: the filter join is not

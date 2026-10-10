@@ -10,7 +10,7 @@ They dropped the set operation and wrote every row the first queryset matched. N
 
 ### Changed — `post.author` stays unloaded after a relation filter (#2412)
 
-A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds only its ordered column. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
+A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds one helper column, which value rows drop. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
 
 ### Fixed — `filter(field, None)` matches NULL rows (#2413)
 

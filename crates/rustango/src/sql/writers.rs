@@ -189,7 +189,7 @@ pub(super) fn null_cast_for(
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
     let result = if query.compound.is_empty() {
-        write_select_inner(b, query)
+        write_select_inner(b, query, true)
     } else {
         write_compound_select(b, query)
     };
@@ -308,12 +308,12 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     let head_scoped = !head.order_by.is_empty() || head.limit.is_some() || head.offset.is_some();
     if head_scoped {
         b.sql.push_str("SELECT * FROM (");
-        write_select_inner(b, &head)?;
+        write_select_inner(b, &head, false)?;
         b.sql.push(')');
         b.sql.push_str(" AS ");
         b.write_ident("__rustango_b0");
     } else {
-        write_select_inner(b, &head)?;
+        write_select_inner(b, &head, false)?;
     }
 
     for (i, branch) in query.compound.iter().enumerate() {
@@ -331,7 +331,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         let r = if branch.query.compound.is_empty() {
             if scoped {
                 b.sql.push_str("SELECT * FROM (");
-                let r = write_select_inner(b, &branch.query);
+                let r = write_select_inner(b, &branch.query, false);
                 b.sql.push(')');
                 if r.is_ok() {
                     b.sql.push_str(" AS ");
@@ -339,7 +339,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
                 }
                 r
             } else {
-                write_select_inner(b, &branch.query)
+                write_select_inner(b, &branch.query, false)
             }
         } else {
             // Nested compound: recurse, wrapped the same way.
@@ -576,8 +576,16 @@ fn write_subquery_joins(
     Ok(())
 }
 
-fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    with_join_types(b, &query.joins, None, |b| write_select_body(b, query))
+/// `order_helpers`: a lone SELECT, not a set-operation branch, so it may
+/// add DISTINCT's ORDER BY helper columns without breaking a column count.
+fn write_select_inner(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
+    with_join_types(b, &query.joins, None, |b| {
+        write_select_body(b, query, order_helpers)
+    })
 }
 
 /// Run `f` with `joins` (and a derived `source`'s joins) typed at the
@@ -599,16 +607,23 @@ fn with_join_types(
     r
 }
 
-fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+fn write_select_body(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
     let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
     let q = qualify.then_some(Qualifier::Base(query.model.table));
-    b.with_qualifier(q, |b| write_select_body_qualified(b, query, qualify))
+    b.with_qualifier(q, |b| {
+        write_select_body_qualified(b, query, qualify, order_helpers)
+    })
 }
 
 fn write_select_body_qualified(
     b: &mut Sql<'_>,
     query: &SelectQuery,
     qualify: bool,
+    order_helpers: bool,
 ) -> Result<(), SqlError> {
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
@@ -674,6 +689,9 @@ fn write_select_body_qualified(
             b.write_ident(&crate::core::joins::joined_label(join.alias, col));
         }
     }
+    if order_helpers && query.distinct.is_some() {
+        write_distinct_order_helpers(b, query)?;
+    }
     // Written before FROM, so the WHERE binds appear twice, in text order.
     if let Some(count) = b.total.take() {
         b.sql.push_str(", (");
@@ -702,6 +720,33 @@ fn write_select_body_qualified(
         write_lock_clause(b, lock);
     }
 
+    Ok(())
+}
+
+/// PG and MySQL want a DISTINCT query's ORDER BY terms in the select
+/// list. Each relation term no join projects is added last, so value
+/// rows can drop it (see `values_width`).
+fn write_distinct_order_helpers(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    use crate::core::{Expr, OrderItem};
+    for (i, item) in query.order_by.iter().enumerate() {
+        let OrderItem::Expr { expr, .. } = item else {
+            continue;
+        };
+        let Expr::AliasedColumn { alias, column } = expr else {
+            continue;
+        };
+        let projected = query
+            .joins
+            .iter()
+            .any(|j| j.alias == *alias && j.project.contains(column));
+        if projected {
+            continue;
+        }
+        b.sql.push_str(", ");
+        write_expr(b, expr, None)?;
+        b.sql.push_str(" AS ");
+        b.write_ident(&format!("__rustango_order{i}"));
+    }
     Ok(())
 }
 

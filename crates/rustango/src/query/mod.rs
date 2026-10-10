@@ -2022,11 +2022,6 @@ impl<T: Model> QuerySet<T> {
                 joins.push(j);
             }
         }
-        // PG and MySQL want every DISTINCT query's ORDER BY term in the
-        // select list, so a relation order term projects its column.
-        if self.distinct.is_some() {
-            project_order_columns(&mut joins, &order_by);
-        }
         // `.distinct_on(&[...])` needs its columns at the head of the
         // ORDER BY, so catch a mismatch at compile time.
         // An empty list is rejected: it would just mean `.distinct()`.
@@ -4564,25 +4559,6 @@ fn compile_values_select<T: Model>(
     let mut q = qs.compile()?;
     project_every_branch(&mut q, &cols);
     Ok(q)
-}
-
-/// Add each `alias.col` ORDER BY term to its join's projection.
-fn project_order_columns(joins: &mut [crate::core::Join], order_by: &[crate::core::OrderItem]) {
-    use crate::core::{Expr, OrderItem};
-    for item in order_by {
-        let OrderItem::Expr {
-            expr: Expr::AliasedColumn { alias, column },
-            ..
-        } = item
-        else {
-            continue;
-        };
-        if let Some(j) = joins.iter_mut().find(|j| j.alias == *alias) {
-            if !j.project.contains(column) {
-                j.project.push(*column);
-            }
-        }
-    }
 }
 
 /// Set `cols` on `q` and on each set-op branch that projects nothing,
