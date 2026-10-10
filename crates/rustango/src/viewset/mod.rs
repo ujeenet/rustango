@@ -1950,6 +1950,10 @@ impl WriteSet {
             }
         }
         self.check(&out)?;
+        // An empty body stays "no fields to update", not a bare restamp.
+        if !out.is_empty() {
+            crate::forms::stamp_auto_now(self.schema, &mut out);
+        }
         Ok(out
             .into_iter()
             .map(|(column, v)| Assignment {

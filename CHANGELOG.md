@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet PUT/PATCH and `ModelForm` updates restamp `auto_now` (#2527)
+
+New `forms::stamp_auto_now`, shared with the admin; `ModelFormFor::into_update_query` uses it too.
+
 ### Fixed — a ViewSet write that breaks a field rule is a `400`, not a `500` (#2529)
 
 `choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `400` with `details: {field: [message]}`. New `QueryError::value_rejection`.

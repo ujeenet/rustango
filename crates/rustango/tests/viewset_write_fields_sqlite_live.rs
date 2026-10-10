@@ -394,3 +394,37 @@ async fn model_validation_failure_is_a_400_field_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
     assert!(v["details"]["status"].is_array(), "{v}");
 }
+
+async fn updated_at(sq: &sqlx::SqlitePool, id: i64) -> String {
+    sqlx::query_scalar("SELECT updated_at FROM vs_wf_item WHERE id = ?")
+        .bind(id)
+        .fetch_one(sq)
+        .await
+        .expect("read")
+}
+
+/// #2527: PUT and PATCH restamp an `auto_now` column.
+#[tokio::test]
+async fn update_restamps_auto_now() {
+    let sq = item_pool().await;
+    let app = items(&sq);
+    let id = new_item(&app).await;
+    let uri = format!("/items/{id}");
+    let full = r#"{"title":"put","status":"live","note":"x","is_public":true,"settings":{}}"#;
+    for (method, body) in [
+        (Method::PATCH, r#"{"title":"patched"}"#),
+        (Method::PUT, full),
+    ] {
+        sqlx::query("UPDATE vs_wf_item SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?")
+            .bind(id)
+            .execute(&sq)
+            .await
+            .expect("age the row");
+        let (status, v) = send(&app, req(method.clone(), &uri, body, None)).await;
+        assert_eq!(status, StatusCode::OK, "{method}: {v}");
+        assert!(
+            !updated_at(&sq, id).await.starts_with("2000-"),
+            "{method} left updated_at stale"
+        );
+    }
+}

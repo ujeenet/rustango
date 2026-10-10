@@ -497,10 +497,9 @@ pub fn collect_values(
 /// the derive macro's own INSERT path had already been fixed.
 ///
 /// Separate from [`collect_values`] rather than a flag on it because
-/// the two differ on UPDATE: `auto_now` should be restamped there and
-/// `auto_now_add` must not, and [`crate::core::FieldSchema`] cannot
-/// tell them apart. UPDATE keeps the plain version, where the derive
-/// macro's `update_assignments` already handles both correctly.
+/// the two differ on UPDATE: `auto_now` is restamped there and
+/// `auto_now_add` must not be. UPDATE keeps the plain version plus
+/// [`stamp_auto_now`].
 ///
 /// # Errors
 /// As [`collect_values`].
@@ -539,9 +538,8 @@ fn insert_stamp(field: &FieldSchema, now: chrono::DateTime<chrono::Utc>) -> Opti
 /// column list — the `(columns, values)` form, for the writers that
 /// build those directly rather than through [`collect_insert_values`].
 ///
-/// **INSERT only.** `auto_now_add` is immutable after insert, and
-/// nothing here can tell it from `auto_now`; an UPDATE must leave both
-/// alone and let the derive macro's `update_assignments` handle them.
+/// **INSERT only.** `auto_now_add` is immutable after insert; an
+/// UPDATE uses [`stamp_auto_now`] instead.
 ///
 /// Idempotent — a column already in the list is left as the caller set
 /// it, so an explicit value always wins.
@@ -561,6 +559,17 @@ pub fn stamp_auto_timestamps(
         if let Some(v) = insert_stamp(field, now) {
             columns.push(field.column);
             values.push(v);
+        }
+    }
+}
+
+/// Restamp every `auto_now` column an UPDATE's `set` list does not
+/// already carry; `auto_now_add` is left alone (#2527).
+pub fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'static str, SqlValue)>) {
+    let now = chrono::Utc::now();
+    for f in model.scalar_fields() {
+        if f.auto_now && !set.iter().any(|(c, _)| *c == f.column) {
+            set.push((f.column, SqlValue::DateTime(now)));
         }
     }
 }
@@ -882,12 +891,13 @@ impl PreparedSave {
     /// [`ModelFormError::Database`] for driver-level failures.
     pub async fn commit_pool(self, pool: &crate::sql::Pool) -> Result<SqlValue, ModelFormError> {
         if let Some(pk_val) = self.pk_value {
-            let assignments: Vec<Assignment> = self
-                .columns
-                .iter()
-                .zip(self.values)
-                .map(|(col, val)| Assignment {
-                    column: col,
+            let mut set: Vec<(&'static str, SqlValue)> =
+                self.columns.into_iter().zip(self.values).collect();
+            stamp_auto_now(self.schema, &mut set);
+            let assignments: Vec<Assignment> = set
+                .into_iter()
+                .map(|(column, val)| Assignment {
+                    column,
                     value: val.into(),
                 })
                 .collect();
@@ -908,8 +918,8 @@ impl PreparedSave {
         // stamped here (#1464). `should_include` drops every `auto`
         // field, which is right for the payload and wrong for the
         // statement: nothing else supplies them and the column default
-        // cannot be trusted. The UPDATE branch above deliberately does
-        // not do this — `auto_now_add` is immutable after insert.
+        // cannot be trusted. The UPDATE branch above restamps only
+        // `auto_now` — `auto_now_add` is immutable after insert.
         let mut columns = self.columns;
         let mut values = self.values;
         stamp_auto_timestamps(self.schema, &mut columns, &mut values);
@@ -1664,10 +1674,11 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         pk_value: crate::core::SqlValue,
     ) -> Option<crate::core::UpdateQuery> {
         let pk = T::SCHEMA.primary_key()?;
-        let assignments: Vec<crate::core::Assignment> = self
-            .columns
+        let mut set: Vec<(&'static str, SqlValue)> =
+            self.columns.into_iter().zip(self.values).collect();
+        stamp_auto_now(T::SCHEMA, &mut set);
+        let assignments: Vec<crate::core::Assignment> = set
             .into_iter()
-            .zip(self.values)
             .map(|(column, value)| crate::core::Assignment {
                 column,
                 value: value.into(),

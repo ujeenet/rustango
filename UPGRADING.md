@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `auto_now` on REST and form updates (#2527)
+
+ViewSet PUT/PATCH, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.
+
 ### ViewSet field-rule errors (#2529)
 
 A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `400` with `details` keyed by field.
