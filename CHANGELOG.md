@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.6] — 2026-10-10
+
 ### Fixed — an INSERT naming no column works on MySQL and in a SQLite bulk insert (#2416)
 
 MySQL writes `() VALUES ()`; a SQLite bulk insert fills an integer PK with `NULL`. New `Dialect::default_values_clause` and `Dialect::default_pk_cell`.

@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.6
+
 ### Strict Bool and null decoding (#2530)
 
 `parse_form_value` now rejects a Bool other than `true/false/1/0/on/off/yes/no` (any case) or empty; it used to read it as `true`. A ViewSet without a serializer answers `400` to JSON `null` on a NOT NULL field, and stores a JSON string sent to a Json field as a JSON string.
