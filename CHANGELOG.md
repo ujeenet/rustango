@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SSO sign-ins fire `user_logged_in` and `user_login_failed` (#2559)
+
+The bare-admin, tenant console and member SSO callbacks send both, with sources `admin_sso`, `tenant_admin_sso` and `member_sso`. The admin SSO TOTP failure now uses `admin_sso` too, not `admin`.
+
 ### Security — member SSO auto-provisioning is opt-in (#2560)
 
 `MemberAuthConfig::auto_provision` defaults to `false`, so a provider added for console SSO no longer creates a user for any verified email.

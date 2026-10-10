@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SSO sign-ins send auth signals
+
+SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`.
+
 ### Member SSO no longer provisions users by default
 
 `MemberAuthConfig::default().auto_provision` is now `false`: an unknown verified email is refused (#2560). Set `auto_provision: true` to keep creating members on first sign-in.

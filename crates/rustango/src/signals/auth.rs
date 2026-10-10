@@ -75,7 +75,8 @@ pub struct AuthRequestMeta {
 #[derive(Debug, Clone)]
 pub struct UserLoggedInContext {
     /// Which login surface this was: `"admin"`, `"tenant_admin"`,
-    /// `"operator"`, `"jwt"` and so on. It lets one receiver cover
+    /// `"operator"`, `"jwt"`, the SSO ones `"admin_sso"`,
+    /// `"tenant_admin_sso"`, `"member_sso"`, and so on. It lets one receiver cover
     /// several paths and still tell them apart.
     pub source: &'static str,
     /// Id of the user who just signed in.

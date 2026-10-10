@@ -715,15 +715,34 @@ async fn sso_callback_in(
     };
 
     let key = resolved.key(LinkSource::Tenant);
-    let member_id = match find_or_provision_member(
+    let meta = || {
+        crate::signals::auth::meta_from_parts(
+            &parts.extensions,
+            &parts.headers,
+            Some(parts.uri.path()),
+        )
+    };
+    let outcome = find_or_provision_member(
         pool,
         &key,
         resolved.allow_email_link,
         &normalized,
         config.auto_provision,
     )
-    .await
-    {
+    .await;
+    if let Ok(signed) = &outcome {
+        use crate::signals::auth::AuthFailureReason as R;
+        let reason = match signed {
+            MemberSignIn::Member(_) => None,
+            MemberSignIn::Inactive => Some(R::Inactive),
+            _ => Some(R::InvalidCredentials),
+        };
+        if let Some(reason) = reason {
+            crate::sso::link::signal_refused(MEMBER_SIGNAL_SOURCE, &normalized, reason, meta())
+                .await;
+        }
+    }
+    let member_id = match outcome {
         Ok(MemberSignIn::Member(id)) => id,
         Ok(MemberSignIn::NotLinked) => {
             return clear_flow(sso_error(
@@ -764,8 +783,19 @@ async fn sso_callback_in(
     };
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
+    crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
+        source: MEMBER_SIGNAL_SOURCE,
+        user_id: member_id,
+        username: member.username.clone(),
+        is_superuser: member.is_superuser,
+        request: meta(),
+    })
+    .await;
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
+
+/// The auth-signal `source` for a member SSO sign-in.
+const MEMBER_SIGNAL_SOURCE: &str = "member_sso";
 
 /// The mounted context's session secret, whichever backend it is for.
 fn session_secret(parts: &Parts) -> Option<SessionSecret> {

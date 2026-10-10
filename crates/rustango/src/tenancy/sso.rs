@@ -25,9 +25,15 @@ use crate::admin::sso::{
 };
 use crate::admin::sso_provider::SsoProvider;
 use crate::query::QuerySet;
+use crate::signals::auth::{
+    meta_from_parts, send_user_logged_in, AuthFailureReason, UserLoggedInContext,
+};
 use crate::sql::Pool;
-use crate::sso::link::{LinkSource, ProviderKey};
+use crate::sso::link::{signal_refused, LinkSource, ProviderKey};
 use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
+
+/// The auth-signal `source` for a tenant console SSO sign-in.
+const SIGNAL_SOURCE: &str = "tenant_admin_sso";
 
 /// IdP callback params (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize, Default)]
@@ -317,6 +323,7 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "handshake");
         }
     };
+    let meta = || meta_from_parts(&parts.extensions, &parts.headers, Some(parts.uri.path()));
     let uid = match crate::sso::link::sign_in(
         tenant_pool,
         &key,
@@ -337,6 +344,9 @@ pub(super) async fn tenant_sso_callback(
                 subject = %normalized.provider_user_id,
                 "sso refused: {e}"
             );
+            if let Some(reason) = e.failure_reason() {
+                signal_refused(SIGNAL_SOURCE, &normalized, reason, meta()).await;
+            }
             return login_error(routes, "nouser");
         }
     };
@@ -344,6 +354,13 @@ pub(super) async fn tenant_sso_callback(
         return login_error(routes, "nouser");
     };
     if !user.active {
+        signal_refused(
+            SIGNAL_SOURCE,
+            &normalized,
+            AuthFailureReason::Inactive,
+            meta(),
+        )
+        .await;
         return login_error(routes, "inactive");
     }
 
@@ -370,6 +387,14 @@ pub(super) async fn tenant_sso_callback(
     let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
     set_cookie(&mut resp, &session_cookie);
     set_cookie(&mut resp, &clear_flow);
+    send_user_logged_in(UserLoggedInContext {
+        source: SIGNAL_SOURCE,
+        user_id: uid,
+        username: user.username.clone(),
+        is_superuser: user.is_superuser,
+        request: meta(),
+    })
+    .await;
     resp
 }
 
