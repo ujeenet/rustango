@@ -1166,6 +1166,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(
@@ -1199,6 +1200,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("LOWER(`name`) NOT LIKE LOWER(?)"));
@@ -1228,6 +1230,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("NOT (`email` <=> ?)"));
@@ -1257,6 +1260,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // No outer NOT; bare null-safe equality.
@@ -1288,6 +1292,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("JSON_CONTAINS(`meta`, ?)"));
@@ -1318,6 +1323,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // Argument order is swapped vs JSON_CONTAINS — value first.
@@ -1348,6 +1354,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1382,6 +1389,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1417,6 +1425,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1509,6 +1518,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(

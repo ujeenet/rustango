@@ -152,15 +152,15 @@ untouched.
 
 ### Set operations on `update()` / `delete()` (#2452)
 
-A queryset with `union`, `intersection` or `difference` now fails `update()` and `delete()` with `QueryError::SetOperationDml`, bounded or not. Match that instead of `BoundedDmlReason::SetOperation`, which is removed. Filter the rows with `where_in_subquery` / `where_not_in_subquery` instead.
+A queryset with `union`, `intersection` or `difference` now fails `update()` and `delete()` with `QueryError::SetOperationDml`, bounded or not. Match that instead of `BoundedDmlReason::SetOperation`, which is deprecated and never returned. Filter the rows with `where_in_subquery` / `where_not_in_subquery` instead.
 
-### Relation filters project nothing (#2412)
+### `post.author` after a relation filter (#2412)
 
-A typed fetch filtered or ordered through `author__x` no longer loads `author` as a side effect, and `values()` drops `select_related`. Add `select_related("author")` where the code reads the loaded relation.
+A typed fetch filtered or ordered through `author__x` no longer loads `author`; reading it is one more query. Add `select_related("author")` where the code reads it. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. A hand-built `SelectQuery` passed to `select_rows_pool_with_related` must list its related joins in the new `select_related` field.
 
 ### `filter(field, None)` (#2413)
 
-`filter("parent", None)` and `filter("parent__exact", None)` now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `__ne` with `None` means `IS NOT NULL`.
+`filter("parent", None)`, `Q::eq("parent", None)` and any `=` against NULL now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `<>` against NULL means `IS NOT NULL`. Code that relied on a `None` id matching nothing must check for `None` first.
 
 ### Workers from `make:worker` (#2331)
 

@@ -656,6 +656,10 @@ pub struct SelectQuery {
     /// `OFFSET` on the merged result, chained after the first set-op
     /// call. See [`Self::compound_order_by`].
     pub compound_offset: Option<i64>,
+    /// Aliases of the [`Self::joins`] a typed fetch decodes into the
+    /// model's `ForeignKey`s: the `select_related` ones. Other joins
+    /// only filter, order or project into value rows (#2412).
+    pub select_related: Vec<&'static str>,
 }
 
 impl SelectQuery {
@@ -696,6 +700,7 @@ impl SelectQuery {
             compound_order_by: Vec::new(),
             compound_limit: None,
             compound_offset: None,
+            select_related: Vec::new(),
         }
     }
 
@@ -875,6 +880,7 @@ impl PartialEq for SelectQuery {
             && self.compound_order_by == other.compound_order_by
             && self.compound_limit == other.compound_limit
             && self.compound_offset == other.compound_offset
+            && self.select_related == other.select_related
     }
 }
 

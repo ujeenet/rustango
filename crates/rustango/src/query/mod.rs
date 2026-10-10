@@ -1218,7 +1218,7 @@ impl<T: Model> QuerySet<T> {
     ///
     /// | Suffix | SQL | Value treatment |
     /// |---|---|---|
-    /// | (none) / `__exact` | `<col> = ?` | as-is |
+    /// | (none) / `__exact` | `<col> = ?` | as-is; `None` gives `<col> IS NULL` |
     /// | `__iexact` | `<col> ILIKE ?` | as-is (no wildcards) |
     /// | `__contains` | `<col> LIKE ?` | wrap `%value%` |
     /// | `__icontains` | `<col> ILIKE ?` | wrap `%value%` |
@@ -1228,7 +1228,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__iendswith` | `<col> ILIKE ?` | wrap `%value` |
     /// | `__like` / `__ilike` / `__not_like` / `__not_ilike` | `<col> [NOT] (I)LIKE ?` | value bound verbatim — caller controls `%` / `_` placement. Eloquent `whereLike` / `whereNotLike` parity. |
     /// | `__gt` / `__gte` / `__lt` / `__lte` | direct map | as-is |
-    /// | `__ne` | `<col> <> ?` | as-is |
+    /// | `__ne` | `<col> <> ?` | as-is; `None` gives `<col> IS NOT NULL` |
     /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
     /// | `__not_in` | `<col> NOT IN (...)` | value must be `SqlValue::List`. Eloquent `whereNotIn` parity. |
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
@@ -1972,6 +1972,7 @@ impl<T: Model> QuerySet<T> {
         let (pending, span_joins) = lower_relation_spans(model, self.pending)?;
         let where_clause = resolve_pending(model, pending)?;
         let mut joins = lower_select_related(model, &self.select_related)?;
+        let select_related: Vec<&'static str> = joins.iter().map(|j| j.alias).collect();
         // Ad-hoc joins come after the FK-driven select_related ones, so
         // column order stays stable and user joins sit next to the user
         // WHERE.
@@ -2020,6 +2021,11 @@ impl<T: Model> QuerySet<T> {
             if !joins.iter().any(|e| e.alias == j.alias) {
                 joins.push(j);
             }
+        }
+        // PG and MySQL want every DISTINCT query's ORDER BY term in the
+        // select list, so a relation order term projects its column.
+        if self.distinct.is_some() {
+            project_order_columns(&mut joins, &order_by);
         }
         // `.distinct_on(&[...])` needs its columns at the head of the
         // ORDER BY, so catch a mismatch at compile time.
@@ -2092,6 +2098,7 @@ impl<T: Model> QuerySet<T> {
             compound_order_by,
             compound_limit,
             compound_offset: comb_offset,
+            select_related,
         })
     }
 
@@ -3242,22 +3249,11 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         }
     }
 
-    let (op, value) = null_as_is_null(raw.op, raw.value);
     Ok(Filter {
         column: field.column,
-        op,
-        value,
+        op: raw.op,
+        value: raw.value,
     })
-}
-
-/// `= NULL` matches no row, so an exact `None` means `IS NULL` and
-/// `ne` means `IS NOT NULL`, as in Django (#2413).
-fn null_as_is_null(op: Op, value: SqlValue) -> (Op, SqlValue) {
-    match (op, &value) {
-        (Op::Eq, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(true)),
-        (Op::Ne, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(false)),
-        _ => (op, value),
-    }
 }
 
 /// Resolve a relation-spanning lookup key into its FK-chain LEFT JOINs
@@ -3294,15 +3290,11 @@ fn resolve_span(
     // Re-parse any trailing suffix through the normal grammar; bare
     // span (no suffix) is an exact match.
     let (op, value, transform) = if suffix_segs.is_empty() {
-        let (op, value) = null_as_is_null(Op::Eq, value);
-        (op, value, None)
+        (Op::Eq, value, None)
     } else {
         let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
         match parse_lookup(&synth, value) {
-            Ok(ParsedLookup::Raw { op, value, .. }) => {
-                let (op, value) = null_as_is_null(op, value);
-                (op, value, None)
-            }
+            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
             Ok(ParsedLookup::DateTransform {
                 transform,
                 op,
@@ -4572,6 +4564,25 @@ fn compile_values_select<T: Model>(
     let mut q = qs.compile()?;
     project_every_branch(&mut q, &cols);
     Ok(q)
+}
+
+/// Add each `alias.col` ORDER BY term to its join's projection.
+fn project_order_columns(joins: &mut [crate::core::Join], order_by: &[crate::core::OrderItem]) {
+    use crate::core::{Expr, OrderItem};
+    for item in order_by {
+        let OrderItem::Expr {
+            expr: Expr::AliasedColumn { alias, column },
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if let Some(j) = joins.iter_mut().find(|j| j.alias == *alias) {
+            if !j.project.contains(column) {
+                j.project.push(*column);
+            }
+        }
+    }
 }
 
 /// Set `cols` on `q` and on each set-op branch that projects nothing,

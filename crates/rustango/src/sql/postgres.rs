@@ -387,7 +387,7 @@ pub(crate) fn compile_where_order_tail(
     order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
-    qualify_with: Option<&str>,
+    qualify_with: Option<&'static str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<CompiledStatement, SqlError> {
     writers::compile_where_order_tail(

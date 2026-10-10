@@ -1719,8 +1719,8 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Suffix | SQL operator | Value shape | Notes |
 |---|---|---|---|
-| *(none)* / `__exact` | `=` | scalar | bare key is exact-eq |
-| `__ne` | `<>` | scalar | |
+| *(none)* / `__exact` | `=` | scalar | bare key is exact-eq; `None` → `IS NULL` |
+| `__ne` | `<>` | scalar | `None` → `IS NOT NULL` |
 | `__gt` / `__gte` / `__lt` / `__lte` | `>` `>=` `<` `<=` | scalar | |
 | `__contains` | `LIKE` | string | wraps value as `%v%` |
 | `__icontains` | `ILIKE` | string | wraps value as `%v%`; MySQL emulated via `LOWER()` |

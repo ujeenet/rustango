@@ -1589,7 +1589,12 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                     }
                 }
             }
-            if !all_present {
+            // A NULL never collides in a unique index, and `= None` now
+            // matches NULLs (#2413).
+            let has_null = bound
+                .iter()
+                .any(|(_, v)| matches!(v, crate::core::SqlValue::Null));
+            if !all_present || has_null {
                 continue;
             }
             let mut predicates: Vec<crate::core::WhereExpr> = bound

@@ -273,7 +273,7 @@ pub async fn check_unique_together_pool(
     values: &std::collections::HashMap<&'static str, crate::core::SqlValue>,
     exclude_pk: Option<&crate::core::SqlValue>,
 ) -> Result<(), crate::forms::FormErrors> {
-    use crate::core::{Filter, Op};
+    use crate::core::{Filter, Op, SqlValue};
 
     let mut errors = crate::forms::FormErrors::default();
 
@@ -292,7 +292,9 @@ pub async fn check_unique_together_pool(
         let mut predicates: Vec<Filter> = Vec::with_capacity(index.columns.len());
         let mut all_bound = true;
         for col in index.columns {
-            let Some(val) = values.get(*col) else {
+            // A NULL never collides in a unique index, and `= None` now
+            // matches NULLs (#2413), so it skips the check like an unbound one.
+            let Some(val) = values.get(*col).filter(|v| !matches!(v, SqlValue::Null)) else {
                 all_bound = false;
                 break;
             };

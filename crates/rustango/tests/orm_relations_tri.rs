@@ -611,6 +611,117 @@ async fn none_filter_is_null(pool: &Pool) {
         ids(Article::objects().filter("editor__name", None::<String>)).await,
         vec![1]
     );
+    assert_eq!(
+        ids(Article::objects().filter("editor__name__ne", None::<String>)).await,
+        vec![2]
+    );
+    // Built predicates take the same rule as `filter`.
+    use rustango::core::{Expr, WhereExpr, F};
+    use rustango::query::Q;
+    assert_eq!(
+        ids(Article::objects().where_raw(Q::eq("editor", none).into())).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().where_raw(Q::ne("editor", none).into())).await,
+        vec![2]
+    );
+    let lhs = || -> Expr { F("editor").into() };
+    let compare = |op| WhereExpr::ExprCompare {
+        lhs: lhs(),
+        op,
+        rhs: Expr::Literal(SqlValue::Null),
+    };
+    assert_eq!(
+        ids(Article::objects().where_raw(compare(Op::Eq))).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().where_raw(compare(Op::Ne))).await,
+        vec![2]
+    );
+}
+
+/// DISTINCT needs the ORDER BY term in the select list on PG and MySQL,
+/// so an ordering span projects its column, also over a filter span's join.
+async fn distinct_order_by_relation(pool: &Pool) {
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .distinct()
+        .order_by(&[("editor__name", false), ("id", false)])
+        .fetch(pool)
+        .await
+        .expect("distinct ordered by a relation");
+    assert_eq!(rows.len(), 2);
+    let rows: Vec<Article> = Article::objects()
+        .filter("editor__name__isnull", false)
+        .distinct()
+        .order_by(&[("editor__name", false)])
+        .fetch(pool)
+        .await
+        .expect("distinct ordered by a filtered relation");
+    assert_eq!(article_ids(&rows), vec![2]);
+    assert!(
+        rows[0]
+            .editor
+            .as_ref()
+            .is_some_and(|fk| fk.value().is_none()),
+        "an ordering span does not load the relation"
+    );
+}
+
+/// A relation filter on the tx and executor paths: the filter join is not
+/// decoded, a `select_related` one still is.
+async fn relation_filter_on_tx_and_executor(pool: &Pool) {
+    use rustango::sql::{transaction_pool, FetcherTx as _};
+    seed_articles(pool).await;
+    let filtered = || Article::objects().filter("editor__profile__bio", "bio");
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    let rows = filtered().fetch_tx(&mut tx).await.expect("tx fetch");
+    assert_eq!(article_ids(&rows), vec![2]);
+    assert!(rows[0]
+        .editor
+        .as_ref()
+        .is_some_and(|fk| fk.value().is_none()));
+    let rows = filtered()
+        .select_related("editor")
+        .fetch_tx(&mut tx)
+        .await
+        .expect("tx fetch with select_related");
+    assert_eq!(editor_name(&rows[0]), Some("Ada"));
+    tx.commit().await.expect("commit");
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        let rows = filtered()
+            .select_related("editor")
+            .fetch_on(pg)
+            .await
+            .expect("fetch_on");
+        assert_eq!(editor_name(&rows[0]), Some("Ada"));
+    }
+}
+
+/// A bare `F` naming a joined column stays bare; the DISTINCT ON fallback's
+/// outer ORDER BY reads the derived table's bare names.
+async fn bare_f_on_joined_column_and_distinct_on(pool: &Pool) {
+    use rustango::core::{funcs::abs, F};
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .select_related("editor")
+        .order_by_expr(F("name"), false)
+        .fetch(pool)
+        .await
+        .expect("bare F on a joined column");
+    assert_eq!(rows.len(), 2);
+    let rows: Vec<Article> = Article::objects()
+        .filter("editor__name__isnull", false)
+        .distinct_on(&["title"])
+        .order_by(&[("title", false)])
+        .order_by_expr(abs(F("id")), false)
+        .fetch(pool)
+        .await
+        .expect("distinct_on under a join");
+    assert_eq!(article_ids(&rows), vec![2]);
 }
 
 /// Past every backend's bind cap: 33k rows x 2 binds, 70k `IN` keys.
@@ -920,6 +1031,9 @@ tri_dialect_test! {
         bare_columns_qualified_under_joins,
         filter_joins_project_nothing,
         none_filter_is_null,
+        distinct_order_by_relation,
+        relation_filter_on_tx_and_executor,
+        bare_f_on_joined_column_and_distinct_on,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
         sliced_in_bulk_past_the_bind_cap_is_refused,

@@ -805,6 +805,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = Sqlite.compile_select(&q).unwrap();
         // SQLite emits ANSI-quoted identifiers and `?` placeholders.

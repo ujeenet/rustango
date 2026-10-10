@@ -37,6 +37,16 @@ pub struct UtvPartial {
     user_id: i64,
 }
 
+/// A nullable column in the pair: NULLs never collide in a unique index.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "utv_nullable", unique_together = "org_id, user_id")]
+pub struct UtvNullable {
+    #[rustango(primary_key)]
+    id: Auto<i64>,
+    org_id: i64,
+    user_id: Option<i64>,
+}
+
 fn form<T: rustango::core::Model>(org_id: i64, user_id: i64) -> ModelFormFor<T> {
     ModelFormFor::<T>::from_json(&serde_json::json!({ "org_id": org_id, "user_id": user_id }))
         .expect("form parses")
@@ -173,6 +183,28 @@ async fn the_table_itself_rejects_a_duplicate_pair(pool: &Pool) {
     );
 }
 
+/// `None` now writes `IS NULL` (#2413); a NULL pair must still pass.
+async fn a_null_in_the_pair_never_collides(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<UtvNullable>(pool).await;
+    let mut row = UtvNullable {
+        id: Auto::Unset,
+        org_id: 1,
+        user_id: None,
+    };
+    row.save_pool(pool).await.expect("seed");
+    let mut pair = HashMap::new();
+    pair.insert("org_id", SqlValue::I64(1));
+    pair.insert("user_id", SqlValue::Null);
+    check_unique_together_pool(pool, UtvNullable::SCHEMA, &pair, None)
+        .await
+        .expect("serializer check: NULL is no collision");
+    ModelFormFor::<UtvNullable>::from_json(&serde_json::json!({ "org_id": 1, "user_id": null }))
+        .expect("form parses")
+        .validate_unique_together(pool, None)
+        .await
+        .expect("form check: NULL is no collision");
+}
+
 tri_dialect_test!(
     model: UtvMembership,
     scenarios: [
@@ -184,5 +216,6 @@ tri_dialect_test!(
         partial_value_set_skips_the_check,
         model_form_flags_a_collision,
         model_form_skips_a_partial_unique_index,
+        a_null_in_the_pair_never_collides,
     ],
 );

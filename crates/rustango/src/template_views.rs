@@ -2048,7 +2048,8 @@ async fn duplicate_errors<'a>(
     let mut errors = HashMap::new();
     let unique = written
         .filter_map(|(col, v)| Some((schema.field_by_column(col)?, v)))
-        .filter(|(f, _)| f.unique || f.primary_key);
+        // A NULL never collides in a unique index, and `= None` now matches NULLs.
+        .filter(|(f, v)| (f.unique || f.primary_key) && !matches!(v, SqlValue::Null));
     for (field, value) in unique {
         let same = WhereExpr::Predicate(Filter::new(field.column, Op::Eq, value.clone()));
         let other = this_row.map(|w| WhereExpr::Not(Box::new(w.clone())));

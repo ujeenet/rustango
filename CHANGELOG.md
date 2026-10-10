@@ -6,19 +6,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
 
-They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is gone.
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is deprecated and never returned.
 
-### Fixed — a relation filter no longer adds the joined columns to the SELECT (#2412)
+### Changed — `post.author` stays unloaded after a relation filter (#2412)
 
-Joins from `filter("author__x", ..)` and `order_by("author__x")` project nothing and no longer load `author`; `values()` ignores `select_related`. DISTINCT, value rows and IN subqueries see only the asked columns.
+A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds only its ordered column. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
 
 ### Fixed — `filter(field, None)` matches NULL rows (#2413)
 
-An exact `None`, bare or through a relation span, now writes `IS NULL` (`ne` writes `IS NOT NULL`, `exclude` negates it); it wrote `= NULL`, which matches nothing.
+Every predicate comparing to NULL with `=` or `<>` (`filter`, `Q::eq`, a typed `eq`, a built `Filter` or `ExprCompare`) now writes `IS NULL` / `IS NOT NULL`; it wrote `= NULL`, which matches nothing. Unique-together and duplicate checks skip a NULL value.
 
 ### Fixed — bare columns are qualified when a query has joins (#2411)
 
-Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column.
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column. A bare `F` naming a joined table's column stays bare.
 
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
