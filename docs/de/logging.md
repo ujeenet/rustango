@@ -150,6 +150,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::template_views` | Template-basierte Views |
 | `rustango::tenancy` | Mandantenfähigkeit, allgemein |
 | `rustango::tenancy::admin` | Mandanten-Admin |
+| `rustango::tenancy::decommission` | Mandanten-Stilllegung und -Bereinigung |
 | `rustango::tenancy::migrate_run` | Migrationen pro Mandant |
 | `rustango::tenancy::operator_console` | Operator-Konsole |
 | `rustango::tenancy::pools` | Lebenszyklus der Mandanten-Pools |

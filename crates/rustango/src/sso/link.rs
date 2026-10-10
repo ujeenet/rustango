@@ -405,7 +405,7 @@ impl std::fmt::Display for LinkRefusal {
     }
 }
 
-#[cfg(feature = "signals")]
+#[cfg(all(feature = "signals", feature = "admin-sso"))]
 impl LinkRefusal {
     /// The `user_login_failed` reason; `None` for a storage error, which is no refusal.
     pub(crate) fn failure_reason(&self) -> Option<crate::signals::auth::AuthFailureReason> {
