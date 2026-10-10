@@ -96,6 +96,18 @@ rustango::register_admin_inline!(
     fields = &["doc_id", "title"],
 );
 
+/// Every column has a default, so a create may write none (#2416, #2528).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pk2416_flag", app = "pk1894")]
+pub struct Flag {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 10, default = "'draft'")]
+    pub status: String,
+    #[rustango(default = "true")]
+    pub is_public: bool,
+}
+
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const UUID_DEFAULT: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
@@ -108,6 +120,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::drop_table(pool, V7Line::SCHEMA.table).await;
     rustango::testkit::matrix::fresh_table::<V7Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<V7Line>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Flag>(pool).await;
 }
 
 fn v7(pk: &str) -> uuid::Uuid {
@@ -307,9 +320,48 @@ async fn inline_row_fills_a_v7_pk(pool: &Pool) {
     assert_eq!(lines[0].doc_id, doc);
 }
 
+/// #2416: an INSERT naming no column. MySQL needs `() VALUES ()`.
+async fn an_insert_of_only_defaults_writes_them(pool: &Pool) {
+    let app =
+        rustango::viewset::ViewSet::for_model(Flag::SCHEMA).router_pool("/flags", pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/flags")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    assert_eq!(status.as_u16(), 201, "{v}");
+    assert_eq!(
+        (v["status"].as_str(), v["is_public"].as_bool()),
+        (Some("draft"), Some(true)),
+        "{v}"
+    );
+
+    // Bulk reads the ids back, which MySQL has no RETURNING for.
+    if pool.dialect().name() != "mysql" {
+        let q = rustango::core::BulkInsertQuery::new(Flag::SCHEMA, vec![], vec![vec![], vec![]])
+            .returning(vec!["id"]);
+        rustango::sql::bulk_insert_pool(pool, &q)
+            .await
+            .expect("bulk");
+        assert_eq!(Flag::objects().count(pool).await.expect("count"), 3);
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        an_insert_of_only_defaults_writes_them,
         model_form_returns_the_written_pk,
         admin_create_redirects_to_the_new_pk,
         db_default_pk_is_read_or_refused_before_the_insert,

@@ -1382,6 +1382,12 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), S
     if query.columns.is_empty() && query.returning.is_empty() {
         return Err(SqlError::EmptyInsert);
     }
+    write_insert_rows(b, query)?;
+    write_returning(b, &query.returning)
+}
+
+/// [`write_insert`] without `RETURNING`: MySQL reads the id from the reply.
+pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), SqlError> {
     if query.columns.len() != query.values.len() {
         return Err(SqlError::InsertShapeMismatch {
             columns: query.columns.len(),
@@ -1393,7 +1399,7 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), S
     b.write_ident(query.model.table);
 
     if query.columns.is_empty() {
-        b.sql.push_str(" DEFAULT VALUES");
+        b.sql.push_str(b.d.default_values_clause());
     } else {
         b.sql.push_str(" (");
         let mut first = true;
@@ -1420,8 +1426,6 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), S
     if let Some(conflict) = &query.on_conflict {
         b.d.write_conflict_clause(&mut b.sql, query.model, conflict)?;
     }
-
-    write_returning(b, &query.returning)?;
     Ok(())
 }
 
@@ -1452,6 +1456,10 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
             .first()
             .copied()
             .ok_or(SqlError::EmptyInsert)?;
+        let cell = query
+            .model
+            .field_by_column(pk)
+            .map_or("DEFAULT", |f| b.d.default_pk_cell(f));
         b.sql.push_str(" (");
         b.write_ident(pk);
         b.sql.push_str(") VALUES ");
@@ -1461,7 +1469,9 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
                 b.sql.push_str(", ");
             }
             first_row = false;
-            b.sql.push_str("(DEFAULT)");
+            b.sql.push('(');
+            b.sql.push_str(cell);
+            b.sql.push(')');
         }
     } else {
         b.sql.push_str(" (");

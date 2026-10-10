@@ -118,7 +118,10 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::forms::{collect_insert_values, parse_form_value, parse_pk_string, FormError};
+use crate::forms::{
+    absent_takes_default, collect_insert_values, parse_form_value, parse_pk_string, Encoding,
+    FormError,
+};
 use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
@@ -1643,6 +1646,11 @@ fn json_server_error(context: &str, e: &dyn std::fmt::Display) -> Response {
 /// A `422` from serializer validation, as every `validation_failed` is.
 /// `details` is `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
 fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
+    json_form_errors_msg("invalid input", errs)
+}
+
+/// [`json_form_errors`] with its own message.
+fn json_form_errors_msg(message: &str, errs: &crate::forms::FormErrors) -> Response {
     let mut map = serde_json::Map::new();
     for (field, msgs) in errs.fields() {
         map.insert(field.clone(), json!(msgs));
@@ -1650,7 +1658,7 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
     if !errs.non_field().is_empty() {
         map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
     }
-    crate::api_errors::ApiError::validation("invalid input")
+    crate::api_errors::ApiError::validation(message)
         .with_details(Value::Object(map))
         .into_response()
 }
@@ -1917,17 +1925,23 @@ impl WriteSet {
     fn insert_values(
         &self,
         form: &HashMap<String, String>,
-    ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+        encoding: Encoding,
+    ) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
+        // An omitted defaulted field is left to the column default (#2528).
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
-            .filter(|f| !self.is_writable(f.name))
+            .filter(|f| {
+                !self.is_writable(f.name)
+                    || (absent_takes_default(f, encoding) && !form.contains_key(f.name))
+            })
             .map(|f| f.name)
             .collect();
         let mut out = collect_insert_values(self.schema, form, &skip)?;
         // A pin replaces a stamped `auto` value rather than doubling the column.
         out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
         out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
+        self.check(&out)?;
         Ok(out)
     }
 
@@ -1936,22 +1950,88 @@ impl WriteSet {
         &self,
         form: &HashMap<String, String>,
         partial: bool,
-    ) -> Result<Vec<Assignment>, FormError> {
+    ) -> Result<Vec<Assignment>, Refusal> {
         let mut out = Vec::new();
         for field in self.updatable() {
             if partial && !form.contains_key(field.name) {
                 continue;
             }
             match parse_form_value(field, form.get(field.name).map(String::as_str)) {
-                Ok(v) => out.push(Assignment {
-                    column: field.column,
-                    value: v.into(),
-                }),
+                Ok(v) => out.push((field.column, v)),
                 Err(FormError::Missing { .. }) if partial => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
-        Ok(out)
+        self.check(&out)?;
+        // An empty body stays "no fields to update", not a bare restamp.
+        if !out.is_empty() {
+            crate::forms::stamp_auto_now(self.schema, &mut out);
+        }
+        Ok(out
+            .into_iter()
+            .map(|(column, v)| Assignment {
+                column,
+                value: v.into(),
+            })
+            .collect())
+    }
+
+    /// The model's field rules, checked here so a rejection is a 400 (#2529).
+    fn check(&self, values: &[(&'static str, SqlValue)]) -> Result<(), Refusal> {
+        for (column, value) in values {
+            let Some(field) = self.schema.scalar_fields().find(|f| f.column == *column) else {
+                continue;
+            };
+            if let Err(e) = crate::core::validate_value(self.schema.name, field, value) {
+                // Anything else (an unknown validator) is the server's; the write reports it.
+                if let Some((_, message)) = e.value_rejection() {
+                    return Err(Refusal::Invalid {
+                        field: field.name,
+                        message,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a body cannot be written: unparseable, or refused by a field rule.
+enum Refusal {
+    Form(FormError),
+    Invalid {
+        field: &'static str,
+        message: String,
+    },
+}
+
+impl From<FormError> for Refusal {
+    fn from(e: FormError) -> Self {
+        Self::Form(e)
+    }
+}
+
+impl Refusal {
+    /// A parse error is a `400`, a field-rule refusal a `422` like a
+    /// serializer's, under the names the API publishes; `entry` is a bulk index.
+    fn into_response(self, state: &ViewSetState, entry: Option<usize>) -> Response {
+        let prefix = entry
+            .map(|i| format!("bulk entry {i}: "))
+            .unwrap_or_default();
+        match self {
+            Self::Form(e) => json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("{prefix}{}", public_form_error(state, e)),
+            ),
+            Self::Invalid { field, message } => {
+                let mut errs = crate::forms::FormErrors::default();
+                errs.add(
+                    serializer_public_field_name(state, field).unwrap_or(field),
+                    message,
+                );
+                json_form_errors_msg(&format!("{prefix}invalid input"), &errs)
+            }
+        }
     }
 }
 
@@ -3070,7 +3150,7 @@ async fn handle_create(
         .create
         .map(|_| ThrottleClient::new(&parts, &acq.scope));
     // A JSON array body means a bulk create.
-    let create_body = match extract_create_body(parts, body).await {
+    let create_body = match extract_create_body(parts, body, typed_schema(&state)).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -3082,12 +3162,17 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
+            let encoding = if json.is_some() {
+                Encoding::Json
+            } else {
+                Encoding::Form
+            };
             let json = write_json(&state, &form, json);
             create_one(
                 &state,
                 &mut acq,
                 &write_set,
-                (&form, &json),
+                (&form, &json, encoding),
                 pk_field,
                 &scope,
             )
@@ -3173,6 +3258,7 @@ async fn insert_and_fetch_one(
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
 /// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
+/// Field rules are checked before the write, by `WriteSet::check`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
     let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
     let body = crate::error::client_error_body(context, e, client_caused);
@@ -3193,7 +3279,7 @@ async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     write_set: &WriteSet,
-    (form, json): (&HashMap<String, String>, &Value),
+    (form, json, encoding): (&HashMap<String, String>, &Value, Encoding),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
@@ -3204,14 +3290,9 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match write_set.insert_values(form) {
+    let collected = match write_set.insert_values(form, encoding) {
         Ok(v) => v,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                &public_form_error(state, e).to_string(),
-            )
-        }
+        Err(e) => return e.into_response(state, None),
     };
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
@@ -3253,12 +3334,10 @@ async fn create_many(
         }
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match write_set.insert_values(row) {
+        // A bulk body is always JSON.
+        let collected = match write_set.insert_values(row, Encoding::Json) {
             Ok(v) => v,
-            Err(e) => {
-                let e = public_form_error(state, e);
-                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
-            }
+            Err(e) => return e.into_response(state, Some(i)),
         };
         prepared.push(collected.into_iter().unzip());
     }
@@ -3384,7 +3463,7 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let (form, json) = match extract_form_body(parts, body).await {
+    let (form, json) = match extract_form_body(parts, body, typed_schema(&state)).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -3428,12 +3507,7 @@ async fn update_inner(
 
     let assignments = match write_set.update_assignments(form, partial) {
         Ok(a) => a,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                &public_form_error(&state, e).to_string(),
-            )
-        }
+        Err(e) => return e.into_response(&state, None),
     };
 
     if assignments.is_empty() {
@@ -3615,8 +3689,9 @@ impl BodyError {
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
+    typed: Option<&'static ModelSchema>,
 ) -> Result<(HashMap<String, String>, Option<Value>), BodyError> {
-    match extract_create_body(parts, body).await? {
+    match extract_create_body(parts, body, typed).await? {
         CreateBody::Single(form, json) => Ok((form, json)),
         CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
     }
@@ -3640,6 +3715,7 @@ pub(crate) enum CreateBody {
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
+    typed: Option<&'static ModelSchema>,
 ) -> Result<CreateBody, BodyError> {
     use axum::body::to_bytes;
 
@@ -3670,14 +3746,19 @@ pub(crate) async fn extract_create_body(
                 let obj = entry
                     .as_object()
                     .ok_or_else(|| format!("bulk entry {i} is not a JSON object"))?;
-                bulk.push((json_object_to_form(obj), Some(entry.clone())));
+                let form =
+                    json_object_to_form(obj, typed).map_err(|e| format!("bulk entry {i}: {e}"))?;
+                bulk.push((form, Some(entry.clone())));
             }
             return Ok(CreateBody::Bulk(bulk));
         }
         let obj = value
             .as_object()
             .ok_or("expected a JSON object or array of objects")?;
-        Ok(CreateBody::Single(json_object_to_form(obj), Some(value)))
+        Ok(CreateBody::Single(
+            json_object_to_form(obj, typed)?,
+            Some(value),
+        ))
     } else {
         // form-urlencoded (default) — single only, no typed JSON value.
         let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
@@ -3692,19 +3773,38 @@ pub(crate) async fn extract_create_body(
 /// arrays serialize back to JSON text (caller can re-parse if it
 /// needs typed access). Extracted from the inlined `extract_form_body`
 /// path so both single and bulk codepaths share it.
-fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, String> {
+///
+/// With `typed`, keys are decoded by their model field (#2530): null on
+/// a NOT NULL field is refused, and a Json field keeps the value as JSON.
+fn json_object_to_form(
+    obj: &serde_json::Map<String, Value>,
+    typed: Option<&'static ModelSchema>,
+) -> Result<HashMap<String, String>, String> {
     let mut form = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
-        let s = match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => String::new(),
-            other => other.to_string(),
+        // Server-set columns are never read from the body.
+        let field = typed
+            .and_then(|s| s.field(k))
+            .filter(|f| !f.auto && f.generated_as.is_none());
+        let s = match (v, field) {
+            (Value::Null, Some(f)) if !f.nullable => {
+                return Err(format!("field `{k}` may not be null"));
+            }
+            (Value::Null, _) => String::new(),
+            (other, Some(f)) if f.ty == FieldType::Json => other.to_string(),
+            (Value::String(s), _) => s.clone(),
+            (Value::Number(n), _) => n.to_string(),
+            (Value::Bool(b), _) => b.to_string(),
+            (other, _) => other.to_string(),
         };
         form.insert(k.clone(), s);
     }
-    form
+    Ok(form)
+}
+
+/// The schema a JSON body is decoded by; a serializer types its own (#2530).
+fn typed_schema(state: &ViewSetState) -> Option<&'static ModelSchema> {
+    state.vs.serializer.is_none().then_some(state.vs.schema)
 }
 
 /// Every ViewSet error is an `ApiError`, and a 5xx withholds its cause (#1193).
@@ -3771,7 +3871,7 @@ mod body_tests {
     #[tokio::test]
     async fn an_over_cap_body_is_413() {
         let body = Body::new(http_body_util::Limited::new(Body::from("[1,2,3,4]"), 4));
-        let Err(err) = extract_create_body(json_parts(), body).await else {
+        let Err(err) = extract_create_body(json_parts(), body, None).await else {
             panic!("an over-cap body was accepted");
         };
         assert!(matches!(err, BodyError::TooLarge));
@@ -3780,7 +3880,8 @@ mod body_tests {
 
     #[tokio::test]
     async fn a_malformed_body_is_still_400() {
-        let Err(err) = extract_create_body(json_parts(), Body::from("{not json")).await else {
+        let Err(err) = extract_create_body(json_parts(), Body::from("{not json"), None).await
+        else {
             panic!("malformed JSON was accepted");
         };
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
