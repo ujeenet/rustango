@@ -102,6 +102,22 @@ On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are s
 
 A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!(Model, Change, [field])` locks fields for non-superusers.
 
+### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
+
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is deprecated and never returned.
+
+### Changed — `post.author` stays unloaded after a relation filter (#2412)
+
+A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds one helper column, which value rows drop. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
+
+### Fixed — `filter(field, None)` matches NULL rows (#2413)
+
+Every predicate comparing to NULL with `=` or `<>` (`filter`, `Q::eq`, a typed `eq`, a built `Filter` or `ExprCompare`) now writes `IS NULL` / `IS NOT NULL`; it wrote `= NULL`, which matches nothing. Unique-together and duplicate checks skip a NULL value.
+
+### Fixed — bare columns are qualified when a query has joins (#2411)
+
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column. A bare `F` naming a joined table's column stays bare.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.

@@ -211,6 +211,18 @@ A user now needs every codename listed for an action, not any one. A list meant 
 On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are read-only for them on add and edit, `password_hash` on edit, and superuser rows refuse their edits and deletes.
 An admin built with `with_user_perms` treats the user as a non-superuser even with a superuser session. An admin with no login now lets anyone edit SSO links and providers, as it does every other table.
 
+### Set operations on `update()` / `delete()` (#2452)
+
+A queryset with `union`, `intersection` or `difference` now fails `update()` and `delete()` with `QueryError::SetOperationDml`, bounded or not. Match that instead of `BoundedDmlReason::SetOperation`, which is deprecated and never returned. Filter the rows with `where_in_subquery` / `where_not_in_subquery` instead.
+
+### `post.author` after a relation filter (#2412)
+
+A typed fetch filtered or ordered through `author__x` no longer loads `author`; reading it is one more query. Add `select_related("author")` where the code reads it. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. A hand-built `SelectQuery` with joins must set the new `select_related` field to their aliases, or the related rows stay unloaded.
+
+### `filter(field, None)` (#2413)
+
+`filter("parent", None)`, `Q::eq("parent", None)` and any `=` against NULL now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `<>` against NULL means `IS NOT NULL`. Code that relied on a `None` id matching nothing must check for `None` first.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

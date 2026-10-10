@@ -133,6 +133,11 @@ pub enum QueryError {
         reason: BoundedDmlReason,
     },
 
+    /// `update()`/`delete()` on a `union`/`intersection`/`difference`:
+    /// the statement cannot carry the set operation, so it is refused (#2452).
+    #[error("`{model}`: update()/delete() refused: the queryset has a set operation")]
+    SetOperationDml { model: &'static str },
+
     /// The value does not fit the lookup: `__in` without a list,
     /// `__isnull` without a bool, `__between` without exactly two
     /// elements.
@@ -253,6 +258,8 @@ pub enum BoundedDmlReason {
     NoSinglePrimaryKey,
     #[error("order_by spans a relation")]
     RelationOrderBy,
+    /// Never returned: a set operation is now [`QueryError::SetOperationDml`].
+    #[deprecated(since = "0.60.6", note = "match `QueryError::SetOperationDml`")]
     #[error("the queryset has a set operation")]
     SetOperation,
     #[error("limit or offset is negative")]

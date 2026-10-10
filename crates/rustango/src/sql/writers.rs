@@ -32,10 +32,10 @@ pub(super) struct Sql<'d> {
     /// resolves against the top frame; `Expr::OuterRef` resolves
     /// against the one below it, the enclosing query.
     pub scope_stack: Vec<&'static ModelSchema>,
-    /// When `Some`, a bare `Expr::Column(name)` is written as
-    /// `"<alias>"."<name>"`. Set while emitting a JOIN `ON` clause, so
-    /// its columns point at the joined alias; unset elsewhere.
-    pub current_qualify_alias: Option<&'static str>,
+    /// `(scope depth, qualifier)` for bare columns: the one carrier for
+    /// predicates, ORDER BY and `Expr::Column`. A nested query pushes a
+    /// scope frame, so it never inherits it (#2411).
+    pub qualifier: Option<(usize, Qualifier)>,
     /// Whether `Expr::Aggregate` is legal here. True only inside an
     /// aggregating query's projection, HAVING or ORDER BY, which are
     /// the places SQL accepts an aggregate call.
@@ -48,6 +48,15 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
+}
+
+/// How a bare column of the current scope is written.
+#[derive(Clone, Copy)]
+pub(super) enum Qualifier {
+    /// Inside a JOIN `ON`: every bare column is the joined alias's.
+    Join(&'static str),
+    /// A SELECT with joins: the base model's columns get its table.
+    Base(&'static str),
 }
 
 /// The joins a grouped aggregate's derived table hides. An aliased
@@ -67,7 +76,7 @@ impl<'d> Sql<'d> {
             sql: String::new(),
             params: Vec::new(),
             scope_stack: Vec::new(),
-            current_qualify_alias: None,
+            qualifier: None,
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
@@ -81,12 +90,35 @@ impl<'d> Sql<'d> {
             sql: String::new(),
             params: Vec::with_capacity(cap),
             scope_stack: Vec::new(),
-            current_qualify_alias: None,
+            qualifier: None,
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
         }
+    }
+
+    /// The qualifier of the innermost open scope, if one is set.
+    fn qualifier(&self) -> Option<Qualifier> {
+        self.qualifier
+            .filter(|(depth, _)| *depth == self.scope_stack.len())
+            .map(|(_, q)| q)
+    }
+
+    /// The table or alias a scope column is written under.
+    fn qualify_alias(&self) -> Option<&'static str> {
+        match self.qualifier()? {
+            Qualifier::Join(a) | Qualifier::Base(a) => Some(a),
+        }
+    }
+
+    /// Run `f` with `q` as this scope's qualifier.
+    fn with_qualifier<R>(&mut self, q: Option<Qualifier>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = self.scope_stack.len();
+        let prior = std::mem::replace(&mut self.qualifier, q.map(|q| (depth, q)));
+        let r = f(self);
+        self.qualifier = prior;
+        r
     }
 
     /// Append a quoted identifier using the dialect's quoting rules.
@@ -157,7 +189,7 @@ pub(super) fn null_cast_for(
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
     let result = if query.compound.is_empty() {
-        write_select_inner(b, query)
+        write_select_inner(b, query, true)
     } else {
         write_compound_select(b, query)
     };
@@ -191,7 +223,6 @@ pub(super) fn write_compound_with_total(
         &query.compound_order_by,
         query.compound_limit,
         query.compound_offset,
-        None,
     )
 }
 
@@ -260,6 +291,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         compound_order_by: _,
         compound_limit: _,
         compound_offset: _,
+        select_related: _,
     } = query;
     let head = SelectQuery {
         where_clause: where_clause.clone(),
@@ -276,12 +308,12 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     let head_scoped = !head.order_by.is_empty() || head.limit.is_some() || head.offset.is_some();
     if head_scoped {
         b.sql.push_str("SELECT * FROM (");
-        write_select_inner(b, &head)?;
+        write_select_inner(b, &head, false)?;
         b.sql.push(')');
         b.sql.push_str(" AS ");
         b.write_ident("__rustango_b0");
     } else {
-        write_select_inner(b, &head)?;
+        write_select_inner(b, &head, false)?;
     }
 
     for (i, branch) in query.compound.iter().enumerate() {
@@ -299,7 +331,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         let r = if branch.query.compound.is_empty() {
             if scoped {
                 b.sql.push_str("SELECT * FROM (");
-                let r = write_select_inner(b, &branch.query);
+                let r = write_select_inner(b, &branch.query, false);
                 b.sql.push(')');
                 if r.is_ok() {
                     b.sql.push_str(" AS ");
@@ -307,7 +339,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
                 }
                 r
             } else {
-                write_select_inner(b, &branch.query)
+                write_select_inner(b, &branch.query, false)
             }
         } else {
             // Nested compound: recurse, wrapped the same way.
@@ -331,7 +363,6 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         &query.compound_order_by,
         query.compound_limit,
         query.compound_offset,
-        None,
     )?;
 
     if let Some(lock) = &query.lock_mode {
@@ -469,14 +500,16 @@ fn write_distinct_on_via_window(
         b,
         &query.where_clause,
         query.search.as_ref(),
-        qualify.then_some(query.model.table),
         Some(query.model),
     )?;
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
 
-    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors.
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, which
+    // `sub` exposes under bare names.
+    b.with_qualifier(None, |b| {
+        write_order_limit_offset(b, &query.order_by, query.limit, query.offset)
+    })?;
 
     Ok(())
 }
@@ -534,17 +567,25 @@ fn write_subquery_joins(
             b.sql.push_str(" ON true");
         } else {
             b.sql.push_str(" ON ");
-            let prior_qualify = b.current_qualify_alias.replace(sj.alias);
-            let on_result = write_where_expr(b, &sj.on, Some(sj.alias), None);
-            b.current_qualify_alias = prior_qualify;
-            on_result?;
+            let alias = sj.alias;
+            b.with_qualifier(Some(Qualifier::Join(alias)), |b| {
+                write_where_expr(b, &sj.on, None)
+            })?;
         }
     }
     Ok(())
 }
 
-fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    with_join_types(b, &query.joins, None, |b| write_select_body(b, query))
+/// `order_helpers`: a lone SELECT, not a set-operation branch, so it may
+/// add DISTINCT's ORDER BY helper columns without breaking a column count.
+fn write_select_inner(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
+    with_join_types(b, &query.joins, None, |b| {
+        write_select_body(b, query, order_helpers)
+    })
 }
 
 /// Run `f` with `joins` (and a derived `source`'s joins) typed at the
@@ -566,7 +607,24 @@ fn with_join_types(
     r
 }
 
-fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+fn write_select_body(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
+    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
+    let q = qualify.then_some(Qualifier::Base(query.model.table));
+    b.with_qualifier(q, |b| {
+        write_select_body_qualified(b, query, qualify, order_helpers)
+    })
+}
+
+fn write_select_body_qualified(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    qualify: bool,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
@@ -574,7 +632,6 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             return write_distinct_on_via_window(b, query, cols);
         }
     }
-    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
 
     b.sql.push_str("SELECT ");
     // Plain `DISTINCT` works on every dialect; `DISTINCT ON` is PG
@@ -632,6 +689,9 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             b.write_ident(&crate::core::joins::joined_label(join.alias, col));
         }
     }
+    if order_helpers && query.distinct.is_some() {
+        write_distinct_order_helpers(b, query)?;
+    }
     // Written before FROM, so the WHERE binds appear twice, in text order.
     if let Some(count) = b.total.take() {
         b.sql.push_str(", (");
@@ -651,22 +711,42 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
         b,
         &query.where_clause,
         query.search.as_ref(),
-        qualify.then_some(query.model.table),
         Some(query.model),
     )?;
 
-    write_order_limit_offset(
-        b,
-        &query.order_by,
-        query.limit,
-        query.offset,
-        qualify.then_some(query.model.table),
-    )?;
+    write_order_limit_offset(b, &query.order_by, query.limit, query.offset)?;
 
     if let Some(lock) = &query.lock_mode {
         write_lock_clause(b, lock);
     }
 
+    Ok(())
+}
+
+/// PG and MySQL want a DISTINCT query's ORDER BY terms in the select
+/// list. Each relation term no join projects is added last, so value
+/// rows can drop it (see `values_width`).
+fn write_distinct_order_helpers(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    use crate::core::{Expr, OrderItem};
+    for (i, item) in query.order_by.iter().enumerate() {
+        let OrderItem::Expr { expr, .. } = item else {
+            continue;
+        };
+        let Expr::AliasedColumn { alias, column } = expr else {
+            continue;
+        };
+        let projected = query
+            .joins
+            .iter()
+            .any(|j| j.alias == *alias && j.project.contains(column));
+        if projected {
+            continue;
+        }
+        b.sql.push_str(", ");
+        write_expr(b, expr, None)?;
+        b.sql.push_str(" AS ");
+        b.write_ident(&format!("__rustango_order{i}"));
+    }
     Ok(())
 }
 
@@ -733,7 +813,6 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
             b,
             &query.where_clause,
             query.search.as_ref(),
-            None,
             Some(query.model),
         )?;
         Ok(())
@@ -804,10 +883,9 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push_str(" ON ");
         // Bare columns in the ON predicate resolve to the joined
         // alias here. Use `Expr::AliasedColumn` to point elsewhere.
-        let prior_qualify = b.current_qualify_alias.replace(join.alias);
-        let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
-        b.current_qualify_alias = prior_qualify;
-        on_result?;
+        b.with_qualifier(Some(Qualifier::Join(join.alias)), |b| {
+            write_where_expr(b, &join.on, Some(join.target))
+        })?;
     }
     Ok(())
 }
@@ -931,7 +1009,7 @@ fn write_aggregate_tail(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), S
         // nested subqueries do not inherit the permission.
         let prev = b.aggregate_allowed;
         b.aggregate_allowed = true;
-        let r = write_where_expr(b, having, None, Some(query.model));
+        let r = write_where_expr(b, having, Some(query.model));
         b.aggregate_allowed = prev;
         r?;
     }
@@ -940,7 +1018,7 @@ fn write_aggregate_tail(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), S
     // SELECT may not.
     let prev = b.aggregate_allowed;
     b.aggregate_allowed = true;
-    let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
+    let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset);
     b.aggregate_allowed = prev;
     r
 }
@@ -1136,7 +1214,7 @@ fn write_aggregate_expr(
             let prior = b.sql.len();
             b.sql.push_str(&bare);
             b.sql.push_str(" FILTER (WHERE ");
-            write_where_expr(b, filter, None, Some(model))?;
+            write_where_expr(b, filter, Some(model))?;
             b.sql.push(')');
             if let Some(kind) = aggregate_cast_kind(b, inner) {
                 let emitted = b.sql[prior..].to_string();
@@ -1319,7 +1397,7 @@ fn write_aggregate_as_case_when(
     b.sql.push('(');
     b.sql.push_str(distinct_prefix);
     b.sql.push_str("CASE WHEN ");
-    write_where_expr(b, filter, None, None)?;
+    write_where_expr(b, filter, None)?;
     b.sql.push_str(" THEN ");
     match case_then {
         Some(col) => b.write_ident(col),
@@ -1560,9 +1638,21 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            // Inside a JOIN ON clause, qualify the column with the
-            // join's alias; elsewhere leave it bare.
-            if let Some(alias) = b.current_qualify_alias {
+            // In a JOIN ON every column is the join's; under a SELECT with
+            // joins only the base model's own columns get its table, so a
+            // bare joined column still resolves to its join.
+            let alias = match b.qualifier() {
+                Some(Qualifier::Join(a)) => Some(a),
+                Some(Qualifier::Base(t))
+                    if b.scope_stack
+                        .last()
+                        .map_or(true, |m| m.field_by_column(name).is_some()) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            };
+            if let Some(alias) = alias {
                 let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
             } else {
@@ -1774,7 +1864,7 @@ fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::Field
     use crate::core::{BinOp as BO, Expr, FieldType};
     match expr {
         Expr::Literal(v) => v.field_type(),
-        Expr::Column(c) if b.current_qualify_alias.is_none() => {
+        Expr::Column(c) if !matches!(b.qualifier(), Some(Qualifier::Join(_))) => {
             b.scope_stack.last()?.field_by_column(c).map(|f| f.ty)
         }
         Expr::AliasedColumn { alias, column } => {
@@ -2098,7 +2188,7 @@ fn write_case(
         b.sql.push_str(" WHEN ");
         // No qualifier or model: the surrounding statement already
         // set the table context.
-        write_where_expr(b, &branch.condition, None, None)?;
+        write_where_expr(b, &branch.condition, None)?;
         b.sql.push_str(" THEN ");
         write_expr(b, &branch.then, None)?;
     }
@@ -3580,14 +3670,13 @@ pub(super) fn write_where(
         return Ok(());
     }
     b.sql.push_str(" WHERE ");
-    write_where_expr(b, where_clause, None, model)
+    write_where_expr(b, where_clause, model)
 }
 
 pub(super) fn write_where_with_search(
     b: &mut Sql<'_>,
     where_clause: &WhereExpr,
     search: Option<&SearchClause>,
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     // A query with no column to match it matches nothing (#2391).
@@ -3604,7 +3693,7 @@ pub(super) fn write_where_with_search(
         if wrap {
             b.sql.push('(');
         }
-        write_where_expr(b, where_clause, qualify_with, model)?;
+        write_where_expr(b, where_clause, model)?;
         if wrap {
             b.sql.push(')');
         }
@@ -3637,7 +3726,7 @@ pub(super) fn write_where_with_search(
             b.params.push(SqlValue::String(pattern.clone()));
             let placeholder = b.d.placeholder(b.params.len());
             let mut qualified = String::new();
-            if let Some(table) = qualify_with {
+            if let Some(table) = b.qualify_alias() {
                 qualified.push_str(&b.d.quote_ident(table));
                 qualified.push('.');
             }
@@ -3654,23 +3743,22 @@ pub(super) fn write_where_with_search(
 pub(super) fn write_where_expr(
     b: &mut Sql<'_>,
     expr: &WhereExpr,
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     match expr {
-        WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
-        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
-        WhereExpr::And(items) => write_joined(b, items, " AND ", qualify_with, model),
+        WhereExpr::Predicate(filter) => write_filter(b, filter, model),
+        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, model),
+        WhereExpr::And(items) => write_joined(b, items, " AND ", model),
         WhereExpr::Or(items) => {
             if items.is_empty() {
                 return Err(SqlError::EmptyOrBranch);
             }
-            write_joined(b, items, " OR ", qualify_with, model)
+            write_joined(b, items, " OR ", model)
         }
-        WhereExpr::Xor(items) => write_xor(b, items, qualify_with, model),
+        WhereExpr::Xor(items) => write_xor(b, items, model),
         WhereExpr::Not(child) => {
             b.sql.push_str("NOT (");
-            write_where_expr(b, child, qualify_with, model)?;
+            write_where_expr(b, child, model)?;
             b.sql.push(')');
             Ok(())
         }
@@ -3691,7 +3779,7 @@ pub(super) fn write_where_expr(
             negated,
             subquery,
         } => {
-            let qualified = render_qualified_col(b.d, qualify_with, column);
+            let qualified = render_qualified_col(b, column);
             b.sql.push_str(&qualified);
             b.sql.push_str(if *negated { " NOT IN (" } else { " IN (" });
             let limited = subquery.limit.is_some()
@@ -3809,6 +3897,16 @@ fn write_rel_correlation(
     }
 }
 
+/// `= NULL` matches no row, so an `Eq` / `Ne` against NULL is written
+/// `IS NULL` / `IS NOT NULL`, the rule for every predicate (#2413).
+fn null_test(op: Op, value: &SqlValue) -> Option<&'static str> {
+    match (op, value) {
+        (Op::Eq, SqlValue::Null) => Some(" IS NULL"),
+        (Op::Ne, SqlValue::Null) => Some(" IS NOT NULL"),
+        _ => None,
+    }
+}
+
 /// Emit `<lhs> <op> <rhs>` for [`WhereExpr::ExprCompare`].
 ///
 /// Handles the binary comparisons plus `IN`, `BETWEEN`, `IS NULL` and
@@ -3828,6 +3926,13 @@ fn write_expr_compare(
 ) -> Result<(), SqlError> {
     use crate::core::{Expr, Op};
 
+    if let Expr::Literal(v) = rhs {
+        if let Some(test) = null_test(op, v) {
+            write_expr(b, lhs, None)?;
+            b.sql.push_str(test);
+            return Ok(());
+        }
+    }
     let binary_op_str = match op {
         Op::Eq => Some(" = "),
         Op::Ne => Some(" <> "),
@@ -3969,11 +4074,16 @@ fn write_expr_compare(
 fn write_column_compare(
     b: &mut Sql<'_>,
     cf: &crate::core::ColumnFilter,
-    qualify_with: Option<&str>,
     _model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    let qualified = render_qualified_col(b.d, qualify_with, cf.column);
+    let qualified = render_qualified_col(b, cf.column);
     b.sql.push_str(&qualified);
+    if let crate::core::Expr::Literal(v) = &cf.rhs {
+        if let Some(test) = null_test(cf.op, v) {
+            b.sql.push_str(test);
+            return Ok(());
+        }
+    }
     let op_str = match cf.op {
         crate::core::Op::Eq => " = ",
         crate::core::Op::Ne => " <> ",
@@ -3997,7 +4107,6 @@ fn write_joined(
     b: &mut Sql<'_>,
     items: &[WhereExpr],
     sep: &str,
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     let mut first = true;
@@ -4006,7 +4115,7 @@ fn write_joined(
             b.sql.push_str(sep);
         }
         first = false;
-        write_child(b, child, qualify_with, model)?;
+        write_child(b, child, model)?;
     }
     Ok(())
 }
@@ -4014,22 +4123,21 @@ fn write_joined(
 fn write_child(
     b: &mut Sql<'_>,
     expr: &WhereExpr,
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     match expr {
-        WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
-        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
+        WhereExpr::Predicate(filter) => write_filter(b, filter, model),
+        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, model),
         // These leaves already write their own parens, or are flat,
         // so they need no extra layer.
         WhereExpr::Exists(_)
         | WhereExpr::NotExists(_)
         | WhereExpr::InSubquery { .. }
         | WhereExpr::ExprCompare { .. }
-        | WhereExpr::RelExists { .. } => write_where_expr(b, expr, qualify_with, model),
+        | WhereExpr::RelExists { .. } => write_where_expr(b, expr, model),
         WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Xor(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
-            write_where_expr(b, expr, qualify_with, model)?;
+            write_where_expr(b, expr, model)?;
             b.sql.push(')');
             Ok(())
         }
@@ -4054,22 +4162,21 @@ fn write_child(
 fn write_xor(
     b: &mut Sql<'_>,
     items: &[WhereExpr],
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     match items.len() {
         0 => Err(SqlError::EmptyXorBranch),
-        1 => write_where_expr(b, &items[0], qualify_with, model),
+        1 => write_where_expr(b, &items[0], model),
         2 => {
             // (a AND NOT (b)) OR (NOT (a) AND b)
             b.sql.push('(');
-            write_child(b, &items[0], qualify_with, model)?;
+            write_child(b, &items[0], model)?;
             b.sql.push_str(" AND NOT (");
-            write_where_expr(b, &items[1], qualify_with, model)?;
+            write_where_expr(b, &items[1], model)?;
             b.sql.push_str(")) OR (NOT (");
-            write_where_expr(b, &items[0], qualify_with, model)?;
+            write_where_expr(b, &items[0], model)?;
             b.sql.push_str(") AND ");
-            write_child(b, &items[1], qualify_with, model)?;
+            write_child(b, &items[1], model)?;
             b.sql.push(')');
             Ok(())
         }
@@ -4084,7 +4191,7 @@ fn write_xor(
                 }
                 first = false;
                 b.sql.push_str("(CASE WHEN ");
-                write_child(b, child, qualify_with, model)?;
+                write_child(b, child, model)?;
                 b.sql.push_str(" THEN 1 ELSE 0 END)");
             }
             b.sql.push_str(") % 2 = 1");
@@ -4097,10 +4204,14 @@ fn write_xor(
 fn write_filter(
     b: &mut Sql<'_>,
     filter: &Filter,
-    qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    let qualified_col = render_qualified_col(b.d, qualify_with, filter.column);
+    let qualified_col = render_qualified_col(b, filter.column);
+    if let Some(test) = null_test(filter.op, &filter.value) {
+        b.sql.push_str(&qualified_col);
+        b.sql.push_str(test);
+        return Ok(());
+    }
     let cast = model.and_then(|m| null_cast_for(b.d, m, filter.column));
 
     match filter.op {
@@ -4367,13 +4478,13 @@ fn simple_op(
 /// Render `[<table>.]<col>` with the dialect's quoting. Built up
 /// front so an op handler can either write it as-is or wrap it, for
 /// example in `LOWER(…)`, without editing the buffer afterwards.
-fn render_qualified_col(d: &dyn Dialect, qualify_with: Option<&str>, column: &str) -> String {
+fn render_qualified_col(b: &Sql<'_>, column: &str) -> String {
     let mut s = String::new();
-    if let Some(table) = qualify_with {
-        s.push_str(&d.quote_ident(table));
+    if let Some(table) = b.qualify_alias() {
+        s.push_str(&b.d.quote_ident(table));
         s.push('.');
     }
-    s.push_str(&d.quote_ident(column));
+    s.push_str(&b.d.quote_ident(column));
     s
 }
 
@@ -4451,7 +4562,6 @@ fn write_order_limit_offset(
     order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
-    qualify_with: Option<&str>,
 ) -> Result<(), SqlError> {
     use crate::core::{NullsOrder, OrderItem};
     if !order_by.is_empty() {
@@ -4473,7 +4583,7 @@ fn write_order_limit_offset(
                     b.sql.push_str(", ");
                 }
                 first = false;
-                write_order_target(b, item, qualify_with)?;
+                write_order_target(b, item)?;
                 b.sql.push_str(" IS NULL");
                 // NULLS FIRST puts nulls on top, so IS NULL DESC.
                 match nulls {
@@ -4486,7 +4596,7 @@ fn write_order_limit_offset(
                 b.sql.push_str(", ");
             }
             first = false;
-            write_order_target(b, item, qualify_with)?;
+            write_order_target(b, item)?;
             if desc {
                 b.sql.push_str(" DESC");
             }
@@ -4517,19 +4627,12 @@ fn write_order_limit_offset(
 /// Write the `<target>` half of `<target> [DESC] [NULLS …]`. The
 /// MySQL nulls workaround needs it twice, once for the `IS NULL`
 /// term and once for the real sort.
-fn write_order_target(
-    b: &mut Sql<'_>,
-    item: &crate::core::OrderItem,
-    qualify_with: Option<&str>,
-) -> Result<(), SqlError> {
+fn write_order_target(b: &mut Sql<'_>, item: &crate::core::OrderItem) -> Result<(), SqlError> {
     use crate::core::OrderItem;
     match item {
         OrderItem::Column { column, .. } => {
-            if let Some(table) = qualify_with {
-                b.write_ident(table);
-                b.sql.push('.');
-            }
-            b.write_ident(column);
+            let qualified = render_qualified_col(b, column);
+            b.sql.push_str(&qualified);
         }
         OrderItem::Expr { expr, .. } => {
             write_expr(b, expr, None)?;
@@ -4581,12 +4684,17 @@ pub(crate) fn compile_where_order_tail(
     order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
-    qualify_with: Option<&str>,
+    qualify_with: Option<&'static str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<CompiledStatement, SqlError> {
     let mut b = Sql::new(d);
-    write_where_with_search(&mut b, where_clause, search, qualify_with, model)?;
-    write_order_limit_offset(&mut b, order_by, limit, offset, qualify_with)?;
+    if let Some(m) = model {
+        b.scope_stack.push(m);
+    }
+    b.with_qualifier(qualify_with.map(Qualifier::Base), |b| {
+        write_where_with_search(b, where_clause, search, model)?;
+        write_order_limit_offset(b, order_by, limit, offset)
+    })?;
     Ok(b.finish())
 }
 

@@ -202,8 +202,7 @@ where
         T: LoadRelated,
     {
         let select = self.compile()?;
-        let select_related_aliases: Vec<&'static str> =
-            select.joins.iter().map(|j| j.alias).collect();
+        let select_related_aliases = select.select_related.clone();
         let stmt = Postgres.compile_select(&select)?;
 
         // With joins, each JOINed target is stitched from the same row:
@@ -1799,7 +1798,7 @@ where
         async {
             crate::test_assertions::query_counter::bump();
             let stmt = tx.dialect().compile_select(query)?;
-            let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+            let aliases = query.select_related.clone();
             // Stitch from leaf aliases so each FK chain is decoded once.
             let leaves = select_related_leaves(&aliases);
             match tx {
@@ -2510,7 +2509,7 @@ where
 {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
-    let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+    let aliases = query.select_related.clone();
     // Stitch from leaf aliases so each FK chain is decoded once.
     let leaves = select_related_leaves(&aliases);
 

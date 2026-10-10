@@ -1,7 +1,9 @@
 //! Relation fetches on every backend: NULL FKs under `select_related` (#2293),
 //! shared select_related hops (#2294), bind-cap batching (#2295), M2M `set`
-//! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298) and
-//! reverse-generic prefetch batching (#2318).
+//! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298),
+//! reverse-generic prefetch batching (#2318), bare columns under joins
+//! (#2411), filter-only joins projecting nothing (#2412) and `None` as
+//! `IS NULL` (#2413).
 //!
 //! The cap tests use 33k rows (x2 binds = 66k) or 70k keys: past SQLite's
 //! 32,766 and PG/MySQL's 65,535.
@@ -117,6 +119,24 @@ pub struct Gpost {
     pub id: i64,
 }
 
+/// Shares `id` and `at` with `Shift`, so a bare column is ambiguous.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_crew", app = "rel2293")]
+pub struct Crew {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_shift", app = "rel2293")]
+pub struct Shift {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub crew: Option<ForeignKey<Crew>>,
+}
+
 /// The generic M2M pivot, kept out of the model registry.
 const TAGGABLES: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
@@ -195,6 +215,7 @@ async fn setup(pool: &Pool) {
         Editor::SCHEMA,
         Profile::SCHEMA,
         Child::SCHEMA,
+        Shift::SCHEMA,
         TAGGABLES,
     ] {
         drop_table(pool, t.table).await;
@@ -210,6 +231,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<PostTag>(pool).await;
     fresh_table::<Badge>(pool).await;
     fresh_table::<Note>(pool).await;
+    fresh_table::<Crew>(pool).await;
+    fresh_table::<Shift>(pool).await;
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -448,6 +471,280 @@ async fn isnull_across_a_null_fk(pool: &Pool) {
         .await
         .expect("__isnull across a NULL FK");
     assert_eq!(rows.iter().map(|a| a.id).collect::<Vec<_>>(), vec![1]);
+}
+
+fn article_ids(rows: &[Article]) -> Vec<i64> {
+    rows.iter().map(|a| a.id).collect()
+}
+
+/// `id` is on both joined tables; bare `F` columns must point at the base (#2411).
+async fn bare_columns_qualified_under_joins(pool: &Pool) {
+    use rustango::core::{funcs::abs, F};
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .select_related("editor")
+        .where_column_op("id", Op::Gt, "editor")
+        .order_by_expr(abs(F("id")), true)
+        .fetch(pool)
+        .await
+        .expect("where_column_op and order_by_expr under a join");
+    assert_eq!(article_ids(&rows), vec![2]);
+
+    let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    Crew {
+        id: 1,
+        at: at("2025-01-01T00:00:00Z"),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("crew");
+    for (id, when) in [(1, "2024-05-01T00:00:00Z"), (2, "2025-05-01T00:00:00Z")] {
+        Shift {
+            id,
+            at: at(when),
+            crew: Some(ForeignKey::unloaded(1)),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("shift");
+    }
+    let shifts: Vec<Shift> = Shift::objects()
+        .select_related("crew")
+        .filter("at__year", 2025_i64)
+        .fetch(pool)
+        .await
+        .expect("date transform under a join");
+    assert_eq!(shifts.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
+}
+
+/// A join only used to filter adds no columns, even with `values()` (#2412).
+async fn filter_joins_project_nothing(pool: &Pool) {
+    seed_articles(pool).await;
+    // Two editors named Ada, each with a "dup" article: a projected
+    // join column would split the DISTINCT row in two.
+    Editor {
+        id: 2,
+        name: "Ada".into(),
+        profile: ForeignKey::unloaded(1),
+        agency: None,
+    }
+    .insert_pool(pool)
+    .await
+    .expect("editor 2");
+    for id in [3, 4] {
+        Article {
+            id,
+            title: "dup".into(),
+            editor: Some(ForeignKey::unloaded(id - 2)),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("article");
+    }
+    let rows = Article::objects()
+        .filter("editor__name", "Ada")
+        .distinct()
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values over a span filter");
+    let mut titles: Vec<SqlValue> = rows.into_iter().flatten().collect();
+    titles.sort_by_key(|v| format!("{v:?}"));
+    assert_eq!(titles, vec![SqlValue::from("a2"), SqlValue::from("dup")]);
+
+    let dicts = Article::objects()
+        .select_related("editor")
+        .filter("id", 2_i64)
+        .values_dict(&["title"])
+        .fetch(pool)
+        .await
+        .expect("values beside select_related");
+    assert_eq!(dicts.len(), 1);
+    assert_eq!(dicts[0].keys().collect::<Vec<_>>(), vec!["title"]);
+
+    let sub = Article::objects()
+        .filter("editor__name", "Ada")
+        .values_list_flat("editor")
+        .compile()
+        .expect("subquery");
+    let mut eds: Vec<i64> = Editor::objects()
+        .where_in_subquery("id", sub)
+        .fetch(pool)
+        .await
+        .expect("span-filtered IN subquery has one column")
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    eds.sort_unstable();
+    assert_eq!(eds, vec![1, 2]);
+}
+
+/// `None` as a filter value means `IS NULL`, as in Django (#2413).
+async fn none_filter_is_null(pool: &Pool) {
+    seed_articles(pool).await;
+    let ids = |qs: rustango::query::QuerySet<Article>| async move {
+        let rows: Vec<Article> = qs
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("None filter");
+        article_ids(&rows)
+    };
+    let none = None::<i64>;
+    assert_eq!(
+        ids(Article::objects().filter("editor", none)).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__exact", none)).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().exclude("editor", none)).await,
+        vec![2]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__ne", none)).await,
+        vec![2]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__name", None::<String>)).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__name__ne", None::<String>)).await,
+        vec![2]
+    );
+    // Built predicates take the same rule as `filter`.
+    use rustango::core::{Expr, WhereExpr, F};
+    use rustango::query::Q;
+    assert_eq!(
+        ids(Article::objects().where_raw(Q::eq("editor", none).into())).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().where_raw(Q::ne("editor", none).into())).await,
+        vec![2]
+    );
+    let lhs = || -> Expr { F("editor").into() };
+    let compare = |op| WhereExpr::ExprCompare {
+        lhs: lhs(),
+        op,
+        rhs: Expr::Literal(SqlValue::Null),
+    };
+    assert_eq!(
+        ids(Article::objects().where_raw(compare(Op::Eq))).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().where_raw(compare(Op::Ne))).await,
+        vec![2]
+    );
+}
+
+/// DISTINCT needs the ORDER BY term in the select list on PG and MySQL,
+/// so an ordering span projects its column, also over a filter span's join.
+async fn distinct_order_by_relation(pool: &Pool) {
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .distinct()
+        .order_by(&[("editor__name", false), ("id", false)])
+        .fetch(pool)
+        .await
+        .expect("distinct ordered by a relation");
+    assert_eq!(rows.len(), 2);
+    let rows: Vec<Article> = Article::objects()
+        .filter("editor__name__isnull", false)
+        .distinct()
+        .order_by(&[("editor__name", false)])
+        .fetch(pool)
+        .await
+        .expect("distinct ordered by a filtered relation");
+    assert_eq!(article_ids(&rows), vec![2]);
+    assert!(
+        rows[0]
+            .editor
+            .as_ref()
+            .is_some_and(|fk| fk.value().is_none()),
+        "an ordering span does not load the relation"
+    );
+    // The helper column the ORDER BY needs stays out of value rows.
+    let distinct = || {
+        Article::objects()
+            .distinct()
+            .order_by(&[("editor__name", false), ("title", false)])
+    };
+    let list = distinct()
+        .values_list(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values_list ordered by a relation");
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert!(list.iter().all(|r| r.len() == 1), "{list:?}");
+    let dicts = distinct()
+        .values_dict(&["title"])
+        .fetch(pool)
+        .await
+        .expect("distinct values_dict ordered by a relation");
+    assert_eq!(dicts.len(), 2);
+    assert!(
+        dicts.iter().all(|r| r.keys().eq(["title"].iter())),
+        "{dicts:?}"
+    );
+}
+
+/// A relation filter on the tx and executor paths: the filter join is not
+/// decoded, a `select_related` one still is.
+async fn relation_filter_on_tx_and_executor(pool: &Pool) {
+    use rustango::sql::{transaction_pool, FetcherTx as _};
+    seed_articles(pool).await;
+    let filtered = || Article::objects().filter("editor__profile__bio", "bio");
+    let mut tx = transaction_pool(pool).await.expect("begin");
+    let rows = filtered().fetch_tx(&mut tx).await.expect("tx fetch");
+    assert_eq!(article_ids(&rows), vec![2]);
+    assert!(rows[0]
+        .editor
+        .as_ref()
+        .is_some_and(|fk| fk.value().is_none()));
+    let rows = filtered()
+        .select_related("editor")
+        .fetch_tx(&mut tx)
+        .await
+        .expect("tx fetch with select_related");
+    assert_eq!(editor_name(&rows[0]), Some("Ada"));
+    tx.commit().await.expect("commit");
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        let rows = filtered()
+            .select_related("editor")
+            .fetch_on(pg)
+            .await
+            .expect("fetch_on");
+        assert_eq!(editor_name(&rows[0]), Some("Ada"));
+    }
+}
+
+/// A bare `F` naming a joined column stays bare; the DISTINCT ON fallback's
+/// outer ORDER BY reads the derived table's bare names.
+async fn bare_f_on_joined_column_and_distinct_on(pool: &Pool) {
+    use rustango::core::{funcs::abs, F};
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .select_related("editor")
+        .order_by_expr(F("name"), false)
+        .fetch(pool)
+        .await
+        .expect("bare F on a joined column");
+    assert_eq!(rows.len(), 2);
+    let rows: Vec<Article> = Article::objects()
+        .filter("editor__name__isnull", false)
+        .distinct_on(&["title"])
+        .order_by(&[("title", false)])
+        .order_by_expr(abs(F("id")), false)
+        .fetch(pool)
+        .await
+        .expect("distinct_on under a join");
+    assert_eq!(article_ids(&rows), vec![2]);
 }
 
 /// Past every backend's bind cap: 33k rows x 2 binds, 70k `IN` keys.
@@ -754,6 +1051,12 @@ tri_dialect_test! {
         sibling_chains_three_levels_both_load,
         null_fk_on_a_deeper_hop,
         isnull_across_a_null_fk,
+        bare_columns_qualified_under_joins,
+        filter_joins_project_nothing,
+        none_filter_is_null,
+        distinct_order_by_relation,
+        relation_filter_on_tx_and_executor,
+        bare_f_on_joined_column_and_distinct_on,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
         sliced_in_bulk_past_the_bind_cap_is_refused,
