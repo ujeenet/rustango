@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### ViewSet field-rule errors (#2529)
+
+A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `400` with `details` keyed by field.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

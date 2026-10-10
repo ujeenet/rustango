@@ -1917,7 +1917,7 @@ impl WriteSet {
     fn insert_values(
         &self,
         form: &HashMap<String, String>,
-    ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    ) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
@@ -1928,6 +1928,7 @@ impl WriteSet {
         // A pin replaces a stamped `auto` value rather than doubling the column.
         out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
         out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
+        self.check(&out)?;
         Ok(out)
     }
 
@@ -1936,22 +1937,81 @@ impl WriteSet {
         &self,
         form: &HashMap<String, String>,
         partial: bool,
-    ) -> Result<Vec<Assignment>, FormError> {
+    ) -> Result<Vec<Assignment>, Refusal> {
         let mut out = Vec::new();
         for field in self.updatable() {
             if partial && !form.contains_key(field.name) {
                 continue;
             }
             match parse_form_value(field, form.get(field.name).map(String::as_str)) {
-                Ok(v) => out.push(Assignment {
-                    column: field.column,
-                    value: v.into(),
-                }),
+                Ok(v) => out.push((field.column, v)),
                 Err(FormError::Missing { .. }) if partial => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
-        Ok(out)
+        self.check(&out)?;
+        Ok(out
+            .into_iter()
+            .map(|(column, v)| Assignment {
+                column,
+                value: v.into(),
+            })
+            .collect())
+    }
+
+    /// The model's field rules, checked here so a rejection is a 400 (#2529).
+    fn check(&self, values: &[(&'static str, SqlValue)]) -> Result<(), Refusal> {
+        for (column, value) in values {
+            let Some(field) = self.schema.scalar_fields().find(|f| f.column == *column) else {
+                continue;
+            };
+            if let Err(e) = crate::core::validate_value(self.schema.name, field, value) {
+                // Anything else (an unknown validator) is the server's; the write reports it.
+                if let Some((_, message)) = e.value_rejection() {
+                    return Err(Refusal::Invalid {
+                        field: field.name,
+                        message,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a body cannot be written: unparseable, or refused by a field rule.
+enum Refusal {
+    Form(FormError),
+    Invalid {
+        field: &'static str,
+        message: String,
+    },
+}
+
+impl From<FormError> for Refusal {
+    fn from(e: FormError) -> Self {
+        Self::Form(e)
+    }
+}
+
+impl Refusal {
+    /// The `400`, under the field names the API publishes; `entry` prefixes a bulk index.
+    fn into_response(self, state: &ViewSetState, entry: Option<usize>) -> Response {
+        let prefix = entry
+            .map(|i| format!("bulk entry {i}: "))
+            .unwrap_or_default();
+        match self {
+            Self::Form(e) => json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("{prefix}{}", public_form_error(state, e)),
+            ),
+            Self::Invalid { field, message } => {
+                let key = serializer_public_field_name(state, field).unwrap_or(field);
+                crate::api_errors::ApiError::bad_request(format!("{prefix}invalid input"))
+                    .with_details(json!({ key: [message] }))
+                    .into_response()
+            }
+        }
     }
 }
 
@@ -3172,9 +3232,14 @@ async fn insert_and_fetch_one(
 }
 
 /// A failed INSERT/UPDATE: a duplicate key is a `409`, any other database
-/// rejection a `400`, driver text withheld; anything else (an audit write) is a logged `500`.
+/// rejection or field-rule refusal a `400`, driver text withheld; anything else is a logged `500`.
 fn write_failure(context: &str, e: &crate::sql::ExecError) -> (StatusCode, String) {
-    let client_caused = matches!(e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
+    use crate::sql::ExecError;
+    let client_caused = match e {
+        ExecError::Driver(sqlx::Error::Database(_)) => true,
+        ExecError::Query(q) => q.value_rejection().is_some(),
+        _ => false,
+    };
     let body = crate::error::client_error_body(context, e, client_caused);
     let status = if e.is_unique_violation() {
         StatusCode::CONFLICT
@@ -3206,12 +3271,7 @@ async fn create_one(
     let form = renamed.as_ref().unwrap_or(form);
     let collected = match write_set.insert_values(form) {
         Ok(v) => v,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                &public_form_error(state, e).to_string(),
-            )
-        }
+        Err(e) => return e.into_response(state, None),
     };
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
@@ -3255,10 +3315,7 @@ async fn create_many(
         let row = renamed.as_ref().unwrap_or(row);
         let collected = match write_set.insert_values(row) {
             Ok(v) => v,
-            Err(e) => {
-                let e = public_form_error(state, e);
-                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
-            }
+            Err(e) => return e.into_response(state, Some(i)),
         };
         prepared.push(collected.into_iter().unzip());
     }
@@ -3428,12 +3485,7 @@ async fn update_inner(
 
     let assignments = match write_set.update_assignments(form, partial) {
         Ok(a) => a,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                &public_form_error(&state, e).to_string(),
-            )
-        }
+        Err(e) => return e.into_response(&state, None),
     };
 
     if assignments.is_empty() {

@@ -299,3 +299,98 @@ async fn two_pins_on_one_field_write_it_once_or_deny() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(count(&sq).await, 4, "only the agreeing create wrote");
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "vs_wf_item")]
+#[rustango(app = "vs_wf_app")]
+#[allow(dead_code)]
+pub struct Item {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 20)]
+    pub title: String,
+    #[rustango(
+        max_length = 10,
+        choices = "draft:Draft, live:Live",
+        default = "'draft'"
+    )]
+    pub status: String,
+    #[rustango(max_length = 60, validators = "email")]
+    pub contact: Option<String>,
+    #[rustango(max_length = 10, default = "'n/a'")]
+    pub note: Option<String>,
+    #[rustango(default = "true")]
+    pub is_public: bool,
+    pub settings: serde_json::Value,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn item_pool() -> sqlx::SqlitePool {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE vs_wf_item (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL, \
+            status TEXT NOT NULL DEFAULT 'draft', \
+            contact TEXT, \
+            note TEXT DEFAULT 'n/a', \
+            is_public BOOLEAN NOT NULL DEFAULT true, \
+            settings TEXT NOT NULL, \
+            updated_at TEXT NOT NULL)",
+    )
+    .execute(&sq)
+    .await
+    .expect("create");
+    sq
+}
+
+fn items(sq: &sqlx::SqlitePool) -> axum::Router {
+    ViewSet::for_model(Item::SCHEMA).router_pool("/items", Pool::Sqlite(sq.clone()))
+}
+
+/// Create one item through the API; returns its id.
+async fn new_item(app: &axum::Router) -> i64 {
+    let body = r#"{"title":"t","status":"live","note":"x","is_public":false,"settings":{"a":1}}"#;
+    let (status, v) = send(app, req(Method::POST, "/items", body, None)).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    v["id"].as_i64().expect("id")
+}
+
+/// #2529: a value the model's rules reject is the client's 400, per field.
+#[tokio::test]
+async fn model_validation_failure_is_a_400_field_error() {
+    let sq = item_pool().await;
+    let app = items(&sq);
+    for (body, field) in [
+        (r#"{"title":"t","status":"bogus","settings":{}}"#, "status"),
+        (
+            r#"{"title":"t","contact":"not-an-email","settings":{}}"#,
+            "contact",
+        ),
+        (
+            r#"{"title":"twenty-one-characters","settings":{}}"#,
+            "title",
+        ),
+    ] {
+        let (status, v) = send(&app, req(Method::POST, "/items", body, None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert!(v["details"][field].is_array(), "{body}: {v}");
+    }
+    let bulk = r#"[{"title":"t","settings":{}},{"title":"t","status":"bogus","settings":{}}]"#;
+    let (status, v) = send(&app, req(Method::POST, "/items", bulk, None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["details"]["status"].is_array(), "{v}");
+
+    let id = new_item(&app).await;
+    let uri = format!("/items/{id}");
+    let (status, v) = send(
+        &app,
+        req(Method::PATCH, &uri, r#"{"status":"bogus"}"#, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["details"]["status"].is_array(), "{v}");
+}

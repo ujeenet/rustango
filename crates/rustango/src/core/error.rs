@@ -199,6 +199,48 @@ pub enum QueryError {
     GroupByJoinUnreachable { model: &'static str, column: String },
 }
 
+impl QueryError {
+    /// `(field, message)` when a field's declared rules rejected the value:
+    /// the client's error, not the server's (#2529).
+    #[must_use]
+    pub fn value_rejection(&self) -> Option<(&str, String)> {
+        match self {
+            Self::MaxLengthExceeded {
+                field, max, actual, ..
+            } => Some((
+                field,
+                format!("must be {max} characters or fewer (got {actual})"),
+            )),
+            Self::OutOfRange {
+                field,
+                value,
+                min,
+                max,
+                ..
+            } => Some((
+                field,
+                match (min, max) {
+                    (Some(lo), Some(hi)) => format!("must be between {lo} and {hi} (got {value})"),
+                    (Some(lo), None) => format!("must be ≥ {lo} (got {value})"),
+                    (None, Some(hi)) => format!("must be ≤ {hi} (got {value})"),
+                    (None, None) => format!("invalid value: {value}"),
+                },
+            )),
+            Self::InvalidChoice {
+                field,
+                value,
+                allowed,
+                ..
+            } => Some((
+                field,
+                format!("`{value}` is not one of: {}", allowed.join(", ")),
+            )),
+            Self::ValidatorFailed { field, reason, .. } => Some((field, reason.clone())),
+            _ => None,
+        }
+    }
+}
+
 /// Why a bounded `update()`/`delete()` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

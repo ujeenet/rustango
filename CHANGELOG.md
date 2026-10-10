@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a ViewSet write that breaks a field rule is a `400`, not a `500` (#2529)
+
+`choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `400` with `details: {field: [message]}`. New `QueryError::value_rejection`.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.
