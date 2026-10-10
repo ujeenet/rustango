@@ -18,7 +18,7 @@ The field is left out of the INSERT, and the OpenAPI create body no longer marks
 
 ### Fixed — ViewSet PUT/PATCH, `UpdateView` and `ModelForm` updates restamp `auto_now` (#2527)
 
-The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping helper.
+The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping step; `auto_now_add` is left alone.
 
 ### Fixed — a ViewSet write that breaks a field rule is a `422`, not a `500` (#2529)
 

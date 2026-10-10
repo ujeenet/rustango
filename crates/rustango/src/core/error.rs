@@ -203,7 +203,11 @@ impl QueryError {
     /// `(field, message)` when a field's declared rules rejected the value:
     /// the client's error, not the server's (#2529).
     #[must_use]
-    pub fn value_rejection(&self) -> Option<(&str, String)> {
+    #[cfg_attr(
+        not(any(feature = "admin", feature = "tenancy", feature = "template_views")),
+        allow(dead_code)
+    )]
+    pub(crate) fn value_rejection(&self) -> Option<(&str, String)> {
         match self {
             Self::MaxLengthExceeded {
                 field, max, actual, ..

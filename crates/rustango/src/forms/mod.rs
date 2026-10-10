@@ -284,7 +284,8 @@ pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> b
 /// Empty string + nullable field → `SqlValue::Null`.
 /// Empty string + required field → `FormError::Missing`.
 /// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
-/// and `NULL` for a nullable one.
+/// and `NULL` for a nullable one. A Bool accepts `true/false/1/0/on/off/yes/no`
+/// (any case) or empty; anything else is a [`FormError::Parse`].
 ///
 /// # Errors
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
@@ -515,7 +516,7 @@ pub fn collect_values(
 /// Separate from [`collect_values`] rather than a flag on it because
 /// the two differ on UPDATE: `auto_now` is restamped there and
 /// `auto_now_add` must not be. UPDATE keeps the plain version plus
-/// [`stamp_auto_now`].
+/// `stamp_auto_now`.
 ///
 /// # Errors
 /// As [`collect_values`].
@@ -555,7 +556,7 @@ fn insert_stamp(field: &FieldSchema, now: chrono::DateTime<chrono::Utc>) -> Opti
 /// build those directly rather than through [`collect_insert_values`].
 ///
 /// **INSERT only.** `auto_now_add` is immutable after insert; an
-/// UPDATE uses [`stamp_auto_now`] instead.
+/// UPDATE uses `stamp_auto_now` instead.
 ///
 /// Idempotent — a column already in the list is left as the caller set
 /// it, so an explicit value always wins.
@@ -581,7 +582,7 @@ pub fn stamp_auto_timestamps(
 
 /// Restamp every `auto_now` column an UPDATE's `set` list does not
 /// already carry; `auto_now_add` is left alone (#2527).
-pub fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'static str, SqlValue)>) {
+pub(crate) fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'static str, SqlValue)>) {
     let now = chrono::Utc::now();
     for f in model.scalar_fields() {
         if f.auto_now && !set.iter().any(|(c, _)| *c == f.column) {
@@ -1819,6 +1820,32 @@ mod model_form_tests {
         pub maybe: Option<bool>,
     }
 
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_stamped")]
+    #[allow(dead_code)]
+    pub struct Stamped {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 50)]
+        pub title: String,
+        #[rustango(auto_now_add)]
+        pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+        #[rustango(auto_now)]
+        pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+    }
+
+    /// #2527: an update restamps `auto_now`, never `auto_now_add`.
+    #[test]
+    fn into_update_query_restamps_only_auto_now() {
+        let p = HashMap::from([("title".to_owned(), "t".to_owned())]);
+        let q = ModelFormFor::<Stamped>::parse(&p)
+            .expect("valid")
+            .into_update_query(crate::core::SqlValue::I64(1))
+            .expect("pk");
+        let cols: Vec<&str> = q.set.iter().map(|a| a.column).collect();
+        assert_eq!(cols, ["title", "updated_at"]);
+    }
+
     /// #2530: a Bool accepts only the known spellings; junk is not `true`.
     #[test]
     fn bool_parse_is_strict() {
@@ -1827,7 +1854,11 @@ mod model_form_tests {
             ("on", true),
             ("Yes", true),
             ("1", true),
+            ("TRUE", true),
             ("false", false),
+            ("0", false),
+            ("off", false),
+            ("NO", false),
             ("", false),
         ] {
             assert_eq!(
