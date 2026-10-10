@@ -30,6 +30,31 @@ pub struct FieldSchema {
     pub primary_key: bool,
     pub relation: Option<Relation>,
     /// Maximum string length in characters. Only meaningful for `FieldType::String`.
+    ///
+    /// A key needs one: MySQL cannot index the LONGTEXT an unbounded
+    /// `String` becomes (#2575).
+    ///
+    /// ```compile_fail
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_keyed")]
+    /// pub struct Keyed {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(unique)]
+    ///     pub email: String,
+    /// }
+    /// ```
+    ///
+    /// ```
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_keyed")]
+    /// pub struct Keyed {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(unique, max_length = 254)]
+    ///     pub email: String,
+    /// }
+    /// ```
     pub max_length: Option<u32>,
     /// Inclusive integer lower bound. Only meaningful for `I32`/`I64`.
     pub min: Option<i64>,

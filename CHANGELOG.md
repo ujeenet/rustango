@@ -24,6 +24,22 @@ The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one
 
 `choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `422 validation_failed` with `details: {field: [message]}`, as serializer errors do.
 
+### Fixed — `managed = false` no longer drops the table (#2576)
+
+A model newly marked unmanaged, or turned into a view, keeps its snapshot entry, so `makemigrations` emits no `DropTable`. Re-managing it writes nothing unless the schema changed.
+
+### Fixed — `--empty` renames reach the next `makemigrations` (#2573)
+
+A hand-written `RenameTable` / `RenameColumn` in an `--empty` migration now updates the diff baseline, so the next run no longer emits Add+Drop for it.
+
+### Fixed — `makemigrations` refuses a branched chain; `--merge` keeps unmigrated edits (#2574)
+
+Two leaves from one history now stop `makemigrations` with "run `--merge`". The merge node names the other leaves in a new `merges` field, and its snapshot joins the branches instead of reading the models.
+
+### Fixed — a keyed `String` needs `max_length` (#2575)
+
+`#[derive(Model)]` rejects a primary-key, unique or indexed `String` without `max_length`, which MySQL could not migrate (error 1170).
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

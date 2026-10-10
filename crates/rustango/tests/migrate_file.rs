@@ -105,6 +105,7 @@ fn round_trip_schema_only_migration() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
             ..Default::default()
@@ -127,6 +128,7 @@ fn round_trip_mixed_schema_and_data_ops() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
             ..Default::default()
@@ -157,6 +159,7 @@ fn round_trip_irreversible_data_op() {
         atomic: false,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![Operation::Data(DataOp {
             sql: "DELETE FROM events WHERE created < NOW() - INTERVAL '90 days'".into(),
@@ -187,6 +190,7 @@ fn write_then_load_round_trip_via_filesystem() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
             ..Default::default()
@@ -308,6 +312,7 @@ fn migration_with_empty_forward_round_trips() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -406,6 +411,7 @@ fn list_dir_rejects_broken_prev_chain() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -435,6 +441,7 @@ fn list_dir_accepts_well_formed_chain() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -445,6 +452,7 @@ fn list_dir_accepts_well_formed_chain() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -468,6 +476,7 @@ fn list_dir_skips_subdirectories() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };

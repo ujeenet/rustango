@@ -256,14 +256,14 @@ cargo run -- makemigrations --empty rename_status_to_state
 Fixes a migration history that has split into two branches (issue #346).
 This happens when two people each run `makemigrations` on their own
 feature branch, so both new files point at the same parent. After both branches merge, the
-history has two "leaves" (end points), and the next `makemigrations`
-would arbitrarily pick one as its parent.
+history has two "leaves" (end points), and `makemigrations` refuses to
+run until they are merged.
 
 `--merge` detects this and writes an empty `NNNN_merge.json` whose parent
-points at the last leaf alphabetically, reuniting the history into one
-chain. Its schema snapshot reflects the combined state, read from the
-live model registry — both branches' models are compiled in at this
-point, so the snapshot is accurate.
+points at the last leaf alphabetically and whose `merges` names the
+others, reuniting the history into one chain. Its schema snapshot joins
+the branches' snapshots, so model edits not yet migrated still show up
+in the next `makemigrations`.
 
 ```bash
 cargo run -- makemigrations --merge

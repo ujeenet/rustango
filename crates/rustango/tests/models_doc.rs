@@ -236,6 +236,7 @@ pub struct DocProfile {
     pub gadget_id: i64,
     #[rustango(fk = "md_account", on_delete = "cascade")]
     pub account_id: i64,
+    #[rustango(max_length = 500)]
     pub bio: String,
 }
 

@@ -854,6 +854,26 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     }
+    // An unbounded String is LONGTEXT on MySQL, which no key can hold (1170, #2575).
+    for field in &named.named {
+        let (Ok(fa), Ok(det)) = (parse_field_attrs(field), detect_type(&field.ty)) else {
+            continue;
+        };
+        if det.kind != DetectedKind::String || fa.max_length.is_some() {
+            continue;
+        }
+        let col = fa
+            .column
+            .clone()
+            .unwrap_or_else(|| ident_name(field.ident.as_ref().expect("named")));
+        if fa.primary_key || fa.unique || all_indexes.iter().any(|i| i.columns.contains(&col)) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "a primary-key, unique or indexed `String` needs `max_length`: \
+                 MySQL cannot index an unbounded (LONGTEXT) column",
+            ));
+        }
+    }
 
     let model_impl = model_impl_tokens(
         struct_name,

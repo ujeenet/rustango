@@ -74,6 +74,7 @@ async fn a_failure_after_committed_ddl_names_the_recovery_path() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: vec![],
+        merges: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         forward: vec![
             rustango::migrate::Operation::Schema(SchemaChange::DropTable(table.clone())),
@@ -165,6 +166,7 @@ async fn a_failure_before_any_ddl_is_still_a_plain_driver_error() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: vec![],
+        merges: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         // Invalid SQL first — nothing DDL has run when it fails.
         forward: vec![rustango::migrate::Operation::Data(
@@ -225,6 +227,7 @@ async fn data_committed_before_a_failing_ddl_is_reported() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: vec![],
+        merges: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         forward: vec![
             rustango::migrate::Operation::Data(
@@ -294,6 +297,7 @@ fn migration(
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: vec![],
+        merges: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         forward,
     }

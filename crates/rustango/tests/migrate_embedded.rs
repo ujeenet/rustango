@@ -81,6 +81,7 @@ fn make_migration_json(table: &str, name: &str) -> String {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: snapshot_with_table(table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(
             table.to_owned(),
@@ -237,6 +238,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };
