@@ -44,6 +44,7 @@ pub enum Action {
 
 /// What happened, for a caller to render.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Report {
     pub slug: String,
     /// Already inactive, so a deactivate changed nothing.
@@ -52,6 +53,11 @@ pub struct Report {
     pub schema_dropped: Option<String>,
     pub database_dropped: Option<String>,
     pub row_deleted: bool,
+    /// Media objects deleted from storage before the purge.
+    pub media_deleted: usize,
+    /// `(disk, key)` of each media object left in storage: no disk
+    /// configured, or a failed delete. Unknowable once the rows are gone.
+    pub media_left: Vec<(String, String)>,
     /// Anything the operator still has to do by hand.
     pub notes: Vec<String>,
 }
@@ -132,6 +138,230 @@ async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, Tenancy
     Ok(updated)
 }
 
+/// Delete the tenant's media objects, by its `rustango_media` rows: a
+/// key can't be found once they are gone (#2569). Only from storage proven
+/// to be the tenant's own; best-effort, what stays is listed in the report.
+#[cfg(feature = "media")]
+async fn purge_media<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org: &Org,
+    mode: StorageMode,
+    pg_exclusive: bool,
+    report: &mut Report,
+) where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Model as _;
+    use crate::media::Media;
+    let table = Media::SCHEMA.table;
+
+    let rows: Result<Vec<Media>, String> = async {
+        match mode {
+            // By name: with the schema gone, the search path reaches `public`.
+            StorageMode::Schema => {
+                if !schema_has_table(registry, org.effective_schema(), table).await? {
+                    return Ok(Vec::new());
+                }
+            }
+            // The Postgres guards above already proved it exclusive.
+            StorageMode::Database if pg_exclusive => {}
+            StorageMode::Database => exclusive_database(pools, registry, org).await?,
+        }
+        let (pool, own) = pools
+            .existing_pool_dyn(org)
+            .await
+            .map_err(|e| e.to_string())?;
+        let rows = async {
+            // URLs compare as text; the registry's own table catches an alias of its database.
+            if mode == StorageMode::Database
+                && !pg_exclusive
+                && crate::migrate::try_table_exists_here(&pool, Org::SCHEMA.table)
+                    .await
+                    .map_err(|e| e.to_string())?
+            {
+                return Err("the database may be shared: it holds the registry's tables".into());
+            }
+            if mode == StorageMode::Database
+                && !crate::migrate::try_table_exists_here(&pool, table)
+                    .await
+                    .map_err(|e| e.to_string())?
+            {
+                return Ok(Vec::new());
+            }
+            Media::objects()
+                .fetch(&pool)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        if own {
+            pool.close().await;
+        }
+        rows
+    }
+    .await;
+    // The listing may have opened a tenant pool; don't keep it past the drop.
+    pools.invalidate(&org.slug).await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            report.notes.push(format!(
+                "media objects not deleted, any stay in storage: {e}"
+            ));
+            return;
+        }
+    };
+    let storage = pools.pool_config().media_storage.as_ref();
+    let mut first_error = None;
+    for m in rows {
+        let deleted = match storage.map(|s| s.disk(&m.disk)) {
+            Some(Some(disk)) => disk.delete(&m.storage_key).await.map_err(|e| e.to_string()),
+            Some(None) => Err(format!("unknown disk `{}`", m.disk)),
+            None => Err("no `TenantPoolsConfig::media_storage` set".to_owned()),
+        };
+        match deleted {
+            Ok(()) => report.media_deleted += 1,
+            Err(e) => {
+                report.media_left.push((m.disk, m.storage_key));
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = first_error {
+        report.notes.push(format!(
+            "{} media objects left in storage ({e}); their keys are listed",
+            report.media_left.len()
+        ));
+    }
+}
+
+/// Whether `schema.table` exists, asked by name.
+#[cfg(feature = "media")]
+async fn schema_has_table(
+    registry: &crate::sql::Pool,
+    schema: &str,
+    table: &str,
+) -> Result<bool, String> {
+    #[allow(unreachable_patterns)]
+    match registry {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            crate::migrate::try_table_exists_in_schema(pg, schema, table)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        _ => {
+            let _ = (schema, table);
+            Err("schema mode needs a Postgres registry".to_owned())
+        }
+    }
+}
+
+/// `Ok` when no other tenant and not the registry use this database-mode
+/// tenant's database. The Postgres purge refuses that; other backends drop
+/// nothing, so only the media step needs the proof (#2569).
+#[cfg(feature = "media")]
+async fn exclusive_database<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry: &crate::sql::Pool,
+    org: &Org,
+) -> Result<(), String>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let shared = |why: String| format!("the database may be shared: {why}");
+    let url = pools
+        .resolved_database_url(org)
+        .await
+        .map_err(|e| e.to_string())?;
+    let me = DbIdentity::of_url(&url)
+        .ok_or_else(|| shared("its URL names no existing file or server database".into()))?;
+    if DbIdentity::of_pool(registry).as_ref() == Some(&me) {
+        return Err(shared("it is the registry's".into()));
+    }
+    let others: Vec<Org> = Org::objects()
+        .where_(Org::storage_mode.eq(StorageMode::Database.as_str().to_owned()))
+        .fetch(registry)
+        .await
+        .map_err(|e| e.to_string())?;
+    for other in others
+        .iter()
+        .filter(|o| o.id.get() != org.id.get() && o.database_url.is_some())
+    {
+        let url = pools
+            .resolved_database_url(other)
+            .await
+            .map_err(|_| shared(format!("tenant `{}`'s URL can't be resolved", other.slug)))?;
+        if DbIdentity::of_url(&url).as_ref() == Some(&me) {
+            return Err(shared(format!("tenant `{}` uses it too", other.slug)));
+        }
+    }
+    Ok(())
+}
+
+/// Where a SQLite or MySQL database lives, as far as its URL tells.
+/// Text-level for a server, so `localhost` and `127.0.0.1` differ.
+#[cfg(feature = "media")]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(all(feature = "sqlite", feature = "mysql")), allow(dead_code))]
+enum DbIdentity {
+    File(std::path::PathBuf),
+    Server {
+        host: String,
+        port: u16,
+        database: String,
+    },
+}
+
+#[cfg(feature = "media")]
+impl DbIdentity {
+    fn of_url(url: &str) -> Option<Self> {
+        #[cfg(feature = "sqlite")]
+        if url.starts_with("sqlite:") {
+            let o =
+                <sqlx::sqlite::SqliteConnectOptions as std::str::FromStr>::from_str(url).ok()?;
+            return Self::file(o.get_filename());
+        }
+        #[cfg(feature = "mysql")]
+        if url.starts_with("mysql:") || url.starts_with("mariadb:") {
+            let o = <sqlx::mysql::MySqlConnectOptions as std::str::FromStr>::from_str(url).ok()?;
+            return Self::server(o.get_host(), o.get_port(), o.get_database());
+        }
+        let _ = url;
+        None
+    }
+
+    fn of_pool(pool: &crate::sql::Pool) -> Option<Self> {
+        #[allow(unreachable_patterns)]
+        match pool {
+            #[cfg(feature = "sqlite")]
+            crate::sql::Pool::Sqlite(p) => Self::file(p.connect_options().get_filename()),
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(p) => {
+                let o = p.connect_options();
+                Self::server(o.get_host(), o.get_port(), o.get_database())
+            }
+            _ => None,
+        }
+    }
+
+    /// An existing file, canonical: `None` for a missing or in-memory one.
+    #[cfg(feature = "sqlite")]
+    fn file(path: &std::path::Path) -> Option<Self> {
+        std::fs::canonicalize(path).ok().map(Self::File)
+    }
+
+    #[cfg(feature = "mysql")]
+    fn server(host: &str, port: u16, database: Option<&str>) -> Option<Self> {
+        Some(Self::Server {
+            host: host.to_ascii_lowercase(),
+            port,
+            database: database?.to_owned(),
+        })
+    }
+}
+
 async fn purge<DB: Database>(
     pools: &TenantPools<DB>,
     registry: &crate::sql::Pool,
@@ -181,6 +411,15 @@ where
     deactivate(registry, id).await?;
     super::invalidate_org_cache();
     pools.invalidate(slug).await;
+    // While the rows that name the keys still exist (#2569).
+    #[cfg(feature = "media")]
+    {
+        #[cfg(feature = "postgres")]
+        let pg_exclusive = pg_target.is_some();
+        #[cfg(not(feature = "postgres"))]
+        let pg_exclusive = false;
+        purge_media(pools, registry, org, mode, pg_exclusive, report).await;
+    }
 
     // Every drop is `IF EXISTS`, so a retry after a partial purge is safe.
     match mode {

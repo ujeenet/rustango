@@ -107,6 +107,13 @@ pub(super) async fn purge(
             if report.database_dropped.is_some() {
                 msg.push_str(" — dropped its database");
             }
+            if report.media_deleted > 0 {
+                let _ = write!(msg, " — deleted {} media objects", report.media_deleted);
+            }
+            // Too many for a flash message; the log keeps every key.
+            for (disk, key) in &report.media_left {
+                tracing::warn!(target: "rustango::tenancy::decommission", tenant = %slug, disk, key, "media object left in storage");
+            }
             for note in &report.notes {
                 let _ = write!(msg, " — {note}");
             }

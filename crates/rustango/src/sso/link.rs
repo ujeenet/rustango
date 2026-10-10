@@ -405,6 +405,47 @@ impl std::fmt::Display for LinkRefusal {
     }
 }
 
+#[cfg(feature = "signals")]
+impl LinkRefusal {
+    /// The `user_login_failed` reason; `None` for a storage error, which is no refusal.
+    pub(crate) fn failure_reason(&self) -> Option<crate::signals::auth::AuthFailureReason> {
+        use crate::signals::auth::AuthFailureReason as R;
+        match self {
+            Self::Storage(_) => None,
+            Self::Inactive => Some(R::Inactive),
+            Self::NoSubject
+            | Self::Unverified
+            | Self::NoAccount(_)
+            | Self::EmailLinkDisabled
+            | Self::Privileged
+            | Self::EmailCollides => Some(R::InvalidCredentials),
+        }
+    }
+}
+
+/// Send `user_login_failed` for a refused SSO sign-in, naming the IdP's
+/// verified email, else its subject (#2559).
+#[cfg(feature = "signals")]
+pub(crate) async fn signal_refused(
+    source: &'static str,
+    profile: &NormalizedUser,
+    reason: crate::signals::auth::AuthFailureReason,
+    request: crate::signals::auth::AuthRequestMeta,
+) {
+    let attempted = super::verified_email(profile)
+        .ok()
+        .map(str::to_owned)
+        .or_else(|| Some(profile.provider_user_id.clone()))
+        .filter(|s| !s.is_empty());
+    crate::signals::auth::send_user_login_failed(crate::signals::auth::UserLoginFailedContext {
+        source,
+        attempted_username: attempted,
+        reason,
+        request,
+    })
+    .await;
+}
+
 fn storage(e: impl std::fmt::Display) -> LinkRefusal {
     LinkRefusal::Storage(e.to_string())
 }

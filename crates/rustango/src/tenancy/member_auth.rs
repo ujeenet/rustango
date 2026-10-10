@@ -397,7 +397,7 @@ pub struct MemberAuthConfig {
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
     /// time it's seen. When `false`, an unknown email is refused.
-    /// Default `true`.
+    /// Default `false`: the provider rows are shared with the tenant console.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -408,7 +408,7 @@ impl Default for MemberAuthConfig {
         Self {
             login_base: "/auth".to_owned(),
             landing_url: "/".to_owned(),
-            auto_provision: true,
+            auto_provision: false,
             session_ttl: 7 * 24 * 60 * 60,
         }
     }
@@ -715,15 +715,37 @@ async fn sso_callback_in(
     };
 
     let key = resolved.key(LinkSource::Tenant);
-    let member_id = match find_or_provision_member(
+    let meta = || {
+        crate::signals::auth::meta_from_parts(
+            &parts.extensions,
+            &parts.headers,
+            Some(parts.uri.path()),
+        )
+    };
+    let outcome = find_or_provision_member(
         pool,
         &key,
         resolved.allow_email_link,
         &normalized,
         config.auto_provision,
     )
-    .await
-    {
+    .await;
+    if let Ok(signed) = &outcome {
+        use crate::signals::auth::AuthFailureReason as R;
+        let reason = match signed {
+            MemberSignIn::Member(_) => None,
+            MemberSignIn::Inactive => Some(R::Inactive),
+            MemberSignIn::NotLinked
+            | MemberSignIn::NoAccount
+            | MemberSignIn::Unverified
+            | MemberSignIn::Refused => Some(R::InvalidCredentials),
+        };
+        if let Some(reason) = reason {
+            crate::sso::link::signal_refused(MEMBER_SIGNAL_SOURCE, &normalized, reason, meta())
+                .await;
+        }
+    }
+    let member_id = match outcome {
         Ok(MemberSignIn::Member(id)) => id,
         Ok(MemberSignIn::NotLinked) => {
             return clear_flow(sso_error(
@@ -764,8 +786,19 @@ async fn sso_callback_in(
     };
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
+    crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
+        source: MEMBER_SIGNAL_SOURCE,
+        user_id: member_id,
+        username: member.username.clone(),
+        is_superuser: member.is_superuser,
+        request: meta(),
+    })
+    .await;
     clear_flow(redirect_with_cookie(&landing, &cookie))
 }
+
+/// The auth-signal `source` for a member SSO sign-in.
+const MEMBER_SIGNAL_SOURCE: &str = "member_sso";
 
 /// The mounted context's session secret, whichever backend it is for.
 fn session_secret(parts: &Parts) -> Option<SessionSecret> {
@@ -1095,6 +1128,12 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::of(&secret(), "$argon2id$test")
+    }
+
+    /// #2560 — provisioning a user from any verified email is opt-in.
+    #[test]
+    fn member_sso_does_not_auto_provision_by_default() {
+        assert!(!MemberAuthConfig::default().auto_provision);
     }
 
     /// #2144: the SSO error page passes a strict CSP: no style attribute,

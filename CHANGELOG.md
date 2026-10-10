@@ -42,6 +42,26 @@ Two leaves from one history now stop `makemigrations` with "run `--merge`". The 
 
 ## [0.60.5] — 2026-10-10
 
+### Security — purging a tenant deletes its media objects (#2569)
+
+With the `media` feature, `purge-tenant` and the console purge delete each `rustango_media` object from `TenantPoolsConfig::media_storage` before the tenant's storage goes, and list each one left. Only storage proven to be the tenant's own is touched: the named schema, or a database no other tenant or the registry uses.
+
+### Fixed — SSO sign-ins fire `user_logged_in` and `user_login_failed` (#2559)
+
+The bare-admin, tenant console and member SSO callbacks send both, with sources `admin_sso`, `tenant_admin_sso` and `member_sso`. The admin SSO TOTP failure now uses `admin_sso` too, not `admin`.
+
+### Security — member SSO auto-provisioning is opt-in (#2560)
+
+`MemberAuthConfig::auto_provision` defaults to `false`, so a provider added for console SSO no longer creates a user for any verified email.
+
+### Security — a scoped MCP user key no longer widens when its last skill is revoked (#2537)
+
+The key records that it is scoped in `Agent.data`, also when a grant is added or revoked later; with no grants left it gets no tools instead of the owner's full entitlement.
+
+### Security — media stores malformed MIME types as octet-stream (#2570)
+
+A type/subtype with non-token characters (a space, a control byte) or `multipart/x-mixed-replace` is stored and signed as `application/octet-stream`, so a browser can't sniff the body into HTML. `text/jscript`, `text/livescript`, `text/vbscript` and `text/css` are too.
+
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
 
 Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.

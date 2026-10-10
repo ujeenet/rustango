@@ -181,6 +181,22 @@ A primary-key, `unique` or indexed `String` (field or container index) without `
 
 ## 0.60.5
 
+### Purge deletes media objects
+
+Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it lists the `(disk, key)` of each one it left (#2569). On MySQL and SQLite it deletes only when no other tenant and not the registry use the tenant's database. `TenantPoolsConfig` gains a field, so its struct literals need `..Default::default()`; `decommission::Report` is now `#[non_exhaustive]`.
+
+### SSO sign-ins send auth signals
+
+SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`. A refusal names the IdP's email only when verified, else its subject.
+
+### Member SSO no longer provisions users by default
+
+`MemberAuthConfig::default().auto_provision` is now `false`: an unknown verified email is refused (#2560). Set `auto_provision: true` to keep creating members on first sign-in.
+
+### Scoped MCP user keys stay scoped
+
+The framework now reads `Agent.data["scoped"]`: set at creation, on any grant or revoke, and on the next resolve of a key with grants. Such a key with no grants left resolves to no tools instead of the owner's full set (#2537). `data` is read-only in the agent admin. An old scoped key whose grants were all removed before upgrading still counts as unscoped; revoke and reissue it.
+
 ### Passkeys in `public` on schema-mode tenants
 
 `migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.

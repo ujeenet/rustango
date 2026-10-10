@@ -27,7 +27,8 @@ use crate::sql::{Auto, ExecError, Pool};
         list_display = "name, user_id, active, secret_prefix, created_at",
         search_fields = "name",
         ordering = "name",
-        readonly_fields = "secret_prefix, secret_hash, created_at, secret_rotated_at",
+        // `data` holds a user key's scope (#2537).
+        readonly_fields = "secret_prefix, secret_hash, created_at, secret_rotated_at, data",
     )
 )]
 pub struct Agent {
@@ -59,9 +60,19 @@ pub struct Agent {
     /// `mcp` feature to `tenancy` and break mcp-without-tenancy builds. Orphan
     /// cleanup on user deletion is explicit via [`delete_user_keys_pool`].
     pub user_id: Option<i64>,
-    /// Flexible per-agent metadata. Never read by the framework.
+    /// Flexible per-agent metadata. The framework reads only `"scoped"`
+    /// (see [`Agent::is_scoped_key`]).
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
+}
+
+impl Agent {
+    /// Whether this user key was minted with pinned skills. A scoped key
+    /// keeps its scope when its last grant goes, so it gets nothing (#2537).
+    #[must_use]
+    pub fn is_scoped_key(&self) -> bool {
+        self.data.get("scoped").and_then(serde_json::Value::as_bool) == Some(true)
+    }
 }
 
 // An agent is minted by `create_agent_pool`, which shows the secret once;
@@ -444,6 +455,7 @@ pub async fn grant_skill_pool(
         .fetch(pool)
         .await?;
     if existing.is_empty() {
+        pin_user_key(pool, agent_id).await?;
         let mut grant = AgentGrant {
             id: Auto::default(),
             agent_id,
@@ -453,6 +465,38 @@ pub async fn grant_skill_pool(
         grant.insert_pool(pool).await?;
         notify_grants_changed(slug, agent_id);
     }
+    Ok(())
+}
+
+/// Mark a user key scoped before its grants change: a pinned key that
+/// loses its last grant must get nothing, not widen (#2537).
+async fn pin_user_key(pool: &Pool, agent_id: i64) -> Result<(), AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::{FetcherPool as _, UpdaterPool as _};
+    let Some(agent) = Agent::objects()
+        .filter("id", agent_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+    if agent.user_id.is_none() || agent.is_scoped_key() {
+        return Ok(());
+    }
+    let mut data = agent.data;
+    if !data.is_object() {
+        data = serde_json::json!({});
+    }
+    data["scoped"] = serde_json::Value::Bool(true);
+    Agent::objects()
+        .where_(Agent::id.eq(agent_id))
+        .update()
+        .set("data", data)
+        .execute_pool(pool)
+        .await?;
     Ok(())
 }
 
@@ -476,6 +520,9 @@ pub async fn revoke_skill_pool(
         .fetch(pool)
         .await?;
     let had_grant = !grants.is_empty();
+    if had_grant {
+        pin_user_key(pool, agent_id).await?;
+    }
     for grant in grants {
         grant.delete_pool(pool).await?;
     }
@@ -725,8 +772,8 @@ async fn user_entitled_skill_ids(
 ///   superuser, otherwise the skills mapped (via [`AgentSkillPermission`]) to a
 ///   permission the owner currently holds.
 /// * **Scope** — if the key was created with pinned skills ([`AgentGrant`]s via
-///   [`create_user_key_pool`]) it is limited to those; an unscoped key gets the
-///   owner's full entitlement.
+///   [`create_user_key_pool`]) it is limited to those, and to nothing once the
+///   last one is revoked; an unscoped key gets the owner's full entitlement.
 ///
 /// Effective skills = `pinned ∩ entitled` for a scoped key, or the full
 /// entitlement for an unscoped one. A key can therefore never exceed the
@@ -743,6 +790,16 @@ pub async fn resolve_user_agent_grants_pool(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
+    let Some(agent) = Agent::objects()
+        .filter("id", agent_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok((Vec::new(), Vec::new()));
+    };
     let entitled = user_entitled_skill_ids(pool, user_id).await?;
 
     // Skills pinned onto THIS key at creation (the per-key scope).
@@ -761,7 +818,12 @@ pub async fn resolve_user_agent_grants_pool(
     };
 
     // Effective skill ids: pinned∩entitled (scoped) or the full entitlement.
-    let effective: Vec<i64> = match (&entitled, pinned.is_empty()) {
+    // A key with grants is scoped; a pre-#2537 one gets the flag now.
+    if !pinned.is_empty() && !agent.is_scoped_key() {
+        pin_user_key(pool, agent_id).await?;
+    }
+    let unscoped = pinned.is_empty() && !agent.is_scoped_key();
+    let effective: Vec<i64> = match (&entitled, unscoped) {
         (None, true) => AgentSkill::objects()
             .fetch(pool)
             .await?
@@ -894,7 +956,11 @@ pub async fn create_user_key_pool(
         created_at: Auto::default(),
         secret_rotated_at: None,
         user_id: Some(user_id),
-        data: serde_json::json!({ "kind": "user_key", "label": label }),
+        data: serde_json::json!({
+            "kind": "user_key",
+            "label": label,
+            "scoped": !skill_ids.is_empty(),
+        }),
     };
     agent.insert_pool(pool).await?;
     let agent_id = agent.id.get().copied().unwrap_or_default();

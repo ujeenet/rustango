@@ -179,7 +179,7 @@ Es hängt zwei Routen pro Slug an `login_base` an:
 
 Unterschiede zum Admin-Ablauf:
 
-- **Auto-Provisionierung.** Mit `auto_provision = true` (dem Standard) **erstellt**
+- **Auto-Provisionierung.** Mit `auto_provision = true` (optional; Standard ist `false`) **erstellt**
   eine verifizierte IdP-E-Mail ohne passende `rustango_users`-Zeile eine solche
   — Benutzername aus dem lokalen Teil der E-Mail (bei Kollision entdupliziert),
   ein echter, aber unbrauchbarer zufälliger Passwort-Hash (SSO-Benutzer können

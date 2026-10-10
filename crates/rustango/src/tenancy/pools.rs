@@ -174,6 +174,11 @@ pub struct TenantPoolsConfig {
     /// them affordable — the cache costs a `PgPool` struct, not a
     /// held connection. Default: 8.
     pub scoped_pool_max_connections: u32,
+
+    /// The app's media disks. With the `media` feature, purging a tenant
+    /// deletes its `rustango_media` objects from them first (#2569).
+    /// Default: `None` (objects are counted and left).
+    pub media_storage: Option<crate::storage::StorageRegistry>,
 }
 
 impl Default for TenantPoolsConfig {
@@ -194,6 +199,7 @@ impl Default for TenantPoolsConfig {
             // shared per tenant now, and 2 deadlocks the documented
             // `Tenant::conn` + `t.pool()` + job-worker combination.
             scoped_pool_max_connections: 8,
+            media_storage: None,
         }
     }
 }
@@ -949,6 +955,25 @@ where
         }
     }
 
+    /// [`Self::scoped_pool_dyn`], but a SQLite file is opened with `mode=rw`,
+    /// which never creates it: a missing file is unreadable, not empty
+    /// (#2393, #2569). `true` when the pool is this call's own, to close.
+    pub(crate) async fn existing_pool_dyn(
+        &self,
+        org: &Org,
+    ) -> Result<(crate::sql::Pool, bool), TenancyError> {
+        if org.storage_mode == "database" && org.database_url.is_some() {
+            let url = self.resolved_database_url(org).await?;
+            if url.starts_with("sqlite:") {
+                let pool = crate::sql::Pool::connect(&sqlite_without_create(&url))
+                    .await
+                    .map_err(|e| TenancyError::Validation(e.to_string()))?;
+                return Ok((pool, true));
+            }
+        }
+        Ok((self.scoped_pool_dyn(org).await?, false))
+    }
+
     /// Pre-warm pools for every active database-mode tenant. Useful
     /// at boot so the *first* request per tenant doesn't pay TCP +
     /// TLS + auth + sqlx-ramp-up on the hot path. Bounded by
@@ -1236,6 +1261,34 @@ async fn build_database_pool<DB: Database>(
     }
     let url = ensure_sqlite_creates(url);
     Ok(opts.connect(&url).await?)
+}
+
+/// `url` with its `mode=` replaced by `rw`: open an existing file, never make one.
+fn sqlite_without_create(url: &str) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut params: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.is_empty() && !p.starts_with("mode="))
+        .collect();
+    params.push("mode=rw");
+    format!("{base}?{}", params.join("&"))
+}
+
+#[cfg(test)]
+mod sqlite_without_create_tests {
+    use super::sqlite_without_create;
+
+    #[test]
+    fn any_mode_becomes_rw() {
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db"),
+            "sqlite://a.db?mode=rw"
+        );
+        assert_eq!(
+            sqlite_without_create("sqlite://a.db?mode=rwc&journal_mode=wal"),
+            "sqlite://a.db?journal_mode=wal&mode=rw"
+        );
+    }
 }
 
 /// The `application_name` a tenant's PG pool connects with. A purge ends
