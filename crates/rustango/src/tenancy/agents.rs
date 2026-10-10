@@ -70,7 +70,7 @@ pub struct Agent {
 crate::register_admin_object_permission!("rustango_agents", "add", |_, _| false);
 // The owner decides who the credential signs in as (#2520).
 #[cfg(feature = "admin")]
-crate::register_admin_superuser_fields!("rustango_agents", "change", &["user_id"]);
+crate::register_admin_superuser_fields!(Agent, Change, [user_id]);
 
 // ------------------------------------------------------------- operations
 

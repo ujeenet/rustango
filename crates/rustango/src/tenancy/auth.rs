@@ -178,16 +178,13 @@ inventory::submit! {
     }
 }
 
-// Superuser grant and the login credentials: one role must not take another
-// account (#2521). A new user's own password and email are harmless.
+// One role must not grant superuser or take another account (#2521).
 #[cfg(feature = "admin")]
-crate::register_admin_superuser_fields!("rustango_users", "add", &["is_superuser"]);
-#[cfg(feature = "admin")]
-crate::register_admin_superuser_fields!(
-    "rustango_users",
-    "change",
-    &["is_superuser", "password_hash", "email"]
-);
+crate::admin::object_permissions::lock_user_credentials!(User, "rustango_users");
+#[cfg(all(feature = "admin", feature = "sso"))]
+crate::register_admin_superuser_fields!(User, Add, [email]);
+#[cfg(all(feature = "admin", feature = "sso"))]
+crate::register_admin_superuser_fields!(User, Change, [email]);
 
 /// A row whose password matched, before any second factor. A weak stored
 /// hash is replaced only by `complete`, so a password alone cannot change

@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
 
-A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::signed_headers`, `sign_port` and `tenant_header`, and `RequestToSign` for clients.
+A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::bind_tenants` checks the resolved tenant; `signed_headers`, `sign_port` and the client's `RequestToSign` sign more of the request.
 
 ### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
 
@@ -14,11 +14,11 @@ It allowed on the first match, so a second codename widened access instead of na
 
 ### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
 
-`is_superuser` is superuser-only on add and edit; `password_hash` and `email` on edit.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are superuser-only on add and edit, `password_hash` on edit, and a superuser's row can only be changed or deleted by a superuser.
 
 ### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
 
-A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!` locks fields for non-superusers.
+A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!(Model, Change, [field])` locks fields for non-superusers.
 
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 

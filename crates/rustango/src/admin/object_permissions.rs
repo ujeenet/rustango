@@ -104,15 +104,24 @@ pub(crate) fn has_hook(table: &str, action: &str) -> bool {
         .any(|e| e.table == table && e.action == action)
 }
 
-/// Fields only a superuser may write through the admin on `action`
-/// (`"add"` or `"change"`), collected via
-/// [`crate::register_admin_superuser_fields!`]. For anyone else they render
-/// locked; a change keeps the stored value, an add stores the blank one.
+/// An admin form write a superuser-only field lock applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AdminWrite {
+    /// The create form.
+    Add,
+    /// The edit form and inline rows.
+    Change,
+}
+
+/// Fields only a superuser may write through the admin on `action`,
+/// collected via [`crate::register_admin_superuser_fields!`]. For anyone
+/// else they render locked and the write leaves them out.
 pub struct AdminSuperuserFields {
     /// Model table. Must equal `ModelSchema::table`.
     pub table: &'static str,
-    /// `"add"` or `"change"`.
-    pub action: &'static str,
+    /// Which form write.
+    pub action: AdminWrite,
     /// Field names.
     pub fields: &'static [&'static str],
 }
@@ -120,7 +129,7 @@ pub struct AdminSuperuserFields {
 inventory::collect!(AdminSuperuserFields);
 
 /// The superuser-only fields of `(table, action)`.
-pub(crate) fn superuser_fields(table: &str, action: &str) -> Vec<&'static str> {
+pub(crate) fn superuser_fields(table: &str, action: AdminWrite) -> Vec<&'static str> {
     inventory::iter::<AdminSuperuserFields>
         .into_iter()
         .filter(|e| e.table == table && e.action == action)
@@ -128,23 +137,71 @@ pub(crate) fn superuser_fields(table: &str, action: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Mark fields of one model superuser-only for an admin action.
+/// Fields a write leaves out: `readonly_fields`, plus the superuser-only
+/// ones for a non-superuser.
+pub(crate) struct LockedFields {
+    pub(crate) readonly: &'static [&'static str],
+    pub(crate) superuser_only: Vec<&'static str>,
+}
+
+impl LockedFields {
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.readonly.contains(&name) || self.superuser_only.contains(&name)
+    }
+
+    pub(crate) fn all(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.readonly
+            .iter()
+            .copied()
+            .chain(self.superuser_only.iter().copied())
+    }
+}
+
+/// Mark fields of one model superuser-only for an admin write. The model,
+/// action and field names are checked at compile time, so call it where
+/// the fields are visible.
 ///
 /// ```ignore
-/// rustango::register_admin_superuser_fields!("blog_post", "change", &["owner_id"]);
+/// rustango::register_admin_superuser_fields!(Post, Change, [owner_id]);
 /// ```
 #[macro_export]
 macro_rules! register_admin_superuser_fields {
-    ($table:expr, $action:expr, $fields:expr $(,)?) => {
+    ($model:ty, $action:ident, [$($field:ident),+ $(,)?]) => {
+        const _: () = {
+            #[allow(dead_code)]
+            fn fields_exist(m: &$model) {
+                $(let _ = &m.$field;)+
+            }
+        };
         $crate::inventory::submit! {
             $crate::admin::object_permissions::AdminSuperuserFields {
-                table: $table,
-                action: $action,
-                fields: $fields,
+                table: <$model as $crate::core::Model>::SCHEMA.table,
+                action: $crate::admin::object_permissions::AdminWrite::$action,
+                fields: &[$(stringify!($field)),+],
             }
         }
     };
 }
+
+/// The superuser grant, the password and superuser rows of a user table are
+/// superuser-only (#2521). Email differs per feature, so callers add it.
+macro_rules! lock_user_credentials {
+    ($model:ty, $table:literal) => {
+        crate::register_admin_superuser_fields!($model, Add, [is_superuser]);
+        crate::register_admin_superuser_fields!($model, Change, [is_superuser, password_hash]);
+        crate::register_admin_object_permission!(
+            $table,
+            "change",
+            crate::admin::session::superuser_row_needs_superuser
+        );
+        crate::register_admin_object_permission!(
+            $table,
+            "delete",
+            crate::admin::session::superuser_row_needs_superuser
+        );
+    };
+}
+pub(crate) use lock_user_credentials;
 
 /// Register a permission predicate for one model.
 ///
@@ -195,7 +252,36 @@ mod tests {
     #[test]
     fn credential_owner_is_superuser_only() {
         for table in ["rustango_api_keys", "rustango_agents"] {
-            assert_eq!(superuser_fields(table, "change"), ["user_id"], "{table}");
+            assert_eq!(
+                superuser_fields(table, AdminWrite::Change),
+                ["user_id"],
+                "{table}"
+            );
+            assert!(
+                superuser_fields(table, AdminWrite::Add).is_empty(),
+                "{table}"
+            );
+        }
+    }
+
+    /// Both user tables lock the superuser grant and the login credentials.
+    #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+    #[test]
+    fn user_credentials_are_superuser_only() {
+        for table in ["rustango_users", "rustango_admin_users"] {
+            let mut add = superuser_fields(table, AdminWrite::Add);
+            add.sort_unstable();
+            assert_eq!(add, ["email", "is_superuser"], "{table}");
+            let mut change = superuser_fields(table, AdminWrite::Change);
+            change.sort_unstable();
+            assert_eq!(
+                change,
+                ["email", "is_superuser", "password_hash"],
+                "{table}"
+            );
+            for action in ["change", "delete"] {
+                assert!(has_hook(table, action), "{table} {action}");
+            }
         }
     }
 

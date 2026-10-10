@@ -32,14 +32,19 @@ pub struct IpsChild {
     pub parent_id: i64,
     #[rustango(max_length = 100)]
     pub title: String,
+    #[rustango(max_length = 100)]
+    pub note: Option<String>,
 }
+
+// Only a superuser writes `note`, inline rows included (#2520).
+rustango::register_admin_superuser_fields!(IpsChild, Change, [note]);
 
 register_admin_inline!(
     parent = "ips_parent",
     child = "ips_child",
     fk = "parent_id",
     kind = InlineKind::Tabular,
-    fields = &["parent_id", "title"],
+    fields = &["parent_id", "title", "note"],
     extra = 1,
 );
 
@@ -49,7 +54,8 @@ async fn fresh_pool() -> Pool {
     for sql in [
         r#"CREATE TABLE "ips_parent" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "name" TEXT NOT NULL)"#,
         r#"CREATE TABLE "ips_child" ("id" INTEGER PRIMARY KEY AUTOINCREMENT,
-            "parent_id" INTEGER NOT NULL REFERENCES "ips_parent"("id"), "title" TEXT NOT NULL)"#,
+            "parent_id" INTEGER NOT NULL REFERENCES "ips_parent"("id"), "title" TEXT NOT NULL,
+            "note" TEXT)"#,
         r#"INSERT INTO "ips_parent" ("id", "name") VALUES (1, 'p1'), (2, 'p2')"#,
         r#"INSERT INTO "ips_child" ("id", "parent_id", "title") VALUES (1, 1, 'c1'), (2, 2, 'c2')"#,
     ] {
@@ -301,6 +307,36 @@ fn app_with_perms(pool: &Pool, child_perms: &[&str]) -> axum::Router {
         .admin_prefix("")
         .with_user_perms(perms)
         .build()
+}
+
+/// A non-superuser's inline row write leaves a superuser-only field alone.
+#[tokio::test]
+async fn inline_rows_keep_superuser_only_fields() {
+    let pool = fresh_pool().await;
+    let mut form = one_row("c1 renamed", false);
+    form.push(("ips_child-0-note", "hijacked"));
+    let perms = ["view", "change", "add", "delete"];
+    let status = post(app_with_perms(&pool, &perms), "/ips_parent/1", &form).await;
+    assert!(is_redirect(status), "got {status}");
+    assert_eq!(children(&pool).await[0].2, "c1 renamed");
+    assert_eq!(note_of(&pool, 1).await, None);
+
+    // A superuser still writes it.
+    let status = post(app(pool.clone()), "/ips_parent/1", &form).await;
+    assert!(is_redirect(status), "got {status}");
+    assert_eq!(note_of(&pool, 1).await.as_deref(), Some("hijacked"));
+}
+
+async fn note_of(pool: &Pool, id: i64) -> Option<String> {
+    let row = rustango::sql::select_one_row_as_json(
+        pool,
+        &rustango::core::SelectQuery::by_pk(IpsChild::SCHEMA, "id", SqlValue::I64(id)),
+        &IpsChild::SCHEMA.scalar_fields().collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    row["note"].as_str().map(str::to_owned)
 }
 
 #[tokio::test]

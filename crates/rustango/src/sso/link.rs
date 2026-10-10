@@ -123,8 +123,8 @@ pub struct SsoLink {
 }
 
 #[cfg(feature = "admin")]
-fn superuser_only(_: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::current().is_some_and(|s| s.is_superuser)
+fn superuser_only(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
+    crate::admin::session::is_superuser(parts)
 }
 
 // A link row decides who an IdP identity signs in as.

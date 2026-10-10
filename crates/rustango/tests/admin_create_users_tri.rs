@@ -344,7 +344,27 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
         "rustango_users.add",
         "rustango_users.change",
     ];
+    // The add form locks the grant and the email, not the password.
+    let (_, html) = send_as(
+        pool,
+        Some(perms),
+        Method::GET,
+        "/rustango_users/new",
+        String::new(),
+    )
+    .await;
+    assert!(
+        input_tag(&html, "is_superuser").contains("readonly"),
+        "{html}"
+    );
+    assert!(input_tag(&html, "email").contains("readonly"), "{html}");
+    assert!(
+        !input_tag(&html, "password_hash").contains("readonly"),
+        "{html}"
+    );
+
     let name = unique("su");
+    let email = format!("{name}@example.com");
     let (status, html) = send_as(
         pool,
         Some(perms),
@@ -353,6 +373,7 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
         form(&[
             ("username", name.as_str()),
             ("password_hash", "pw-2521-own"),
+            ("email", email.as_str()),
             ("is_superuser", "true"),
             ("active", "true"),
             ("data", ""),
@@ -362,6 +383,7 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
     assert!(status.is_redirection(), "{status}: {html}");
     let user = user_named(pool, &name).await;
     assert!(!user.is_superuser, "a non-superuser created a superuser");
+    assert!(user.email.is_none(), "a non-superuser set an email on add");
     assert!(logs_in(pool, &name, "pw-2521-own").await);
 
     let pk = user.id.get().copied().unwrap();
@@ -404,6 +426,51 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
     assert!(!logs_in(pool, &renamed, "pw-2521-taken").await);
 }
 
+/// A non-superuser cannot edit or delete a superuser's row (#2521).
+async fn superuser_rows_are_superuser_only(pool: &Pool) {
+    let name = unique("root");
+    let (status, html) = send(
+        pool,
+        Method::POST,
+        "/rustango_users",
+        form(&[
+            ("username", name.as_str()),
+            ("password_hash", "pw-2521-root"),
+            ("is_superuser", "true"),
+            ("active", "true"),
+            ("data", ""),
+        ]),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert!(
+        user_named(pool, &name).await.is_superuser,
+        "a superuser can grant it"
+    );
+    let uri = format!("/rustango_users/{}", user_pk(pool, &name).await);
+    let perms: &[&str] = &[
+        "rustango_users.view",
+        "rustango_users.change",
+        "rustango_users.delete",
+    ];
+    let deactivate = form(&[("username", name.as_str()), ("data", "")]);
+    let (status, _) = send_as(pool, Some(perms), Method::POST, &uri, deactivate).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send_as(
+        pool,
+        Some(perms),
+        Method::POST,
+        &format!("{uri}/delete"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        user_named(pool, &name).await.active,
+        "the superuser row changed"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -415,5 +482,6 @@ tri_dialect_test! {
         api_keys_are_not_added_through_the_admin,
         api_key_owner_is_superuser_only,
         user_superuser_fields_are_superuser_only,
+        superuser_rows_are_superuser_only,
     ],
 }

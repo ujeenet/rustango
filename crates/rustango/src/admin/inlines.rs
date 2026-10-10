@@ -1020,8 +1020,8 @@ impl InlineTarget {
         let pk = child.primary_key()?;
         let cfg = admin_config_or_default(child);
         // An inline row may be added or changed: lock for both.
-        let mut admin_readonly = state.locked_fields(child, "add");
-        admin_readonly.extend(state.locked_fields(child, "change"));
+        let add = state.locked_fields(child, super::object_permissions::AdminWrite::Add);
+        let change = state.locked_fields(child, super::object_permissions::AdminWrite::Change);
         let secrets = display
             .iter()
             .filter(|f| is_secret_field(&cfg, f.name))
@@ -1034,7 +1034,8 @@ impl InlineTarget {
                 f.column != pk.column
                     && !scope.pins(f.column)
                     && !inline_readonly.contains(&f.name)
-                    && !admin_readonly.contains(&f.name)
+                    && !add.contains(f.name)
+                    && !change.contains(f.name)
             })
             .collect();
         Some(Self {

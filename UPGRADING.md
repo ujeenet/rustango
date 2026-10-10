@@ -152,7 +152,7 @@ untouched.
 
 ### HMAC auth on a tenant-resolved app (#2492)
 
-The tenant header and port are still unsigned by default. Behind `HeaderResolver`, add `.signed_headers(["x-org"])` or `.tenant_header("x-org", ..)`; behind `PortResolver`, `.sign_port()`. Clients then sign with `RequestToSign::header` / `port`.
+The tenant header and port are still unsigned by default. Add `.bind_tenants(..)` to tie keys to their tenant; `.signed_headers(["x-org"])` and `.sign_port()` sign more, and clients then sign with `RequestToSign::header` / `port`.
 
 ### `ViewSetPerms` is all-of (#2522)
 
@@ -161,7 +161,8 @@ A user now needs every codename listed for an action, not any one. A list meant 
 ### Admin superuser-only fields (#2520, #2521)
 
 `user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
-On `rustango_users` and `rustango_admin_users`, `is_superuser` is read-only for them on add and edit, `password_hash` and `email` on edit.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are read-only for them on add and edit, `password_hash` on edit, and superuser rows refuse their edits and deletes.
+An admin built with `with_user_perms` treats the user as a non-superuser even with a superuser session. An admin with no login now lets anyone edit SSO links and providers, as it does every other table.
 
 ### Workers from `make:worker` (#2331)
 

@@ -31,6 +31,38 @@ pub fn current() -> Option<AdminSession> {
     CURRENT_SESSION.try_with(|s| s.clone()).ok()
 }
 
+/// Request marker the admin router adds: `true` under `with_user_perms`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PermsScoped(pub(crate) bool);
+
+/// The one "acts as superuser" rule for admin writes: no per-user perm set
+/// and, when signed in, a superuser session. No login means full access.
+pub(crate) fn acting_superuser(perms_scoped: bool) -> bool {
+    !perms_scoped && current().is_none_or(|s| s.is_superuser)
+}
+
+/// [`acting_superuser`] for an object-permission hook; `false` outside
+/// an admin request.
+#[must_use]
+pub fn is_superuser(parts: &axum::http::request::Parts) -> bool {
+    parts
+        .extensions
+        .get::<PermsScoped>()
+        .is_some_and(|p| acting_superuser(p.0))
+}
+
+/// Object-permission hook: a superuser's row needs a superuser (#2521).
+pub(crate) fn superuser_row_needs_superuser(
+    parts: &axum::http::request::Parts,
+    row: Option<&serde_json::Value>,
+) -> bool {
+    let row_is_superuser = row.and_then(|r| r.get("is_superuser")).is_some_and(|v| {
+        v.as_bool()
+            .unwrap_or_else(|| v.as_i64().is_some_and(|n| n != 0))
+    });
+    !row_is_superuser || is_superuser(parts)
+}
+
 /// The request's session: the extension, else the task-local. A
 /// handler that reads only one of them misses the other mount path.
 #[must_use]
@@ -226,6 +258,47 @@ mod tests {
 
     fn session(user_id: i64, username: &str, is_superuser: bool) -> AdminSession {
         AdminSession::new(user_id, username, is_superuser)
+    }
+
+    fn parts(scoped: Option<bool>) -> axum::http::request::Parts {
+        let (mut p, ()) = axum::http::Request::new(()).into_parts();
+        if let Some(b) = scoped {
+            p.extensions.insert(PermsScoped(b));
+        }
+        p
+    }
+
+    /// Both halves of the rule: the perm set and the session (#2520).
+    #[tokio::test]
+    async fn acting_superuser_needs_no_perm_set_and_a_superuser_session() {
+        assert!(acting_superuser(false), "no login is full access");
+        assert!(!acting_superuser(true));
+        let under = |su: bool, scoped: bool| {
+            CURRENT_SESSION.scope(session(1, "u", su), async move { acting_superuser(scoped) })
+        };
+        assert!(under(true, false).await);
+        assert!(!under(false, false).await, "a non-superuser session");
+        assert!(!under(true, true).await, "with_user_perms wins");
+        // Outside an admin request a hook fails closed.
+        assert!(!is_superuser(&parts(None)));
+        assert!(is_superuser(&parts(Some(false))));
+        assert!(!is_superuser(&parts(Some(true))));
+    }
+
+    #[test]
+    fn a_superuser_row_needs_a_superuser() {
+        let su = serde_json::json!({"is_superuser": true});
+        let su_int = serde_json::json!({"is_superuser": 1});
+        let member = serde_json::json!({"is_superuser": false});
+        let scoped = parts(Some(true));
+        assert!(!superuser_row_needs_superuser(&scoped, Some(&su)));
+        assert!(!superuser_row_needs_superuser(&scoped, Some(&su_int)));
+        assert!(superuser_row_needs_superuser(&scoped, Some(&member)));
+        assert!(superuser_row_needs_superuser(&scoped, None));
+        assert!(superuser_row_needs_superuser(
+            &parts(Some(false)),
+            Some(&su)
+        ));
     }
 
     #[test]
