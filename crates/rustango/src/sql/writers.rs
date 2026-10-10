@@ -187,9 +187,11 @@ pub(super) fn null_cast_for(
 // ---- SELECT ----
 
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    // Only the outermost SELECT may widen its select list (#2567).
+    let top_level = b.scope_stack.is_empty();
     b.scope_stack.push(query.model);
     let result = if query.compound.is_empty() {
-        write_select_inner(b, query, true)
+        write_select_inner(b, query, top_level)
     } else {
         write_compound_select(b, query)
     };
@@ -576,8 +578,8 @@ fn write_subquery_joins(
     Ok(())
 }
 
-/// `order_helpers`: a lone SELECT, not a set-operation branch, so it may
-/// add DISTINCT's ORDER BY helper columns without breaking a column count.
+/// `order_helpers`: a lone top-level SELECT, not a subquery or set-operation
+/// branch, so it may add DISTINCT's ORDER BY helper columns.
 fn write_select_inner(
     b: &mut Sql<'_>,
     query: &SelectQuery,
@@ -689,7 +691,8 @@ fn write_select_body_qualified(
             b.write_ident(&crate::core::joins::joined_label(join.alias, col));
         }
     }
-    if order_helpers && query.distinct.is_some() {
+    let needs_helpers = query.distinct.is_some() && distinct_order_helpers(query).next().is_some();
+    if order_helpers && needs_helpers {
         write_distinct_order_helpers(b, query)?;
     }
     // Written before FROM, so the WHERE binds appear twice, in text order.
@@ -714,7 +717,15 @@ fn write_select_body_qualified(
         Some(query.model),
     )?;
 
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset)?;
+    // A nested DISTINCT can't carry the helpers; with no LIMIT/OFFSET its
+    // ORDER BY changes nothing, so drop it rather than fail on PG/MySQL.
+    let order_by: &[crate::core::OrderItem] =
+        if needs_helpers && !order_helpers && query.limit.is_none() && query.offset.is_none() {
+            &[]
+        } else {
+            &query.order_by
+        };
+    write_order_limit_offset(b, order_by, query.limit, query.offset)?;
 
     if let Some(lock) = &query.lock_mode {
         write_lock_clause(b, lock);
@@ -727,27 +738,37 @@ fn write_select_body_qualified(
 /// list. Each relation term no join projects is added last, so value
 /// rows can drop it (see `values_width`).
 fn write_distinct_order_helpers(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    use crate::core::{Expr, OrderItem};
-    for (i, item) in query.order_by.iter().enumerate() {
-        let OrderItem::Expr { expr, .. } = item else {
-            continue;
-        };
-        let Expr::AliasedColumn { alias, column } = expr else {
-            continue;
-        };
-        let projected = query
-            .joins
-            .iter()
-            .any(|j| j.alias == *alias && j.project.contains(column));
-        if projected {
-            continue;
-        }
+    for (i, expr) in distinct_order_helpers(query) {
         b.sql.push_str(", ");
         write_expr(b, expr, None)?;
         b.sql.push_str(" AS ");
         b.write_ident(&format!("__rustango_order{i}"));
     }
     Ok(())
+}
+
+/// The relation ORDER BY terms no join projects, with their position.
+fn distinct_order_helpers(
+    query: &SelectQuery,
+) -> impl Iterator<Item = (usize, &crate::core::Expr)> + '_ {
+    use crate::core::{Expr, OrderItem};
+    query
+        .order_by
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match item {
+            OrderItem::Expr {
+                expr: expr @ Expr::AliasedColumn { alias, column },
+                ..
+            } => {
+                let projected = query
+                    .joins
+                    .iter()
+                    .any(|j| j.alias == *alias && j.project.contains(column));
+                (!projected).then_some((i, expr))
+            }
+            _ => None,
+        })
 }
 
 /// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` for

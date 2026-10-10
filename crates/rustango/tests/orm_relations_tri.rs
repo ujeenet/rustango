@@ -691,6 +691,20 @@ async fn distinct_order_by_relation(pool: &Pool) {
         dicts.iter().all(|r| r.keys().eq(["title"].iter())),
         "{dicts:?}"
     );
+    // As an IN subquery it must stay one column wide.
+    let sub = distinct()
+        .values_list_flat("id")
+        .compile()
+        .expect("subquery");
+    let mut ids = article_ids(
+        &Article::objects()
+            .where_in_subquery("id", sub)
+            .fetch(pool)
+            .await
+            .expect("distinct relation-ordered IN subquery"),
+    );
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2]);
 }
 
 /// A relation filter on the tx and executor paths: the filter join is not
