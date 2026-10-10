@@ -36,6 +36,10 @@ pub(super) struct Sql<'d> {
     /// `"<alias>"."<name>"`. Set while emitting a JOIN `ON` clause, so
     /// its columns point at the joined alias; unset elsewhere.
     pub current_qualify_alias: Option<&'static str>,
+    /// `(scope depth, table)` of a SELECT body with joins: its bare
+    /// `Expr::Column`s are written `"<table>"."<name>"` so they cannot
+    /// clash with a joined column (#2411).
+    pub base_qualifier: Option<(usize, &'static str)>,
     /// Whether `Expr::Aggregate` is legal here. True only inside an
     /// aggregating query's projection, HAVING or ORDER BY, which are
     /// the places SQL accepts an aggregate call.
@@ -68,6 +72,7 @@ impl<'d> Sql<'d> {
             params: Vec::new(),
             scope_stack: Vec::new(),
             current_qualify_alias: None,
+            base_qualifier: None,
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
@@ -82,6 +87,7 @@ impl<'d> Sql<'d> {
             params: Vec::with_capacity(cap),
             scope_stack: Vec::new(),
             current_qualify_alias: None,
+            base_qualifier: None,
             aggregate_allowed: false,
             derived_joins: None,
             join_types: Vec::new(),
@@ -475,8 +481,11 @@ fn write_distinct_on_via_window(
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
 
-    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors.
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors, which
+    // `sub` exposes under bare names.
+    with_base_qualifier(b, None, |b| {
+        write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)
+    })?;
 
     Ok(())
 }
@@ -566,7 +575,31 @@ fn with_join_types(
     r
 }
 
+/// Run `f` with this scope's bare `Expr::Column`s qualified by `table`.
+fn with_base_qualifier<R>(
+    b: &mut Sql<'_>,
+    table: Option<&'static str>,
+    f: impl FnOnce(&mut Sql<'_>) -> R,
+) -> R {
+    let depth = b.scope_stack.len();
+    let prior = std::mem::replace(&mut b.base_qualifier, table.map(|t| (depth, t)));
+    let r = f(b);
+    b.base_qualifier = prior;
+    r
+}
+
 fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
+    with_base_qualifier(b, qualify.then_some(query.model.table), |b| {
+        write_select_body_qualified(b, query, qualify)
+    })
+}
+
+fn write_select_body_qualified(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    qualify: bool,
+) -> Result<(), SqlError> {
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
@@ -574,7 +607,6 @@ fn write_select_body(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErro
             return write_distinct_on_via_window(b, query, cols);
         }
     }
-    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
 
     b.sql.push_str("SELECT ");
     // Plain `DISTINCT` works on every dialect; `DISTINCT ON` is PG
@@ -1550,9 +1582,13 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            // Inside a JOIN ON clause, qualify the column with the
-            // join's alias; elsewhere leave it bare.
-            if let Some(alias) = b.current_qualify_alias {
+            // A JOIN ON clause qualifies with the join's alias; a SELECT
+            // body with joins with its own table; elsewhere it is bare.
+            let base = b
+                .base_qualifier
+                .filter(|(depth, _)| *depth == b.scope_stack.len())
+                .map(|(_, table)| table);
+            if let Some(alias) = b.current_qualify_alias.or(base) {
                 let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
                 b.sql.push_str(&qualified);
             } else {

@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
+
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is gone.
+
+### Fixed — a relation filter no longer adds the joined columns to the SELECT (#2412)
+
+Joins from `filter("author__x", ..)` and `order_by("author__x")` project nothing and no longer load `author`; `values()` ignores `select_related`. DISTINCT, value rows and IN subqueries see only the asked columns.
+
+### Fixed — `filter(field, None)` matches NULL rows (#2413)
+
+An exact `None`, bare or through a relation span, now writes `IS NULL` (`ne` writes `IS NOT NULL`, `exclude` negates it); it wrote `= NULL`, which matches nothing.
+
+### Fixed — bare columns are qualified when a query has joins (#2411)
+
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.

@@ -65,6 +65,17 @@ pub trait LoadRelated {}
 #[cfg(not(feature = "postgres"))]
 impl<T> LoadRelated for T {}
 
+/// Aliases of the joins whose columns the row carries. A filter-only
+/// join projects nothing, so there is nothing to decode (#2412).
+pub(crate) fn projected_join_aliases(query: &SelectQuery) -> Vec<&'static str> {
+    query
+        .joins
+        .iter()
+        .filter(|j| !j.project.is_empty())
+        .map(|j| j.alias)
+        .collect()
+}
+
 /// Reduce `select_related` join aliases to the leaf ones — those that
 /// no longer alias extends at a `__` boundary — each paired with its
 /// first hop. One join is emitted per hop (`author`, `author__profile`),
@@ -202,8 +213,7 @@ where
         T: LoadRelated,
     {
         let select = self.compile()?;
-        let select_related_aliases: Vec<&'static str> =
-            select.joins.iter().map(|j| j.alias).collect();
+        let select_related_aliases = projected_join_aliases(&select);
         let stmt = Postgres.compile_select(&select)?;
 
         // With joins, each JOINed target is stitched from the same row:
@@ -1803,7 +1813,7 @@ where
         async {
             crate::test_assertions::query_counter::bump();
             let stmt = tx.dialect().compile_select(query)?;
-            let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+            let aliases = projected_join_aliases(query);
             // Stitch from leaf aliases so each FK chain is decoded once.
             let leaves = select_related_leaves(&aliases);
             match tx {
@@ -2514,7 +2524,7 @@ where
 {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
-    let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+    let aliases = projected_join_aliases(query);
     // Stitch from leaf aliases so each FK chain is decoded once.
     let leaves = select_related_leaves(&aliases);
 

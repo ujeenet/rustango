@@ -2190,7 +2190,8 @@ impl<T: Model> QuerySet<T> {
     ///
     /// # Errors
     /// As [`QuerySet::compile`], plus [`QueryError::BoundedDmlUnsupported`]
-    /// when a limit or offset cannot be bounded.
+    /// when a limit or offset cannot be bounded and
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Fold global scopes into the WHERE, so a bulk delete honours
         // the same filters as a fetch. A `published_only` scope means
@@ -2413,7 +2414,8 @@ impl<T: Model> UpdateBuilder<T> {
     /// unknown field, [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type, and
     /// [`QueryError::BoundedDmlUnsupported`] if the queryset's limit or
-    /// offset cannot be bounded by primary key.
+    /// offset cannot be bounded by primary key, or
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
@@ -3081,6 +3083,7 @@ fn never_match_clause(
 }
 
 /// Bound an UPDATE/DELETE: `<where> AND pk IN (SELECT pk … ORDER BY …, pk LIMIT … OFFSET …)`.
+/// A set operation is refused with or without a bound.
 /// The outer `<where>` stays so a row changed by a concurrent writer is not claimed.
 /// Without a limit or offset the order cannot change the row set, so it is left out.
 fn bound_dml_where(
@@ -3092,6 +3095,10 @@ fn bound_dml_where(
     has_compound: bool,
 ) -> Result<WhereExpr, QueryError> {
     use crate::core::BoundedDmlReason as Why;
+    // UPDATE/DELETE has no set operation; dropping it widens the write.
+    if has_compound {
+        return Err(QueryError::SetOperationDml { model: model.name });
+    }
     if limit.is_none() && offset.is_none() {
         return Ok(where_clause);
     }
@@ -3104,9 +3111,6 @@ fn bound_dml_where(
     // SQLite reads `LIMIT -1` as no limit at all.
     if limit.is_some_and(|n| n < 0) || offset.is_some_and(|n| n < 0) {
         return refuse(Why::Negative);
-    }
-    if has_compound {
-        return refuse(Why::SetOperation);
     }
     let mut pks = model.fields.iter().filter(|f| f.primary_key);
     let pk = match (pks.next(), pks.next()) {
@@ -3238,11 +3242,22 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         }
     }
 
+    let (op, value) = null_as_is_null(raw.op, raw.value);
     Ok(Filter {
         column: field.column,
-        op: raw.op,
-        value: raw.value,
+        op,
+        value,
     })
+}
+
+/// `= NULL` matches no row, so an exact `None` means `IS NULL` and
+/// `ne` means `IS NOT NULL`, as in Django (#2413).
+fn null_as_is_null(op: Op, value: SqlValue) -> (Op, SqlValue) {
+    match (op, &value) {
+        (Op::Eq, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(true)),
+        (Op::Ne, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(false)),
+        _ => (op, value),
+    }
 }
 
 /// Resolve a relation-spanning lookup key into its FK-chain LEFT JOINs
@@ -3279,11 +3294,15 @@ fn resolve_span(
     // Re-parse any trailing suffix through the normal grammar; bare
     // span (no suffix) is an exact match.
     let (op, value, transform) = if suffix_segs.is_empty() {
-        (Op::Eq, value, None)
+        let (op, value) = null_as_is_null(Op::Eq, value);
+        (op, value, None)
     } else {
         let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
         match parse_lookup(&synth, value) {
-            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
+            Ok(ParsedLookup::Raw { op, value, .. }) => {
+                let (op, value) = null_as_is_null(op, value);
+                (op, value, None)
+            }
             Ok(ParsedLookup::DateTransform {
                 transform,
                 op,
@@ -3408,7 +3427,8 @@ fn resolve_span_chain(
                     alias_path = format!("{alias_path}__{seg}");
                     intern_join_alias(&alias_path)?
                 };
-                let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+                // A span only filters or orders, so it projects nothing:
+                // extra columns broke DISTINCT, values() and IN subqueries (#2412).
                 joins.push(Join {
                     target,
                     alias,
@@ -3421,7 +3441,7 @@ fn resolve_span_chain(
                         op: Op::Eq,
                         rhs: Expr::AliasedColumn { alias, column: on },
                     },
-                    project,
+                    project: Vec::new(),
                 });
                 current = target;
                 prev_alias = alias;
@@ -4532,7 +4552,7 @@ impl<T: Model> DateTimesQuerySet<T> {
 /// column list, then delegates to `QuerySet::compile` and stamps the
 /// projection onto the resulting [`SelectQuery`].
 fn compile_values_select<T: Model>(
-    qs: QuerySet<T>,
+    mut qs: QuerySet<T>,
     cols: Vec<&'static str>,
 ) -> Result<SelectQuery, QueryError> {
     if cols.is_empty() {
@@ -4547,6 +4567,8 @@ fn compile_values_select<T: Model>(
             });
         }
     }
+    // A projection reads no related row, so `select_related` adds nothing.
+    qs.select_related.clear();
     let mut q = qs.compile()?;
     project_every_branch(&mut q, &cols);
     Ok(q)

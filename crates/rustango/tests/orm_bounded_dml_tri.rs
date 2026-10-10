@@ -1,5 +1,6 @@
 //! `update()` / `delete()` honour `limit`, `offset` and `order_by` on
 //! every backend (#1666). They used to drop them and touch every row.
+//! A set operation is refused outright, with or without a bound (#2452).
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
@@ -226,6 +227,33 @@ async fn anti_join_delete(pool: &Pool) {
     assert_eq!(left.iter().map(|l| l.id).collect::<Vec<_>>(), vec![1, 3]);
 }
 
+/// `difference` used to be dropped, so the excluded rows went too (#2452).
+async fn set_operation_dml_is_refused(pool: &Pool) {
+    let pinned = || Item::objects().filter("id", 1_i64);
+    let e = Item::objects()
+        .filter("tag", "new")
+        .difference(pinned())
+        .compile_delete()
+        .unwrap_err();
+    assert!(matches!(e, QueryError::SetOperationDml { .. }), "{e:?}");
+    let e = Item::objects()
+        .limit(1)
+        .union(pinned())
+        .compile_delete()
+        .unwrap_err();
+    assert!(matches!(e, QueryError::SetOperationDml { .. }), "{e:?}");
+    let e = Item::objects()
+        .intersection(pinned())
+        .update()
+        .set("tag", "x")
+        .execute_pool(pool)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("set operation"), "{e}");
+    assert_eq!(ids(pool).await, vec![1, 2, 3, 4, 5]);
+    assert!(ids_tagged(pool, "x").await.is_empty());
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
@@ -239,6 +267,7 @@ tri_dialect_test! {
         ties_page_by_pk,
         unbounded_paths_unchanged,
         anti_join_delete,
+        set_operation_dml_is_refused,
     ],
 }
 
@@ -271,7 +300,7 @@ fn set_operation_with_limit_is_refused() {
         .limit(1)
         .compile_delete()
         .unwrap_err();
-    assert_eq!(reason(e), BoundedDmlReason::SetOperation);
+    assert!(matches!(e, QueryError::SetOperationDml { .. }), "{e:?}");
 }
 
 #[test]
