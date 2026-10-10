@@ -1926,9 +1926,19 @@ fn stored_content_type(mime: &str) -> &str {
     });
     // Parameters can't change the type; just keep them header-safe.
     let params_ok = params.bytes().all(|b| (0x20..0x7f).contains(&b));
-    let active = ["html", "xml", "javascript", "ecmascript", "xsl"]
-        .iter()
-        .any(|t| main.contains(t));
+    let active = [
+        "html",
+        "xml",
+        "javascript",
+        "ecmascript",
+        "xsl",
+        "jscript",
+        "livescript",
+        "vbscript",
+        "css",
+    ]
+    .iter()
+    .any(|t| main.contains(t));
     if well_formed && params_ok && !active {
         mime
     } else {
@@ -2113,6 +2123,11 @@ mod tests {
             "Multipart/X-Mixed-Replace",
             "text/html",
             "image/svg+xml",
+            "text/jscript",
+            "text/livescript",
+            "text/vbscript",
+            "text/css",
+            "text/plain; charset=utf-8\u{1}",
             "",
             "image/",
         ] {
