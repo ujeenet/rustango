@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.5] — 2026-10-10
+
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
 
 Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.
