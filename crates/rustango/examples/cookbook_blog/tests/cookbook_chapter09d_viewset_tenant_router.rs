@@ -119,13 +119,12 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
 
     let slug = unique("acme");
     // Use the public `create_tenant_if_missing` API so we exercise
-    // the same path operators run when provisioning. `database`
-    // mode points at the same DB the test connects to — degenerate
-    // but sufficient for the per-request-conn-acquire flow.
+    // the same path operators run when provisioning. Schema mode: a
+    // database-mode tenant may not use the registry's own database (#2320).
+    // Its `search_path` falls back to `public`, where the Author table is.
     let opts = tenancy::manage::api::CreateTenantOpts {
         host_pattern: Some(format!("{slug}.app.test")),
-        mode: tenancy::StorageMode::Database,
-        database_url: Some(registry_url.clone()),
+        mode: tenancy::StorageMode::Schema,
         // Skip the tenant-migration pass: the Author table is set up
         // manually via fresh_author_table since the test only needs
         // that one table on the tenant DB.

@@ -150,6 +150,37 @@ untouched.
 
 ## Unreleased
 
+### Workers from `make:worker` (#2331)
+
+The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
+`ensure_table` adds a `rustango_jobs_locked_idx` index at the next boot.
+
+### Tenant database URLs (#2320)
+
+Creating or editing a tenant now refuses a `postgres://`, `mysql://`, `mariadb://` or `sqlite:` URL that sqlx cannot parse. Secret references are not resolved there, so they pass unchecked.
+
+### Scoped pools quote the schema (#2325)
+
+Before, a legacy mixed-case schema such as `Acme` got `search_path` `acme`. Writes through `scoped_pool` may have landed in `acme` or `public`; check those for its rows.
+
+### `SearchClause` with no columns
+
+A `SearchClause` with a non-empty query and no columns now matches no rows (`WHERE 1 = 0`); it used to be dropped. A ViewSet without `search_fields` still ignores `?search=` (#2391).
+
+### Admin: inline delete of a `soft_delete` child
+
+Ticking DELETE on an inline row of a `soft_delete` model now stamps its column, as the main delete does; it used to remove the row (#2453).
+
+### Admin: audit in the write's transaction
+
+An inline row of an `audit(...)` child model now writes its audit row in the edit's transaction; if that write fails, the edit is not saved (#2389).
+
+The same holds for admin delete, soft delete, `delete_selected` and `restore_selected` on an `audit(...)` model: a missing or failing audit table now refuses the delete (a 500 or the missing-table page) where it used to delete and log a warning (#2390).
+
+### `migrate-tenant-storage` takes the tenant offline
+
+The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. A suspension made during the move is undone when it ends; suspend again afterwards. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).
+
 ### Admin: passkeys and registry tables
 
 No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it on the single database or on each tenant, never the registry (#2364). With `tenancy` compiled in, a plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them, and lists only registry tables (#2365).

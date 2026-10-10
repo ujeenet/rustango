@@ -98,6 +98,15 @@ impl Booted {
             .next()
             .expect("the org")
     }
+
+    async fn has_org(&self, slug: &str) -> bool {
+        !Org::objects()
+            .where_(Org::slug.eq(slug.to_owned()))
+            .fetch(&self.registry)
+            .await
+            .expect("read org")
+            .is_empty()
+    }
 }
 
 #[tokio::test]
@@ -411,4 +420,66 @@ async fn own_extra_hosts_are_not_a_clash_and_case_is_ignored() {
         .await
         .expect_err("claimed by acme in another case");
     assert!(err.contains("another tenant"), "{err}");
+}
+
+/// #2320: every path that writes a tenant URL refuses the registry's own
+/// database, or tenant migrations run over the registry.
+#[tokio::test]
+async fn no_path_points_a_tenant_at_the_registry_database() {
+    use rustango::tenancy::manage::api::{create_tenant, CreateTenantOpts};
+    use rustango::tenancy::{BackendKind, StorageMode};
+    let b = boot().await;
+    b.tenant("acme").await;
+    let registry = b.url.replace("?mode=rwc", "");
+
+    let err = b
+        .run(&["edit-tenant", "acme", "--database-url", &registry])
+        .await
+        .expect_err("edit to the registry");
+    assert!(err.contains("registry's own database"), "{err}");
+    assert_ne!(
+        b.org("acme").await.database_url.as_deref(),
+        Some(&*registry)
+    );
+
+    let err = create_tenant(
+        b.pools.as_ref(),
+        &b.url,
+        b.migrations.path(),
+        "globex",
+        CreateTenantOpts {
+            mode: StorageMode::Database,
+            backend: BackendKind::Sqlite,
+            database_url: Some(registry.clone()),
+            no_migrate: true,
+            ..CreateTenantOpts::default()
+        },
+    )
+    .await
+    .expect_err("create on the registry");
+    assert!(err.to_string().contains("registry's own database"), "{err}");
+    assert!(
+        !b.has_org("globex").await,
+        "no Org row for a refused create"
+    );
+
+    let err = b
+        .run(&[
+            "create-tenant",
+            "initech",
+            "--mode",
+            "database",
+            "--backend",
+            "sqlite",
+            "--database-url",
+            &registry,
+            "--no-migrate",
+        ])
+        .await
+        .expect_err("CLI create on the registry");
+    assert!(err.contains("registry's own database"), "{err}");
+    assert!(
+        !b.has_org("initech").await,
+        "no Org row for a refused create"
+    );
 }
