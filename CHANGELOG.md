@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security — media stores malformed MIME types as octet-stream (#2570)
+
+A type/subtype with non-token characters (a space, a control byte) or `multipart/x-mixed-replace` is stored and signed as `application/octet-stream`, so a browser can't sniff the body into HTML.
+
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
 
 Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.

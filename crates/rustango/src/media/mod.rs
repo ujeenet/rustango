@@ -1908,19 +1908,28 @@ fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, 
 /// The `Content-Type` stored with an upload. A client-declared type that
 /// a browser would render or sniff into script becomes `application/octet-stream`.
 fn stored_content_type(mime: &str) -> &str {
-    let main = mime
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    // RFC 9110 `token` characters only: a space or stray byte makes a
+    // browser ignore the type and sniff the body (#2570).
+    fn is_token(s: &str) -> bool {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    }
+    let (main, params) = mime.split_once(';').unwrap_or((mime, ""));
+    let main = main.trim().to_ascii_lowercase();
     let well_formed = main.split_once('/').is_some_and(|(t, s)| {
-        !t.is_empty() && !s.is_empty() && !s.contains('/') && t != "*" && s != "unknown"
+        is_token(t)
+            && is_token(s)
+            && t != "*"
+            && s != "unknown"
+            && main != "multipart/x-mixed-replace"
     });
+    // Parameters can't change the type; just keep them header-safe.
+    let params_ok = params.bytes().all(|b| (0x20..0x7f).contains(&b));
     let active = ["html", "xml", "javascript", "ecmascript", "xsl"]
         .iter()
         .any(|t| main.contains(t));
-    if well_formed && !active {
+    if well_formed && params_ok && !active {
         mime
     } else {
         "application/octet-stream"
@@ -2088,6 +2097,35 @@ mod tests {
         assert!(upload_matches(&meta("text/plain;charset=UTF-8"), &m));
         assert!(upload_matches(&meta("Text/Plain"), &m));
         assert!(!upload_matches(&meta("text/csv; charset=utf-8"), &m));
+    }
+
+    /// #2570 — malformed or multipart types are stored as octet-stream.
+    #[test]
+    fn stored_content_type_allows_only_token_types() {
+        const OCTET: &str = "application/octet-stream";
+        for bad in [
+            "image/png x",
+            "image /png",
+            "image/png\tx",
+            "image/png\r\nX-Evil: 1",
+            "image/(png)",
+            "multipart/x-mixed-replace; boundary=x",
+            "Multipart/X-Mixed-Replace",
+            "text/html",
+            "image/svg+xml",
+            "",
+            "image/",
+        ] {
+            assert_eq!(stored_content_type(bad), OCTET, "{bad:?}");
+        }
+        for ok in [
+            "image/png",
+            "text/plain; charset=utf-8",
+            "application/vnd.ms-excel",
+            "audio/x-wav",
+        ] {
+            assert_eq!(stored_content_type(ok), ok);
+        }
     }
 
     fn bare_media() -> Media {
