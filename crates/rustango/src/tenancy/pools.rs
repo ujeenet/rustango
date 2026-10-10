@@ -174,6 +174,11 @@ pub struct TenantPoolsConfig {
     /// them affordable — the cache costs a `PgPool` struct, not a
     /// held connection. Default: 8.
     pub scoped_pool_max_connections: u32,
+
+    /// The app's media disks. With the `media` feature, purging a tenant
+    /// deletes its `rustango_media` objects from them first (#2569).
+    /// Default: `None` (objects are counted and left).
+    pub media_storage: Option<crate::storage::StorageRegistry>,
 }
 
 impl Default for TenantPoolsConfig {
@@ -194,6 +199,7 @@ impl Default for TenantPoolsConfig {
             // shared per tenant now, and 2 deadlocks the documented
             // `Tenant::conn` + `t.pool()` + job-worker combination.
             scoped_pool_max_connections: 8,
+            media_storage: None,
         }
     }
 }

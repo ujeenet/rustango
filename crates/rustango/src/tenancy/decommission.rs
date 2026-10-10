@@ -52,6 +52,10 @@ pub struct Report {
     pub schema_dropped: Option<String>,
     pub database_dropped: Option<String>,
     pub row_deleted: bool,
+    /// Media objects deleted from storage before the purge.
+    pub media_deleted: usize,
+    /// Media objects left in storage (no disk configured, or a failed delete).
+    pub media_left: usize,
     /// Anything the operator still has to do by hand.
     pub notes: Vec<String>,
 }
@@ -132,6 +136,78 @@ async fn deactivate(registry: &crate::sql::Pool, id: i64) -> Result<u64, Tenancy
     Ok(updated)
 }
 
+/// Delete the tenant's media objects, by its `rustango_media` rows: a
+/// key can't be found once they are gone (#2569). Best-effort; what
+/// stays is counted and noted.
+#[cfg(feature = "media")]
+async fn purge_media<DB: Database>(pools: &TenantPools<DB>, org: &Org, report: &mut Report)
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Model as _;
+    use crate::media::Media;
+
+    let rows: Result<Vec<Media>, String> = async {
+        let pool = pools
+            .scoped_pool_dyn(org)
+            .await
+            .map_err(|e| e.to_string())?;
+        let has_table = crate::migrate::try_table_exists_here(&pool, Media::SCHEMA.table)
+            .await
+            .map_err(|e| e.to_string())?;
+        if !has_table {
+            return Ok(Vec::new());
+        }
+        Media::objects()
+            .fetch(&pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+    // The listing opened a tenant pool; don't keep it past the drop.
+    pools.invalidate(&org.slug).await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            report.notes.push(format!(
+                "media objects not checked, any stay in storage: {e}"
+            ));
+            return;
+        }
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let Some(storage) = pools.pool_config().media_storage.as_ref() else {
+        report.media_left = rows.len();
+        report.notes.push(format!(
+            "{} media objects left in storage: set `TenantPoolsConfig::media_storage` to delete them",
+            rows.len()
+        ));
+        return;
+    };
+    let mut first_error = None;
+    for m in &rows {
+        let deleted = match storage.disk(&m.disk) {
+            Some(disk) => disk.delete(&m.storage_key).await.map_err(|e| e.to_string()),
+            None => Err(format!("unknown disk `{}`", m.disk)),
+        };
+        match deleted {
+            Ok(()) => report.media_deleted += 1,
+            Err(e) => {
+                report.media_left += 1;
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = first_error {
+        report.notes.push(format!(
+            "{} media objects left in storage (first error: {e})",
+            report.media_left
+        ));
+    }
+}
+
 async fn purge<DB: Database>(
     pools: &TenantPools<DB>,
     registry: &crate::sql::Pool,
@@ -181,6 +257,9 @@ where
     deactivate(registry, id).await?;
     super::invalidate_org_cache();
     pools.invalidate(slug).await;
+    // While the rows that name the keys still exist (#2569).
+    #[cfg(feature = "media")]
+    purge_media(pools, org, report).await;
 
     // Every drop is `IF EXISTS`, so a retry after a partial purge is safe.
     match mode {

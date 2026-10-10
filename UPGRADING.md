@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Purge deletes media objects
+
+Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it reports how many it left (#2569). `TenantPoolsConfig` and `decommission::Report` gain fields, so struct literals without `..Default::default()` need them.
+
 ### SSO sign-ins send auth signals
 
 SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`.

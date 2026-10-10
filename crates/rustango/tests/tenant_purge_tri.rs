@@ -93,6 +93,98 @@ tri_dialect_test!(
     scenarios: [purge_deletes_org_with_extra_host, purge_unlinks_its_unsucceeded_runs]
 );
 
+/// #2569 — purge deletes the tenant's media objects, or counts what it
+/// had to leave when no media storage is configured.
+#[cfg(all(feature = "sqlite", feature = "media"))]
+#[tokio::test]
+async fn purge_deletes_the_tenants_media_objects() {
+    use rustango::media::{MediaManager, SaveOpts};
+    use rustango::storage::{BoxedStorage, InMemoryStorage, Storage as _, StorageRegistry};
+    use rustango::tenancy::TenantPoolsConfig;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = |n: &str| format!("sqlite://{}?mode=rwc", dir.path().join(n).display());
+    let registry = rustango::sql::sqlx::SqlitePool::connect(&url("reg.db"))
+        .await
+        .unwrap();
+    let reg = Pool::Sqlite(registry.clone());
+    setup(&reg).await;
+    let disk = Arc::new(InMemoryStorage::new());
+    let storage = StorageRegistry::new()
+        .set("default", disk.clone() as BoxedStorage)
+        .with_default("default");
+
+    // A tenant database holding two uploads; its slug.
+    let tenant = |name: &'static str| {
+        let (url, reg, storage) = (url(name), reg.clone(), storage.clone());
+        async move {
+            let pool = Pool::connect(&url).await.unwrap();
+            rustango::testkit::migrate_framework(&pool).await.unwrap();
+            let mgr = MediaManager::new_pool(pool, storage);
+            let mut keys = Vec::new();
+            for file in ["a.txt", "b.txt"] {
+                let m = mgr
+                    .save_bytes(SaveOpts {
+                        disk: "default".into(),
+                        key_prefix: "docs".into(),
+                        bytes: b"secret".to_vec(),
+                        mime: "text/plain".into(),
+                        original_filename: file.into(),
+                        uploaded_by_id: None,
+                        collection_id: None,
+                        metadata: serde_json::json!({}),
+                    })
+                    .await
+                    .unwrap();
+                keys.push(m.storage_key);
+            }
+            let slug = format!("purge-media-{name}-{}", std::process::id());
+            let mut org = Org {
+                slug: slug.clone(),
+                display_name: slug.clone(),
+                backend_kind: "sqlite".into(),
+                database_url: Some(url),
+                ..rustango::testkit::org()
+            };
+            org.save_pool(&reg).await.unwrap();
+            (slug, keys)
+        }
+    };
+    let purge = |slug: String, config: TenantPoolsConfig| {
+        let pools = TenantPools::new(registry.clone()).config(config);
+        async move {
+            let action = Action::Purge {
+                purge_database: true,
+            };
+            decommission(&pools, &slug, action).await.unwrap()
+        }
+    };
+
+    let (slug, kept) = tenant("bare.db").await;
+    let report = purge(slug, TenantPoolsConfig::default()).await;
+    assert_eq!((report.media_deleted, report.media_left), (0, 2));
+    assert!(
+        report.notes.iter().any(|n| n.contains("2 media objects")),
+        "{:?}",
+        report.notes
+    );
+    for key in &kept {
+        assert!(disk.exists(key).await.unwrap());
+    }
+
+    let (slug, keys) = tenant("full.db").await;
+    let config = TenantPoolsConfig {
+        media_storage: Some(storage.clone()),
+        ..TenantPoolsConfig::default()
+    };
+    let report = purge(slug, config).await;
+    assert_eq!((report.media_deleted, report.media_left), (2, 0));
+    for key in &keys {
+        assert!(!disk.exists(key).await.unwrap(), "{key} survived the purge");
+    }
+}
+
 /// Schema-mode purge drops the cached scoped pool too (#1930). PG-only.
 #[cfg(feature = "postgres")]
 #[tokio::test]

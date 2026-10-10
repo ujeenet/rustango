@@ -107,6 +107,9 @@ pub(super) async fn purge(
             if report.database_dropped.is_some() {
                 msg.push_str(" — dropped its database");
             }
+            if report.media_deleted > 0 {
+                let _ = write!(msg, " — deleted {} media objects", report.media_deleted);
+            }
             for note in &report.notes {
                 let _ = write!(msg, " — {note}");
             }
