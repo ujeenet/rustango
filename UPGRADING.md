@@ -150,6 +150,22 @@ untouched.
 
 ## Unreleased
 
+### Passkeys in `public` on schema-mode tenants
+
+`migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.
+
+### Impersonation links use https by default
+
+Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
+
+### Password changes refuse a stale row
+
+A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
+
+### Auth links take a `LinkScope`
+
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

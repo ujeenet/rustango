@@ -1488,14 +1488,16 @@ fn end_impersonation_response(cookie_path: &str) -> Response {
                 .to_string()
         })
         .collect();
-    let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
     let apex = crate::tenancy::server::apex_domain();
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
         .ok()
         .filter(|s| !s.is_empty() && s != "80" && s != "443")
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
-    let target = format!("{scheme}://{apex}{port_suffix}/orgs");
+    let target = format!(
+        "{}/orgs",
+        crate::tenancy::server::tenant_origin(&apex, &port_suffix)
+    );
     let mut resp = Redirect::to(&target).into_response();
     for clear in clears {
         resp.headers_mut().append(
@@ -1636,10 +1638,7 @@ async fn change_password_submit(
     if user_id <= 0 {
         return redir_err("Session is missing a user id; please log in again.");
     }
-    // v0.38 — fetch the user via the tri-dialect ORM, verify current
-    // password, then save the updated row. save_pool covers PG / MySQL
-    // / SQLite and the dialect emitter handles the placeholder /
-    // identifier quoting differences.
+    // Verify the current password, then write only the password columns.
     let users: Vec<super::auth::User> = match super::auth::User::objects()
         .where_(super::auth::User::id.eq(user_id))
         .fetch(tenant_pool)
@@ -1651,7 +1650,7 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let Some(mut user) = users.into_iter().next() else {
+    let Some(user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
     let verify = async {
@@ -1687,11 +1686,21 @@ async fn change_password_submit(
             return redir_err("Could not update the password; please try again.");
         }
     };
-    user.password_hash = new_hash;
-    user.password_changed_at = Some(chrono::Utc::now());
-    if let Err(e) = user.save_pool(tenant_pool).await {
-        warn!(target: "rustango::tenancy::admin", error = %e, "change-password update");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    match crate::passwords::store_password_change(
+        tenant_pool,
+        <super::auth::User as crate::core::Model>::SCHEMA,
+        &user.id,
+        &user.password_hash,
+        &new_hash,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
+        Err(e) => {
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password update");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+        }
     }
     Redirect::to(&format!(
         "{}?ok=Password+updated",
