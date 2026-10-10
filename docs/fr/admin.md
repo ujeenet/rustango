@@ -511,6 +511,7 @@ sauf indication contraire) :
 | `tenant_brand_css(css)` | Bloc CSS de variables par tenant. |
 | `impersonated_by(operator_id)` | Affiche une bannière d'emprunt d'identité (console opérateur). |
 | `tenant_mode()` | Masque les modèles à portée registre (défini automatiquement pour les admins de tenant). |
+| `registry_mode()` | Sert un registre de tenancy : liste `Org`, `Operator` et les autres tables du registre qu'un admin simple masque. |
 | `build()` | Finalise et renvoie le `axum::Router`. |
 
 ---

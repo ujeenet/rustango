@@ -350,6 +350,33 @@ impl Dialect for MySql {
         )
     }
 
+    /// Each FK column must sit at its position in the index, unprefixed.
+    fn composite_fks_needing_index_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(k.CONSTRAINT_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE k \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ? \
+             AND k.REFERENCED_TABLE_NAME IS NOT NULL AND k.ORDINAL_POSITION = 2 \
+             AND NOT EXISTS (SELECT 1 FROM information_schema.KEY_COLUMN_USAGE f \
+             WHERE f.TABLE_SCHEMA = k.TABLE_SCHEMA AND f.TABLE_NAME = k.TABLE_NAME \
+             AND f.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = f.TABLE_SCHEMA AND s.TABLE_NAME = f.TABLE_NAME \
+             AND s.INDEX_NAME = ? AND s.SEQ_IN_INDEX = f.ORDINAL_POSITION \
+             AND s.COLUMN_NAME = f.COLUMN_NAME AND s.SUB_PART IS NULL)) \
+             AND NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS j \
+             WHERE j.TABLE_SCHEMA = k.TABLE_SCHEMA AND j.TABLE_NAME = k.TABLE_NAME \
+             AND j.INDEX_NAME <> ? AND j.SEQ_IN_INDEX = 1 \
+             AND NOT EXISTS (SELECT 1 FROM information_schema.KEY_COLUMN_USAGE f \
+             WHERE f.TABLE_SCHEMA = k.TABLE_SCHEMA AND f.TABLE_NAME = k.TABLE_NAME \
+             AND f.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = j.TABLE_SCHEMA AND s.TABLE_NAME = j.TABLE_NAME \
+             AND s.INDEX_NAME = j.INDEX_NAME AND s.SEQ_IN_INDEX = f.ORDINAL_POSITION \
+             AND s.COLUMN_NAME = f.COLUMN_NAME AND s.SUB_PART IS NULL \
+             AND s.INDEX_TYPE = 'BTREE')))",
+        )
+    }
+
     fn modifies_whole_column(&self) -> bool {
         true
     }

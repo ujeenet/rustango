@@ -701,6 +701,17 @@ async fn shared_and_tenant_providers_with_one_slug_do_not_share_links() {
     );
 }
 
+/// A tenant without its own provider table signs in with a shared one (#2366).
+#[tokio::test]
+async fn shared_provider_serves_a_tenant_without_a_provider_table() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    rustango::testkit::matrix::drop_table(env.pool(), "rustango_sso_providers").await;
+    env.shared_provider("corp", true).await;
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+}
+
 /// `check --deploy` names the providers that refuse every existing user (#2359).
 #[tokio::test]
 async fn check_deploy_names_providers_that_refuse_every_user() {
@@ -1704,4 +1715,65 @@ async fn admin_written_links_get_the_key_and_stay_unique() {
     );
     assert_eq!(env.sso("corp", "sub-b", "x@example.com").await, Ok(ann));
     assert!(env.sso("corp", "sub-a", "x@example.com").await.is_err());
+}
+
+/// Audit sources recorded on the registry for `(table, pk)`.
+async fn audit_sources(env: &Env, table: &str, pk: &str) -> Vec<String> {
+    rustango::audit::fetch_for_entity_pool(&env._pools.registry_pool(), table, pk)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.source)
+        .collect()
+}
+
+/// #2424 — shared provider create, email-link and delete each write an audit row.
+#[tokio::test]
+async fn shared_provider_changes_are_audited() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.shared_provider("corp", false).await;
+    let path = env.email_link_path().await;
+    let id = path.split('/').rev().nth(1).unwrap().to_owned();
+    env.set_shared_email_link(true).await;
+    assert_eq!(
+        env.console_post(&path.replace("/email-link", "/delete"), String::new())
+            .await,
+        StatusCode::SEE_OTHER
+    );
+    let sources = audit_sources(&env, "rustango_shared_sso_providers", &id).await;
+    for verb in [
+        "sso_shared_create",
+        "sso_shared_email_link",
+        "sso_shared_delete",
+    ] {
+        assert!(
+            sources.iter().any(|s| s.ends_with(&format!(":{verb}"))),
+            "{verb} not audited: {sources:?}"
+        );
+    }
+}
+
+/// #2424 — an operator's own password change writes an audit row.
+#[tokio::test]
+async fn an_operator_password_change_is_audited() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let form = "current_password=op-pass-123&new_password=Another-strong-pass-9!&confirm_password=Another-strong-pass-9!";
+    assert_eq!(
+        env.console_post("/change-password", form.into()).await,
+        StatusCode::SEE_OTHER
+    );
+    let op = Operator::objects()
+        .filter("username", "op")
+        .fetch(&env._pools.registry_pool())
+        .await
+        .unwrap()
+        .remove(0);
+    let id = op.id.get().unwrap().to_string();
+    let sources = audit_sources(&env, "rustango_operators", &id).await;
+    assert!(
+        sources.iter().any(|s| s.ends_with(":change_password")),
+        "not audited: {sources:?}"
+    );
 }

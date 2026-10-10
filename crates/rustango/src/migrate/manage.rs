@@ -914,6 +914,7 @@ where
         writeln!(w, "nothing to migrate (already up to date)")?;
     }
     ensure_bootstrap_tables(pool).await?;
+    ensure_tenant_bootstrap_tables(pool).await?;
 
     // #1464 — rows written by the pre-fix SQLite default are stored as
     // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
@@ -957,6 +958,19 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
     crate::admin::totp_store::ensure_table(pool).await?;
     // The admin lists translations wherever they live (#2360).
     crate::i18n::db::ensure_table_pool(pool).await
+}
+
+/// The `managed = false` tables each tenant holds: the single database, or
+/// every tenant. Never a registry, where schema-mode tenants would share them.
+///
+/// # Errors
+/// Driver or SQL failures from the DDL.
+#[allow(clippy::unused_async, unused_variables)]
+pub(crate) async fn ensure_tenant_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
+    // Passkey sign-in reads it from the first login (#2364).
+    #[cfg(feature = "passkey")]
+    crate::passkey::ensure_table(pool).await?;
+    Ok(())
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
@@ -1222,6 +1236,20 @@ async fn forget_pending_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
+    forget_pending_cmd_with(pool, dir, args, w, async { Ok(Vec::new()) }).await
+}
+
+/// [`forget_pending_cmd`], also refusing a migration any of `tenant_ledgers`
+/// (slug, applied names) records. Awaited only once a name is resolved (#2393).
+pub(crate) async fn forget_pending_cmd_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+    tenant_ledgers: impl std::future::Future<
+        Output = Result<Vec<(String, std::collections::HashSet<String>)>, MigrateError>,
+    >,
+) -> Result<(), MigrateError> {
     // --help / no args
     let target = match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | None => {
@@ -1297,6 +1325,17 @@ async fn forget_pending_cmd<W: Write>(
              `forget-pending` to drop the JSON.",
             migration.name,
             runner::LEDGER_TABLE,
+        )));
+    }
+    if let Some((slug, _)) = tenant_ledgers
+        .await?
+        .into_iter()
+        .find(|(_, applied)| applied.contains(&migration.name))
+    {
+        return Err(MigrateError::Validation(format!(
+            "forget-pending: migration `{}` is already applied on tenant `{slug}`. \
+             Unapply it there first.",
+            migration.name,
         )));
     }
 
@@ -2755,12 +2794,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     // The queue is tri-dialect despite the `Database` name — the table
     // DDL and the row-pickup strategy are chosen from the pool's dialect.
     DatabaseJobQueue::ensure_table_pool(&pool).await?;
-    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 4));
+    // A worker killed mid-job (OOM, SIGKILL) never reaches its shutdown,
+    // so its rows stay locked. This unlocks them at start and every minute.
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool.clone(), 4)
+            .reclaim_stuck_after(Duration::from_secs(300)),
+    );
 
     // Register EVERY job type this queue might see, not just the ones
     // this process dispatches. A worker that picks up a row whose name
     // is unregistered here logs and returns *without unlocking it* — the
-    // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
+    // row is then stranded until the reclaim sweep, and
     // it does not show up in `pending_count()`.
     //
     // Note the crate name: this file is its own binary crate, so `crate::`
@@ -2778,10 +2822,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
 
     tracing::info!("{snake}: signal received, draining in-flight jobs");
     queue.shutdown().await;
-
-    // Rows whose worker died mid-job stay locked. Nothing sweeps them
-    // for you; run this on a scheduler, or at boot as done here.
-    let _ = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await;
     Ok(())
 }}
 "#
@@ -2982,10 +3022,16 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
     })
 }
 
-/// Build the argument vector for pg_dump given parsed args + database
-/// URL. Pure function — easy to test.
-fn build_pg_dump_argv(parsed: &DbDumpArgs, database_url: &str) -> Vec<String> {
-    let mut argv = vec![database_url.to_owned()];
+/// `pg_dump` for `url`; the password goes in its env, not argv (#2324).
+fn pg_dump_command(parsed: &DbDumpArgs, url: &str) -> std::process::Command {
+    let mut cmd = crate::dbshell::LibpqConn::new(url).command("pg_dump");
+    cmd.args(build_pg_dump_argv(parsed));
+    cmd
+}
+
+/// pg_dump's flags, after `--dbname`.
+fn build_pg_dump_argv(parsed: &DbDumpArgs) -> Vec<String> {
+    let mut argv = Vec::new();
     if parsed.data_only {
         argv.push("--data-only".into());
     }
@@ -3017,14 +3063,11 @@ fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
                 .into(),
         )
     })?;
-    let argv = build_pg_dump_argv(&parsed, &url);
-    eprintln!("running: pg_dump {}", redact(&argv).join(" "));
-    let status = std::process::Command::new("pg_dump")
-        .args(&argv)
-        .status()
-        .map_err(|e| {
-            MigrateError::Validation(format!("could not run pg_dump (is it on PATH?): {e}"))
-        })?;
+    let mut cmd = pg_dump_command(&parsed, &url);
+    eprintln!("running: pg_dump {}", shown_args(&cmd));
+    let status = cmd.status().map_err(|e| {
+        MigrateError::Validation(format!("could not run pg_dump (is it on PATH?): {e}"))
+    })?;
     if !status.success() {
         return Err(MigrateError::Validation(format!(
             "pg_dump exited with status {status}"
@@ -3135,10 +3178,16 @@ fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
     matches!(answer, Ok(Some(a)) if a == "yes")
 }
 
-/// Build the psql argv given a checked plan + URL. Pure function — easy
-/// to test.
-fn build_psql_argv(parsed: &RestorePlan, database_url: &str) -> Vec<String> {
-    let mut argv = vec![database_url.to_owned()];
+/// `psql` for `url`; the password goes in its env, not argv (#2324).
+fn psql_restore_command(parsed: &RestorePlan, url: &str) -> std::process::Command {
+    let mut cmd = crate::dbshell::LibpqConn::new(url).command("psql");
+    cmd.args(build_psql_argv(parsed));
+    cmd
+}
+
+/// psql's flags, after `--dbname`.
+fn build_psql_argv(parsed: &RestorePlan) -> Vec<String> {
+    let mut argv = Vec::new();
     // -v ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL
     // error, instead of plowing through and "succeeding" with garbage.
     argv.push("-v".into());
@@ -3172,14 +3221,11 @@ fn run_psql_restore<W: Write>(
     url: &str,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    let argv = build_psql_argv(parsed, url);
-    writeln!(w, "running: psql {}", redact(&argv).join(" "))?;
-    let status = std::process::Command::new("psql")
-        .args(&argv)
-        .status()
-        .map_err(|e| {
-            MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
-        })?;
+    let mut cmd = psql_restore_command(parsed, url);
+    writeln!(w, "running: psql {}", shown_args(&cmd))?;
+    let status = cmd.status().map_err(|e| {
+        MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
+    })?;
     if !status.success() {
         return Err(MigrateError::Validation(format!(
             "psql exited with status {status}"
@@ -5102,10 +5148,12 @@ async fn sendtestemail_cmd<W: Write>(_args: &[String], _w: &mut W) -> Result<(),
     ))
 }
 
-/// Mask the password in a `postgres://user:pass@host/db` connection
-/// URL so it doesn't leak into log output.
-fn redact(argv: &[String]) -> Vec<String> {
-    argv.iter().map(|a| redact_url(a)).collect()
+/// A command's argv for a status line; the URL in it has no password.
+fn shown_args(cmd: &std::process::Command) -> String {
+    cmd.get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 use crate::sql::connect_diagnosis::redact as redact_url;
@@ -6906,6 +6954,20 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         }
     }
 
+    /// #2425 — the tenant-scheme warning is the tenancy dispatcher's, so a
+    /// single-database deploy never sees it.
+    #[test]
+    fn deploy_audit_says_nothing_about_the_tenant_scheme() {
+        let r = run(&good_prod_env());
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("RUSTANGO_TENANT_SCHEME")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     /// #1627 — an admin built without session auth is named.
     #[test]
     fn deploy_audit_warns_on_an_ungated_admin() {
@@ -7567,15 +7629,50 @@ mod db_cmd_tests {
     // -------- build_pg_dump_argv
 
     #[test]
-    fn dump_argv_contains_url_first() {
+    fn dump_argv_starts_with_a_password_free_dbname() {
         let parsed = DbDumpArgs {
             out: None,
             data_only: false,
             schema_only: false,
             no_owner: false,
         };
-        let argv = build_pg_dump_argv(&parsed, "postgres://u:p@h/db");
-        assert_eq!(argv[0], "postgres://u:p@h/db");
+        let cmd = pg_dump_command(&parsed, "postgres://u:s3cret@h/db");
+        let argv: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(argv[..2], ["--dbname", "postgres://u@h/db"]);
+    }
+
+    /// #2324: argv is visible in `ps`; the password goes in the env.
+    #[test]
+    fn dump_and_restore_keep_the_password_out_of_argv() {
+        let url = "postgres://u:s3cret@h/db";
+        let dump = DbDumpArgs {
+            out: None,
+            data_only: false,
+            schema_only: false,
+            no_owner: false,
+        };
+        let plan = RestorePlan {
+            file: "/tmp/x.sql".into(),
+            clean: false,
+        };
+        for cmd in [
+            pg_dump_command(&dump, url),
+            psql_restore_command(&plan, url),
+        ] {
+            assert!(
+                !cmd.get_args()
+                    .any(|a| a.to_string_lossy().contains("s3cret")),
+                "{cmd:?}"
+            );
+            let env: Vec<_> = cmd.get_envs().collect();
+            assert_eq!(
+                env,
+                [(
+                    std::ffi::OsStr::new("PGPASSWORD"),
+                    Some(std::ffi::OsStr::new("s3cret"))
+                )]
+            );
+        }
     }
 
     #[test]
@@ -7586,7 +7683,7 @@ mod db_cmd_tests {
             schema_only: false,
             no_owner: true,
         };
-        let argv = build_pg_dump_argv(&parsed, "postgres://u:p@h/db");
+        let argv = build_pg_dump_argv(&parsed);
         assert!(argv.contains(&"--data-only".to_owned()));
         assert!(argv.contains(&"--no-owner".to_owned()));
         assert!(argv.contains(&"--file".to_owned()));
@@ -7752,7 +7849,7 @@ mod db_cmd_tests {
             file: "/tmp/x.sql".into(),
             clean: false,
         };
-        let argv = build_psql_argv(&parsed, "postgres://u:p@h/db");
+        let argv = build_psql_argv(&parsed);
         // ON_ERROR_STOP=1 prevents psql from continuing past errors
         // and silently "succeeding" with a half-restored DB.
         assert!(argv.contains(&"ON_ERROR_STOP=1".to_owned()));
@@ -7768,7 +7865,7 @@ mod db_cmd_tests {
             file: "/tmp/x.sql".into(),
             clean: true,
         };
-        let argv = build_psql_argv(&parsed, "postgres://u:p@h/db");
+        let argv = build_psql_argv(&parsed);
         assert!(argv.iter().any(|a| a.contains("DROP SCHEMA")));
         assert!(argv.iter().any(|a| a.contains("CREATE SCHEMA")));
     }

@@ -150,6 +150,83 @@ untouched.
 
 ## Unreleased
 
+## 0.60.5
+
+### Passkeys in `public` on schema-mode tenants
+
+`migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.
+
+### Impersonation links use https by default
+
+Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
+
+### Password changes refuse a stale row
+
+A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
+
+### Auth links take a `LinkScope`
+
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
+
+### Workers from `make:worker` (#2331)
+
+The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
+`ensure_table` adds a `rustango_jobs_locked_idx` index at the next boot.
+
+### Tenant database URLs (#2320)
+
+Creating or editing a tenant now refuses a `postgres://`, `mysql://`, `mariadb://` or `sqlite:` URL that sqlx cannot parse. Secret references are not resolved there, so they pass unchecked.
+
+### Scoped pools quote the schema (#2325)
+
+Before, a legacy mixed-case schema such as `Acme` got `search_path` `acme`. Writes through `scoped_pool` may have landed in `acme` or `public`; check those for its rows.
+
+### `SearchClause` with no columns
+
+A `SearchClause` with a non-empty query and no columns now matches no rows (`WHERE 1 = 0`); it used to be dropped. A ViewSet without `search_fields` still ignores `?search=` (#2391).
+
+### Admin: inline delete of a `soft_delete` child
+
+Ticking DELETE on an inline row of a `soft_delete` model now stamps its column, as the main delete does; it used to remove the row (#2453).
+
+### Admin: audit in the write's transaction
+
+An inline row of an `audit(...)` child model now writes its audit row in the edit's transaction; if that write fails, the edit is not saved (#2389).
+
+The same holds for admin delete, soft delete, `delete_selected` and `restore_selected` on an `audit(...)` model: a missing or failing audit table now refuses the delete (a 500 or the missing-table page) where it used to delete and log a warning (#2390).
+
+### `migrate-tenant-storage` takes the tenant offline
+
+The tenant is inactive for the whole move, plus a `--drain-secs` wait before the dump (default 30 s, the tenant cache TTL); `active` comes back on success, failure or Ctrl-C; if the process dies, run `edit-tenant <slug> --activate`. A suspension made during the move is undone when it ends; suspend again afterwards. Stop workers that write to the tenant without the resolver first (#2383). Drop the old copy by hand, never with `purge-tenant` (#2382).
+
+### Admin: passkeys and registry tables
+
+No admin serves `rustango_webauthn_credentials` any more; with `passkey`, `migrate` creates it on the single database or on each tenant, never the registry (#2364). With `tenancy` compiled in, a plain `admin::Builder` hides `Org`, `Operator` and the other registry-only tables; an admin you mount on a tenancy registry needs `.registry_mode()` to list them, and lists only registry tables (#2365).
+
+### SSO: missing provider table
+
+A missing `rustango_sso_providers` table now reads as no providers, so bare-admin `resolve_by_slug` returns `Ok(None)` instead of an error (#2366).
+
+### Migrations re-add some FKs
+
+On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326). On PG and MySQL, renaming an FK or M2M junction column re-adds its FK under the new column's name, which re-checks every row (#2307). FKs on columns renamed by 0.60.4 or older keep their old names: `migrate` finds them by column, but `sqlmigrate` prints the new name.
+
+### `create_tenant` fails on a failed migration
+
+`api::create_tenant` (and `create_tenant_if_missing`) now returns `Err` when the tenant's migrations fail, and leaves the tenant inactive. It no longer migrates the other tenants. The next `create_tenant_if_missing` for that slug migrates and activates it; a tenant you suspended stays inactive (#2392).
+
+### `forget-pending` reads every tenant ledger
+
+In a tenancy project `forget-pending` now refuses a migration any tenant applied, inactive ones included, and fails if a tenant's ledger can't be read, such as a missing SQLite file (#2393).
+
+### Schema-mode tenants need a new schema
+
+Creating a schema-mode tenant now fails if its schema already exists. Drop it or pick another `--schema-name` (#2394).
+
+### `create-api-key --expires-days` must be positive
+
+`--expires-days 0` or below, and values past chrono's range, are now refused (#2395).
+
 ## 0.60.4
 
 ### Tenant admin: TOTP and translations

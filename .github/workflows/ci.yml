@@ -1039,6 +1039,7 @@ jobs:
             --test i18n_admin_editor_sqlite_live \
             --test i18n_admin_editor_tri \
             --test org_host_claims_tri \
+            --test tenancy_manage_tri \
             --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
@@ -1312,6 +1313,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test admin_row_scope_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_list_state_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test admin_write_errors_tri
+      - run: cargo test -p rustango --features mysql,admin,testkit --test admin_audit_writes_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
@@ -1328,12 +1330,13 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test tenant_purge_tri
       - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test resolver_per_registry_tri
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test org_host_claims_tri
+      - run: cargo test -p rustango --features mysql,sqlite,tenancy,testkit --test tenancy_manage_tri
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
-      - run: cargo test -p rustango --features mysql,admin,tenancy,totp,testkit --test tenant_admin_tables_tri
+      - run: cargo test -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri
       - run: cargo test -p rustango --features mysql,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
       - run: cargo test -p rustango --features mysql,admin --test login_throttle_mysql_live
       - run: cargo test -p rustango --features mysql,admin,template_views,testkit --test view_global_scopes_tri

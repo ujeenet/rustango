@@ -98,20 +98,33 @@ pub(crate) async fn fetch_in_chunks<T, C, F, Fut>(
     pool: &Pool,
     base: &QuerySet<T>,
     keys: Vec<SqlValue>,
-    mut fetch: F,
+    fetch: F,
 ) -> Result<Vec<C>, ExecError>
 where
     T: Model,
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
-    let carried = pool
-        .dialect()
-        .compile_select(&base.clone().compile()?)?
-        .params
-        .len();
+    let select = base.clone().compile()?;
+    fetch_select_in_chunks(pool, &select, base.is_sliced(), keys, fetch).await
+}
+
+/// [`fetch_in_chunks`] over a schema-level `base`, for callers with no
+/// typed model (#2318).
+pub(crate) async fn fetch_select_in_chunks<C, F, Fut>(
+    pool: &Pool,
+    base: &SelectQuery,
+    sliced: bool,
+    keys: Vec<SqlValue>,
+    mut fetch: F,
+) -> Result<Vec<C>, ExecError>
+where
+    F: FnMut(Vec<SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    let carried = pool.dialect().compile_select(base)?.params.len();
     let room = pool.dialect().max_bind_params().saturating_sub(carried);
-    let size = in_chunk_size(T::SCHEMA.table, keys.len(), room, base.is_sliced())?;
+    let size = in_chunk_size(base.model.table, keys.len(), room, sliced)?;
     if keys.len() <= size {
         return fetch(keys).await;
     }
@@ -330,9 +343,9 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
-#[cfg(feature = "admin")]
-pub(crate) use row_to_json::select_one_row_as_json_tx;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
+#[cfg(feature = "admin")]
+pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
 
 /// Annotate each parent row with the COUNT of its children, from a
 /// single query, so a list page costs one round trip instead of

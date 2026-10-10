@@ -59,7 +59,8 @@
 //!
 //! [`PgJobQueue::reclaim_stuck_jobs_pool`] clears `locked_at` on rows
 //! locked longer than a threshold. Run it on a schedule so jobs from a
-//! crashed worker get picked up again. A running job refreshes its lock
+//! crashed worker get picked up again, or let the queue do it with
+//! [`PgJobQueue::reclaim_stuck_after`]. A running job refreshes its lock
 //! every [`PgJobQueue::heartbeat_interval`], so keep the threshold well
 //! above that. `attempt` counts at pickup: a job that crashes its
 //! process still spends an attempt.
@@ -99,6 +100,8 @@ pub struct PgJobQueue {
     worker_id_prefix: String,
     heartbeat_interval: Duration,
     context_column: ContextColumn,
+    reclaim_after: Option<Duration>,
+    sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Whether `rustango_jobs` has a usable `context` column. A table from a
@@ -166,7 +169,10 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at)
-    WHERE locked_at IS NULL";
+    WHERE locked_at IS NULL;
+CREATE INDEX IF NOT EXISTS rustango_jobs_locked_idx
+    ON rustango_jobs (locked_at)
+    WHERE locked_at IS NOT NULL";
 
 const CREATE_JOBS_TABLE_SQL_MYSQL: &str = "\
 CREATE TABLE IF NOT EXISTS `rustango_jobs` (
@@ -182,7 +188,8 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
     `created_at`   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     `context`      JSON
 );
-CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`)";
+CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`);
+CREATE INDEX `rustango_jobs_locked_idx` ON `rustango_jobs` (`locked_at`)";
 
 /// `run_at` and `created_at` take their DEFAULT from the dialect, not
 /// from a literal here, so the format cannot drift from the one the
@@ -206,7 +213,9 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     context      TEXT
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
-    ON rustango_jobs (run_at) WHERE locked_at IS NULL"
+    ON rustango_jobs (run_at) WHERE locked_at IS NULL;
+CREATE INDEX IF NOT EXISTS rustango_jobs_locked_idx
+    ON rustango_jobs (locked_at) WHERE locked_at IS NOT NULL"
     )
 }
 
@@ -242,6 +251,8 @@ impl PgJobQueue {
             worker_id_prefix: id_prefix,
             heartbeat_interval: Duration::from_secs(10),
             context_column: ContextColumn::default(),
+            reclaim_after: None,
+            sweeper: Mutex::new(None),
         }
     }
 
@@ -285,6 +296,18 @@ impl PgJobQueue {
         self
     }
 
+    /// While running, unlock rows locked longer than `older_than`: at
+    /// `start`, then every `min(older_than, 60s)`. Off by default (#2331).
+    ///
+    /// A worker killed mid-job never reaches `shutdown`, so this is what
+    /// frees its rows. `older_than` is raised to three of this queue's
+    /// heartbeats. A handler that blocks its thread past that loses its lease (#2374).
+    #[must_use]
+    pub fn reclaim_stuck_after(mut self, older_than: Duration) -> Self {
+        self.reclaim_after = Some(older_than);
+        self
+    }
+
     /// How long `shutdown` waits for running jobs before aborting them
     /// and unlocking their rows. Default: [`DEFAULT_SHUTDOWN_GRACE`].
     #[must_use]
@@ -319,10 +342,9 @@ impl PgJobQueue {
         Self::ensure_table_pool(&Pool::Postgres(pool.clone())).await
     }
 
-    /// Create the `rustango_jobs` table and its pickup index if they
-    /// are missing. Safe to call every boot. MySQL gets a plain index
-    /// because it has no partial indexes; PG and SQLite get the
-    /// `WHERE locked_at IS NULL` one.
+    /// Create the `rustango_jobs` table, its pickup index and its
+    /// `locked_at` reclaim index if they are missing. Safe to call every
+    /// boot. MySQL gets plain indexes because it has no partial indexes.
     ///
     /// # Errors
     /// Underlying sqlx DDL error.
@@ -477,12 +499,21 @@ impl JobQueue for PgJobQueue {
             });
             run.push(h);
         }
+        if let Some(older_than) = self.reclaim_after {
+            let older_than = older_than.max(self.heartbeat_interval * 3);
+            let every = older_than.min(Duration::from_secs(60));
+            let sweep = sweep_loop(self.pool.clone(), older_than, every, stop.clone());
+            *self.sweeper.lock().await = Some(tokio::spawn(sweep));
+        }
         *slot = Some(run);
     }
 
     async fn shutdown(&self) {
         let mut slot = self.run.lock().await;
         let Some(run) = slot.take() else { return };
+        if let Some(sweeper) = self.sweeper.lock().await.take() {
+            sweeper.abort();
+        }
         for n in run.stop(self.shutdown_grace).await {
             // Hand the aborted job back now rather than at the next reclaim.
             release_worker_rows(&self.pool, &self.worker_id(n)).await;
@@ -541,6 +572,21 @@ async fn worker_loop(
                     () = stop.wait() => {}
                 }
             }
+        }
+    }
+}
+
+/// [`PgJobQueue::reclaim_stuck_after`]'s sweep, until the run stops.
+async fn sweep_loop(pool: Pool, older_than: Duration, every: Duration, mut stop: StopSignal) {
+    while !stop.is_set() {
+        match PgJobQueue::reclaim_stuck_jobs_pool(&pool, older_than).await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(reclaimed = n, "unlocked jobs a dead worker left locked"),
+            Err(e) => tracing::error!(error = %e, "stuck-job sweep failed"),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            () = stop.wait() => {}
         }
     }
 }

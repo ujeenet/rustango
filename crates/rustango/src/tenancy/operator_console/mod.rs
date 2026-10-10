@@ -1433,10 +1433,9 @@ async fn change_password_submit(
         return redir_err("Session is missing an operator id; please log in again.");
     }
 
-    // `op` from the extension is a snapshot taken in `require_session`.
-    // Re-read the live row so we do not overwrite a change another
-    // operator just made.
-    let mut op_row: auth::Operator = match auth::Operator::objects()
+    // `op` from the extension is a snapshot taken in `require_session`;
+    // verify against the live hash.
+    let op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
         .fetch(&state.registry)
         .await
@@ -1488,12 +1487,31 @@ async fn change_password_submit(
             ))
         }
     };
-    op_row.password_hash = new_hash;
-    op_row.password_changed_at = Some(chrono::Utc::now());
-    if let Err(e) = op_row.save_pool(&state.registry).await {
-        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password update");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    match crate::passwords::store_password_change(
+        &state.registry,
+        <auth::Operator as crate::core::Model>::SCHEMA,
+        &op_row.id,
+        &op_row.password_hash,
+        &new_hash,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return redir_err("Your password changed meanwhile; please try again."),
+        Err(e) => {
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password update");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+        }
     }
+    emit_registry_audit(
+        &state.registry,
+        "rustango_operators",
+        &op_id.to_string(),
+        op_id,
+        "change_password",
+        serde_json::Map::new(),
+    )
+    .await;
     redir("ok=Password+updated")
 }
 
@@ -1622,7 +1640,7 @@ async fn sso_shared_list(
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_create(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     Form(form): Form<SharedSsoForm>,
 ) -> Response<Body> {
     let mut row = super::sso::SharedSsoProvider {
@@ -1643,7 +1661,38 @@ async fn sso_shared_create(
     if let Err(e) = row.insert_pool(&state.registry).await {
         return server_error("create failed", &e);
     }
+    let mut detail = serde_json::Map::new();
+    detail.insert("slug".into(), serde_json::json!(row.slug));
+    detail.insert("kind".into(), serde_json::json!(row.kind));
+    detail.insert("enabled".into(), serde_json::json!(row.enabled));
+    detail.insert(
+        "allow_email_link".into(),
+        serde_json::json!(row.allow_email_link),
+    );
+    let id = row.id.get().copied().unwrap_or_default();
+    sso_shared_audit(&state, &op, id, "sso_shared_create", detail).await;
     Redirect::to("/sso-shared").into_response()
+}
+
+/// Audit a shared provider change; these rows decide sign-in for every tenant.
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_audit(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    id: i64,
+    verb: &str,
+    detail: serde_json::Map<String, serde_json::Value>,
+) {
+    use crate::core::Model as _;
+    emit_registry_audit(
+        &state.registry,
+        super::sso::SharedSsoProvider::SCHEMA.table,
+        &id.to_string(),
+        op.id.get().copied().unwrap_or(0),
+        verb,
+        detail,
+    )
+    .await;
 }
 
 /// The wanted `allow_email_link` value, `on` or `off`.
@@ -1657,7 +1706,7 @@ struct EmailLinkForm {
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_set_email_link(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Form(form): Form<EmailLinkForm>,
 ) -> Response<Body> {
@@ -1680,7 +1729,12 @@ async fn sso_shared_set_email_link(
         .execute_pool(&state.registry)
         .await
     {
-        Ok(1) => Redirect::to("/sso-shared").into_response(),
+        Ok(1) => {
+            let mut detail = serde_json::Map::new();
+            detail.insert("allow_email_link".into(), serde_json::json!(allow));
+            sso_shared_audit(&state, &op, id, "sso_shared_email_link", detail).await;
+            Redirect::to("/sso-shared").into_response()
+        }
         Ok(_) => (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
         Err(e) => server_error("update failed", &e),
     }
@@ -1689,18 +1743,26 @@ async fn sso_shared_set_email_link(
 #[cfg(feature = "admin-sso")]
 async fn sso_shared_delete(
     State(state): State<ConsoleState>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Response<Body> {
-    let row = super::sso::SharedSsoProvider::objects()
+    let row = match super::sso::SharedSsoProvider::objects()
         .filter("id", id)
         .fetch(&state.registry)
         .await
-        .ok()
-        .and_then(|v| v.into_iter().next());
-    if let Some(r) = row {
-        let _ = r.delete_pool(&state.registry).await;
+    {
+        Ok(v) => v.into_iter().next(),
+        Err(e) => return server_error("delete failed", &e),
+    };
+    let Some(r) = row else {
+        return (StatusCode::NOT_FOUND, "no such shared provider").into_response();
+    };
+    if let Err(e) = r.delete_pool(&state.registry).await {
+        return server_error("delete failed", &e);
     }
+    let mut detail = serde_json::Map::new();
+    detail.insert("slug".into(), serde_json::json!(r.slug));
+    sso_shared_audit(&state, &op, id, "sso_shared_delete", detail).await;
     Redirect::to("/sso-shared").into_response()
 }
 
@@ -2311,9 +2373,7 @@ async fn org_impersonate(
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
     // Build the redirect: tenant subdomain, the handoff path, and the
-    // token. Scheme comes from `RUSTANGO_TENANT_SCHEME`, defaulting to
-    // http for local dev.
-    let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    // token. See `tenant_origin` for the scheme.
     let prefix = handoff_prefix(org.path_prefix.as_deref());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
@@ -2335,7 +2395,10 @@ async fn org_impersonate(
     let handoff_path = format!("{prefix}{}", state.tenant_handoff_url.trim_end_matches('/'));
     // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
     // every character is already URL-safe, so no escaping needed.
-    let handoff = format!("{scheme}://{host}{port_suffix}{handoff_path}");
+    let handoff = format!(
+        "{}{handoff_path}",
+        crate::tenancy::server::tenant_origin(&host, &port_suffix)
+    );
     let redirect_to = format!("{handoff}?token={token}");
 
     let mut resp = Redirect::to(&redirect_to).into_response();

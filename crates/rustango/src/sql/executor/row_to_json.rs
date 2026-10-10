@@ -419,7 +419,7 @@ fn augment_joined_columns_pg(
     };
     for join in joins {
         for col in &join.project {
-            let key = format!("{}__{}", join.alias, col);
+            let key = crate::core::joins::joined_label(join.alias, col);
             let v = row
                 .try_get::<Option<String>, _>(key.as_str())
                 .ok()
@@ -445,7 +445,7 @@ fn augment_joined_columns_my(
     };
     for join in joins {
         for col in &join.project {
-            let key = format!("{}__{}", join.alias, col);
+            let key = crate::core::joins::joined_label(join.alias, col);
             let v = row
                 .try_get::<Option<String>, _>(key.as_str())
                 .ok()
@@ -471,7 +471,7 @@ fn augment_joined_columns_sqlite(
     };
     for join in joins {
         for col in &join.project {
-            let key = format!("{}__{}", join.alias, col);
+            let key = crate::core::joins::joined_label(join.alias, col);
             let v = row
                 .try_get::<Option<String>, _>(key.as_str())
                 .ok()
@@ -539,13 +539,13 @@ pub async fn select_one_row_as_json(
     }
 }
 
-/// [`select_one_row_as_json`] inside an open transaction.
+/// [`select_rows_as_json`] inside an open transaction.
 #[cfg(feature = "admin")]
-pub(crate) async fn select_one_row_as_json_tx(
+pub(crate) async fn select_rows_as_json_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
-) -> Result<Option<serde_json::Value>, ExecError> {
+) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = tx.dialect().compile_select(query)?;
     match tx {
@@ -555,11 +555,15 @@ pub(crate) async fn select_one_row_as_json_tx(
             for v in stmt.params {
                 q = bind_query(q, v);
             }
-            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
-                let mut json = row_to_json(r, fields);
-                augment_joined_columns_pg(&mut json, r, &query.joins);
-                json
-            }))
+            Ok(q.fetch_all(&mut **t)
+                .await?
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json(r, fields);
+                    augment_joined_columns_pg(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
         }
         #[cfg(feature = "mysql")]
         crate::sql::PoolTx::Mysql(t) => {
@@ -568,11 +572,15 @@ pub(crate) async fn select_one_row_as_json_tx(
             for v in stmt.params {
                 q = bind_query_my(q, v);
             }
-            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
-                let mut json = row_to_json_my(r, fields);
-                augment_joined_columns_my(&mut json, r, &query.joins);
-                json
-            }))
+            Ok(q.fetch_all(&mut **t)
+                .await?
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json_my(r, fields);
+                    augment_joined_columns_my(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
         }
         #[cfg(feature = "sqlite")]
         crate::sql::PoolTx::Sqlite(t) => {
@@ -581,11 +589,28 @@ pub(crate) async fn select_one_row_as_json_tx(
             for v in stmt.params {
                 q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_optional(&mut **t).await?.as_ref().map(|r| {
-                let mut json = row_to_json_sqlite(r, fields);
-                augment_joined_columns_sqlite(&mut json, r, &query.joins);
-                json
-            }))
+            Ok(q.fetch_all(&mut **t)
+                .await?
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json_sqlite(r, fields);
+                    augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
         }
     }
+}
+
+/// [`select_one_row_as_json`] inside an open transaction.
+#[cfg(feature = "admin")]
+pub(crate) async fn select_one_row_as_json_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Option<serde_json::Value>, ExecError> {
+    Ok(select_rows_as_json_tx(tx, query, fields)
+        .await?
+        .into_iter()
+        .next())
 }

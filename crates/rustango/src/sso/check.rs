@@ -52,12 +52,13 @@ async fn email_linking<P: Model + Send>(pool: &Pool) -> Vec<i64> {
         })
 }
 
-/// The enabled `P` rows on `pool`. A missing table counts as empty.
+/// The enabled `P` rows on `pool`. A missing table counts as empty, as at sign-in.
 async fn candidates<P: Model + Send>(
     pool: &Pool,
     source: LinkSource,
 ) -> Result<Vec<Candidate>, ExecError> {
-    if !try_table_exists_here(pool, P::SCHEMA.table).await? {
+    let rows = load_rows(QuerySet::<P>::new().filter("enabled", true), pool).await?;
+    if rows.is_empty() {
         return Ok(Vec::new());
     }
     // The admin never links by email, whatever the row says.
@@ -66,7 +67,6 @@ async fn candidates<P: Model + Send>(
     } else {
         email_linking::<P>(pool).await
     };
-    let rows = load_rows(QuerySet::<P>::new().filter("enabled", true), pool).await?;
     Ok(rows
         .into_iter()
         .map(|r| Candidate {
@@ -167,7 +167,8 @@ pub async fn shared_providers(
     tenant: &Pool,
 ) -> Result<Vec<Stranded>, ExecError> {
     let mut rows = shared.0.clone();
-    if !rows.is_empty() && try_table_exists_here(tenant, super::SsoProvider::SCHEMA.table).await? {
+    if !rows.is_empty() {
+        // The sign-in read: a tenant without the table overrides nothing.
         let own = load_rows(QuerySet::<super::SsoProvider>::new(), tenant).await?;
         rows.retain(|c| !own.iter().any(|r| r.enabled && r.slug == c.slug));
     }

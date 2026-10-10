@@ -169,11 +169,15 @@ fn int(v: Option<&SqlValue>) -> i64 {
     }
 }
 
-/// Provider rows matching `qs`, without the [`DEFERRED`] columns.
+/// Provider rows matching `qs`, without the [`DEFERRED`] columns. A missing
+/// table holds none, so a tenant without one falls through to the shared set (#2366).
 pub(crate) async fn load_rows<T: Model>(
     qs: QuerySet<T>,
     pool: &Pool,
 ) -> Result<Vec<ProviderRow>, ExecError> {
+    if !crate::migrate::try_table_exists_here(pool, T::SCHEMA.table).await? {
+        return Ok(Vec::new());
+    }
     let rows = qs.defer(DEFERRED).fetch(pool).await?;
     Ok(rows
         .iter()

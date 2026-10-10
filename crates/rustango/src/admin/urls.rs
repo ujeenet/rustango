@@ -139,6 +139,40 @@ pub struct Builder {
     config: Config,
 }
 
+/// The database an admin serves. Each holds a different set of tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AdminDatabase {
+    /// A single-database app: `migrate` runs only the tenant-scope system
+    /// chain, so registry-only tables such as `rustango_orgs` are absent (#2365).
+    #[default]
+    Single,
+    /// A tenancy registry, set by [`Builder::registry_mode`].
+    Registry,
+    /// One tenant's storage, set by [`Builder::tenant_mode`]. Registry
+    /// models stay out: on a schema-mode tenant `search_path` would reach
+    /// the registry's copy and leak cross-tenant data.
+    Tenant,
+}
+
+impl AdminDatabase {
+    /// Whether this database holds `schema`'s table.
+    fn holds(self, schema: &crate::core::ModelSchema) -> bool {
+        use crate::core::ModelScope;
+        use crate::migrate::snapshot::in_system_chain;
+        match self {
+            Self::Single => {
+                !in_system_chain(schema, ModelScope::Registry)
+                    || in_system_chain(schema, ModelScope::Tenant)
+            }
+            Self::Registry => {
+                schema.scope == ModelScope::Registry
+                    || in_system_chain(schema, ModelScope::Registry)
+            }
+            Self::Tenant => schema.scope == ModelScope::Tenant,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Config {
     /// Sidebar header name. `None` means "Rustango Admin".
@@ -178,13 +212,8 @@ pub(crate) struct Config {
     /// effective set that `is_visible`, `is_read_only`, `can_add`
     /// and `can_delete` check.
     pub(crate) user_perms: Option<HashSet<String>>,
-    /// When true, hide registry-scoped models
-    /// (`#[rustango(scope = "registry")]`, such as Org and Operator)
-    /// from the sidebar and index. A tenant admin runs on the
-    /// per-tenant pool, so showing a registry model there can leak
-    /// cross-tenant data. `TenantAdminBuilder::build()` sets it.
-    /// Single-tenant admins leave it false and see every model.
-    pub(crate) tenant_mode: bool,
+    /// The database this admin serves, which decides the models it lists.
+    pub(crate) database: AdminDatabase,
     /// The tenancy layer gates every route around this admin, so
     /// `check --deploy` must not call it ungated (#1627).
     pub(crate) gated_upstream: bool,
@@ -510,16 +539,23 @@ impl Builder {
         self
     }
 
-    /// Hide registry-scoped models (`#[rustango(scope =
-    /// "registry")]`) from the sidebar and index.
-    /// `TenantAdminBuilder::build()` sets it; standalone admins
-    /// leave it false. Without it, models like `Org` and `Operator`
-    /// show inside a tenant admin, and on a schema-mode tenant
-    /// clicking one can **leak cross-tenant data**: the registry's
-    /// `public.rustango_orgs` resolves through `search_path`.
+    /// Serve one tenant: list only tenant-scope models.
+    /// `TenantAdminBuilder::build()` sets it. On a schema-mode tenant a
+    /// registry model would **leak cross-tenant data** through `search_path`.
+    /// The last of `tenant_mode` / `registry_mode` called wins.
     #[must_use]
     pub fn tenant_mode(mut self) -> Self {
-        self.config.tenant_mode = true;
+        self.config.database = AdminDatabase::Tenant;
+        self
+    }
+
+    /// Serve a tenancy registry: list registry models such as `Org` and
+    /// `Operator`. A plain admin is a single-database one and hides them,
+    /// because single-database `migrate` never creates their tables.
+    /// The last of `tenant_mode` / `registry_mode` called wins.
+    #[must_use]
+    pub fn registry_mode(mut self) -> Self {
+        self.config.database = AdminDatabase::Registry;
         self
     }
 
@@ -782,18 +818,20 @@ impl Builder {
 }
 
 /// Tables the generic admin never serves: the TOTP store holds raw
-/// secrets, and enrollment has its own pages.
+/// secrets, and a passkey row signs in as its `user_id` (#2364).
+/// Enrollment has its own pages.
 fn is_never_served(table: &str) -> bool {
+    #[cfg(not(any(feature = "totp", feature = "passkey")))]
+    let _ = table;
     #[cfg(feature = "totp")]
-    {
-        use crate::core::Model as _;
-        table == super::totp_store::AdminTotp::SCHEMA.table
+    if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
+        return true;
     }
-    #[cfg(not(feature = "totp"))]
-    {
-        let _ = table;
-        false
+    #[cfg(feature = "passkey")]
+    if table == <crate::passkey::WebauthnCredential as crate::core::Model>::SCHEMA.table {
+        return true;
     }
+    false
 }
 
 /// Per-request state: the pool plus the resolved `Config`. It is
@@ -810,9 +848,9 @@ impl AppState {
     /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {
         use crate::core::Model as _;
-        // A schema-mode tenant's `search_path` reaches the registry's
-        // copy, so registry tables must not be served there (#2360).
-        if super::helpers::served_entry(table).is_some_and(|e| !self.scope_visible(e.schema.scope))
+        // Only tables this database holds (#2360, #2365).
+        if super::helpers::served_entry(table)
+            .is_some_and(|e| !self.config.database.holds(e.schema))
         {
             return false;
         }
@@ -840,18 +878,6 @@ impl AppState {
             return perms.contains(&format!("{table}.view"));
         }
         true
-    }
-
-    /// Scope filter, applied by [`Self::is_visible`]. With `tenant_mode` on, registry-only models
-    /// (`#[rustango(scope = "registry")]`, such as `Org` and
-    /// `Operator`) are hidden, so **cross-tenant data cannot
-    /// surface inside a tenant subdomain**. Standalone admins
-    /// return true for every scope.
-    fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
-        if !self.config.tenant_mode {
-            return true;
-        }
-        scope == crate::core::ModelScope::Tenant
     }
 
     /// `true` when the table's edit and update routes are blocked.
@@ -1022,7 +1048,6 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
 #[cfg(all(test, feature = "postgres"))]
 mod scope_filter_tests {
     use super::*;
-    use crate::core::ModelScope;
     use sqlx::PgPool;
     use std::sync::Arc;
 
@@ -1034,9 +1059,9 @@ mod scope_filter_tests {
             .expect("connect_lazy never fails")
     }
 
-    fn state_with(tenant_mode: bool) -> AppState {
+    fn state_with(database: AdminDatabase) -> AppState {
         let mut cfg = Config::default();
-        cfg.tenant_mode = tenant_mode;
+        cfg.database = database;
         AppState {
             pool: Pool::Postgres(lazy_pg_pool()),
             config: Arc::new(cfg),
@@ -1044,12 +1069,22 @@ mod scope_filter_tests {
     }
 
     #[tokio::test]
-    async fn standalone_admin_sees_every_scope() {
-        // A single-tenant project must still see registry-scoped
-        // models in its admin.
-        let state = state_with(false);
-        assert!(state.scope_visible(ModelScope::Tenant));
-        assert!(state.scope_visible(ModelScope::Registry));
+    async fn single_database_admin_hides_registry_only_tables() {
+        // Single-database `migrate` never creates them (#2365).
+        let state = state_with(AdminDatabase::Single);
+        #[cfg(feature = "tenancy")]
+        assert!(!state.is_visible("rustango_orgs"));
+        // Unmanaged and tenant-scope framework tables are there.
+        assert!(state.is_visible("rustango_translations"));
+        assert!(state.is_visible("rustango_users"));
+        // A registry holds its own tables and no tenant ones.
+        #[cfg(feature = "tenancy")]
+        {
+            let registry = state_with(AdminDatabase::Registry);
+            assert!(registry.is_visible("rustango_orgs"));
+            assert!(!registry.is_visible("rustango_users"));
+            assert!(registry.is_visible("rustango_audit_log"));
+        }
     }
 
     #[tokio::test]
@@ -1059,20 +1094,28 @@ mod scope_filter_tests {
         // Operator. They are not in the tenant pool, and on a
         // schema-mode tenant opening one leaks cross-tenant data
         // through `search_path`.
-        let state = state_with(true);
-        assert!(state.scope_visible(ModelScope::Tenant));
-        assert!(!state.scope_visible(ModelScope::Registry));
+        let state = state_with(AdminDatabase::Tenant);
+        assert!(state.is_visible("rustango_users"));
+        #[cfg(feature = "tenancy")]
+        assert!(!state.is_visible("rustango_orgs"));
         // `is_visible` is the gate custom views and docs use too (#2360).
         assert!(!state.is_visible("rustango_translations"));
-        assert!(state_with(false).is_visible("rustango_translations"));
     }
 
     #[tokio::test]
-    async fn tenant_mode_setter_flips_flag() {
+    async fn mode_setters_pick_the_database() {
         let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
             .expect("connect_lazy never fails");
-        let builder = Builder::new(pool).tenant_mode();
-        assert!(builder.config.tenant_mode);
+        let builder = || Builder::new(pool.clone());
+        assert_eq!(builder().config.database, AdminDatabase::Single);
+        assert_eq!(
+            builder().tenant_mode().config.database,
+            AdminDatabase::Tenant
+        );
+        assert_eq!(
+            builder().registry_mode().config.database,
+            AdminDatabase::Registry
+        );
     }
 
     // The derive always registers `rustango_admin_users`, but its
@@ -1080,7 +1123,7 @@ mod scope_filter_tests {
     // never opts in must not see it in the model index.
     #[tokio::test]
     async fn admin_users_hidden_when_session_auth_not_configured() {
-        let state = state_with(false);
+        let state = state_with(AdminDatabase::Single);
         // The default Config leaves `session_secret` at None, so
         // the table must be hidden.
         assert!(state.config.session_secret.is_none());

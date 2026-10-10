@@ -190,7 +190,11 @@ pub(crate) async fn first_verified<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    use crate::core::Column as _;
     use crate::passwords::ticks_while;
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    use crate::sql::{FetcherPool as _, UpdaterPool as _};
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_variants_do_not_block_the_runtime() {
@@ -202,6 +206,106 @@ mod tests {
         let (r, n) = ticks_while(verify_dummy_async("hunter2")).await;
         assert!(r.is_ok());
         assert!(n >= 2, "verify_dummy_async stalled the runtime ({n} ticks)");
+    }
+
+    /// A user row on a fresh SQLite pool, read once: the copy a password
+    /// change holds while Argon2 runs.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    async fn user_row() -> (crate::sql::Pool, super::super::User) {
+        use super::super::User;
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<User>(&pool)
+            .await
+            .unwrap();
+        let mut u = User {
+            username: "ada".into(),
+            password_hash: "OLD".into(),
+            ..crate::testkit::user()
+        };
+        u.insert_pool(&pool).await.unwrap();
+        (pool, u)
+    }
+
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    async fn reread(pool: &crate::sql::Pool, id: i64) -> super::super::User {
+        use super::super::User;
+        User::objects()
+            .where_(User::id.eq(id))
+            .fetch(pool)
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    /// Change `row`'s password to `NEW` the way the console and CLI do.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    async fn change(
+        pool: &crate::sql::Pool,
+        row: &super::super::User,
+    ) -> Result<bool, crate::sql::ExecError> {
+        use crate::core::Model as _;
+        crate::passwords::store_password_change(
+            pool,
+            super::super::User::SCHEMA,
+            &row.id,
+            &row.password_hash,
+            "NEW",
+        )
+        .await
+    }
+
+    /// #2467 — an unsaved row is an error, not an UPDATE of id 0.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_password_change_on_an_unsaved_row_errors() {
+        let (pool, _) = user_row().await;
+        let unsaved = super::super::User {
+            password_hash: "OLD".into(),
+            ..crate::testkit::user()
+        };
+        assert!(matches!(
+            change(&pool, &unsaved).await,
+            Err(crate::sql::ExecError::UnsavedRow { .. })
+        ));
+    }
+
+    /// #2467 — a deactivate landing while the hash runs must stand.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_password_write_keeps_a_concurrent_deactivate() {
+        use super::super::User;
+        let (pool, stale) = user_row().await;
+        let id = *stale.id.get().unwrap();
+        User::objects()
+            .where_(User::id.eq(id))
+            .update()
+            .set_typed(User::active.set(false))
+            .execute_pool(&pool)
+            .await
+            .unwrap();
+        assert!(change(&pool, &stale).await.unwrap());
+        let now = reread(&pool, id).await;
+        assert!(!now.active, "the password write undid the deactivate");
+        assert_eq!(now.password_hash, "NEW");
+        assert!(now.password_changed_at.is_some());
+    }
+
+    /// #2467 — a password changed meanwhile is not overwritten.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_password_write_loses_to_a_concurrent_change() {
+        use super::super::User;
+        let (pool, stale) = user_row().await;
+        let id = *stale.id.get().unwrap();
+        User::objects()
+            .where_(User::id.eq(id))
+            .update()
+            .set_typed(User::password_hash.set("OTHER".to_owned()))
+            .execute_pool(&pool)
+            .await
+            .unwrap();
+        assert!(!change(&pool, &stale).await.unwrap());
+        assert_eq!(reread(&pool, id).await.password_hash, "OTHER");
     }
 
     #[test]

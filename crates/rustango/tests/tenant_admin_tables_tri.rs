@@ -116,11 +116,7 @@ async fn assert_listed_tables_exist(router: &axum::Router, what: &str) -> Vec<St
     let tables = listed_tables(&index);
     assert!(!tables.is_empty(), "{what}: the index lists no model");
     let mut missing = Vec::new();
-    // Passkeys are app-wired: the app runs `passkey::ensure_table` itself.
-    for t in tables
-        .iter()
-        .filter(|t| *t != "rustango_webauthn_credentials")
-    {
+    for t in &tables {
         let (status, _) = get(router, &format!("/{t}")).await;
         if status != StatusCode::OK {
             missing.push(format!("{t}: {status}"));
@@ -205,18 +201,26 @@ async fn database_mode_tenant_admin(backend: Backend) {
             pools.scoped_pool_dyn(&org).await.unwrap()
         }
     };
+    assert_passkeys_on_tenant_only(&tenant, &registry).await;
     let router = tenant_admin(tenant);
     let listed = assert_listed_tables_exist(&router, "tenant admin").await;
     assert!(listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
     assert_no_registry_tables(&listed);
+    assert_no_passkey_admin(&router).await;
     assert_no_translations_editor(&router, &registry).await;
 
     // The registry holds the translations the tenant admin no longer lists.
     let registry_admin = rustango::admin::Builder::new(registry.clone())
+        .registry_mode()
         .admin_prefix("/a")
         .build();
+    let listed = assert_listed_tables_exist(&registry_admin, "registry admin").await;
+    assert!(!listed.iter().any(|t| t == "rustango_users"), "{listed:?}");
     let (status, _) = get(&registry_admin, "/rustango_translations").await;
     assert_eq!(status, StatusCode::OK, "registry rustango_translations");
+    let (status, _) = get(&registry_admin, "/rustango_orgs").await;
+    assert_eq!(status, StatusCode::OK, "registry rustango_orgs");
+    assert_no_passkey_admin(&registry_admin).await;
     // ...and serves the editor the tenant admin 404s.
     let (status, body) = get(&registry_admin, "/rustango_translations/editor").await;
     assert_eq!(status, StatusCode::OK, "registry editor: {body}");
@@ -235,11 +239,53 @@ async fn single_database_admin(backend: Backend) {
     rustango::migrate::manage::run_with_writer(&pool, &dir, ["migrate".to_owned()], &mut out)
         .await
         .expect("migrate");
-    let router = rustango::admin::Builder::new(pool)
+    let router = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("/a")
         .build();
-    let (status, _) = get(&router, "/rustango_translations").await;
-    assert_eq!(status, StatusCode::OK, "rustango_translations");
+    // Registry-only tables are not created here, so not listed (#2365).
+    let listed = assert_listed_tables_exist(&router, "single-database admin").await;
+    // Shared system tables stay listed (#2365).
+    for t in [
+        "rustango_translations",
+        "rustango_audit_log",
+        "rustango_content_types",
+    ] {
+        assert!(listed.iter().any(|l| l == t), "{t} missing: {listed:?}");
+    }
+    assert!(!listed.iter().any(|t| t == "rustango_orgs"), "{listed:?}");
+    let (status, _) = get(&router, "/rustango_orgs").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "rustango_orgs");
+    assert_no_passkey_admin(&router).await;
+    // `migrate` creates the passkey store sign-in reads (#2364).
+    #[cfg(feature = "passkey")]
+    rustango::passkey::for_user(&pool, 1)
+        .await
+        .expect("passkey table");
+}
+
+/// Tenancy `migrate` creates the passkey store on the tenant, never the registry (#2364).
+#[allow(unused_variables)]
+async fn assert_passkeys_on_tenant_only(tenant: &Pool, registry: &Pool) {
+    #[cfg(feature = "passkey")]
+    {
+        rustango::passkey::for_user(tenant, 1)
+            .await
+            .expect("tenant passkey table");
+        assert!(
+            rustango::passkey::for_user(registry, 1).await.is_err(),
+            "the registry holds a passkey table"
+        );
+    }
+}
+
+/// No admin serves passkeys: a row signs in as its `user_id` (#2364).
+async fn assert_no_passkey_admin(router: &axum::Router) {
+    let (status, _) = get(router, "/rustango_webauthn_credentials").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "rustango_webauthn_credentials"
+    );
 }
 
 macro_rules! per_backend {
@@ -300,9 +346,11 @@ async fn schema_mode_tenant_admin() {
         .expect("tenants");
     assert!(report.all_ok(), "{report:?}");
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
+    assert_passkeys_on_tenant_only(&tenant, &registry).await;
     let router = tenant_admin(tenant);
     let listed = assert_listed_tables_exist(&router, "schema-mode tenant admin").await;
     assert_no_registry_tables(&listed);
+    assert_no_passkey_admin(&router).await;
     assert_no_translations_editor(&router, &registry).await;
 
     // `search_path` falls back to `public`, so a 200 alone can't show
@@ -313,12 +361,63 @@ async fn schema_mode_tenant_admin() {
     .fetch_all(pg)
     .await
     .unwrap();
-    let foreign: Vec<&String> = listed
-        .iter()
-        .filter(|t| *t != "rustango_webauthn_credentials" && !in_t1.contains(t))
-        .collect();
+    let foreign: Vec<&String> = listed.iter().filter(|t| !in_t1.contains(t)).collect();
     assert!(
         foreign.is_empty(),
         "listed but not in schema t1: {foreign:?}"
+    );
+}
+
+/// A passkey enrolled on one schema-mode tenant is not found on another (#2364).
+#[cfg(all(feature = "postgres", feature = "passkey"))]
+#[tokio::test]
+async fn schema_mode_passkeys_stay_per_tenant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((registry, registry_url, _db)) = fresh(Backend::Postgres, tmp.path(), "pk").await
+    else {
+        eprintln!("skipping — DATABASE_URL unset");
+        return;
+    };
+    let dir = tmp.path().join("app/migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    rustango::tenancy::migrate_registry_pool(&registry, &dir)
+        .await
+        .expect("registry migrate");
+    let mut orgs = Vec::new();
+    for slug in ["pa", "pb"] {
+        let mut org = rustango::tenancy::Org {
+            slug: slug.into(),
+            display_name: slug.into(),
+            storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
+            backend_kind: "postgres".into(),
+            schema_name: Some(slug.into()),
+            database_url: None,
+            ..rustango::testkit::org()
+        };
+        org.insert_pool(&registry).await.unwrap();
+        orgs.push(org);
+    }
+    let pools = rustango::tenancy::TenantPools::new(registry.as_postgres().unwrap().clone());
+    let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
+        .await
+        .expect("tenants");
+    assert!(report.all_ok(), "{report:?}");
+    let a = pools.scoped_pool_dyn(&orgs[0]).await.unwrap();
+    let b = pools.scoped_pool_dyn(&orgs[1]).await.unwrap();
+    rustango::passkey::register(&a, 7, "cred-a", vec![1, 2, 3], 0, "laptop")
+        .await
+        .expect("enroll on tenant a");
+    assert!(rustango::passkey::by_credential_id(&a, "cred-a")
+        .await
+        .unwrap()
+        .is_some());
+    let on_b = rustango::passkey::by_credential_id(&b, "cred-a").await;
+    assert!(
+        matches!(on_b, Ok(None)),
+        "tenant b sees a's passkey: {on_b:?}"
+    );
+    assert!(
+        rustango::passkey::for_user(&registry, 7).await.is_err(),
+        "the registry holds a passkey table"
     );
 }

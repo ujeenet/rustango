@@ -341,7 +341,7 @@ pub(super) async fn operator_reset_password(
     Path(id): Path<i64>,
     Form(form): Form<ResetForm>,
 ) -> Response<Body> {
-    let mut target = match one_operator(&state, &op, id).await {
+    let target = match one_operator(&state, &op, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return back_err(&state, &op, "No such operator.").await,
         Err(e) => return back_err(&state, &op, &e).await,
@@ -364,10 +364,20 @@ pub(super) async fn operator_reset_password(
 
     // The new hash is what signs them out: sessions carry a fingerprint
     // of the old one.
-    target.password_hash = hash;
-    target.password_changed_at = Some(chrono::Utc::now());
-    if let Err(e) = target.save_pool(&state.registry).await {
-        return back_err(&state, &op, &withheld(&op, "Could not save", &e)).await;
+    match crate::passwords::store_password_change(
+        &state.registry,
+        <auth::Operator as crate::core::Model>::SCHEMA,
+        &target.id,
+        &target.password_hash,
+        &hash,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return back_err(&state, &op, "The password changed meanwhile; try again.").await
+        }
+        Err(e) => return back_err(&state, &op, &withheld(&op, "Could not save", &e)).await,
     }
 
     audit(&state, &op, id, "operator_reset_password", &target.username).await;

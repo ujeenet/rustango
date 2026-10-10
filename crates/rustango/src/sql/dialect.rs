@@ -375,6 +375,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for the multi-column FKs on `table` that only `index` can serve,
+    /// binding `(table, index, index)` (MySQL, 1553; #2326).
+    fn composite_fks_needing_index_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for the names of the single-column UNIQUE indexes on one
     /// column, binding `(table, column)`. `Some` where an `AlterColumnUnique`
     /// drops the index by that name (MySQL) (#1676).

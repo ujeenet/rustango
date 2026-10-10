@@ -69,6 +69,11 @@ pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
     Expr::AliasedColumn { alias, column }
 }
 
+/// The result-column name of joined column `alias.column`.
+pub(crate) fn joined_label(alias: &str, column: &str) -> String {
+    format!("{alias}__{column}")
+}
+
 /// Predicate builder for JOIN `on` clauses. Emits
 /// `"<alias>"."<col>" <op> <value>`. Use it whenever the column you
 /// filter on does not belong to the join's own alias.

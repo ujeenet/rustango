@@ -179,6 +179,9 @@
       <option data-href="{{ v.toggle_url | safe }}"{% if v.active %} selected{% endif %}>{{ v.display | safe }} ({{ v.count }})</option>
       {% endfor %}
     </select>
+    {% if facet.more_count and facet.more_count > 0 %}
+    <ul><li class="facet-more"><a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a></li></ul>
+    {% endif %}
     {% else %}
     {# Non-FK facets: link list (original behaviour) #}
     <ul>

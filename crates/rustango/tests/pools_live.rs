@@ -498,6 +498,36 @@ async fn scoped_pool_cache_is_keyed_per_tenant_and_stays_scoped() {
     migrate::drop_all(&pool).await.unwrap();
 }
 
+/// #2325: a legacy `Acme` schema stays `Acme`, not the `acme` another
+/// tenant owns; a space in the name survives the startup option.
+#[tokio::test]
+async fn scoped_pool_quotes_the_schema_name() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    let schemas = ["Acme_sp_q", "acme_sp_q", "acme sp q"];
+    for s in schemas {
+        drop_schema(&pool, s).await;
+        create_schema(&pool, s).await;
+    }
+    let pools = TenantPools::new(pool.clone());
+    for (slug, schema) in [("acme_q_upper", "Acme_sp_q"), ("acme_q_space", "acme sp q")] {
+        let org = seed_org(&pool, slug, StorageMode::Schema, Some(schema), None).await;
+        let scoped = pools.scoped_pool(&org).await.expect("scoped pool");
+        let mut conn = scoped.acquire().await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, schema);
+        let mut conn = pools.acquire(&org).await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, schema);
+    }
+    for s in schemas {
+        drop_schema(&pool, s).await;
+    }
+    migrate::drop_all(&pool).await.unwrap();
+}
+
 /// A schema change made by another process reaches this cache: the fresh
 /// Org names another schema, so the cached pool is a miss (#1882).
 #[tokio::test]

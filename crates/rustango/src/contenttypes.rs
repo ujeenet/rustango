@@ -883,7 +883,7 @@ pub async fn reverse_generic_for<Parent: crate::core::Model>(
 
 /// Batched reverse-generic prefetch.
 /// Given a list of parent primary keys (same model), fetches all
-/// matching child rows in a single SELECT and groups them by
+/// matching child rows, one SELECT per bind-sized batch, and groups them by
 /// parent_pk. Eliminates the N+1 query pattern when rendering an
 /// index page that shows children per parent.
 ///
@@ -930,24 +930,32 @@ pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
         .copied()
         .map(crate::core::SqlValue::I64)
         .collect();
-    // #562 — composite AND-IN lookup; struct-update over SelectQuery::new.
-    let select_q = SelectQuery {
-        where_clause: WhereExpr::And(vec![
-            WhereExpr::Predicate(Filter {
-                column: rel.ct_column,
-                op: Op::Eq,
-                value: crate::core::SqlValue::I64(ct_id),
-            }),
-            WhereExpr::Predicate(Filter {
-                column: rel.pk_column,
-                op: Op::In,
-                value: crate::core::SqlValue::List(pk_values),
-            }),
-        ]),
+    // #562 — composite AND-IN lookup, one IN list per bind-sized batch (#2318).
+    let base = SelectQuery {
+        where_clause: WhereExpr::Predicate(Filter {
+            column: rel.ct_column,
+            op: Op::Eq,
+            value: crate::core::SqlValue::I64(ct_id),
+        }),
         ..SelectQuery::new(child_schema)
     };
     let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
-    let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
+    let rows = crate::sql::fetch_select_in_chunks(pool, &base, false, pk_values, |keys| {
+        let select_q = SelectQuery {
+            where_clause: WhereExpr::And(vec![
+                base.where_clause.clone(),
+                WhereExpr::Predicate(Filter {
+                    column: rel.pk_column,
+                    op: Op::In,
+                    value: crate::core::SqlValue::List(keys),
+                }),
+            ]),
+            ..base.clone()
+        };
+        let fields = &fields;
+        async move { crate::sql::select_rows_as_json(pool, &select_q, fields).await }
+    })
+    .await?;
     let mut grouped: ::std::collections::HashMap<i64, Vec<serde_json::Value>> =
         ::std::collections::HashMap::new();
     for row in rows {

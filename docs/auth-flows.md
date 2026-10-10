@@ -75,10 +75,14 @@ hash** in one call.
 
 ```rust
 use std::time::Duration;
-use rustango::auth_flows::{PasswordReset, confirm_password_reset_pool_into};
+use rustango::auth_flows::{LinkScope, PasswordReset, confirm_password_reset_pool};
+
+// The request's tenant (`t: Tenant`): links redeem only in it (#2472).
+let scope = LinkScope::from(&t);
 
 // 1. User asks to reset → look them up → issue a link → email it.
 let url = PasswordReset::issue(
+    &scope,
     "https://app.example.com/auth/reset",   // your callback route
     user_id,                                // encoded in the token
     secret,
@@ -88,9 +92,13 @@ mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).aw
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
 let user_id = confirm_password_reset_pool(
-    &pool, &url, "a-brand-new-strong-password", secret,
+    &t, &url, "a-brand-new-strong-password", secret,
 ).await?;
 ```
+
+> **Multi-tenant apps must pass `&t`** (the `Tenant`) to confirm, so the pool
+> and the scope come from one value. `LinkTarget::audience(&pool, "app")` and
+> `LinkScope::audience("app")` are for apps with a single user database.
 
 > **Use this form for `rustango_users`.** Framework sessions carry a fingerprint
 > of the password hash ([#1338](https://github.com/ujeenet/rustango/issues/1338)), so the new hash ends every
@@ -129,7 +137,7 @@ Pass a cache and the token is consumed on first use:
 use rustango::auth_flows::confirm_password_reset_single_use;
 
 let user_id = confirm_password_reset_single_use(
-    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+    &t, &url, "a-brand-new-strong-password", secret, &cache,
 ).await?;                      // a replay → Err(AuthFlowError::AlreadyUsed)
 ```
 
@@ -153,11 +161,11 @@ before an email change). There's no built-in DB write here — you set your own
 use rustango::auth_flows::EmailVerification;
 
 // On signup:
-let url = EmailVerification::issue(callback, user_id, &email, secret, Duration::from_secs(86_400));
+let url = EmailVerification::issue(&scope, callback, user_id, &email, secret, Duration::from_secs(86_400));
 mailer.send(&Email::new().to(&email).subject("Confirm your email").body(&url)).await?;
 
 // On click:
-let (user_id, email) = EmailVerification::verify(&url, secret)?;
+let (user_id, email) = EmailVerification::verify(&scope, &url, secret)?;
 // → if email still matches the user's current address, mark them verified
 ```
 
@@ -172,11 +180,11 @@ mint a [session](auth-sessions.md). Keep the TTL short (10–30 min) and make it
 ```rust
 use rustango::auth_flows::MagicLink;
 
-let url = MagicLink::issue(callback, &email, secret, Duration::from_secs(900));
+let url = MagicLink::issue(&scope, callback, &email, secret, Duration::from_secs(900));
 mailer.send(&Email::new().to(&email).subject("Your sign-in link").body(&url)).await?;
 
 // On click:
-let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
+let email = MagicLink::verify_single_use(&scope, &url, secret, &cache).await?;
 // → look up the user by email, create a session
 ```
 
@@ -185,8 +193,8 @@ let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
 ## Single-use tokens
 
 Plain `verify` only checks signature + expiry, so a leaked link is replayable
-until it expires. For login and reset, prefer `verify_single_use(url, secret,
-&cache)` — it records the token's signature in a `Cache` and refuses a second
+until it expires. For login and reset, prefer `verify_single_use(scope, url,
+secret, &cache)` — it records the token's signature in a `Cache` and refuses a second
 use. For reset specifically, `confirm_password_reset_single_use` does this as
 part of the same call ([above](#make-the-link-single-use)):
 

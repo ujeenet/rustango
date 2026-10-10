@@ -24,12 +24,18 @@ pub const SHARED_SYSTEM_TABLES: &[&str] = &["rustango_audit_log", "rustango_cont
 /// build with no registry database.
 #[must_use]
 pub fn scope_owns_system_tables(scope: crate::core::ModelScope) -> bool {
-    inventory::iter::<ModelEntry>.into_iter().any(|e| {
-        e.schema.scope == scope
-            && e.schema.table.starts_with("rustango_")
-            && !e.schema.is_view
-            && e.schema.managed
-    })
+    inventory::iter::<ModelEntry>
+        .into_iter()
+        .any(|e| e.schema.scope == scope && in_system_chain(e.schema, scope))
+}
+
+/// Whether `scope`'s system migrations create `schema`'s table.
+#[must_use]
+pub(crate) fn in_system_chain(schema: &ModelSchema, scope: crate::core::ModelScope) -> bool {
+    (schema.scope == scope || SHARED_SYSTEM_TABLES.contains(&schema.table))
+        && schema.table.starts_with("rustango_")
+        && !schema.is_view
+        && schema.managed
 }
 
 /// A snapshot of every registered model, ordered by table name.
@@ -315,12 +321,9 @@ impl SchemaSnapshot {
     /// [`scope_owns_system_tables`] for that.
     #[must_use]
     pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
-        let matching = inventory::iter::<ModelEntry>.into_iter().filter(|e| {
-            (e.schema.scope == scope || SHARED_SYSTEM_TABLES.contains(&e.schema.table))
-                && e.schema.table.starts_with("rustango_")
-                && !e.schema.is_view
-                && e.schema.managed
-        });
+        let matching = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| in_system_chain(e.schema, scope));
         // Only one model may own a table, or the migration emits two
         // `CREATE TABLE`s for it. A custom user model declares
         // `rustango_users` while the built-in `User` derive is always

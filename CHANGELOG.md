@@ -4,6 +4,140 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.5] — 2026-10-10
+
+### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
+
+Provisioning and `create_tenant` refuse a schema that exists, which `purge-tenant` would later drop. A schema made for a row that then failed to insert is dropped again.
+
+### Fixed — a new project keeps `migrations/` in git (#2396)
+
+The scaffolder writes `migrations/.gitkeep`, so a clone made before the first `makemigrations` still builds the image.
+
+### Fixed — `create-api-key --expires-days` no longer panics on a huge value (#2395)
+
+A count of zero, below zero or past chrono's range is now a validation error.
+
+### Fixed — `forget-pending` keeps a migration a tenant applied (#2393)
+
+In a tenancy project it checked only the registry ledger. It now refuses when any tenant's ledger records the migration.
+
+### Fixed — `api::create_tenant` returns a failed migration (#2392)
+
+It inserted the tenant active and ran the batch, which logs failures and returns `Ok`. It now migrates only the new tenant and activates it after a clean run; `create_tenant_if_missing` finishes one that failed.
+
+### Fixed — migrate warns when a tenant's passkey table hides `public` passkeys (#2518)
+
+On PG schema-mode tenants the new per-tenant `rustango_webauthn_credentials` shadows `public`'s; `migrate-tenants` now logs a warning naming the table and the rows to move.
+
+### Security — logout ends the refresh family even with an expired access token (#2419)
+
+The family is read from any token signed for the tenant, expired or already rotated, so a thief's rotated refresh token stops working at logout.
+
+### Fixed — operator console audits shared SSO changes and password changes (#2424)
+
+Creating, re-linking and deleting a shared SSO provider, and an operator's own password change, now write audit rows; a failed delete reports the error instead of a success redirect.
+
+### Security — impersonation links default to https (#2425)
+
+With `RUSTANGO_TENANT_SCHEME` unset, the handoff and end-impersonation links use https wherever cookies are `Secure` (loopback hosts keep http); the tenancy `check --deploy` warns when the variable is unset or not `https`.
+
+### Fixed — a password change no longer undoes a concurrent deactivate or demote (#2467)
+
+The tenant admin, operator console and CLI password writes, and operator activate/deactivate, update only their own columns; a password write is guarded by the old hash.
+
+### Security — reset, verify and magic links are tenant-bound (#2472)
+
+`PasswordReset`, `EmailVerification` and `MagicLink` sign a `LinkScope` and refuse a link redeemed under another one, so a link from one tenant can no longer reset the same user id in another.
+
+### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
+
+The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.
+
+### Fixed — a scoped tenant pool quotes its schema in `search_path` (#2325)
+
+A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_pool` now matches `acquire`.
+
+### Fixed — `db:dump` and `db:restore` no longer put the database password in argv (#2324)
+
+`pg_dump` and `psql` get it through `PGPASSWORD`, so `ps` no longer shows it.
+
+### Fixed — a `make:worker` worker frees a killed worker's jobs while it runs (#2331)
+
+New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start`, then every `min(older_than, 60s)`, using a new `locked_at` index. The template uses it instead of a reclaim after shutdown.
+
+### Fixed — an admin inline DELETE stamps a `soft_delete` child instead of removing it (#2453)
+
+As the main admin delete does; trashed children no longer count toward the inline's `max_num`.
+
+### Fixed — an admin search on a model with no searchable column returns no rows (#2391)
+
+The changelist and autocomplete returned every row. A `SearchClause` with a query and no columns now matches nothing.
+
+### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
+
+For an `audit(...)` model a failed audit write now refuses the write instead of logging a warning. Custom actions still audit after their handler.
+
+### Fixed — admin inline rows of an `audit(...)` model are audited (#2389)
+
+Inline updates, deletes and inserts write their audit rows in the parent edit's transaction; a failed audit write saves nothing.
+
+### Fixed — `migrate-tenant-storage` no longer advises `purge-tenant` for the old copy (#2382)
+
+That would drop the new storage and the Org row. The message now names the old schema or database to drop by hand.
+
+### Fixed — `migrate-tenant-storage` resolves secret references (#2384)
+
+A source `database_url` like `env://ACME_DB` is resolved before connecting. `--database-url` may be a reference too; it is stored and printed as given, so the password stays out of the registry and the output.
+
+### Fixed — `migrate-tenant-storage --to database` accepts extensions the target already has (#2385)
+
+An untrusted extension pre-installed on the target, in the schema the registry has it in, no longer needs `--allow-extension`. One in another schema is refused before the move starts.
+
+### Fixed — `migrate-tenant-storage` no longer loses writes made during the move (#2383)
+
+The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The switch writes only the storage columns and `active`, guarded by `active = false`, so an edit made meanwhile survives. Ctrl-C and failures reactivate the tenant; otherwise the output names `edit-tenant <slug> --activate`.
+
+### Fixed — `migrate-tenant-storage --to database` moves an extension in the tenant's own schema (#2386)
+
+The restore failed on `CREATE SCHEMA` (42P06). The dump now creates that extension itself, which needs pg_dump 14+.
+
+### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
+
+A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.
+
+### Fixed — a single-database admin no longer lists registry-only tables (#2365)
+
+With `tenancy` compiled in, a plain admin listed `Org`, `Operator` and other tables single-database `migrate` never creates. New `admin::Builder::registry_mode()` lists only registry tables, for an admin on a registry.
+
+### Fixed — shared SSO sign-in works for a tenant without its own provider table (#2366)
+
+A missing `rustango_sso_providers` reads as no providers, at sign-in and in `check --deploy`.
+
+### Fixed — admin FK facets past the cut are reachable (#2350)
+
+An FK facet's dropdown now has a "+N more" link, like the other facets.
+
+### Fixed — MySQL: dropping the index a composite FK uses no longer fails with 1553 (#2326)
+
+The runner drops each composite FK only that index serves and re-adds it right after; `sqlmigrate` shows the same.
+
+### Fixed — a renamed FK or junction column's FK takes the new column's name (#2307)
+
+PG and MySQL kept `<table>_<old>_fkey`. The runner drops the live FK by its catalog name and re-adds it at the end of the migration.
+
+### Fixed — PG widens an `Auto` PK's sequence in the migration's schema (#2308)
+
+The sequence lookup used the bare table name, so outside `search_path` it failed.
+
+### Fixed — `prefetch_reverse_generic_for` splits a large parent list across queries (#2318)
+
+It bound every parent id in one `IN` list and failed past the backend's bind limit.
+
+### Fixed — `values().annotate()` grouped by a joined bool reads as `Bool` on MySQL and SQLite (#2322)
+
+A `values(&["a.flag"])` group column, or a join's `project` column in `values_dict` / `values_list`, took no model type and came back as `I64`.
+
 ## [0.60.4] — 2026-10-09
 
 ### Fixed — the tenant admin no longer lists tables no tenant has (#2360)

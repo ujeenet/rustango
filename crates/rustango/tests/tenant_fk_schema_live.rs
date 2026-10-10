@@ -191,3 +191,102 @@ async fn seed_permissions_continues_past_a_failing_tenant() {
     drop(pools);
     registry.close().await;
 }
+
+/// Logs of `migrate-tenants` on a schema tenant while `public` holds a
+/// passkey. `existing`: the tenant had users before, as before 0.60.5.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+async fn migrate_logs_with_public_passkeys(
+    db_name: &str,
+    slug: &str,
+    existing: bool,
+) -> Option<String> {
+    use rustango::sql::Auto;
+    use tracing::instrument::WithSubscriber as _;
+    let admin_url = std::env::var("DATABASE_URL").ok()?;
+    let db = ScratchDb::create(&admin_url, db_name).await;
+    let url = db.url().to_owned();
+    let registry = sqlx::PgPool::connect(&url).await.unwrap();
+    let reg = rustango::sql::Pool::from(registry.clone());
+    rustango::testkit::migrate_framework(&reg).await.unwrap();
+    // A pre-0.60.5 app kept passkeys in `public`.
+    rustango::passkey::ensure_table(&reg).await.unwrap();
+    let mut cred = rustango::passkey::WebauthnCredential {
+        id: Auto::default(),
+        user_id: 1,
+        credential_id: "cred-1".into(),
+        public_key: vec![1, 2, 3],
+        sign_count: 0,
+        label: String::new(),
+        created_at: chrono::Utc::now(),
+    };
+    cred.insert_pool(&reg).await.unwrap();
+    let pools = TenantPools::new(registry.clone());
+    run(
+        &pools,
+        &url,
+        &["create-tenant", slug, "--mode", "schema", "--no-migrate"],
+    )
+    .await
+    .unwrap();
+    if existing {
+        // Migrated before 0.60.5: users, but no tenant passkey table.
+        run(&pools, &url, &["migrate-tenants"]).await.unwrap();
+        let org = Org::objects()
+            .where_(Org::slug.eq(slug.to_owned()))
+            .fetch(&reg)
+            .await
+            .unwrap()
+            .remove(0);
+        let schema = org.schema_name.clone().unwrap_or_else(|| slug.to_owned());
+        sqlx::query(&format!(
+            r#"DROP TABLE "{schema}".rustango_webauthn_credentials"#
+        ))
+        .execute(&registry)
+        .await
+        .unwrap();
+    }
+
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    run(&pools, &url, &["migrate-tenants"])
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+    drop(pools);
+    registry.close().await;
+    Some(buf.contents())
+}
+
+/// #2518 — an existing schema tenant's new passkey table hides the rows in
+/// `public`; `migrate-tenants` must say so.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn migrate_warns_when_public_passkeys_get_hidden() {
+    let Some(logs) = migrate_logs_with_public_passkeys("rustango_t2518", "t2518-acme", true).await
+    else {
+        return;
+    };
+    assert!(
+        logs.contains("public.rustango_webauthn_credentials") && logs.contains("t2518-acme"),
+        "no warning about hidden passkeys:\n{logs}"
+    );
+}
+
+/// #2518 — a brand-new tenant never read `public`, so it stays quiet.
+#[cfg(all(feature = "passkey", feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn migrate_is_quiet_about_passkeys_for_a_new_tenant() {
+    let Some(logs) = migrate_logs_with_public_passkeys("rustango_t2518b", "t2518-new", false).await
+    else {
+        return;
+    };
+    assert!(
+        !logs.contains("rustango_webauthn_credentials"),
+        "a new tenant was warned:\n{logs}"
+    );
+}

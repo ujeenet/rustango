@@ -31,9 +31,14 @@ fn unique(prefix: &str) -> String {
 }
 
 async fn send(pool: &Pool, method: Method, uri: &str, body: String) -> (StatusCode, String) {
-    let app = rustango::admin::Builder::new(pool.clone())
-        .admin_prefix("")
-        .build();
+    // One database stands in for both; the shared SSO providers live on the registry.
+    let builder = rustango::admin::Builder::new(pool.clone()).admin_prefix("");
+    let app = if uri.starts_with("/rustango_shared_sso_providers") {
+        builder.registry_mode()
+    } else {
+        builder
+    }
+    .build();
     let resp = app
         .oneshot(
             Request::builder()

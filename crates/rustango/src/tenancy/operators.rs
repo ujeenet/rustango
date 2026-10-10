@@ -13,7 +13,7 @@
 //! it is the invariant, not a UI courtesy.
 
 use crate::core::Column as _;
-use crate::sql::{CounterPool as _, FetcherPool as _, Pool};
+use crate::sql::{CounterPool as _, FetcherPool as _, Pool, UpdaterPool as _};
 use crate::tenancy::auth::Operator;
 
 /// Why an activation change was refused.
@@ -136,7 +136,65 @@ pub async fn set_active(
         }
     }
 
+    // Only `active`: a whole-row save would undo a password reset that
+    // landed since `target` was read (#2467).
+    Operator::objects()
+        .where_(Operator::id.eq(id))
+        .update()
+        .set_typed(Operator::active.set(active))
+        .execute_pool(registry)
+        .await?;
     target.active = active;
-    target.save_pool(registry).await?;
     Ok(Outcome::Changed)
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "testkit"))]
+mod tests {
+    use super::*;
+    use crate::sql::Auto;
+
+    async fn operator(pool: &Pool, username: &str) -> Operator {
+        let mut op = Operator {
+            id: Auto::default(),
+            username: username.into(),
+            password_hash: "OLD".into(),
+            active: true,
+            created_at: chrono::Utc::now(),
+            password_changed_at: None,
+            sessions_revoked_at: None,
+        };
+        op.insert_pool(pool).await.unwrap();
+        op
+    }
+
+    /// #2467 — deactivating writes only `active`, so a password reset that
+    /// landed since the row was read stands.
+    #[tokio::test]
+    async fn set_active_keeps_a_concurrent_password_reset() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<Operator>(&pool)
+            .await
+            .unwrap();
+        operator(&pool, "keeper").await;
+        let mut stale = operator(&pool, "target").await;
+        let id = *stale.id.get().unwrap();
+        Operator::objects()
+            .where_(Operator::id.eq(id))
+            .update()
+            .set_typed(Operator::password_hash.set("NEW".to_owned()))
+            .execute_pool(&pool)
+            .await
+            .unwrap();
+
+        let out = set_active(&pool, &mut stale, false, None).await.unwrap();
+        assert!(matches!(out, Outcome::Changed));
+        let now = Operator::objects()
+            .where_(Operator::id.eq(id))
+            .fetch(&pool)
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(!now.active);
+        assert_eq!(now.password_hash, "NEW", "deactivate undid the reset");
+    }
 }

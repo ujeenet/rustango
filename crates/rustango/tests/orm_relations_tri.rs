@@ -1,6 +1,7 @@
 //! Relation fetches on every backend: NULL FKs under `select_related` (#2293),
 //! shared select_related hops (#2294), bind-cap batching (#2295), M2M `set`
-//! with repeated ids (#2297) and `prefetch_generic` on an i32 PK (#2298).
+//! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298) and
+//! reverse-generic prefetch batching (#2318).
 //!
 //! The cap tests use 33k rows (x2 binds = 66k) or 70k keys: past SQLite's
 //! 32,766 and PG/MySQL's 65,535.
@@ -80,6 +81,17 @@ pub struct Child {
     #[rustango(primary_key)]
     pub id: i64,
     pub row: ForeignKey<Row>,
+}
+
+/// Points at any model through a generic FK.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_note", app = "rel2293")]
+#[rustango(generic_fk(name = "target", ct_column = "ct_id", pk_column = "object_pk"))]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub ct_id: i64,
+    pub object_pk: i64,
 }
 
 #[derive(Model, Debug, Clone)]
@@ -197,6 +209,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Uniq>(pool).await;
     fresh_table::<PostTag>(pool).await;
     fresh_table::<Badge>(pool).await;
+    fresh_table::<Note>(pool).await;
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -693,6 +706,42 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
     );
 }
 
+/// `prefetch_reverse_generic_for` splits its parent keys too (#2318).
+async fn prefetch_reverse_generic_past_the_bind_cap(pool: &Pool) {
+    use rustango::contenttypes::{self, ContentType};
+    contenttypes::ensure_seeded(pool)
+        .await
+        .expect("seed content types");
+    let ct = ContentType::for_model::<Row>(pool)
+        .await
+        .unwrap()
+        .expect("row ct");
+    let ct_id = *ct.id.get().expect("ct id");
+    let other = ContentType::for_model::<Badge>(pool)
+        .await
+        .unwrap()
+        .expect("badge ct");
+    let other_ct = *other.id.get().expect("other ct id");
+    // Hits in the first and the last batch; note 3 is a badge's, not a row's.
+    for (id, ct_id, object_pk) in [(1, ct_id, 9), (2, ct_id, 69_999), (3, other_ct, 9)] {
+        Note {
+            id,
+            ct_id,
+            object_pk,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("note");
+    }
+    let keys: Vec<i64> = (0..70_000).collect();
+    let grouped =
+        contenttypes::prefetch_reverse_generic_for::<Row>(pool, Note::SCHEMA, &keys, None)
+            .await
+            .expect("prefetch_reverse_generic_for batches its IN list");
+    assert_eq!(grouped.get(&9).map(Vec::len), Some(1));
+    assert_eq!(grouped.get(&69_999).map(Vec::len), Some(1));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -716,5 +765,6 @@ tri_dialect_test! {
         m2m_set_ignores_repeated_ids,
         generic_m2m_set_ignores_repeated_ids,
         prefetch_generic_keeps_i32_pks,
+        prefetch_reverse_generic_past_the_bind_cap,
     ],
 }
