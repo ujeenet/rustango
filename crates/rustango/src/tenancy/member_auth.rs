@@ -735,7 +735,10 @@ async fn sso_callback_in(
         let reason = match signed {
             MemberSignIn::Member(_) => None,
             MemberSignIn::Inactive => Some(R::Inactive),
-            _ => Some(R::InvalidCredentials),
+            MemberSignIn::NotLinked
+            | MemberSignIn::NoAccount
+            | MemberSignIn::Unverified
+            | MemberSignIn::Refused => Some(R::InvalidCredentials),
         };
         if let Some(reason) = reason {
             crate::sso::link::signal_refused(MEMBER_SIGNAL_SOURCE, &normalized, reason, meta())

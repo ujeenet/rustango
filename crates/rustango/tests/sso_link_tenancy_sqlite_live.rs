@@ -1589,8 +1589,9 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     });
     let fail_id = sig::connect_user_login_failed(move |c| {
         s2.lock().unwrap().push(format!(
-            "failed:{}:{}",
+            "failed:{}:{:?}:{}",
             c.source,
+            c.reason,
             c.attempted_username.unwrap_or_default()
         ));
         async {}
@@ -1601,7 +1602,10 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     let (app, pool, idp) = bare_admin().await;
     idp.assert("sub-root", "root@example.com");
     handshake(&app, "admin.test", "/login", "corp").await;
-    assert_eq!(take(), ["failed:admin_sso:root@example.com"]);
+    assert_eq!(
+        take(),
+        ["failed:admin_sso:InvalidCredentials:root@example.com"]
+    );
     let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
         .await
         .unwrap()
@@ -1621,13 +1625,24 @@ async fn sso_sign_ins_fire_the_auth_signals() {
 
     // Tenant console.
     let env = boot().await;
-    env.user("ann", "ann@example.com", false).await;
+    let ann = env.user("ann", "ann@example.com", false).await;
     env.tenant_provider("corp", false).await;
     assert!(env.sso("corp", "sub-ann", "ann@example.com").await.is_err());
-    assert_eq!(take(), ["failed:tenant_admin_sso:ann@example.com"]);
+    assert_eq!(
+        take(),
+        ["failed:tenant_admin_sso:InvalidCredentials:ann@example.com"]
+    );
     env.tenant_provider("open", true).await;
     assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_ok());
     assert_eq!(take(), ["in:tenant_admin_sso:ann"]);
+    // An unverified email is never named; the subject is.
+    *env.idp.claims.lock().unwrap() =
+        serde_json::json!({"sub": "sub-x", "email": "x@example.com", "email_verified": false});
+    handshake(&env.admin, &env.tenants[0].host, "/__login", "open").await;
+    assert_eq!(take(), ["failed:tenant_admin_sso:InvalidCredentials:sub-x"]);
+    env.deactivate(ann).await;
+    assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_err());
+    assert_eq!(take(), ["failed:tenant_admin_sso:Inactive:ann@example.com"]);
 
     // Member SSO: the default refuses a stranger; provisioning signs in.
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
@@ -1641,7 +1656,10 @@ async fn sso_sign_ins_fire_the_auth_signals() {
         .layer(axum::Extension(ctx.clone()));
     env.idp.assert("sub-new", "new@example.com");
     handshake(&strict, &host, "/auth", "corp").await;
-    assert_eq!(take(), ["failed:member_sso:new@example.com"]);
+    assert_eq!(
+        take(),
+        ["failed:member_sso:InvalidCredentials:new@example.com"]
+    );
     let open = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
         auto_provision: true,
         ..MemberAuthConfig::default()

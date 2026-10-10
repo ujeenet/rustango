@@ -413,13 +413,18 @@ impl LinkRefusal {
         match self {
             Self::Storage(_) => None,
             Self::Inactive => Some(R::Inactive),
-            _ => Some(R::InvalidCredentials),
+            Self::NoSubject
+            | Self::Unverified
+            | Self::NoAccount(_)
+            | Self::EmailLinkDisabled
+            | Self::Privileged
+            | Self::EmailCollides => Some(R::InvalidCredentials),
         }
     }
 }
 
-/// Send `user_login_failed` for a refused SSO sign-in, naming the IdP
-/// email, else its subject (#2559).
+/// Send `user_login_failed` for a refused SSO sign-in, naming the IdP's
+/// verified email, else its subject (#2559).
 #[cfg(feature = "signals")]
 pub(crate) async fn signal_refused(
     source: &'static str,
@@ -427,9 +432,9 @@ pub(crate) async fn signal_refused(
     reason: crate::signals::auth::AuthFailureReason,
     request: crate::signals::auth::AuthRequestMeta,
 ) {
-    let attempted = profile
-        .email
-        .clone()
+    let attempted = super::verified_email(profile)
+        .ok()
+        .map(str::to_owned)
         .or_else(|| Some(profile.provider_user_id.clone()))
         .filter(|s| !s.is_empty());
     crate::signals::auth::send_user_login_failed(crate::signals::auth::UserLoginFailedContext {
