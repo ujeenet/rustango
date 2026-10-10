@@ -93,12 +93,15 @@ impl Env {
         dir
     }
 
-    /// A database-mode tenant on the registry database itself.
-    fn shared_opts(&self) -> CreateTenantOpts {
+    /// `create_tenant` options for a tenant with storage of its own; the
+    /// registry's own database is refused (#2320).
+    async fn tenant_opts(&mut self, tag: &str) -> CreateTenantOpts {
+        let org = self.own_tenant(tag).await;
         CreateTenantOpts {
-            mode: StorageMode::Database,
+            mode: StorageMode::parse(&org.storage_mode).unwrap(),
             backend: self.backend(),
-            database_url: Some(self.url.clone()),
+            database_url: org.database_url,
+            schema_name: org.schema_name,
             ..CreateTenantOpts::default()
         }
     }
@@ -222,11 +225,12 @@ const BROKEN: &str = "SELECT * FROM rustango_no_such_table_2392";
 
 /// #2392 — a failed migration is an error, and the tenant stays inactive.
 async fn create_tenant_returns_a_failed_migration(pool: &Pool) {
-    let env = Env::new(pool).await;
+    let mut env = Env::new(pool).await;
     let dir = env.dir("migrations");
     migration(&dir, "0001_fail", BROKEN);
+    let opts = env.tenant_opts("broken").await;
     let err = env
-        .create(&dir, "broken", env.shared_opts())
+        .create(&dir, "broken", opts)
         .await
         .expect_err("a failed migration must fail create_tenant");
     assert!(
@@ -239,14 +243,15 @@ async fn create_tenant_returns_a_failed_migration(pool: &Pool) {
 
 /// #2392 — `create_tenant_if_missing` finishes a create that failed at migrate.
 async fn create_tenant_if_missing_finishes_a_failed_create(pool: &Pool) {
-    let env = Env::new(pool).await;
+    let mut env = Env::new(pool).await;
     let dir = env.dir("migrations");
     migration(&dir, "0001_fail", BROKEN);
-    assert!(env.create(&dir, "retry", env.shared_opts()).await.is_err());
+    let opts = env.tenant_opts("retry").await;
+    assert!(env.create(&dir, "retry", opts).await.is_err());
     std::fs::remove_file(dir.join("0001_fail.json")).unwrap();
     migration(&dir, "0001_ok", "SELECT 1");
     let org = env
-        .create_if_missing(&dir, "retry", env.shared_opts())
+        .create_if_missing(&dir, "retry", CreateTenantOpts::default())
         .await
         .expect("resume");
     assert!(org.active, "the failed create was not finished");
@@ -265,7 +270,11 @@ async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
     };
     org.save_pool(&env.registry).await.expect("insert org");
     let got = env
-        .create_if_missing(&env.dir("migrations"), "paused", env.shared_opts())
+        .create_if_missing(
+            &env.dir("migrations"),
+            "paused",
+            CreateTenantOpts::default(),
+        )
         .await
         .expect("existing org");
     assert!(!got.active, "a suspended tenant was reactivated");
@@ -273,9 +282,10 @@ async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
 
 /// #2392 — a clean run activates the tenant.
 async fn create_tenant_activates_after_migrating(pool: &Pool) {
-    let env = Env::new(pool).await;
+    let mut env = Env::new(pool).await;
+    let opts = env.tenant_opts("clean").await;
     let org = env
-        .create(&env.dir("migrations"), "clean", env.shared_opts())
+        .create(&env.dir("migrations"), "clean", opts)
         .await
         .expect("create");
     assert!(org.active);
@@ -292,10 +302,8 @@ async fn create_tenant_migrates_only_the_new_tenant(pool: &Pool) {
 
     let dir = env.dir("migrations");
     migration(&dir, "0001_new", "SELECT 1");
-    let new = env
-        .create(&dir, "new", env.shared_opts())
-        .await
-        .expect("create");
+    let opts = env.tenant_opts("new").await;
+    let new = env.create(&dir, "new", opts).await.expect("create");
     assert!(env.applied(&new).await.contains("0001_new"));
     assert!(
         !env.applied(&other).await.contains("0001_new"),
