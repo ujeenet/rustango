@@ -471,3 +471,51 @@ fn create_spec_does_not_require_defaulted_fields() {
         "{post}"
     );
 }
+
+/// #2530: JSON null on a NOT NULL field and a junk Bool are 400s, not coerced.
+#[tokio::test]
+async fn json_body_is_decoded_by_field_type() {
+    let sq = item_pool().await;
+    let app = items(&sq);
+    let id = new_item(&app).await;
+    let uri = format!("/items/{id}");
+    let stored = || async {
+        sqlx::query_as::<_, (String, String, bool, Option<String>)>(
+            "SELECT title, settings, is_public, contact FROM vs_wf_item WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&sq)
+        .await
+        .expect("read")
+    };
+    let before = stored().await;
+    for body in [
+        r#"{"settings":null}"#,
+        r#"{"title":null}"#,
+        r#"{"is_public":null}"#,
+        r#"{"is_public":"nope"}"#,
+    ] {
+        let (status, v) = send(&app, req(Method::PATCH, &uri, body, None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert_eq!(stored().await, before, "{body} wrote");
+    }
+
+    // Null on a nullable field is NULL; a JSON string is a JSON string.
+    let set = r#"{"contact":"a@b.co"}"#;
+    let (status, v) = send(&app, req(Method::PATCH, &uri, set, None)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let body = r#"{"contact":null,"settings":"hello"}"#;
+    let (status, v) = send(&app, req(Method::PATCH, &uri, body, None)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, settings, _, contact) = stored().await;
+    assert_eq!((settings.as_str(), contact), (r#""hello""#, None));
+
+    let form = Request::builder()
+        .method(Method::PATCH)
+        .uri(&uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("is_public=nope"))
+        .unwrap();
+    let (status, v) = send(&app, form).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+}

@@ -3139,7 +3139,7 @@ async fn handle_create(
         .create
         .map(|_| ThrottleClient::new(&parts, &acq.scope));
     // A JSON array body means a bulk create.
-    let create_body = match extract_create_body(parts, body).await {
+    let create_body = match extract_create_body(parts, body, typed_schema(&state)).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -3450,7 +3450,7 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let (form, json) = match extract_form_body(parts, body).await {
+    let (form, json) = match extract_form_body(parts, body, typed_schema(&state)).await {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -3676,8 +3676,9 @@ impl BodyError {
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
+    typed: Option<&'static ModelSchema>,
 ) -> Result<(HashMap<String, String>, Option<Value>), BodyError> {
-    match extract_create_body(parts, body).await? {
+    match extract_create_body(parts, body, typed).await? {
         CreateBody::Single(form, json) => Ok((form, json)),
         CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
     }
@@ -3701,6 +3702,7 @@ pub(crate) enum CreateBody {
 pub(crate) async fn extract_create_body(
     parts: axum::http::request::Parts,
     body: Body,
+    typed: Option<&'static ModelSchema>,
 ) -> Result<CreateBody, BodyError> {
     use axum::body::to_bytes;
 
@@ -3731,14 +3733,19 @@ pub(crate) async fn extract_create_body(
                 let obj = entry
                     .as_object()
                     .ok_or_else(|| format!("bulk entry {i} is not a JSON object"))?;
-                bulk.push((json_object_to_form(obj), Some(entry.clone())));
+                let form =
+                    json_object_to_form(obj, typed).map_err(|e| format!("bulk entry {i}: {e}"))?;
+                bulk.push((form, Some(entry.clone())));
             }
             return Ok(CreateBody::Bulk(bulk));
         }
         let obj = value
             .as_object()
             .ok_or("expected a JSON object or array of objects")?;
-        Ok(CreateBody::Single(json_object_to_form(obj), Some(value)))
+        Ok(CreateBody::Single(
+            json_object_to_form(obj, typed)?,
+            Some(value),
+        ))
     } else {
         // form-urlencoded (default) — single only, no typed JSON value.
         let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
@@ -3753,19 +3760,38 @@ pub(crate) async fn extract_create_body(
 /// arrays serialize back to JSON text (caller can re-parse if it
 /// needs typed access). Extracted from the inlined `extract_form_body`
 /// path so both single and bulk codepaths share it.
-fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, String> {
+///
+/// With `typed`, keys are decoded by their model field (#2530): null on
+/// a NOT NULL field is refused, and a Json field keeps the value as JSON.
+fn json_object_to_form(
+    obj: &serde_json::Map<String, Value>,
+    typed: Option<&'static ModelSchema>,
+) -> Result<HashMap<String, String>, String> {
     let mut form = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
-        let s = match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => String::new(),
-            other => other.to_string(),
+        // Server-set columns are never read from the body.
+        let field = typed
+            .and_then(|s| s.field(k))
+            .filter(|f| !f.auto && f.generated_as.is_none());
+        let s = match (v, field) {
+            (Value::Null, Some(f)) if !f.nullable => {
+                return Err(format!("field `{k}` may not be null"));
+            }
+            (Value::Null, _) => String::new(),
+            (other, Some(f)) if f.ty == FieldType::Json => other.to_string(),
+            (Value::String(s), _) => s.clone(),
+            (Value::Number(n), _) => n.to_string(),
+            (Value::Bool(b), _) => b.to_string(),
+            (other, _) => other.to_string(),
         };
         form.insert(k.clone(), s);
     }
-    form
+    Ok(form)
+}
+
+/// The schema a JSON body is decoded by; a serializer types its own (#2530).
+fn typed_schema(state: &ViewSetState) -> Option<&'static ModelSchema> {
+    state.vs.serializer.is_none().then_some(state.vs.schema)
 }
 
 /// Every ViewSet error is an `ApiError`, and a 5xx withholds its cause (#1193).
@@ -3832,7 +3858,7 @@ mod body_tests {
     #[tokio::test]
     async fn an_over_cap_body_is_413() {
         let body = Body::new(http_body_util::Limited::new(Body::from("[1,2,3,4]"), 4));
-        let Err(err) = extract_create_body(json_parts(), body).await else {
+        let Err(err) = extract_create_body(json_parts(), body, None).await else {
             panic!("an over-cap body was accepted");
         };
         assert!(matches!(err, BodyError::TooLarge));
@@ -3841,7 +3867,8 @@ mod body_tests {
 
     #[tokio::test]
     async fn a_malformed_body_is_still_400() {
-        let Err(err) = extract_create_body(json_parts(), Body::from("{not json")).await else {
+        let Err(err) = extract_create_body(json_parts(), Body::from("{not json"), None).await
+        else {
             panic!("malformed JSON was accepted");
         };
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);

@@ -311,13 +311,12 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         detail: e.to_string(),
     };
     match field.ty {
-        FieldType::Bool => {
-            let v = !matches!(
-                raw.to_ascii_lowercase().as_str(),
-                "" | "false" | "0" | "off" | "no"
-            );
-            Ok(SqlValue::Bool(v))
-        }
+        // Strict: junk such as `nope` is an error, not `true` (#2530).
+        FieldType::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Ok(SqlValue::Bool(true)),
+            "" | "false" | "0" | "off" | "no" => Ok(SqlValue::Bool(false)),
+            _ => Err(make_parse_err("bool", &"expected true or false")),
+        },
         FieldType::I16 => raw
             .parse::<i16>()
             .map(SqlValue::I16)
@@ -1810,6 +1809,26 @@ mod model_form_tests {
         pub id: Auto<i64>,
         pub on: bool,
         pub maybe: Option<bool>,
+    }
+
+    /// #2530: a Bool accepts only the known spellings; junk is not `true`.
+    #[test]
+    fn bool_parse_is_strict() {
+        let on = <Flags as crate::core::Model>::SCHEMA.field("on").unwrap();
+        for (raw, want) in [
+            ("on", true),
+            ("Yes", true),
+            ("1", true),
+            ("false", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                parse_form_value(on, Some(raw)).unwrap(),
+                crate::core::SqlValue::Bool(want),
+                "{raw:?}"
+            );
+        }
+        assert!(parse_form_value(on, Some("nope")).is_err());
     }
 
     #[test]

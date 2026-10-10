@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Strict Bool and null decoding (#2530)
+
+`parse_form_value` now rejects a Bool other than `true/false/1/0/on/off/yes/no` (any case) or empty; it used to read it as `true`. A ViewSet without a serializer answers `400` to JSON `null` on a NOT NULL field, and stores a JSON string sent to a Json field as a JSON string.
+
 ### Column defaults on create (#2528)
 
 A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`. A ViewSet Bool with a default follows it too; send `false` explicitly.
