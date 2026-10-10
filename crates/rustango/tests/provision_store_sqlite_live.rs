@@ -226,6 +226,7 @@ async fn a_failed_migration_leaves_an_inactive_tenant_and_a_failed_run() {
             atomic: true,
             scope: rustango::migrate::MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: serde_json::from_value(serde_json::json!({
                 "tables": [{
                     "name": "collide", "model": "T",

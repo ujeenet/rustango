@@ -68,6 +68,7 @@ mod scenarios {
             atomic: true,
             scope: migrate::MigrationScope::default(),
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snapshot_with_tables(all_tables),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.into()))],
         }

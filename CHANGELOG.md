@@ -12,6 +12,10 @@ A model newly marked unmanaged, or turned into a view, keeps its snapshot entry,
 
 A hand-written `RenameTable` / `RenameColumn` in an `--empty` migration now updates the diff baseline, so the next run no longer emits Add+Drop for it.
 
+### Fixed — `makemigrations` refuses a branched chain; `--merge` keeps unmigrated edits (#2574)
+
+Two leaves from one history now stop `makemigrations` with "run `--merge`". The merge node names the other leaves in a new `merges` field, and its snapshot joins the branches instead of reading the models.
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

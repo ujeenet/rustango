@@ -65,6 +65,7 @@ fn mig(name: &str, tables: &[&str], replaces: &[&str]) -> Migration {
         atomic: true,
         scope: migrate::MigrationScope::default(),
         replaces: replaces.iter().map(|s| (*s).to_owned()).collect(),
+        merges: Vec::new(),
         snapshot: snapshot_of(tables),
         forward: tables
             .iter()

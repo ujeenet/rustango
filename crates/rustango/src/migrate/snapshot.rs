@@ -681,6 +681,52 @@ impl SchemaSnapshot {
         self.sort();
     }
 
+    /// Add what branch `theirs` changed since `base`, so a merge node holds
+    /// both branches and nothing unmigrated (#2574).
+    pub(crate) fn merge_branch(&mut self, base: &Self, theirs: &Self) {
+        for b in &base.tables {
+            if theirs.table(&b.name).is_none() {
+                self.tables.retain(|t| t.name != b.name);
+            }
+        }
+        for t in &theirs.tables {
+            let was = base.table(&t.name);
+            if was == Some(t) {
+                continue;
+            }
+            let Some(ours) = self.tables.iter_mut().find(|o| o.name == t.name) else {
+                self.tables.push(t.clone());
+                continue;
+            };
+            let (fields, fks) = was.map_or((&[][..], &[][..]), |w| {
+                (&w.fields[..], &w.composite_fks[..])
+            });
+            merge_keyed(fields, &mut ours.fields, &t.fields, |f| f.column.clone());
+            merge_keyed(fks, &mut ours.composite_fks, &t.composite_fks, |c| {
+                c.name.clone()
+            });
+            if was.is_none_or(|w| w.model != t.model) {
+                ours.model.clone_from(&t.model);
+            }
+        }
+        merge_keyed(
+            &base.m2m_tables,
+            &mut self.m2m_tables,
+            &theirs.m2m_tables,
+            |m| m.through.clone(),
+        );
+        merge_keyed(&base.indexes, &mut self.indexes, &theirs.indexes, |i| {
+            i.name.clone()
+        });
+        merge_keyed(&base.checks, &mut self.checks, &theirs.checks, |c| {
+            c.name.clone()
+        });
+        merge_keyed(&base.excludes, &mut self.excludes, &theirs.excludes, |x| {
+            x.name.clone()
+        });
+        self.sort();
+    }
+
     /// The order `from_registry` writes, so a rebuilt snapshot diffs clean.
     fn sort(&mut self) {
         self.tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -691,6 +737,30 @@ impl SchemaSnapshot {
         self.indexes.sort_by(|a, b| a.name.cmp(&b.name));
         self.checks.sort_by(|a, b| a.name.cmp(&b.name));
         self.excludes.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+/// Three-way merge by `key`: each entry `theirs` added, changed or dropped
+/// since `base` lands in `ours`.
+fn merge_keyed<T: Clone + PartialEq>(
+    base: &[T],
+    ours: &mut Vec<T>,
+    theirs: &[T],
+    key: impl Fn(&T) -> String,
+) {
+    for b in base {
+        if !theirs.iter().any(|t| key(t) == key(b)) {
+            ours.retain(|o| key(o) != key(b));
+        }
+    }
+    for t in theirs {
+        if base.iter().any(|b| b == t && key(b) == key(t)) {
+            continue;
+        }
+        match ours.iter_mut().find(|o| key(o) == key(t)) {
+            Some(o) => *o = t.clone(),
+            None => ours.push(t.clone()),
+        }
     }
 }
 

@@ -1395,6 +1395,7 @@ impl Chain {
             atomic: true,
             scope: prev.scope,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap(current),
             forward,
         });
@@ -3496,11 +3497,58 @@ async fn empty_migration_renames_reach_the_snapshot(pool: &Pool) {
     );
 }
 
+// ---------------------------------------------------------------- #2574
+
+/// Two branches' `0002`s: makemigrations refuses until `--merge`, and the
+/// merge snapshot keeps an unmigrated model edit for the next diff.
+async fn branched_chain_needs_a_merge(pool: &Pool) {
+    let t = "mad_br_post";
+    let chain = Chain::new(pool, "br", &[t]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    chain.step(pool, with(&["a"])).await.expect("branch a");
+    chain.write(&Migration {
+        name: "0002_branch_b".into(),
+        prev: Some(initial),
+        snapshot: snap(with(&["b"])),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "b".into(),
+        })],
+        ..chain.head()
+    });
+    chain.migrate(pool).await.expect("both branches");
+    let err = make_migrations_from(chain.dir.path(), &snap(with(&["a", "b"])), None)
+        .expect_err("a branched chain");
+    assert!(err.to_string().contains("--merge"), "{err}");
+    rustango::migrate::make::make_merge_migration(chain.dir.path())
+        .expect("merge")
+        .expect("a merge file");
+    chain.migrate(pool).await.expect("the merge node");
+    chain
+        .step(pool, with(&["a", "b", "c"]))
+        .await
+        .expect("the unmigrated edit");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "c".into(),
+        })]
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,
+        branched_chain_needs_a_merge,
         type_change_with_a_default,
         dropped_exclude_unapplies,
         case_insensitive_change_applies,

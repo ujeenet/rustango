@@ -512,6 +512,7 @@ async fn legacy_bootstrap_waits_for_a_pool_migrate() {
         atomic: true,
         scope: Default::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         forward: vec![Operation::Data(DataOp {
             sql: "SELECT pg_sleep(2)".into(),
             reverse_sql: None,

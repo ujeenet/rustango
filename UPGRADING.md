@@ -154,6 +154,10 @@ untouched.
 
 `makemigrations` no longer drops the table of a model you set to `managed = false` or `view` (#2576). To drop it, delete the model, or write a `DropTable` in an `--empty` migration.
 
+### Branched migration chains and `Migration::merges`
+
+`makemigrations` now refuses a chain with two leaves from one parent history; run `makemigrations --merge` first (#2574). `Migration` has a new `merges: Vec<String>` field (add `merges: Vec::new()` to struct literals), and `make_merge_migration_from` is gone: call `make_merge_migration(dir)`.
+
 ## 0.60.5
 
 ### Passkeys in `public` on schema-mode tenants
