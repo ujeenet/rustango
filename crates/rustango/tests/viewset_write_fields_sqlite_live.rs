@@ -322,6 +322,8 @@ pub struct Item {
     #[rustango(default = "true")]
     pub is_public: bool,
     pub settings: serde_json::Value,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
@@ -339,6 +341,7 @@ async fn item_pool() -> sqlx::SqlitePool {
             note TEXT DEFAULT 'n/a', \
             is_public BOOLEAN NOT NULL DEFAULT true, \
             settings TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
             updated_at TEXT NOT NULL)",
     )
     .execute(&sq)
@@ -424,18 +427,53 @@ async fn update_restamps_auto_now() {
         (Method::PATCH, r#"{"title":"patched"}"#),
         (Method::PUT, full),
     ] {
-        sqlx::query("UPDATE vs_wf_item SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?")
-            .bind(id)
-            .execute(&sq)
-            .await
-            .expect("age the row");
+        sqlx::query(
+            "UPDATE vs_wf_item SET created_at = '2000-01-01T00:00:00Z', \
+             updated_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&sq)
+        .await
+        .expect("age the row");
         let (status, v) = send(&app, req(method.clone(), &uri, body, None)).await;
         assert_eq!(status, StatusCode::OK, "{method}: {v}");
         assert!(
             !updated_at(&sq, id).await.starts_with("2000-"),
             "{method} left updated_at stale"
         );
+        let created: String = sqlx::query_scalar("SELECT created_at FROM vs_wf_item WHERE id = ?")
+            .bind(id)
+            .fetch_one(&sq)
+            .await
+            .expect("read");
+        assert!(created.starts_with("2000-"), "{method} moved auto_now_add");
     }
+
+    // An empty PATCH is still "no fields to update", not a bare restamp.
+    let (status, v) = send(&app, req(Method::PATCH, &uri, "{}", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// A form-encoded create without a Bool is an unticked box, default or not.
+#[tokio::test]
+async fn form_create_without_a_bool_is_false() {
+    let sq = item_pool().await;
+    let app = items(&sq);
+    let r = Request::builder()
+        .method(Method::POST)
+        .uri("/items")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("title=u&settings=%7B%7D"))
+        .unwrap();
+    let (status, v) = send(&app, r).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let stored: (String, bool) =
+        sqlx::query_as("SELECT status, is_public FROM vs_wf_item WHERE id = ?")
+            .bind(v["id"].as_i64().expect("id"))
+            .fetch_one(&sq)
+            .await
+            .expect("read");
+    assert_eq!(stored, ("draft".into(), false));
 }
 
 /// #2528: a create that leaves out a defaulted field gets the column default.

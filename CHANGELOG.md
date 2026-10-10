@@ -14,7 +14,7 @@ JSON `null` on a NOT NULL field is a `400` instead of `false`/`{}` or a silent s
 
 ### Fixed — a REST or `ModelForm` create applies the column `default` of an omitted field (#2528)
 
-The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. A `ModelForm` Bool stays an unticked box; PKs must still be sent.
+The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. In a form-encoded body an absent Bool is still an unticked box; PKs must still be sent.
 
 ### Fixed — ViewSet PUT/PATCH, `UpdateView` and `ModelForm` updates restamp `auto_now` (#2527)
 

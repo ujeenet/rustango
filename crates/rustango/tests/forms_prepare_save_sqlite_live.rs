@@ -163,6 +163,8 @@ pub struct Stamped {
     pub title: String,
     #[rustango(max_length = 10, default = "'draft'")]
     pub status: String,
+    #[rustango(default = "true")]
+    pub is_public: bool,
     #[rustango(auto_now)]
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
@@ -175,6 +177,7 @@ async fn stamped_pool() -> Pool {
             "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
             "title"      TEXT NOT NULL,
             "status"     TEXT NOT NULL DEFAULT 'draft',
+            "is_public"  BOOLEAN NOT NULL DEFAULT true,
             "updated_at" TEXT NOT NULL
         )"#,
         Vec::new(),
@@ -223,9 +226,11 @@ async fn model_form_insert_applies_column_default() {
         .save(&pool)
         .await
         .expect("insert");
-    let status: String = sqlx::query_scalar("SELECT status FROM ps_stamped WHERE title = 'x'")
-        .fetch_one(sqlite_pool(&pool))
-        .await
-        .expect("fetch");
-    assert_eq!(status, "draft");
+    let stored: (String, bool) =
+        sqlx::query_as("SELECT status, is_public FROM ps_stamped WHERE title = 'x'")
+            .fetch_one(sqlite_pool(&pool))
+            .await
+            .expect("fetch");
+    // An absent Bool is an unticked box, not its default.
+    assert_eq!(stored, ("draft".into(), false));
 }

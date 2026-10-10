@@ -119,7 +119,8 @@ use crate::core::{
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{
-    absent_takes_default, collect_insert_values, parse_form_value, parse_pk_string, FormError,
+    absent_takes_default, collect_insert_values, parse_form_value, parse_pk_string, Encoding,
+    FormError,
 };
 use crate::sql::Pool;
 
@@ -1924,13 +1925,15 @@ impl WriteSet {
     fn insert_values(
         &self,
         form: &HashMap<String, String>,
+        encoding: Encoding,
     ) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
         // An omitted defaulted field is left to the column default (#2528).
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
             .filter(|f| {
-                !self.is_writable(f.name) || (absent_takes_default(f) && !form.contains_key(f.name))
+                !self.is_writable(f.name)
+                    || (absent_takes_default(f, encoding) && !form.contains_key(f.name))
             })
             .map(|f| f.name)
             .collect();
@@ -3159,12 +3162,17 @@ async fn handle_create(
 
     match create_body {
         CreateBody::Single(form, json) => {
+            let encoding = if json.is_some() {
+                Encoding::Json
+            } else {
+                Encoding::Form
+            };
             let json = write_json(&state, &form, json);
             create_one(
                 &state,
                 &mut acq,
                 &write_set,
-                (&form, &json),
+                (&form, &json, encoding),
                 pk_field,
                 &scope,
             )
@@ -3271,7 +3279,7 @@ async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     write_set: &WriteSet,
-    (form, json): (&HashMap<String, String>, &Value),
+    (form, json, encoding): (&HashMap<String, String>, &Value, Encoding),
     pk_field: &'static crate::core::FieldSchema,
     scope: &[WhereExpr],
 ) -> Response {
@@ -3282,7 +3290,7 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match write_set.insert_values(form) {
+    let collected = match write_set.insert_values(form, encoding) {
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
     };
@@ -3326,7 +3334,8 @@ async fn create_many(
         }
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match write_set.insert_values(row) {
+        // A bulk body is always JSON.
+        let collected = match write_set.insert_values(row, Encoding::Json) {
             Ok(v) => v,
             Err(e) => return e.into_response(state, Some(i)),
         };

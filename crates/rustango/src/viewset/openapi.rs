@@ -24,7 +24,7 @@ use crate::openapi::{Operation, Parameter, PathItem, RequestBody, Response, Sche
 
 use super::{PaginationStyle, ViewSet};
 use crate::core::{FieldType, WriteKind};
-use crate::forms::{absent_is_missing, absent_takes_default};
+use crate::forms::{absent_is_missing, absent_takes_default, Encoding};
 
 /// A write that hits a unique key answers 409 (`write_failure`, #2164).
 fn conflict() -> Response {
@@ -237,7 +237,7 @@ impl ViewSet {
             let key = self.body_key(f.name);
             let prop = field_type_to_schema(f.ty);
             s = s.property(key, if f.nullable { prop.nullable() } else { prop });
-            let defaulted = body == Body::Create && absent_takes_default(f);
+            let defaulted = body == Body::Create && absent_takes_default(f, Encoding::Json);
             if body != Body::Patch && absent_is_missing(f) && !defaulted {
                 required.push(key);
             }

@@ -263,10 +263,20 @@ pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
     !field.nullable && !matches!(field.ty, FieldType::Bool)
 }
 
+/// How a write body was encoded; it decides what an absent Bool means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    Json,
+    /// An HTML form: an absent Bool is an unticked box.
+    Form,
+}
+
 /// A non-PK field an INSERT leaves to its column `DEFAULT` when the body
 /// omits it (#2528). A PK must be sent: MySQL cannot read a defaulted one back.
-pub(crate) fn absent_takes_default(field: &FieldSchema) -> bool {
-    field.default.is_some() && !field.primary_key
+pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> bool {
+    field.default.is_some()
+        && !field.primary_key
+        && (encoding == Encoding::Json || field.ty != FieldType::Bool)
 }
 
 /// Parse one form value from a raw string.
@@ -682,11 +692,9 @@ impl ModelForm {
         if self.exclude_fields.iter().any(|n| n == field.name) {
             return false;
         }
-        // An omitted defaulted field takes the column default; an absent
-        // Bool is still an unticked box (#2528).
+        // An omitted defaulted field takes the column default (#2528).
         if kind == crate::core::WriteKind::Insert
-            && absent_takes_default(field)
-            && field.ty != FieldType::Bool
+            && absent_takes_default(field, Encoding::Form)
             && !self.data.contains_key(field.name)
         {
             return false;

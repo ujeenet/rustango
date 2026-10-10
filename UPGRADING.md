@@ -156,7 +156,8 @@ untouched.
 
 ### Column defaults on create (#2528)
 
-A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`. A ViewSet Bool with a default follows it too; send `false` explicitly.
+A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`, and the OpenAPI create body no longer lists it as `required`. A Bool follows its default only in a JSON body; in a form-encoded body or a `ModelForm` an absent Bool is still `false`.
+The value is the database's: a SQLite `CURRENT_TIMESTAMP` default uses SQLite's clock and `YYYY-MM-DD HH:MM:SS` format, so use `auto_now_add` for timestamps.
 
 ### `auto_now` on REST and form updates (#2527)
 
