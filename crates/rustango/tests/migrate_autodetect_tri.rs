@@ -3389,9 +3389,61 @@ async fn type_change_with_a_default(pool: &Pool) {
     assert_eq!(got, [(3,)], "the old default is back");
 }
 
+// ---------------------------------------------------------------- #2576
+
+/// Registered as `managed = false`; its table came from a managed past.
+#[derive(rustango::Model)]
+#[rustango(table = "mad_um_legacy", managed = false)]
+#[allow(dead_code)]
+pub struct UmLegacy {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+/// A newly unmanaged model keeps its table: no DROP, and re-managing
+/// it unchanged writes nothing.
+async fn unmanaged_model_keeps_its_table(pool: &Pool) {
+    let (t, keep) = ("mad_um_legacy", "mad_um_other");
+    let chain = Chain::new(pool, "um", &[t, keep]).await;
+    let both = |extra: bool| {
+        let mut f = vec![id()];
+        if extra {
+            f.push(col("note", "string", json!({"max_length": 20})));
+        }
+        json!({"tables": [table(t, vec![id()]), table(keep, f)]})
+    };
+    chain.step(pool, both(false)).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    // `from_registry` once the model is unmanaged, plus another edit.
+    let unmanaged = json!({"tables": [table(keep, vec![id(),
+        col("note", "string", json!({"max_length": 20}))])]});
+    chain
+        .step(pool, unmanaged)
+        .await
+        .expect("only the other edit");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: keep.into(),
+            column: "note".into(),
+        })],
+        "no DropTable for an unmanaged model"
+    );
+    assert_eq!(rows(pool, t).await, 1, "the table and its rows stay");
+    let back = make_migrations_from(chain.dir.path(), &snap(both(true)), None).expect("diff");
+    assert!(
+        back.is_none(),
+        "re-managing an unchanged model writes nothing: {:?}",
+        back.map(|m| m.forward)
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        unmanaged_model_keeps_its_table,
         type_change_with_a_default,
         dropped_exclude_unapplies,
         case_insensitive_change_applies,

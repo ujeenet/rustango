@@ -549,6 +549,58 @@ impl SchemaSnapshot {
     pub fn table(&self, name: &str) -> Option<&TableSnapshot> {
         self.tables.iter().find(|t| t.name == name)
     }
+
+    /// Carry `prev`'s entries for tables whose model is now unmanaged or a
+    /// view: migrations stop owning the table but never drop it (#2576).
+    pub(crate) fn keep_unmanaged(&mut self, prev: &Self) {
+        let kept: std::collections::HashSet<&str> = prev
+            .tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|t| {
+                self.table(t).is_none()
+                    && ModelEntry::for_table(t)
+                        .is_some_and(|e| !e.schema.managed || e.schema.is_view)
+            })
+            .collect();
+        if kept.is_empty() {
+            return;
+        }
+        let on_kept = |t: &str| kept.contains(t);
+        for t in prev.tables.iter().filter(|t| on_kept(&t.name)) {
+            self.tables.push(t.clone());
+        }
+        let m2m: Vec<M2MTableSnapshot> = prev
+            .m2m_tables
+            .iter()
+            .filter(|m| on_kept(&m.src_table) || on_kept(&m.dst_table))
+            .filter(|m| self.m2m_table(&m.through).is_none())
+            .cloned()
+            .collect();
+        self.m2m_tables.extend(m2m);
+        for i in prev.indexes.iter().filter(|i| on_kept(&i.table)) {
+            self.indexes.push(i.clone());
+        }
+        for c in prev.checks.iter().filter(|c| on_kept(&c.table)) {
+            self.checks.push(c.clone());
+        }
+        for x in prev.excludes.iter().filter(|x| on_kept(&x.table)) {
+            self.excludes.push(x.clone());
+        }
+        self.sort();
+    }
+
+    /// The order `from_registry` writes, so a rebuilt snapshot diffs clean.
+    fn sort(&mut self) {
+        self.tables.sort_by(|a, b| a.name.cmp(&b.name));
+        for t in &mut self.tables {
+            t.fields.sort_by(|a, b| a.column.cmp(&b.column));
+        }
+        self.m2m_tables.sort_by(|a, b| a.through.cmp(&b.through));
+        self.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        self.checks.sort_by(|a, b| a.name.cmp(&b.name));
+        self.excludes.sort_by(|a, b| a.name.cmp(&b.name));
+    }
 }
 
 impl TableSnapshot {

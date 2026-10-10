@@ -143,6 +143,9 @@ pub fn make_migrations_scoped(
     }
     fold_in_framework_tables(&mut prev_snapshot, current);
     let prev_snapshot = prev_snapshot.filtered_to_scope(model_scope);
+    let mut current = current.clone();
+    current.keep_unmanaged(&prev_snapshot);
+    let current = &current;
     let prev_name = prior_scoped.last().map(|m| m.name.clone());
     // Numbering looks at the whole directory, so a tenant `0002` and
     // a registry `0002` cannot collide as filenames.
@@ -400,6 +403,9 @@ pub fn make_migrations_from(
     // `make_migrations_system` does not fold: there those tables are
     // the subject.
     fold_in_framework_tables(&mut prev_snapshot, current);
+    let mut current = current.clone();
+    current.keep_unmanaged(&prev_snapshot);
+    let current = &current;
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
         .last()

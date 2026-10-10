@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `managed = false` no longer drops the table (#2576)
+
+A model newly marked unmanaged, or turned into a view, keeps its snapshot entry, so `makemigrations` emits no `DropTable`. Re-managing it writes nothing unless the schema changed.
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

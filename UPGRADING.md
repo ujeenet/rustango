@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Unmanaged models keep their tables
+
+`makemigrations` no longer drops the table of a model you set to `managed = false` or `view` (#2576). To drop it, delete the model, or write a `DropTable` in an `--empty` migration.
+
 ## 0.60.5
 
 ### Passkeys in `public` on schema-mode tenants
