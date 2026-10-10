@@ -511,3 +511,72 @@ async fn scoped_key_without_grants_gets_nothing() {
     fs.sort();
     assert_eq!(fs, vec!["billing", "coach"]);
 }
+
+/// #2537 review — a grant pins a user key for good, a key minted before
+/// the flag stays scoped when its last grant goes, and a superuser's
+/// scoped key gets nothing once revoked.
+#[tokio::test]
+async fn a_pinned_user_key_never_widens() {
+    use rustango::sql::FetcherPool as _;
+    use rustango::tenancy::{grant_skill_pool, revoke_skill_pool, Agent};
+    let pool = world().await;
+    let uid = make_user(&pool, "gus").await;
+    let root = make_superuser(&pool, "root").await;
+    create_skill_pool(&pool, "coach", "Coach", "", "", &["log_set".into()])
+        .await
+        .expect("coach");
+    map_skill_to_permission_pool(&pool, "coach", "mcp.coach")
+        .await
+        .expect("map");
+    set_user_perm_pool(uid, "mcp.coach", true, &pool)
+        .await
+        .expect("perm");
+    let empty = |agent: i64, owner: i64| {
+        let pool = pool.clone();
+        async move {
+            let (s, t) = resolve_user_agent_grants_pool(&pool, agent, owner)
+                .await
+                .expect("resolve");
+            s.is_empty() && t.is_empty()
+        }
+    };
+
+    // Unscoped, then granted and revoked.
+    let key = create_user_key_pool(&pool, uid, "k", &[]).await.unwrap();
+    let id = key.agent.id.get().copied().unwrap();
+    grant_skill_pool(&pool, "", &key.agent.name, "coach")
+        .await
+        .unwrap();
+    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
+        .await
+        .unwrap();
+    assert!(empty(id, uid).await, "a granted-then-revoked key widened");
+
+    // Minted before the flag existed: no `scoped` in its data.
+    let key = create_user_key_pool(&pool, uid, "old", &["coach".into()])
+        .await
+        .unwrap();
+    let id = key.agent.id.get().copied().unwrap();
+    let mut row = Agent::objects()
+        .filter("id", id)
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    row.data = json!({ "kind": "user_key", "label": "old" });
+    row.save_pool(&pool).await.unwrap();
+    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
+        .await
+        .unwrap();
+    assert!(empty(id, uid).await, "a pre-flag scoped key widened");
+
+    // A superuser's scoped key.
+    let key = create_user_key_pool(&pool, root, "su", &["coach".into()])
+        .await
+        .unwrap();
+    let id = key.agent.id.get().copied().unwrap();
+    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
+        .await
+        .unwrap();
+    assert!(empty(id, root).await, "a superuser's scoped key widened");
+}
