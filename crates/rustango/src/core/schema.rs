@@ -43,6 +43,7 @@ pub struct FieldSchema {
     ///     #[rustango(unique)]
     ///     pub email: String,
     /// }
+    /// # fn main() {}
     /// ```
     ///
     /// ```
@@ -54,6 +55,7 @@ pub struct FieldSchema {
     ///     #[rustango(unique, max_length = 254)]
     ///     pub email: String,
     /// }
+    /// # fn main() {}
     /// ```
     pub max_length: Option<u32>,
     /// Inclusive integer lower bound. Only meaningful for `I32`/`I64`.
