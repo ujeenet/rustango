@@ -118,7 +118,9 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::forms::{collect_insert_values, parse_form_value, parse_pk_string, FormError};
+use crate::forms::{
+    absent_takes_default, collect_insert_values, parse_form_value, parse_pk_string, FormError,
+};
 use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
@@ -1918,10 +1920,13 @@ impl WriteSet {
         &self,
         form: &HashMap<String, String>,
     ) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
+        // An omitted defaulted field is left to the column default (#2528).
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
-            .filter(|f| !self.is_writable(f.name))
+            .filter(|f| {
+                !self.is_writable(f.name) || (absent_takes_default(f) && !form.contains_key(f.name))
+            })
             .map(|f| f.name)
             .collect();
         let mut out = collect_insert_values(self.schema, form, &skip)?;

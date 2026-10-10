@@ -213,3 +213,19 @@ async fn model_form_update_restamps_auto_now() {
         "updated_at left stale: {stamp}"
     );
 }
+
+/// #2528: a `ModelForm` insert that leaves out a defaulted field gets the column default.
+#[tokio::test]
+async fn model_form_insert_applies_column_default() {
+    let pool = stamped_pool().await;
+    let body = HashMap::from([("title".to_owned(), "x".to_owned())]);
+    ModelForm::new(Stamped::SCHEMA, body)
+        .save(&pool)
+        .await
+        .expect("insert");
+    let status: String = sqlx::query_scalar("SELECT status FROM ps_stamped WHERE title = 'x'")
+        .fetch_one(sqlite_pool(&pool))
+        .await
+        .expect("fetch");
+    assert_eq!(status, "draft");
+}

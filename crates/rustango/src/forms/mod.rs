@@ -257,9 +257,16 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 }
 
 /// Whether leaving `field` out of a full write is a [`FormError::Missing`].
-/// The OpenAPI request schemas mark exactly these `required`.
+/// The OpenAPI request schemas mark these `required`, less
+/// [`absent_takes_default`] ones on create.
 pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
     !field.nullable && !matches!(field.ty, FieldType::Bool)
+}
+
+/// A non-PK field an INSERT leaves to its column `DEFAULT` when the body
+/// omits it (#2528). A PK must be sent: MySQL cannot read a defaulted one back.
+pub(crate) fn absent_takes_default(field: &FieldSchema) -> bool {
+    field.default.is_some() && !field.primary_key
 }
 
 /// Parse one form value from a raw string.
@@ -674,6 +681,15 @@ impl ModelForm {
             return false;
         }
         if self.exclude_fields.iter().any(|n| n == field.name) {
+            return false;
+        }
+        // An omitted defaulted field takes the column default; an absent
+        // Bool is still an unticked box (#2528).
+        if kind == crate::core::WriteKind::Insert
+            && absent_takes_default(field)
+            && field.ty != FieldType::Bool
+            && !self.data.contains_key(field.name)
+        {
             return false;
         }
         match &self.include_fields {

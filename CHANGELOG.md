@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a REST or `ModelForm` create applies the column `default` of an omitted field (#2528)
+
+The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. A `ModelForm` Bool stays an unticked box; PKs must still be sent.
+
 ### Fixed — ViewSet PUT/PATCH and `ModelForm` updates restamp `auto_now` (#2527)
 
 New `forms::stamp_auto_now`, shared with the admin; `ModelFormFor::into_update_query` uses it too.

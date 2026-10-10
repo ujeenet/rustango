@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Column defaults on create (#2528)
+
+A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`. A ViewSet Bool with a default follows it too; send `false` explicitly.
+
 ### `auto_now` on REST and form updates (#2527)
 
 ViewSet PUT/PATCH, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.

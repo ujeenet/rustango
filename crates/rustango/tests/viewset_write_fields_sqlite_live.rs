@@ -428,3 +428,46 @@ async fn update_restamps_auto_now() {
         );
     }
 }
+
+/// #2528: a create that leaves out a defaulted field gets the column default.
+#[tokio::test]
+async fn create_applies_column_defaults() {
+    let sq = item_pool().await;
+    let app = items(&sq);
+    let (status, v) = send(
+        &app,
+        req(
+            Method::POST,
+            "/items",
+            r#"{"title":"x","settings":{}}"#,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let stored: (String, Option<String>, bool, Option<String>) =
+        sqlx::query_as("SELECT status, note, is_public, contact FROM vs_wf_item WHERE id = ?")
+            .bind(v["id"].as_i64().expect("id"))
+            .fetch_one(&sq)
+            .await
+            .expect("read");
+    assert_eq!(stored, ("draft".into(), Some("n/a".into()), true, None));
+}
+
+/// #2528: a defaulted field is not `required` in the create body.
+#[cfg(feature = "openapi")]
+#[test]
+fn create_spec_does_not_require_defaulted_fields() {
+    let (_, item) = ViewSet::for_model(Item::SCHEMA)
+        .openapi_paths("/x", "X")
+        .into_iter()
+        .find(|(p, _)| p == "/x")
+        .unwrap();
+    let v = serde_json::to_value(item).unwrap();
+    let post = &v["post"]["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(
+        post["required"],
+        serde_json::json!(["title", "settings"]),
+        "{post}"
+    );
+}
