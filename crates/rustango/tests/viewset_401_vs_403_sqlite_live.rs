@@ -168,10 +168,6 @@ async fn every_codename_is_required() {
         ],
     );
     rustango::sql::insert_pool(&pool, &user).await.unwrap();
-    set_user_perm_pool(7, "vs_401_app.view_note", true, &pool)
-        .await
-        .unwrap();
-
     let app = |pool: Pool| {
         ViewSet::for_model(Note::SCHEMA)
             .permissions(ViewSetPerms {
@@ -197,12 +193,27 @@ async fn every_codename_is_required() {
             });
         req
     };
+    let grant = |codename: &'static str, on: bool| {
+        let pool = pool.clone();
+        async move { set_user_perm_pool(7, codename, on, &pool).await.unwrap() }
+    };
+    // Either codename alone is refused; both pass.
+    grant("vs_401_app.view_note", true).await;
     let res = app(pool.clone()).oneshot(list()).await.unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN, "one of two let it in");
-
-    set_user_perm_pool(7, "vs_401_app.audit_note", true, &pool)
-        .await
-        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "the first alone let it in"
+    );
+    grant("vs_401_app.view_note", false).await;
+    grant("vs_401_app.audit_note", true).await;
+    let res = app(pool.clone()).oneshot(list()).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "the second alone let it in"
+    );
+    grant("vs_401_app.view_note", true).await;
     let res = app(pool).oneshot(list()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }

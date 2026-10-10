@@ -123,7 +123,7 @@ use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
 
-/// Permission codenames required for each ViewSet action. The user
+/// Permission codenames required for each `ViewSet` action. The user
 /// needs every codename in the list; an empty vec skips the check.
 #[derive(Clone, Default)]
 pub struct ViewSetPerms {
@@ -2018,7 +2018,7 @@ enum PermOutcome {
     /// unconstructed rather than dead.
     #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Unauthenticated,
-    /// Authenticated, but lacks every required codename → `403`.
+    /// Authenticated, but lacks a required codename → `403`.
     Forbidden,
 }
 
