@@ -90,6 +90,14 @@ inventory::submit! {
     }
 }
 
+// As on `rustango_users` (#2521).
+crate::register_admin_superuser_fields!("rustango_admin_users", "add", &["is_superuser"]);
+crate::register_admin_superuser_fields!(
+    "rustango_admin_users",
+    "change",
+    &["is_superuser", "password_hash", "email"]
+);
+
 impl AdminUser {
     /// Hash the password and build an `AdminUser` ready to insert.
     /// Sync: in a request handler, hash with `passwords::hash_async` instead.

@@ -336,6 +336,74 @@ async fn api_key_owner_is_superuser_only(pool: &Pool) {
     assert_eq!(key_of(other_pk).await.len(), 1);
 }
 
+/// A non-superuser with `add`/`change` cannot grant superuser or take over
+/// an account through its password or email (#2521).
+async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
+    let perms: &[&str] = &[
+        "rustango_users.view",
+        "rustango_users.add",
+        "rustango_users.change",
+    ];
+    let name = unique("su");
+    let (status, html) = send_as(
+        pool,
+        Some(perms),
+        Method::POST,
+        "/rustango_users",
+        form(&[
+            ("username", name.as_str()),
+            ("password_hash", "pw-2521-own"),
+            ("is_superuser", "true"),
+            ("active", "true"),
+            ("data", ""),
+        ]),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    let user = user_named(pool, &name).await;
+    assert!(!user.is_superuser, "a non-superuser created a superuser");
+    assert!(logs_in(pool, &name, "pw-2521-own").await);
+
+    let pk = user.id.get().copied().unwrap();
+    let uri = format!("/rustango_users/{pk}");
+    let (_, html) = send_as(
+        pool,
+        Some(perms),
+        Method::GET,
+        &format!("{uri}/edit"),
+        String::new(),
+    )
+    .await;
+    for field in ["is_superuser", "password_hash", "email"] {
+        assert!(
+            input_tag(&html, field).contains("readonly"),
+            "{field}: {html}"
+        );
+    }
+    let renamed = format!("{name}r");
+    let (status, html) = send_as(
+        pool,
+        Some(perms),
+        Method::POST,
+        &uri,
+        form(&[
+            ("username", renamed.as_str()),
+            ("password_hash", "pw-2521-taken"),
+            ("email", "taken-2521@example.com"),
+            ("is_superuser", "true"),
+            ("active", "true"),
+            ("data", ""),
+        ]),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    let user = user_named(pool, &renamed).await;
+    assert!(!user.is_superuser, "a non-superuser granted superuser");
+    assert!(user.email.is_none(), "a non-superuser set the email");
+    assert!(logs_in(pool, &renamed, "pw-2521-own").await);
+    assert!(!logs_in(pool, &renamed, "pw-2521-taken").await);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -346,5 +414,6 @@ tri_dialect_test! {
         admin_created_provider_secret_is_encrypted,
         api_keys_are_not_added_through_the_admin,
         api_key_owner_is_superuser_only,
+        user_superuser_fields_are_superuser_only,
     ],
 }

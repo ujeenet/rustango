@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
+
+`is_superuser` is superuser-only on add and edit; `password_hash` and `email` on edit.
+
 ### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
 
 A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!` locks fields for non-superusers.

@@ -150,9 +150,10 @@ untouched.
 
 ## Unreleased
 
-### Admin superuser-only fields (#2520)
+### Admin superuser-only fields (#2520, #2521)
 
 `user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` is read-only for them on add and edit, `password_hash` and `email` on edit.
 
 ### Workers from `make:worker` (#2331)
 
