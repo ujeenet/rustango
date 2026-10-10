@@ -633,7 +633,8 @@ impl Builder {
     /// * `{table}.delete` gates delete submit and `delete_selected`.
     ///
     /// Do **not** call this for a superuser. Leaving it unset means
-    /// `None`, which skips every permission check.
+    /// `None`, which skips every permission check. Set, the user is not a
+    /// superuser even with a superuser session: superuser-only fields lock.
     pub fn with_user_perms<I: IntoIterator<Item = String>>(mut self, perms: I) -> Self {
         self.config.user_perms = Some(perms.into_iter().collect());
         self
@@ -753,7 +754,9 @@ impl Builder {
         // Extra routes a model registers for itself. Each inventory
         // entry is checked against the built-in routes, then mounted
         // on the same protected router.
-        let protected = mount_custom_views(protected, state.clone());
+        let protected = mount_custom_views(protected, state.clone()).layer(axum::Extension(
+            super::session::PermsScoped(state.config.user_perms.is_some()),
+        ));
 
         // With session auth on, `/login` and `/logout` mount before
         // the auth middleware so they stay reachable. Every other
@@ -844,6 +847,23 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    /// Fields this user may not write on `action`.
+    pub(crate) fn locked_fields(
+        &self,
+        model: &'static crate::core::ModelSchema,
+        action: super::object_permissions::AdminWrite,
+    ) -> super::object_permissions::LockedFields {
+        let superuser_only = if super::session::acting_superuser(self.config.user_perms.is_some()) {
+            Vec::new()
+        } else {
+            super::object_permissions::superuser_fields(model.table, action)
+        };
+        super::object_permissions::LockedFields {
+            readonly: super::helpers::admin_config_or_default(model).readonly_fields,
+            superuser_only,
+        }
+    }
+
     /// Whether this admin serves `table` at all. Index, sidebar, routes,
     /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {

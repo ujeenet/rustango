@@ -197,6 +197,20 @@ A password change or reset whose user changed password meanwhile now fails with 
 
 `PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
 
+### HMAC auth on a tenant-resolved app (#2492)
+
+The tenant header and port are still unsigned by default. Add `.bind_tenants(..)` to tie keys to their tenant; `.signed_headers(["x-org"])` and `.sign_port()` sign more, and clients then sign with `RequestToSign::header` / `port`.
+
+### `ViewSetPerms` is all-of (#2522)
+
+A user now needs every codename listed for an action, not any one. A list meant as alternatives needs a role that grants them together.
+
+### Admin superuser-only fields (#2520, #2521)
+
+`user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are read-only for them on add and edit, `password_hash` on edit, and superuser rows refuse their edits and deletes.
+An admin built with `with_user_perms` treats the user as a non-superuser even with a superuser session. An admin with no login now lets anyone edit SSO links and providers, as it does every other table.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

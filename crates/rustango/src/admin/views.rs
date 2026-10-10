@@ -21,6 +21,7 @@ use super::helpers::{
     render_cell_json, render_form, render_secret_cell, resolve_model, resolve_model_and_pk,
     search_columns, url_filterable, FormLayout, ListQuery,
 };
+use super::object_permissions::AdminWrite;
 use super::queryset_hooks::RowScope;
 use super::render;
 use super::templates::render_with_chrome;
@@ -1954,7 +1955,9 @@ pub(crate) async fn create_submit(
     // `readonly_fields` are display-only, so they are not form input.
     // An auto PK never is; a `default_uuid_v7` one is stamped (#1725).
     let admin_cfg = admin_config_or_default(model);
-    let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
+    // Locked fields are left out, so the column default applies.
+    let locked = state.locked_fields(model, AdminWrite::Add);
+    let mut skip: Vec<&str> = locked.all().collect();
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
@@ -1965,6 +1968,7 @@ pub(crate) async fn create_submit(
         }
     };
     stamp_readonly_timestamps(model, &admin_cfg, &mut collected);
+    default_locked_flags(model, &locked.superuser_only, &mut collected);
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         let html = render_form(&state, model, Some(&form), false, Some(e.as_str()));
         return Ok(Html(html).into_response());
@@ -2093,6 +2097,25 @@ fn stamp_readonly_timestamps(
             && !values.iter().any(|(c, _)| *c == f.column)
         {
             values.push((f.column, SqlValue::DateTime(now)));
+        }
+    }
+}
+
+/// A locked NOT NULL flag with no column default stores `false`, as an
+/// unticked box would; anything else is left to the column default.
+fn default_locked_flags(
+    model: &'static crate::core::ModelSchema,
+    locked: &[&'static str],
+    values: &mut Vec<(&'static str, SqlValue)>,
+) {
+    for f in model.scalar_fields() {
+        if f.ty == crate::core::FieldType::Bool
+            && !f.nullable
+            && f.default.is_none()
+            && locked.contains(&f.name)
+            && !values.iter().any(|(c, _)| *c == f.column)
+        {
+            values.push((f.column, SqlValue::Bool(false)));
         }
     }
 }
@@ -2244,7 +2267,7 @@ pub(crate) async fn update_submit(
     // skipped on the server too.
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
-    skip.extend(admin_cfg.readonly_fields.iter().copied());
+    skip.extend(state.locked_fields(model, AdminWrite::Change).all());
     // Fields the edit form hides are left as they are.
     skip.extend(FormLayout::of(model, &admin_cfg, true).unrendered(model));
     // An empty secret keeps the stored one.

@@ -178,6 +178,14 @@ inventory::submit! {
     }
 }
 
+// One role must not grant superuser or take another account (#2521).
+#[cfg(feature = "admin")]
+crate::admin::object_permissions::lock_user_credentials!(User, "rustango_users");
+#[cfg(all(feature = "admin", feature = "sso"))]
+crate::register_admin_superuser_fields!(User, Add, [email]);
+#[cfg(all(feature = "admin", feature = "sso"))]
+crate::register_admin_superuser_fields!(User, Change, [email]);
+
 /// A row whose password matched, before any second factor. A weak stored
 /// hash is replaced only by `complete`, so a password alone cannot change
 /// the fingerprint that ends the user's other sessions (#2093).
