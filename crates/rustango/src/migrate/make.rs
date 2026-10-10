@@ -459,28 +459,50 @@ pub fn make_migrations_from(
     Ok(Some(mig))
 }
 
-/// Names reachable from the last in-scope migration by following
-/// `prev` backwards. A name missing from this set belongs to a side
-/// chain whose tables would otherwise drop out of the baseline. See
-/// `make_migrations_scoped`.
+/// Names reachable from the last in-scope migration through every
+/// parent (`prev` and merged branches). A name missing from this set
+/// belongs to a side chain whose tables would otherwise drop out of the
+/// baseline. See `make_migrations_scoped`.
 fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<String> {
     let mut seen = std::collections::HashSet::new();
-    let Some(last) = prior_scoped.last() else {
-        return seen;
-    };
-    let mut cur: Option<&str> = Some(last.name.as_str());
-    while let Some(name) = cur {
+    let mut todo: Vec<&str> = prior_scoped
+        .last()
+        .map(|m| m.name.as_str())
+        .into_iter()
+        .collect();
+    while let Some(name) = todo.pop() {
+        // `insert` fails on a revisit, so a cyclic chain still ends.
         if !seen.insert(name.to_owned()) {
-            // A cyclic `prev` chain should not happen, but would
-            // loop forever here.
-            break;
+            continue;
         }
-        cur = prior_scoped
-            .iter()
-            .find(|m| m.name == name)
-            .and_then(|m| m.prev.as_deref());
+        if let Some(m) = prior_scoped.iter().find(|m| m.name == name) {
+            todo.extend(m.prev.as_deref());
+            todo.extend(merged_branches(prior_scoped, m));
+        }
     }
     seen
+}
+
+/// The branch leaves `m` merges. A merge file written before `merges`
+/// existed (0.60.5) joined every sibling of its `prev` named before it.
+fn merged_branches<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a str> {
+    if !m.merges.is_empty() {
+        return m.merges.iter().map(String::as_str).collect();
+    }
+    let legacy = m.forward.is_empty() && m.name.ends_with("_merge") && m.replaces.is_empty();
+    let Some(head) = m
+        .prev
+        .as_deref()
+        .and_then(|p| chain.iter().find(|c| c.name == p))
+        .filter(|_| legacy)
+    else {
+        return Vec::new();
+    };
+    chain
+        .iter()
+        .filter(|c| c.name != head.name && c.name < m.name && c.prev == head.prev)
+        .map(|c| c.name.as_str())
+        .collect()
 }
 
 /// `head`'s snapshot plus the renames hand-written into it and the copies
@@ -527,12 +549,14 @@ fn ancestry<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a Migration>
     out
 }
 
-/// Migrations no `prev`, `merges` or `replaces` names.
+/// Migrations no `prev`, merged branch or `replaces` names.
 fn leaves<'a>(chain: &[&'a Migration]) -> Vec<&'a Migration> {
     let joined: std::collections::HashSet<&str> = chain
         .iter()
-        .flat_map(|m| m.prev.iter().chain(&m.merges).chain(&m.replaces))
-        .map(String::as_str)
+        .flat_map(|m| {
+            let named = m.prev.iter().chain(&m.replaces).map(String::as_str);
+            named.chain(merged_branches(chain, m))
+        })
         .collect();
     chain
         .iter()
@@ -1390,6 +1414,53 @@ mod tests {
         let b = snap_with(vec![posts_with(&["b", "old"]), t("tags")]);
         write_mig(&dir, &mig_at("0002b", Some("0001_initial"), b));
         dir
+    }
+
+    /// A merged-in branch is part of the chain, not a side chain whose
+    /// tables and indexes fold back into the baseline.
+    #[test]
+    fn scoped_makemigrations_follows_merges() {
+        let dir = tempdir();
+        let mut base = snap_with(vec![posts_with(&[])]);
+        base.indexes = vec![idx("posts_x_idx", "posts")];
+        write_mig(&dir, &mig_at("0001_initial", None, base));
+        let mut a = snap_with(vec![posts_with(&["a"])]);
+        a.indexes = vec![idx("posts_x_idx", "posts")];
+        write_mig(&dir, &mig_at("0002a", Some("0001_initial"), a));
+        let b = snap_with(vec![posts_with(&[])]);
+        write_mig(&dir, &mig_at("0002b", Some("0001_initial"), b));
+        let mig = make_merge_migration(&dir).unwrap().unwrap();
+        assert!(mig.snapshot.indexes.is_empty(), "{:?}", mig.snapshot);
+        let next = make_migrations_scoped(
+            &dir,
+            &mig.snapshot,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A merge file from before `merges` existed still joins its branch.
+    #[test]
+    fn legacy_merge_file_still_joins_the_branch() {
+        let dir = branched_dir();
+        let joined = snap_with(vec![posts_with(&["a", "b"]), t("tags")]);
+        write_mig(&dir, &mig_at("0003_merge", Some("0002b"), joined.clone()));
+        assert!(make_migrations_from(&dir, &joined, None).unwrap().is_none());
+        let scoped = make_migrations_scoped(
+            &dir,
+            &joined,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(scoped.is_none(), "{:?}", scoped.map(|m| m.forward));
+        assert!(make_merge_migration(&dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Diffing one branch would re-add the other's column (#2574).
