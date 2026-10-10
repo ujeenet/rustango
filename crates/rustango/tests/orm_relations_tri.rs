@@ -1,7 +1,8 @@
 //! Relation fetches on every backend: NULL FKs under `select_related` (#2293),
 //! shared select_related hops (#2294), bind-cap batching (#2295), M2M `set`
-//! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298) and
-//! reverse-generic prefetch batching (#2318).
+//! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298),
+//! reverse-generic prefetch batching (#2318) and bare columns under joins
+//! (#2411).
 //!
 //! The cap tests use 33k rows (x2 binds = 66k) or 70k keys: past SQLite's
 //! 32,766 and PG/MySQL's 65,535.
@@ -117,6 +118,24 @@ pub struct Gpost {
     pub id: i64,
 }
 
+/// Shares `id` and `at` with `Shift`, so a bare column is ambiguous.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_crew", app = "rel2293")]
+pub struct Crew {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel2293_shift", app = "rel2293")]
+pub struct Shift {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub crew: Option<ForeignKey<Crew>>,
+}
+
 /// The generic M2M pivot, kept out of the model registry.
 const TAGGABLES: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
@@ -195,6 +214,7 @@ async fn setup(pool: &Pool) {
         Editor::SCHEMA,
         Profile::SCHEMA,
         Child::SCHEMA,
+        Shift::SCHEMA,
         TAGGABLES,
     ] {
         drop_table(pool, t.table).await;
@@ -210,6 +230,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<PostTag>(pool).await;
     fresh_table::<Badge>(pool).await;
     fresh_table::<Note>(pool).await;
+    fresh_table::<Crew>(pool).await;
+    fresh_table::<Shift>(pool).await;
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -448,6 +470,50 @@ async fn isnull_across_a_null_fk(pool: &Pool) {
         .await
         .expect("__isnull across a NULL FK");
     assert_eq!(rows.iter().map(|a| a.id).collect::<Vec<_>>(), vec![1]);
+}
+
+fn article_ids(rows: &[Article]) -> Vec<i64> {
+    rows.iter().map(|a| a.id).collect()
+}
+
+/// `id` is on both joined tables; bare `F` columns must point at the base (#2411).
+async fn bare_columns_qualified_under_joins(pool: &Pool) {
+    use rustango::core::{funcs::abs, F};
+    seed_articles(pool).await;
+    let rows: Vec<Article> = Article::objects()
+        .select_related("editor")
+        .where_column_op("id", Op::Gt, "editor")
+        .order_by_expr(abs(F("id")), true)
+        .fetch(pool)
+        .await
+        .expect("where_column_op and order_by_expr under a join");
+    assert_eq!(article_ids(&rows), vec![2]);
+
+    let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    Crew {
+        id: 1,
+        at: at("2025-01-01T00:00:00Z"),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("crew");
+    for (id, when) in [(1, "2024-05-01T00:00:00Z"), (2, "2025-05-01T00:00:00Z")] {
+        Shift {
+            id,
+            at: at(when),
+            crew: Some(ForeignKey::unloaded(1)),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("shift");
+    }
+    let shifts: Vec<Shift> = Shift::objects()
+        .select_related("crew")
+        .filter("at__year", 2025_i64)
+        .fetch(pool)
+        .await
+        .expect("date transform under a join");
+    assert_eq!(shifts.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
 }
 
 /// Past every backend's bind cap: 33k rows x 2 binds, 70k `IN` keys.
@@ -754,6 +820,7 @@ tri_dialect_test! {
         sibling_chains_three_levels_both_load,
         null_fk_on_a_deeper_hop,
         isnull_across_a_null_fk,
+        bare_columns_qualified_under_joins,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
         sliced_in_bulk_past_the_bind_cap_is_refused,

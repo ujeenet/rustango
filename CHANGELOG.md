@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — bare columns are qualified when a query has joins (#2411)
+
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.
