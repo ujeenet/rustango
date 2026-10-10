@@ -2190,7 +2190,8 @@ impl<T: Model> QuerySet<T> {
     ///
     /// # Errors
     /// As [`QuerySet::compile`], plus [`QueryError::BoundedDmlUnsupported`]
-    /// when a limit or offset cannot be bounded.
+    /// when a limit or offset cannot be bounded and
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Fold global scopes into the WHERE, so a bulk delete honours
         // the same filters as a fetch. A `published_only` scope means
@@ -2413,7 +2414,8 @@ impl<T: Model> UpdateBuilder<T> {
     /// unknown field, [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type, and
     /// [`QueryError::BoundedDmlUnsupported`] if the queryset's limit or
-    /// offset cannot be bounded by primary key.
+    /// offset cannot be bounded by primary key, or
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
@@ -3081,6 +3083,7 @@ fn never_match_clause(
 }
 
 /// Bound an UPDATE/DELETE: `<where> AND pk IN (SELECT pk … ORDER BY …, pk LIMIT … OFFSET …)`.
+/// A set operation is refused with or without a bound.
 /// The outer `<where>` stays so a row changed by a concurrent writer is not claimed.
 /// Without a limit or offset the order cannot change the row set, so it is left out.
 fn bound_dml_where(
@@ -3092,6 +3095,10 @@ fn bound_dml_where(
     has_compound: bool,
 ) -> Result<WhereExpr, QueryError> {
     use crate::core::BoundedDmlReason as Why;
+    // UPDATE/DELETE has no set operation; dropping it widens the write.
+    if has_compound {
+        return Err(QueryError::SetOperationDml { model: model.name });
+    }
     if limit.is_none() && offset.is_none() {
         return Ok(where_clause);
     }
@@ -3104,9 +3111,6 @@ fn bound_dml_where(
     // SQLite reads `LIMIT -1` as no limit at all.
     if limit.is_some_and(|n| n < 0) || offset.is_some_and(|n| n < 0) {
         return refuse(Why::Negative);
-    }
-    if has_compound {
-        return refuse(Why::SetOperation);
     }
     let mut pks = model.fields.iter().filter(|f| f.primary_key);
     let pk = match (pks.next(), pks.next()) {

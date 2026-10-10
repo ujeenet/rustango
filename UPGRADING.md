@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Set operations on `update()` / `delete()` (#2452)
+
+A queryset with `union`, `intersection` or `difference` now fails `update()` and `delete()` with `QueryError::SetOperationDml`, bounded or not. Match that instead of `BoundedDmlReason::SetOperation`, which is removed. Filter the rows with `where_in_subquery` / `where_not_in_subquery` instead.
+
 ### Relation filters project nothing (#2412)
 
 A typed fetch filtered or ordered through `author__x` no longer loads `author` as a side effect, and `values()` drops `select_related`. Add `select_related("author")` where the code reads the loaded relation.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
+
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is gone.
+
 ### Fixed — a relation filter no longer adds the joined columns to the SELECT (#2412)
 
 Joins from `filter("author__x", ..)` and `order_by("author__x")` project nothing and no longer load `author`; `values()` ignores `select_related`. DISTINCT, value rows and IN subqueries see only the asked columns.
