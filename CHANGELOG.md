@@ -20,6 +20,42 @@ A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_p
 
 New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start`, then every `min(older_than, 60s)`, using a new `locked_at` index. The template uses it instead of a reclaim after shutdown.
 
+### Fixed — an admin inline DELETE stamps a `soft_delete` child instead of removing it (#2453)
+
+As the main admin delete does; trashed children no longer count toward the inline's `max_num`.
+
+### Fixed — an admin search on a model with no searchable column returns no rows (#2391)
+
+The changelist and autocomplete returned every row. A `SearchClause` with a query and no columns now matches nothing.
+
+### Fixed — admin delete, soft delete, restore and built-in bulk actions audit in the write's transaction (#2390)
+
+For an `audit(...)` model a failed audit write now refuses the write instead of logging a warning. Custom actions still audit after their handler.
+
+### Fixed — admin inline rows of an `audit(...)` model are audited (#2389)
+
+Inline updates, deletes and inserts write their audit rows in the parent edit's transaction; a failed audit write saves nothing.
+
+### Fixed — `migrate-tenant-storage` no longer advises `purge-tenant` for the old copy (#2382)
+
+That would drop the new storage and the Org row. The message now names the old schema or database to drop by hand.
+
+### Fixed — `migrate-tenant-storage` resolves secret references (#2384)
+
+A source `database_url` like `env://ACME_DB` is resolved before connecting. `--database-url` may be a reference too; it is stored and printed as given, so the password stays out of the registry and the output.
+
+### Fixed — `migrate-tenant-storage --to database` accepts extensions the target already has (#2385)
+
+An untrusted extension pre-installed on the target, in the schema the registry has it in, no longer needs `--allow-extension`. One in another schema is refused before the move starts.
+
+### Fixed — `migrate-tenant-storage` no longer loses writes made during the move (#2383)
+
+The tenant is inactive from before the dump until the Org row points at the new copy, after a `--drain-secs` wait (default 30 s). The switch writes only the storage columns and `active`, guarded by `active = false`, so an edit made meanwhile survives. Ctrl-C and failures reactivate the tenant; otherwise the output names `edit-tenant <slug> --activate`.
+
+### Fixed — `migrate-tenant-storage --to database` moves an extension in the tenant's own schema (#2386)
+
+The restore failed on `CREATE SCHEMA` (42P06). The dump now creates that extension itself, which needs pg_dump 14+.
+
 ### Fixed — no admin serves passkeys; `migrate` creates their table (#2364)
 
 A staff user could add a `rustango_webauthn_credentials` row for any `user_id`. With `passkey`, `migrate` creates the table on the single database or on each tenant, never on the registry, where schema-mode tenants would share it.

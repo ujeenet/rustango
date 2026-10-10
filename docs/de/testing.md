@@ -170,8 +170,8 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 | Variable | Suites | Was sie brauchen |
 |---|---:|---|
 | *(keine)* | 225 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
-| `DATABASE_URL` | 143 | Ein erreichbarer PostgreSQL-Server. |
-| `MYSQL_TEST_URL` | 75 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| `DATABASE_URL` | 144 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 76 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
 
 Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte

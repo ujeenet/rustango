@@ -30,14 +30,20 @@
 //!      single-statement decision the operator should own). Its empty
 //!      `public` is replaced by the restored schema, renamed to `public`;
 //!      both emptiness and the right to drop it are checked first.
-//! 3. `pg_dump` the source (schema-scoped or full DB), pipe into
+//! 3. Deactivate the tenant and wait `--drain-secs` (default: the tenant
+//!    cache TTL) so servers stop writing the old copy. Requests already
+//!    running and workers that bypass the resolver are not stopped.
+//!    `active` comes back on success, failure and Ctrl-C, by an update
+//!    guarded by `active = false`, so a suspension made during the move is
+//!    still undone. If the process dies, `edit-tenant <slug> --activate`.
+//!
+//!    `pg_dump` the source (schema-scoped or full DB), pipe into
 //!    `psql` against the target. Into a schema it goes through a
 //!    staging database that renames `public` first.
 //! 4. Smoke check: `SELECT 1 FROM <schema>.rustango_users LIMIT 1`
 //!    against the new location, before the Org row moves.
-//! 5. Single-statement transaction: `UPDATE rustango_orgs SET
-//!    storage_mode = ?, database_url = ?, schema_name = ? WHERE
-//!    slug = ?`.
+//! 5. `UPDATE rustango_orgs SET storage_mode, database_url, schema_name
+//!    (, active)` — only those columns, one short guarded update.
 //! 6. `TenantPools::invalidate(slug)` so the next request rebuilds
 //!    the cached pool against the new storage.
 //!
@@ -50,9 +56,9 @@
 //! ## What this verb does NOT do
 //!
 //! * It does NOT drop the source data after a successful move. The
-//!   operator can `purge-tenant --purge-database` (database-mode
-//!   source) or manually `DROP SCHEMA` (schema-mode source) when
-//!   they're confident the new side is healthy.
+//!   final message names the old schema or database; drop it by hand
+//!   once the new side is healthy. Not with `purge-tenant`: that drops
+//!   the tenant's *new* storage and its Org row (#2382).
 //! * It does NOT create the target database. Database-mode targets
 //!   need `createdb` / `CREATE DATABASE` to have run already.
 //! * It does NOT verify the data row counts match between source
@@ -63,6 +69,7 @@ use std::io::Write;
 use std::process::Stdio;
 
 use crate::core::Column as _;
+use crate::sql::UpdaterPool as _;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident};
 use crate::tenancy::org::{Org, StorageMode};
@@ -80,6 +87,8 @@ struct MigrateStorageArgs {
     schema_name: Option<String>,
     /// Untrusted extensions the move may create (`--allow-extension`).
     allow_extensions: Vec<String>,
+    /// How long the tenant stays inactive before the dump (#2383).
+    drain_secs: u64,
     dry_run: bool,
 }
 
@@ -96,7 +105,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         .where_(Org::slug.eq(parsed.slug.clone()))
         .fetch_on(pools.registry())
         .await?;
-    let mut org = orgs
+    let org = orgs
         .pop()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{}` not found", parsed.slug)))?;
 
@@ -118,15 +127,14 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         ));
     }
 
-    // 2. Compute source / target connection details.
-    let source_url = match current {
-        StorageMode::Schema => registry_url.to_owned(),
-        StorageMode::Database => org.database_url.clone().ok_or_else(|| {
-            TenancyError::Validation(format!(
-                "tenant `{}` has no database_url despite database mode",
-                parsed.slug
-            ))
-        })?,
+    // Secret references (`env://…`) resolve to connect; only the
+    // reference is printed and stored (#2384).
+    let (source_ref, source_url) = match current {
+        StorageMode::Schema => (registry_url.to_owned(), registry_url.to_owned()),
+        StorageMode::Database => (
+            org.database_url.clone().unwrap_or_default(),
+            pools.resolved_database_url(&org).await?,
+        ),
     };
     let source_schema = match current {
         StorageMode::Schema => Some(SchemaName::parse(org.effective_schema())?),
@@ -149,9 +157,11 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             )));
         }
     }
-    let target_url = match parsed.target {
-        StorageMode::Schema => registry_url.to_owned(),
-        StorageMode::Database => parsed.database_url.clone().expect("validated above"),
+    let (target_ref, target_url) = match &parsed.database_url {
+        Some(reference) if parsed.target == StorageMode::Database => {
+            (reference.clone(), pools.resolve_secret(reference).await?)
+        }
+        _ => (registry_url.to_owned(), registry_url.to_owned()),
     };
 
     writeln!(
@@ -160,23 +170,14 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         parsed.slug, current, parsed.target,
     )?;
     if let Some(s) = &source_schema {
-        writeln!(
-            writer,
-            "  source: {} (schema `{s}`)",
-            redact_url(&source_url)
-        )?;
+        writeln!(writer, "  source: {} (schema `{s}`)", shown(&source_ref))?;
     } else {
-        writeln!(writer, "  source: {}", redact_url(&source_url))?;
+        writeln!(writer, "  source: {}", shown(&source_ref))?;
     }
     if let Some(s) = &target_schema {
-        writeln!(
-            writer,
-            "  target: {} (schema `{}`)",
-            redact_url(&target_url),
-            s.0
-        )?;
+        writeln!(writer, "  target: {} (schema `{s}`)", shown(&target_ref))?;
     } else {
-        writeln!(writer, "  target: {}", redact_url(&target_url))?;
+        writeln!(writer, "  target: {}", shown(&target_ref))?;
     }
 
     if parsed.dry_run {
@@ -184,14 +185,13 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         return Ok(());
     }
 
-    // 3-4. Dump → restore. Streams pg_dump stdout into psql stdin so
-    // we never buffer the full snapshot in memory.
-    writeln!(writer, "  starting pg_dump → psql pipe…")?;
-    let (source, target) = (Conn::new(&source_url), Conn::new(&target_url));
-    match (&target_schema, &source_schema) {
+    // 2. Every refusal before the tenant goes offline.
+    let restore = match (&target_schema, &source_schema) {
         (Some(schema), _) => {
             let allowed = &parsed.allow_extensions;
-            restore_into_schema(pools.registry(), &source_url, &target, schema, allowed).await?
+            Restore::IntoSchema(
+                plan_into_schema(pools.registry(), &source_url, schema, allowed).await?,
+            )
         }
         // A database-mode tenant lives in `public` (#2189).
         (None, Some(schema)) => {
@@ -204,12 +204,20 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
                 .max_connections(1)
                 .connect(&target_url)
                 .await?;
-            let creating: Vec<&Extension> = used.iter().collect();
-            let refused =
-                refuse_untrusted(&pool, &creating, &parsed.allow_extensions, "the target").await;
+            // Only what the target lacks needs trust to create (#2385).
+            let refused = async {
+                let missing = missing_on(&pool, &used, &schema.0).await?;
+                refuse_untrusted(&pool, &missing, &parsed.allow_extensions, "the target").await
+            }
+            .await;
             pool.close().await;
             refused?;
-            let before: Vec<String> = used.iter().flat_map(|e| e.create_in(&e.schema)).collect();
+            // One in the tenant's schema comes with the dump, which creates
+            // that schema; `before` cannot (#2386).
+            let (own, other): (Vec<&Extension>, _) =
+                used.iter().partition(|e| e.schema == schema.0);
+            let extensions = own.iter().map(|e| e.name.clone()).collect();
+            let before = other.iter().flat_map(|e| e.create_in(&e.schema)).collect();
             let mut after: Vec<String> = used.iter().flat_map(|e| e.move_to(&schema.0)).collect();
             // `--no-acl` drops the default grant, which other app roles need.
             after.extend([
@@ -217,49 +225,61 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
                 format!("ALTER SCHEMA {} RENAME TO public", quote_ident(&schema.0)),
                 "GRANT USAGE ON SCHEMA public TO PUBLIC".to_owned(),
             ]);
-            pg_dump_to_psql(&source, Some(schema), &target, &before, &after)?;
+            Restore::Dump {
+                extensions,
+                before,
+                after,
+            }
         }
-        (None, None) => pg_dump_to_psql(&source, None, &target, &[], &[])?,
-    }
-    writeln!(writer, "  data move OK")?;
-
-    // Before the Org row moves, so a bad restore leaves it in place.
-    let target_name = target_schema.as_ref().map(|s| s.0.as_str());
-    if let Err(e) = smoke_check(&target_url, target_name).await {
-        // The restore created it, so a rerun would hit "schema exists".
-        let Some(s) = target_name else {
-            return Err(TenancyError::Validation(format!(
-                "smoke-check failed: {e}; recreate the target database before a rerun"
-            )));
-        };
-        let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
-        crate::sql::sqlx::query(&drop)
-            .execute(pools.registry())
-            .await?;
-        return Err(TenancyError::Validation(format!(
-            "smoke-check failed: {e}; the restored schema was dropped"
-        )));
-    }
-    writeln!(writer, "  smoke-check OK")?;
-
-    // 5. Update Org row.
-    let new_storage_mode = parsed.target.as_str().into();
-    let new_database_url = match parsed.target {
-        StorageMode::Database => Some(target_url.clone()),
-        StorageMode::Schema => None,
+        (None, None) => Restore::Dump {
+            extensions: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
+        },
     };
-    let new_schema_name = match parsed.target {
-        StorageMode::Schema => target_schema.map(|s| s.0),
-        StorageMode::Database => None,
-    };
-    org.storage_mode = new_storage_mode;
-    org.database_url = new_database_url;
-    org.schema_name = new_schema_name;
-    org.save(pools.registry()).await?;
+
+    // 3. Offline for the move: a write to the old copy after the dump
+    // would be lost (#2383).
+    let id = org
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| TenancyError::Validation("Org row has no PK".into()))?;
+    let slug = &parsed.slug;
+    // Before going offline, so Ctrl-C reaches the code that comes back.
+    let mut interrupt = Interrupt::listen()?;
+    if org.active {
+        writeln!(
+            writer,
+            "  deactivating the tenant; if this run dies, run `edit-tenant {slug} --activate`"
+        )?;
+        writeln!(
+            writer,
+            "  waiting {} s for running servers' tenant caches…",
+            parsed.drain_secs
+        )?;
+        set_active(pools, slug, id, false).await?;
+    } else {
+        writeln!(
+            writer,
+            "  the tenant is inactive and stays so; if an earlier move left it so, \
+             run `edit-tenant {slug} --activate` afterwards"
+        )?;
+    }
+    MoveCtx {
+        pools,
+        parsed: &parsed,
+        id,
+        reactivate: org.active,
+        source_url: &source_url,
+        source_schema: source_schema.as_ref(),
+        target_url: &target_url,
+        target_schema: target_schema.as_ref(),
+    }
+    .run(restore, &mut interrupt, writer)
+    .await?;
+
     writeln!(writer, "  Org row updated")?;
-
-    // 6. Evict the cached pool.
-    pools.invalidate(&parsed.slug).await;
     writeln!(
         writer,
         "  running servers switch to the new location within {} s (their tenant cache TTL)",
@@ -267,10 +287,280 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     )?;
     writeln!(
         writer,
-        "  ✓ migrated `{}` to {} mode. Source data still at the old location — `purge-tenant --purge-database` or DROP SCHEMA when ready.",
+        "  ✓ migrated `{}` to {} mode.",
         parsed.slug, parsed.target,
     )?;
+    writeln!(
+        writer,
+        "  {}",
+        old_copy_advice(source_schema.as_ref(), &source_ref)
+    )?;
     Ok(())
+}
+
+/// How the data moves, decided before the tenant goes offline.
+enum Restore {
+    /// database → schema, through a staging database.
+    IntoSchema(SchemaPlan),
+    /// One `pg_dump | psql`, with statements around the dump.
+    Dump {
+        /// Extensions the dump itself creates (`pg_dump --extension`).
+        extensions: Vec<String>,
+        before: Vec<String>,
+        after: Vec<String>,
+    },
+}
+
+/// SIGINT / SIGTERM, caught while the tenant is offline so the move can
+/// bring it back (#2383).
+struct Interrupt {
+    #[cfg(unix)]
+    signals: [tokio::signal::unix::Signal; 2],
+}
+
+impl Interrupt {
+    fn listen() -> Result<Self, TenancyError> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Ok(Self {
+                signals: [
+                    signal(SignalKind::interrupt()).map_err(TenancyError::Io)?,
+                    signal(SignalKind::terminate()).map_err(TenancyError::Io)?,
+                ],
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            let [int, term] = &mut self.signals;
+            tokio::select! {
+                _ = int.recv() => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// The part of the move that runs while the tenant is offline.
+struct MoveCtx<'a> {
+    pools: &'a TenantPools,
+    parsed: &'a MigrateStorageArgs,
+    id: i64,
+    /// The move deactivated the tenant, so it brings it back.
+    reactivate: bool,
+    source_url: &'a str,
+    source_schema: Option<&'a SchemaName>,
+    target_url: &'a str,
+    target_schema: Option<&'a SchemaName>,
+}
+
+impl MoveCtx<'_> {
+    /// No lock is held across the move: the switch and the reactivation
+    /// are short updates guarded by `active = false`. A suspension made
+    /// during the move is still undone by them; a "moved by migrate"
+    /// marker column would fix that (0.61.0).
+    async fn run<W: Write + Send>(
+        self,
+        restore: Restore,
+        interrupt: &mut Interrupt,
+        writer: &mut W,
+    ) -> Result<(), TenancyError> {
+        let done = tokio::select! {
+            r = self.copy(restore, writer) => r,
+            () = interrupt.recv() => Err(TenancyError::Validation("interrupted".into())),
+        };
+        let done = match done {
+            Ok(()) => self.switch().await,
+            Err(e) => Err(e),
+        };
+        let result = match done {
+            Ok(()) => Ok(()),
+            Err(e) if self.reactivate => match self.come_back().await {
+                Ok(()) => Err(e),
+                Err(again) => Err(self.left_inactive(format!("{e}; {again}"))),
+            },
+            Err(e) => Err(e),
+        };
+        crate::tenancy::invalidate_org_cache();
+        self.pools.invalidate(&self.parsed.slug).await;
+        result
+    }
+
+    /// The move's own `active = false`, guarded the same way as the switch.
+    fn offline(&self) -> crate::query::QuerySet<Org> {
+        let rows = Org::objects().where_(Org::id.eq(self.id));
+        if self.reactivate {
+            rows.where_(Org::active.eq(false))
+        } else {
+            rows
+        }
+    }
+
+    async fn come_back(&self) -> Result<(), TenancyError> {
+        let n = self
+            .offline()
+            .update()
+            .set_typed(Org::active.set(true))
+            .execute_pool(&self.pools.registry_pool())
+            .await?;
+        expect_one(n, &self.parsed.slug)
+    }
+
+    /// `e`, plus the way back when the move left the tenant inactive.
+    fn left_inactive(&self, e: impl std::fmt::Display) -> TenancyError {
+        let slug = &self.parsed.slug;
+        if self.reactivate {
+            TenancyError::Validation(format!(
+                "{e}; the tenant stays inactive: run `edit-tenant {slug} --activate`"
+            ))
+        } else {
+            TenancyError::Validation(e.to_string())
+        }
+    }
+
+    /// Drain, then 3. dump → restore and 4. smoke check.
+    async fn copy<W: Write + Send>(
+        &self,
+        restore: Restore,
+        writer: &mut W,
+    ) -> Result<(), TenancyError> {
+        if self.reactivate {
+            tokio::time::sleep(std::time::Duration::from_secs(self.parsed.drain_secs)).await;
+        }
+        // Streams pg_dump stdout into psql stdin so we never buffer the
+        // full snapshot in memory.
+        writeln!(writer, "  starting pg_dump → psql pipe…")?;
+        let (source, target) = (Conn::new(self.source_url), Conn::new(self.target_url));
+        match restore {
+            Restore::IntoSchema(plan) => {
+                run_into_schema(self.pools.registry(), &source, &target, plan).await?;
+            }
+            Restore::Dump {
+                extensions,
+                before,
+                after,
+            } => {
+                let scope = self.source_schema;
+                pg_dump_to_psql(&source, scope, &extensions, &target, &before, &after)?;
+            }
+        }
+        writeln!(writer, "  data move OK")?;
+
+        // 4. Before the Org row moves, so a bad restore leaves it in place.
+        let target_name = self.target_schema.map(|s| s.0.as_str());
+        if let Err(e) = smoke_check(self.target_url, target_name).await {
+            // The restore created it, so a rerun would hit "schema exists".
+            let Some(s) = target_name else {
+                return Err(TenancyError::Validation(format!(
+                    "smoke-check failed: {e}; recreate the target database before a rerun"
+                )));
+            };
+            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
+            crate::sql::sqlx::query(&drop)
+                .execute(self.pools.registry())
+                .await?;
+            return Err(TenancyError::Validation(format!(
+                "smoke-check failed: {e}; the restored schema was dropped"
+            )));
+        }
+        writeln!(writer, "  smoke-check OK")?;
+        Ok(())
+    }
+
+    /// 5. Only the storage columns (and `active`), one guarded update.
+    async fn switch(&self) -> Result<(), TenancyError> {
+        let (database_url, schema_name) = match self.parsed.target {
+            StorageMode::Database => (self.parsed.database_url.clone(), None),
+            StorageMode::Schema => (None, self.target_schema.map(|s| s.0.clone())),
+        };
+        let mut update = self
+            .offline()
+            .update()
+            .set_typed(Org::storage_mode.set(self.parsed.target.as_str().to_owned()))
+            .set_typed(Org::database_url.set(database_url))
+            .set_typed(Org::schema_name.set(schema_name));
+        if self.reactivate {
+            update = update.set_typed(Org::active.set(true));
+        }
+        let n = update.execute_pool(&self.pools.registry_pool()).await?;
+        expect_one(n, &self.parsed.slug)
+    }
+}
+
+/// Set the tenant's `active` column alone, and drop this process's caches.
+async fn set_active(
+    pools: &TenantPools,
+    slug: &str,
+    id: i64,
+    active: bool,
+) -> Result<(), TenancyError> {
+    let n = Org::objects()
+        .where_(Org::id.eq(id))
+        .update()
+        .set_typed(Org::active.set(active))
+        .execute_pool(&pools.registry_pool())
+        .await?;
+    crate::tenancy::invalidate_org_cache();
+    pools.invalidate(slug).await;
+    expect_one(n, slug)
+}
+
+/// An Org row update must hit exactly the tenant's row: none means it was
+/// deleted, or reactivated during the move.
+fn expect_one(updated: u64, slug: &str) -> Result<(), TenancyError> {
+    if updated == 1 {
+        return Ok(());
+    }
+    Err(TenancyError::Validation(format!(
+        "tenant `{slug}` was deleted or reactivated meanwhile; its Org row was not updated"
+    )))
+}
+
+/// A URL or keyword conninfo, its password masked.
+fn shown(conninfo: &str) -> String {
+    if conninfo.contains("://") {
+        return redact_url(conninfo);
+    }
+    conninfo
+        .split(' ')
+        .map(|kv| match kv.split_once('=') {
+            Some((k, _)) if k == "password" => "password=***".to_owned(),
+            _ => kv.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Where the old copy is and how to drop it. Never `purge-tenant`: it
+/// drops the tenant's current (new) storage and its Org row (#2382).
+/// `purge-tenant`'s check that no other tenant shares it is not done here.
+fn old_copy_advice(source_schema: Option<&SchemaName>, source_ref: &str) -> String {
+    let what = match source_schema {
+        Some(s) => format!(
+            "schema `{s}` on the registry database ({}); once the new location is \
+             healthy and no other tenant uses it, run `DROP SCHEMA {} CASCADE` there",
+            shown(source_ref),
+            quote_ident(&s.0)
+        ),
+        None => format!(
+            "the database at {}; once the new location is healthy and no other tenant \
+             uses it, drop that database",
+            shown(source_ref)
+        ),
+    };
+    format!(
+        "The old copy is still in {what} by hand. Not with `purge-tenant`: it would drop \
+         the new location and the Org row."
+    )
 }
 
 fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
@@ -283,6 +573,7 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
     let mut database_url: Option<String> = None;
     let mut schema_name: Option<String> = None;
     let mut allow_extensions = Vec::new();
+    let mut drain_secs = crate::tenancy::resolver::CACHE_TTL.as_secs();
     let mut dry_run = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -299,12 +590,18 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
             "--allow-extension" => {
                 allow_extensions.push(next_value(&mut iter, "--allow-extension")?);
             }
+            "--drain-secs" => {
+                let v = next_value(&mut iter, "--drain-secs")?;
+                drain_secs = v.parse().map_err(|_| {
+                    TenancyError::Validation(format!("--drain-secs must be a number, got `{v}`"))
+                })?;
+            }
             "--dry-run" => dry_run = true,
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
                     "migrate-tenant-storage <slug> --to schema|database \
                      [--database-url <conninfo>] [--schema-name <s>] \
-                     [--allow-extension <name>]... [--dry-run]"
+                     [--allow-extension <name>]... [--drain-secs <n>] [--dry-run]"
                         .into(),
                 ));
             }
@@ -324,6 +621,7 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
         database_url,
         schema_name,
         allow_extensions,
+        drain_secs,
         dry_run,
     })
 }
@@ -341,6 +639,7 @@ impl Conn {
 /// A target schema name that provisioning accepts (`[a-z0-9_-]`), so
 /// pg_dump's `--schema` pattern can neither fold its case nor match it
 /// as a wildcard.
+#[derive(Clone)]
 struct SchemaName(String);
 
 impl SchemaName {
@@ -474,6 +773,39 @@ async fn extensions_used_by(
     Ok(used)
 }
 
+/// The extensions of `used` that `pool`'s database lacks. One it has must
+/// sit where the dump names it, or the restore fails after the drain
+/// (#2385); one in the tenant's schema the dump creates itself (#2386).
+async fn missing_on<'e>(
+    pool: &crate::sql::sqlx::PgPool,
+    used: &'e [Extension],
+    tenant_schema: &str,
+) -> Result<Vec<&'e Extension>, TenancyError> {
+    let sql = format!("{EXTENSIONS} WHERE e.extname = $1");
+    let mut missing = Vec::new();
+    for e in used {
+        let Some(found) = fetch_extensions(pool, &sql, &e.name).await?.pop() else {
+            missing.push(e);
+            continue;
+        };
+        if e.schema == tenant_schema {
+            return Err(TenancyError::Validation(format!(
+                "extension `{}` is already on the target (schema `{}`), but the dump \
+                 creates it with the tenant's schema: drop it there",
+                e.name, found.schema
+            )));
+        }
+        if found.schema != e.schema {
+            return Err(TenancyError::Validation(format!(
+                "extension `{}` is in schema `{}` on the target, but the tenant uses it \
+                 from `{}`: move it there",
+                e.name, found.schema, e.schema
+            )));
+        }
+    }
+    Ok(missing)
+}
+
 /// Refuse to create on `pool`'s server an extension it does not trust,
 /// unless the operator allowed it: one untrusted extension in a tenant
 /// must not install itself in a shared database.
@@ -519,17 +851,25 @@ fn refuse_fixed<'e>(fixed: impl Iterator<Item = &'e Extension>) -> Result<(), Te
     )))
 }
 
-/// Restore `source`'s `public` into `schema` on `target`. pg_dump names
-/// every object `public.`, so `public` is renamed in a staging database
-/// first (#1864). The extensions it uses go back where the registry has
-/// them, or to `public`, and the registry gets any it lacks (#2210).
-async fn restore_into_schema(
+/// Restore a database-mode tenant's `public` into `schema` on the
+/// registry. pg_dump names every object `public.`, so `public` is renamed
+/// in a staging database first (#1864).
+struct SchemaPlan {
+    schema: SchemaName,
+    /// Extensions the registry lacks, created before the restore.
+    create: Vec<String>,
+    /// Run in staging: the rename, and the extensions' moves.
+    moves: Vec<String>,
+}
+
+/// The extensions it uses go back where the registry has them, or to
+/// `public`, and the registry gets any it lacks (#2210).
+async fn plan_into_schema(
     registry: &crate::sql::sqlx::PgPool,
     source_url: &str,
-    target: &Conn,
     schema: &SchemaName,
     allowed: &[String],
-) -> Result<(), TenancyError> {
+) -> Result<SchemaPlan, TenancyError> {
     use crate::sql::sqlx::postgres::PgPoolOptions;
     let pool = PgPoolOptions::new()
         .max_connections(1)
@@ -571,7 +911,19 @@ async fn restore_into_schema(
     }
     refuse_fixed(fixed.into_iter())?;
     refuse_untrusted(registry, &creating, allowed, "the registry").await?;
+    Ok(SchemaPlan {
+        schema: schema.clone(),
+        create,
+        moves,
+    })
+}
 
+async fn run_into_schema(
+    registry: &crate::sql::sqlx::PgPool,
+    source: &Conn,
+    target: &Conn,
+    plan: SchemaPlan,
+) -> Result<(), TenancyError> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -581,9 +933,8 @@ async fn restore_into_schema(
         .execute(registry)
         .await?;
     let stage = target.database(&staging);
-    let source = Conn::new(source_url);
-    let moved = pg_dump_to_psql(&source, None, &stage, &[], &moves)
-        .and_then(|()| pg_dump_to_psql(&stage, Some(schema), target, &create, &[]));
+    let moved = pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves)
+        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &plan.create, &[]));
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;
@@ -593,10 +944,12 @@ async fn restore_into_schema(
 }
 
 /// Pipe `pg_dump <source>` into `psql <target>` in one transaction. When
-/// the source is schema-scoped, pass `--schema=<name>` to pg_dump.
+/// the source is schema-scoped, pass `--schema=<name>` to pg_dump, and
+/// `--extension` (pg_dump 14+) for each of `extensions`.
 fn pg_dump_to_psql(
     source: &Conn,
     source_schema: Option<&SchemaName>,
+    extensions: &[String],
     target: &Conn,
     before: &[String],
     after: &[String],
@@ -610,6 +963,10 @@ fn pg_dump_to_psql(
         .arg("--no-subscriptions");
     if let Some(s) = source_schema {
         dump_cmd.arg(format!("--schema={}", s.0));
+    }
+    // Quoted, so the pattern is the literal name.
+    for e in extensions {
+        dump_cmd.arg(format!("--extension={}", quote_ident(e)));
     }
     dump_cmd.stdout(Stdio::piped());
     dump_cmd.stderr(Stdio::piped());
@@ -815,6 +1172,17 @@ mod tests {
         assert_eq!(parsed.allow_extensions, ["postgis", "dblink"]);
     }
 
+    /// #2383 — waits out the tenant cache TTL unless told otherwise.
+    #[test]
+    fn parse_args_drain_secs() {
+        let parsed = parse_args(&s(&["acme", "--to", "schema"])).unwrap();
+        let ttl = crate::tenancy::resolver::CACHE_TTL.as_secs();
+        assert_eq!(parsed.drain_secs, ttl);
+        let parsed = parse_args(&s(&["acme", "--to", "schema", "--drain-secs", "5"])).unwrap();
+        assert_eq!(parsed.drain_secs, 5);
+        assert!(parse_args(&s(&["acme", "--to", "schema", "--drain-secs", "x"])).is_err());
+    }
+
     #[test]
     fn parse_args_rejects_unknown_flag() {
         let err = parse_args(&s(&["acme", "--to", "schema", "--foo"])).unwrap_err();
@@ -840,6 +1208,28 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// #2384 — a printed conninfo never shows its password.
+    #[test]
+    fn shown_masks_keyword_and_url_passwords() {
+        assert_eq!(
+            shown("host=db user=al password=s3cret dbname=app"),
+            "host=db user=al password=*** dbname=app"
+        );
+        assert_eq!(
+            shown("postgres://al:s3cret@h/app"),
+            "postgres://al:***@h/app"
+        );
+        assert_eq!(shown("env://ACME_DB"), "env://ACME_DB");
+    }
+
+    /// An Org update that hits no row is an error, not a success.
+    #[test]
+    fn expect_one_refuses_a_missing_row() {
+        assert!(expect_one(1, "acme").is_ok());
+        let err = expect_one(0, "acme").unwrap_err().to_string();
+        assert!(err.contains("`acme` was deleted or reactivated"), "{err}");
     }
 
     /// pg_dump reads `--schema` as a pattern; only literal names pass.
