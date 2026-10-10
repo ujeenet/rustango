@@ -133,7 +133,18 @@ async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
     s.insert_pool(pool).await.expect("insert slug");
 }
 
+/// No searchable column: only a number.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "adminls_counter")]
+#[allow(dead_code)]
+pub struct Counter {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub qty: i32,
+}
+
 async fn setup(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
     rustango::testkit::matrix::fresh_table::<Slugged>(pool).await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
     rustango::testkit::matrix::fresh_table::<Tagged>(pool).await;
@@ -668,9 +679,37 @@ async fn bulk_action_selection_is_capped(pool: &Pool) {
     assert!(get(pool, "/adminls_item").await.contains("kept-row"));
 }
 
+/// A query with no searchable column matches nothing, in autocomplete and
+/// the changelist (#2391).
+async fn autocomplete_without_search_columns_is_empty(pool: &Pool) {
+    let mut c = Counter {
+        id: Auto::default(),
+        qty: 7,
+    };
+    c.insert_pool(pool).await.expect("insert");
+    let results = |body: String| {
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+        json["results"].as_array().expect("results").len()
+    };
+    let all = get(pool, "/adminls_counter/__autocomplete").await;
+    assert_eq!(results(all), 1, "no query lists the rows");
+    let none = get(pool, "/adminls_counter/__autocomplete?q=zzz").await;
+    assert_eq!(results(none), 0);
+
+    // The changelist agrees: the writer, not each view, decides.
+    let link = format!("adminls_counter/{}\"", c.id.get().expect("pk"));
+    assert!(get(pool, "/adminls_counter").await.contains(&link));
+    let searched = get(pool, "/adminls_counter?q=zzz").await;
+    assert!(
+        !searched.contains(&link),
+        "a search with no column listed the row"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        autocomplete_without_search_columns_is_empty,
         equal_sort_keys_page_in_pk_order,
         links_keep_the_whole_filter_state,
         facet_show_all_keeps_the_filter_state,

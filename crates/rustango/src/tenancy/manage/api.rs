@@ -120,6 +120,7 @@ where
     // that no other tenant routes on them (#2097).
     let checked = crate::tenancy::provision::checked_request(
         &pools.registry_pool(),
+        registry_url,
         &crate::tenancy::provision::ProvisionRequest {
             slug: slug.to_owned(),
             mode: opts.mode,

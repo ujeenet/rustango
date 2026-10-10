@@ -376,7 +376,7 @@ pub(crate) async fn audit_cleanup_submit(
 }
 
 /// Diff-shaped audit entry for an admin UPDATE: `{ "field": { "before": v,
-/// "after": v } }` from the row `update_submit` locked before the write.
+/// "after": v } }` from the row locked before the write, secrets masked.
 /// `None` when nothing changed.
 pub(crate) fn admin_audit_diff_entry(
     model: &'static crate::core::ModelSchema,
@@ -384,6 +384,7 @@ pub(crate) fn admin_audit_diff_entry(
     row: &serde_json::Value,
     form: &HashMap<String, String>,
 ) -> Option<crate::audit::PendingEntry> {
+    let row = &mask_secrets(model, &super::helpers::admin_config_or_default(model), row);
     // Both sides use typed JSON (numbers as numbers, bools as bools),
     // so an app-code write and an admin form POST produce the same
     // diff. `before` reads the SELECTed row; `after` coerces the form
@@ -422,6 +423,60 @@ pub(crate) fn admin_audit_diff_entry(
     )
 }
 
+/// Stands in for a secret in the audit log.
+const SECRET_CHANGED: &str = "[changed]";
+const SECRET_SET: &str = "[set]";
+
+/// What the audit log records for a write: the form without secrets, a
+/// marker for each secret written, and timestamps the server stamped.
+pub(super) fn audit_form(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    form: &HashMap<String, String>,
+    written: &[(&'static str, crate::core::SqlValue)],
+) -> HashMap<String, String> {
+    // Only written fields: a POSTed readonly or hidden value is skipped,
+    // so the diff must fall back to the row for it (#1939).
+    let is_written = |name: &str| {
+        model
+            .field(name)
+            .is_some_and(|f| written.iter().any(|(c, _)| *c == f.column))
+    };
+    let mut out: HashMap<String, String> = form
+        .iter()
+        .filter(|(k, _)| !super::helpers::is_secret_field(admin_cfg, k) && is_written(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (column, value) in written {
+        let Some(f) = model.scalar_fields().find(|f| f.column == *column) else {
+            continue;
+        };
+        if super::helpers::is_secret_field(admin_cfg, f.name) {
+            out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
+        } else if let crate::core::SqlValue::DateTime(at) = value {
+            out.insert(f.name.to_owned(), at.to_rfc3339());
+        }
+    }
+    out
+}
+
+/// `row` with each set secret replaced by a marker, for the audit log.
+fn mask_secrets(
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    row: &Value,
+) -> Value {
+    let mut row = row.clone();
+    for f in model.scalar_fields() {
+        if super::helpers::is_secret_field(admin_cfg, f.name) {
+            if let Some(v) = row.get_mut(f.name).filter(|v| !v.is_null()) {
+                *v = Value::String(SECRET_SET.to_owned());
+            }
+        }
+    }
+    row
+}
+
 /// Write `entry` after its data write committed; a failure only warns.
 pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
     if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
@@ -431,6 +486,27 @@ pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::Pen
             entity_table = %entry.entity_table,
             entity_pk = %entry.entity_pk,
             "admin audit emit failed (data write already committed)",
+        );
+    }
+}
+
+/// [`emit_best_effort`] for a bulk action's entries.
+pub(crate) async fn emit_many_best_effort(
+    state: &AppState,
+    entries: &[crate::audit::PendingEntry],
+    action: &str,
+) {
+    let Some(first) = entries.first() else {
+        return;
+    };
+    if let Err(e) = crate::audit::emit_many_pool(&state.pool, entries).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %first.entity_table,
+            action = %action,
+            count = entries.len(),
+            "admin bulk-action audit emit failed",
         );
     }
 }
@@ -466,6 +542,33 @@ pub(crate) fn admin_audit_entry(
     }
 }
 
+/// Snapshot of a whole stored row, secrets masked, as a delete or a bulk
+/// action records it. `action` tags a custom action's name.
+pub(crate) fn admin_row_snapshot_entry(
+    model: &'static crate::core::ModelSchema,
+    pk_str: String,
+    op: crate::audit::AuditOp,
+    row: &Value,
+    action: Option<&str>,
+) -> crate::audit::PendingEntry {
+    let cfg = super::helpers::admin_config_or_default(model);
+    let row = mask_secrets(model, &cfg, row);
+    let mut pairs: Vec<(&str, Value)> = model
+        .scalar_fields()
+        .map(|f| (f.name, render::read_value_as_json_from_json(&row, f)))
+        .collect();
+    if let Some(name) = action {
+        pairs.push(("__action", Value::String(name.to_owned())));
+    }
+    crate::audit::PendingEntry {
+        entity_table: model.table,
+        entity_pk: pk_str,
+        operation: op,
+        source: crate::audit::current_source(),
+        changes: crate::audit::snapshot_changes(&pairs),
+    }
+}
+
 /// Split the `__action` marker out of a `changes` object. Returns
 /// `(action_name, cleaned_changes)`, so the panel can show the action
 /// as a badge instead of as a changed field.
@@ -486,3 +589,26 @@ pub(crate) fn split_action_marker(changes: &Value) -> (Option<String>, Value) {
 // The canonical encoder under the local name. An earlier local version
 // left `/`, `@` and non-ASCII bytes unencoded.
 use crate::url_codec::url_encode as url_encode_q;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1939: a POSTed field the update skipped is not an audit "after".
+    #[test]
+    fn the_audit_form_holds_only_written_fields() {
+        use crate::core::Model as _;
+        let model = crate::admin::user::AdminUser::SCHEMA;
+        let form: HashMap<String, String> = [
+            ("username", "alice"),
+            ("sessions_revoked_at", "2020-01-01T00:00"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let written = vec![("username", crate::core::SqlValue::String("alice".into()))];
+        let out = audit_form(model, &crate::core::AdminConfig::DEFAULT, &form, &written);
+        assert_eq!(out.get("username").map(String::as_str), Some("alice"));
+        assert!(!out.contains_key("sessions_revoked_at"), "{out:?}");
+    }
+}
