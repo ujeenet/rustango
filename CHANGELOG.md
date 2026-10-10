@@ -24,6 +24,7 @@ The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one
 
 `choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `422 validation_failed` with `details: {field: [message]}`, as serializer errors do.
 
+## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
 
