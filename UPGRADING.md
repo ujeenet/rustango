@@ -150,6 +150,23 @@ untouched.
 
 ## Unreleased
 
+### Strict Bool and null decoding (#2530)
+
+`parse_form_value` now rejects a Bool other than `true/false/1/0/on/off/yes/no` (any case) or empty; it used to read it as `true`. A ViewSet without a serializer answers `400` to JSON `null` on a NOT NULL field, and stores a JSON string sent to a Json field as a JSON string.
+
+### Column defaults on create (#2528)
+
+A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`, and the OpenAPI create body no longer lists it as `required`. A Bool follows its default only in a JSON body; in a form-encoded body or a `ModelForm` an absent Bool is still `false`.
+The value is the database's: a SQLite `CURRENT_TIMESTAMP` default uses SQLite's clock and `YYYY-MM-DD HH:MM:SS` format, so use `auto_now_add` for timestamps.
+
+### `auto_now` on REST and form updates (#2527)
+
+ViewSet PUT/PATCH, template `UpdateView`, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.
+
+### ViewSet field-rule errors (#2529)
+
+A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `422 validation_failed` with `details` keyed by field, the same shape as serializer errors. Template views show the shorter messages for `choices` and validators too.
+
 ## 0.60.5
 
 ### Passkeys in `public` on schema-mode tenants

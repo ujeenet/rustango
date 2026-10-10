@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an INSERT naming no column works on MySQL and in a SQLite bulk insert (#2416)
+
+MySQL writes `() VALUES ()`; a SQLite bulk insert fills an integer PK with `NULL`. New `Dialect::default_values_clause` and `Dialect::default_pk_cell`.
+
+### Fixed — a ViewSet without a serializer decodes JSON by field type (#2530)
+
+JSON `null` on a NOT NULL field is a `400` instead of `false`/`{}` or a silent skip, and a Json field keeps a JSON string as sent. Form Bools accept only `true/false/1/0/on/off/yes/no`.
+
+### Fixed — a REST or `ModelForm` create applies the column `default` of an omitted field (#2528)
+
+The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. In a form-encoded body an absent Bool is still an unticked box; PKs must still be sent.
+
+### Fixed — ViewSet PUT/PATCH, `UpdateView` and `ModelForm` updates restamp `auto_now` (#2527)
+
+The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping step; `auto_now_add` is left alone.
+
+### Fixed — a ViewSet write that breaks a field rule is a `422`, not a `500` (#2529)
+
+`choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `422 validation_failed` with `details: {field: [message]}`, as serializer errors do.
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

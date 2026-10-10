@@ -30,9 +30,27 @@ pub struct MySql;
 #[cfg(feature = "mysql")]
 pub static DIALECT: &MySql = &MySql;
 
+#[cfg(feature = "mysql")]
+impl MySql {
+    /// The INSERT without `RETURNING`; the id comes from the reply, so an
+    /// INSERT naming no column is still a write (#2416).
+    pub(crate) fn compile_insert_auto_id(
+        &self,
+        query: &InsertQuery,
+    ) -> Result<CompiledStatement, SqlError> {
+        let mut b = Sql::with_capacity(self, query.values.len());
+        super::writers::write_insert_rows(&mut b, query)?;
+        Ok(b.finish())
+    }
+}
+
 impl Dialect for MySql {
     fn name(&self) -> &'static str {
         "mysql"
+    }
+
+    fn default_values_clause(&self) -> &'static str {
+        " () VALUES ()"
     }
 
     /// MySQL has no `NULLS FIRST` or `NULLS LAST`, so the writer

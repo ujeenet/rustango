@@ -43,8 +43,8 @@ pub struct FieldSchema {
     /// migration writer reads this flag; the macro's INSERT path does
     /// the omission.
     pub auto: bool,
-    /// `#[rustango(auto_now)]`: restamped on every update, so schema-driven
-    /// writers (the admin) can tell it from `auto_now_add`.
+    /// `#[rustango(auto_now)]`: restamped on every update by the admin,
+    /// ViewSet, `ModelForm` and `UpdateView`, unlike `auto_now_add`.
     pub auto_now: bool,
     /// `true` when `#[rustango(unique)]` is present. The DDL writer emits
     /// `UNIQUE` inline on the column definition.

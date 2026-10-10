@@ -257,9 +257,26 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
 }
 
 /// Whether leaving `field` out of a full write is a [`FormError::Missing`].
-/// The OpenAPI request schemas mark exactly these `required`.
+/// The OpenAPI request schemas mark these `required`, less
+/// [`absent_takes_default`] ones on create.
 pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
     !field.nullable && !matches!(field.ty, FieldType::Bool)
+}
+
+/// How a write body was encoded; it decides what an absent Bool means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    Json,
+    /// An HTML form: an absent Bool is an unticked box.
+    Form,
+}
+
+/// A non-PK field an INSERT leaves to its column `DEFAULT` when the body
+/// omits it (#2528). A PK must be sent: MySQL cannot read a defaulted one back.
+pub(crate) fn absent_takes_default(field: &FieldSchema, encoding: Encoding) -> bool {
+    field.default.is_some()
+        && !field.primary_key
+        && (encoding == Encoding::Json || field.ty != FieldType::Bool)
 }
 
 /// Parse one form value from a raw string.
@@ -267,7 +284,8 @@ pub(crate) fn absent_is_missing(field: &FieldSchema) -> bool {
 /// Empty string + nullable field → `SqlValue::Null`.
 /// Empty string + required field → `FormError::Missing`.
 /// An absent key is `false` for a NOT NULL Bool (unchecked checkbox)
-/// and `NULL` for a nullable one.
+/// and `NULL` for a nullable one. A Bool accepts `true/false/1/0/on/off/yes/no`
+/// (any case) or empty; anything else is a [`FormError::Parse`].
 ///
 /// # Errors
 /// As [`parse_pk_string`], plus [`FormError::Missing`].
@@ -304,13 +322,12 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         detail: e.to_string(),
     };
     match field.ty {
-        FieldType::Bool => {
-            let v = !matches!(
-                raw.to_ascii_lowercase().as_str(),
-                "" | "false" | "0" | "off" | "no"
-            );
-            Ok(SqlValue::Bool(v))
-        }
+        // Strict: junk such as `nope` is an error, not `true` (#2530).
+        FieldType::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Ok(SqlValue::Bool(true)),
+            "" | "false" | "0" | "off" | "no" => Ok(SqlValue::Bool(false)),
+            _ => Err(make_parse_err("bool", &"expected true or false")),
+        },
         FieldType::I16 => raw
             .parse::<i16>()
             .map(SqlValue::I16)
@@ -497,10 +514,9 @@ pub fn collect_values(
 /// the derive macro's own INSERT path had already been fixed.
 ///
 /// Separate from [`collect_values`] rather than a flag on it because
-/// the two differ on UPDATE: `auto_now` should be restamped there and
-/// `auto_now_add` must not, and [`crate::core::FieldSchema`] cannot
-/// tell them apart. UPDATE keeps the plain version, where the derive
-/// macro's `update_assignments` already handles both correctly.
+/// the two differ on UPDATE: `auto_now` is restamped there and
+/// `auto_now_add` must not be. UPDATE keeps the plain version plus
+/// `stamp_auto_now`.
 ///
 /// # Errors
 /// As [`collect_values`].
@@ -539,9 +555,8 @@ fn insert_stamp(field: &FieldSchema, now: chrono::DateTime<chrono::Utc>) -> Opti
 /// column list — the `(columns, values)` form, for the writers that
 /// build those directly rather than through [`collect_insert_values`].
 ///
-/// **INSERT only.** `auto_now_add` is immutable after insert, and
-/// nothing here can tell it from `auto_now`; an UPDATE must leave both
-/// alone and let the derive macro's `update_assignments` handle them.
+/// **INSERT only.** `auto_now_add` is immutable after insert; an
+/// UPDATE uses `stamp_auto_now` instead.
 ///
 /// Idempotent — a column already in the list is left as the caller set
 /// it, so an explicit value always wins.
@@ -561,6 +576,17 @@ pub fn stamp_auto_timestamps(
         if let Some(v) = insert_stamp(field, now) {
             columns.push(field.column);
             values.push(v);
+        }
+    }
+}
+
+/// Restamp every `auto_now` column an UPDATE's `set` list does not
+/// already carry; `auto_now_add` is left alone (#2527).
+pub(crate) fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'static str, SqlValue)>) {
+    let now = chrono::Utc::now();
+    for f in model.scalar_fields() {
+        if f.auto_now && !set.iter().any(|(c, _)| *c == f.column) {
+            set.push((f.column, SqlValue::DateTime(now)));
         }
     }
 }
@@ -665,6 +691,13 @@ impl ModelForm {
             return false;
         }
         if self.exclude_fields.iter().any(|n| n == field.name) {
+            return false;
+        }
+        // An omitted defaulted field takes the column default (#2528).
+        if kind == crate::core::WriteKind::Insert
+            && absent_takes_default(field, Encoding::Form)
+            && !self.data.contains_key(field.name)
+        {
             return false;
         }
         match &self.include_fields {
@@ -882,12 +915,13 @@ impl PreparedSave {
     /// [`ModelFormError::Database`] for driver-level failures.
     pub async fn commit_pool(self, pool: &crate::sql::Pool) -> Result<SqlValue, ModelFormError> {
         if let Some(pk_val) = self.pk_value {
-            let assignments: Vec<Assignment> = self
-                .columns
-                .iter()
-                .zip(self.values)
-                .map(|(col, val)| Assignment {
-                    column: col,
+            let mut set: Vec<(&'static str, SqlValue)> =
+                self.columns.into_iter().zip(self.values).collect();
+            stamp_auto_now(self.schema, &mut set);
+            let assignments: Vec<Assignment> = set
+                .into_iter()
+                .map(|(column, val)| Assignment {
+                    column,
                     value: val.into(),
                 })
                 .collect();
@@ -908,8 +942,8 @@ impl PreparedSave {
         // stamped here (#1464). `should_include` drops every `auto`
         // field, which is right for the payload and wrong for the
         // statement: nothing else supplies them and the column default
-        // cannot be trusted. The UPDATE branch above deliberately does
-        // not do this — `auto_now_add` is immutable after insert.
+        // cannot be trusted. The UPDATE branch above restamps only
+        // `auto_now` — `auto_now_add` is immutable after insert.
         let mut columns = self.columns;
         let mut values = self.values;
         stamp_auto_timestamps(self.schema, &mut columns, &mut values);
@@ -1664,10 +1698,11 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         pk_value: crate::core::SqlValue,
     ) -> Option<crate::core::UpdateQuery> {
         let pk = T::SCHEMA.primary_key()?;
-        let assignments: Vec<crate::core::Assignment> = self
-            .columns
+        let mut set: Vec<(&'static str, SqlValue)> =
+            self.columns.into_iter().zip(self.values).collect();
+        stamp_auto_now(T::SCHEMA, &mut set);
+        let assignments: Vec<crate::core::Assignment> = set
             .into_iter()
-            .zip(self.values)
             .map(|(column, value)| crate::core::Assignment {
                 column,
                 value: value.into(),
@@ -1783,6 +1818,56 @@ mod model_form_tests {
         pub id: Auto<i64>,
         pub on: bool,
         pub maybe: Option<bool>,
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_stamped")]
+    #[allow(dead_code)]
+    pub struct Stamped {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 50)]
+        pub title: String,
+        #[rustango(auto_now_add)]
+        pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+        #[rustango(auto_now)]
+        pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+    }
+
+    /// #2527: an update restamps `auto_now`, never `auto_now_add`.
+    #[test]
+    fn into_update_query_restamps_only_auto_now() {
+        let p = HashMap::from([("title".to_owned(), "t".to_owned())]);
+        let q = ModelFormFor::<Stamped>::parse(&p)
+            .expect("valid")
+            .into_update_query(crate::core::SqlValue::I64(1))
+            .expect("pk");
+        let cols: Vec<&str> = q.set.iter().map(|a| a.column).collect();
+        assert_eq!(cols, ["title", "updated_at"]);
+    }
+
+    /// #2530: a Bool accepts only the known spellings; junk is not `true`.
+    #[test]
+    fn bool_parse_is_strict() {
+        let on = <Flags as crate::core::Model>::SCHEMA.field("on").unwrap();
+        for (raw, want) in [
+            ("on", true),
+            ("Yes", true),
+            ("1", true),
+            ("TRUE", true),
+            ("false", false),
+            ("0", false),
+            ("off", false),
+            ("NO", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                parse_form_value(on, Some(raw)).unwrap(),
+                crate::core::SqlValue::Bool(want),
+                "{raw:?}"
+            );
+        }
+        assert!(parse_form_value(on, Some("nope")).is_err());
     }
 
     #[test]

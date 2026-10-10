@@ -2013,10 +2013,18 @@ async fn update_row(
     values: Vec<SqlValue>,
     this_row: WhereExpr,
 ) -> Result<u64, WriteFailed> {
-    let set = columns
+    let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
-        .zip(&values)
-        .map(|(column, value)| crate::core::Assignment::new(*column, value.clone()))
+        .copied()
+        .zip(values.iter().cloned())
+        .collect();
+    // An empty form stays an error, not a bare restamp (#2527).
+    if !stamped.is_empty() {
+        crate::forms::stamp_auto_now(schema, &mut stamped);
+    }
+    let set = stamped
+        .into_iter()
+        .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
     let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible();
     match crate::audit::update(pool, &update_q).await {
@@ -2234,24 +2242,8 @@ fn parse_form(
 /// logs but leaks `model.field` framing that's noise in the UI;
 /// this strips that down to the bounds-side message.
 fn bounds_error_message(e: &crate::core::QueryError) -> String {
-    use crate::core::QueryError;
-    match e {
-        QueryError::MaxLengthExceeded { max, actual, .. } => {
-            format!("must be {max} characters or fewer (got {actual})")
-        }
-        QueryError::OutOfRange {
-            min, max, value, ..
-        } => match (min, max) {
-            (Some(lo), Some(hi)) => format!("must be between {lo} and {hi} (got {value})"),
-            (Some(lo), None) => format!("must be ≥ {lo} (got {value})"),
-            (None, Some(hi)) => format!("must be ≤ {hi} (got {value})"),
-            (None, None) => format!("invalid value: {value}"),
-        },
-        // Other variants aren't produced by validate_value; surface
-        // the framework's Display string as a fallback so the user
-        // sees something actionable rather than an empty message.
-        other => other.to_string(),
-    }
+    e.value_rejection()
+        .map_or_else(|| e.to_string(), |(_, msg)| msg)
 }
 
 /// Re-render the form template after a validation failure with the

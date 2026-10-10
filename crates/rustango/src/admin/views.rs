@@ -2116,10 +2116,8 @@ fn keep_unchanged(
         if unchanged {
             values.retain(|(c, _)| *c != f.column);
         }
-        if f.auto_now && !values.iter().any(|(c, _)| *c == f.column) {
-            values.push((f.column, SqlValue::DateTime(chrono::Utc::now())));
-        }
     }
+    crate::forms::stamp_auto_now(model, values);
 }
 
 // ============================================================== EDIT
