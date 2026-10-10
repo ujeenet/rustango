@@ -363,7 +363,7 @@ impl JwtLifecycle {
     /// `verify_*` calls for this token will return `None` until the
     /// token's natural expiry passes.
     pub async fn revoke(&self, token: &str) -> bool {
-        let Some(claims) = self.decode_unchecked(token) else {
+        let Some(claims) = self.decode_signed(token) else {
             return false;
         };
         self.blacklist_jti(&claims.jti, claims.exp).await;
@@ -496,13 +496,14 @@ impl JwtLifecycle {
     /// Signature and expiry, no store lookup. Expiry comes first, so an
     /// expired token never costs a round trip to a durable backend.
     fn decode_unexpired(&self, token: &str) -> Option<JwtClaims> {
-        let claims = self.decode_unchecked(token)?;
+        let claims = self.decode_signed(token)?;
         (chrono::Utc::now().timestamp() < claims.exp).then_some(claims)
     }
 
     /// Decode + verify signature only — does NOT check expiry or blacklist.
-    /// Used for `revoke` so we can blacklist even an already-expired token's JTI.
-    fn decode_unchecked(&self, token: &str) -> Option<JwtClaims> {
+    /// Used for `revoke` so we can blacklist even an already-expired token's
+    /// JTI, and at logout to end its family (#2419).
+    pub(crate) fn decode_signed(&self, token: &str) -> Option<JwtClaims> {
         // Accepts both shapes (#1397). Three segments is what we issue
         // now; two is the pre-#1397 format, still verified so that
         // upgrading the framework does not log out everyone holding a

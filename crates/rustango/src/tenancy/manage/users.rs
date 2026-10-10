@@ -458,14 +458,24 @@ where
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
         .fetch(&registry)
         .await?;
-    let mut op = existing.into_iter().next().ok_or_else(|| {
+    let op = existing.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!(
             "reset-operator-password: no operator named `{username}`"
         ))
     })?;
-    op.password_hash = hash;
-    op.password_changed_at = Some(chrono::Utc::now());
-    op.save_pool(&registry).await?;
+    if !crate::passwords::store_password_change(
+        &registry,
+        <crate::tenancy::Operator as crate::core::Model>::SCHEMA,
+        &op.id,
+        &op.password_hash,
+        &hash,
+    )
+    .await?
+    {
+        return Err(TenancyError::Validation(format!(
+            "reset-operator-password: `{username}`'s password changed meanwhile; try again"
+        )));
+    }
     writeln!(w, "password reset for operator `{username}`")?;
     if generated {
         writeln!(w, "  generated password: {plain}")?;
@@ -546,7 +556,7 @@ where
         .where_(crate::tenancy::User::username.eq(username.clone()))
         .fetch(&pool)
         .await?;
-    let Some(mut user) = users.into_iter().next() else {
+    let Some(user) = users.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
             "change-password: no user `{username}` in tenant `{slug}`"
         )));
@@ -556,9 +566,20 @@ where
             "change-password: current password did not match".into(),
         ));
     }
-    user.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
-    user.password_changed_at = Some(chrono::Utc::now());
-    user.save_pool(&pool).await?;
+    let hash = crate::tenancy::password::hash_async(&new_plain).await?;
+    if !crate::passwords::store_password_change(
+        &pool,
+        <crate::tenancy::User as crate::core::Model>::SCHEMA,
+        &user.id,
+        &user.password_hash,
+        &hash,
+    )
+    .await?
+    {
+        return Err(TenancyError::Validation(format!(
+            "change-password: `{username}`'s password changed meanwhile; try again"
+        )));
+    }
     writeln!(
         w,
         "password changed for user `{username}` in tenant `{slug}`"
@@ -638,7 +659,7 @@ where
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
         .fetch(&registry)
         .await?;
-    let mut op = existing.into_iter().next().ok_or_else(|| {
+    let op = existing.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!(
             "change-operator-password: no operator named `{username}`"
         ))
@@ -648,9 +669,20 @@ where
             "change-operator-password: current password did not match".into(),
         ));
     }
-    op.password_hash = crate::tenancy::password::hash_async(&new_plain).await?;
-    op.password_changed_at = Some(chrono::Utc::now());
-    op.save_pool(&registry).await?;
+    let hash = crate::tenancy::password::hash_async(&new_plain).await?;
+    if !crate::passwords::store_password_change(
+        &registry,
+        <crate::tenancy::Operator as crate::core::Model>::SCHEMA,
+        &op.id,
+        &op.password_hash,
+        &hash,
+    )
+    .await?
+    {
+        return Err(TenancyError::Validation(format!(
+            "change-operator-password: `{username}`'s password changed meanwhile; try again"
+        )));
+    }
     writeln!(w, "password changed for operator `{username}`")?;
     if generated {
         writeln!(w, "  generated password: {new_plain}")?;

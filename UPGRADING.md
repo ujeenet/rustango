@@ -166,6 +166,23 @@ ViewSet PUT/PATCH, `ModelForm` updates and `ModelFormFor::into_update_query` now
 
 A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `400` with `details` keyed by field.
 
+
+### Passkeys in `public` on schema-mode tenants
+
+`migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.
+
+### Impersonation links use https by default
+
+Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
+
+### Password changes refuse a stale row
+
+A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
+
+### Auth links take a `LinkScope`
+
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
@@ -208,6 +225,22 @@ A missing `rustango_sso_providers` table now reads as no providers, so bare-admi
 ### Migrations re-add some FKs
 
 On MySQL, dropping the index a composite FK uses now drops and re-adds that FK (#2326). On PG and MySQL, renaming an FK or M2M junction column re-adds its FK under the new column's name, which re-checks every row (#2307). FKs on columns renamed by 0.60.4 or older keep their old names: `migrate` finds them by column, but `sqlmigrate` prints the new name.
+
+### `create_tenant` fails on a failed migration
+
+`api::create_tenant` (and `create_tenant_if_missing`) now returns `Err` when the tenant's migrations fail, and leaves the tenant inactive. It no longer migrates the other tenants. The next `create_tenant_if_missing` for that slug migrates and activates it; a tenant you suspended stays inactive (#2392).
+
+### `forget-pending` reads every tenant ledger
+
+In a tenancy project `forget-pending` now refuses a migration any tenant applied, inactive ones included, and fails if a tenant's ledger can't be read, such as a missing SQLite file (#2393).
+
+### Schema-mode tenants need a new schema
+
+Creating a schema-mode tenant now fails if its schema already exists. Drop it or pick another `--schema-name` (#2394).
+
+### `create-api-key --expires-days` must be positive
+
+`--expires-days 0` or below, and values past chrono's range, are now refused (#2395).
 
 ## 0.60.4
 

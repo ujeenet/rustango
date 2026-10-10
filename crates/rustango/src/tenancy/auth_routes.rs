@@ -817,16 +817,25 @@ async fn logout_in(
             ));
         }
     }
-    // The family too, so every access token of this login ends (#2119).
-    if let Some(session) = claims
-        .as_ref()
-        .and_then(|c| RefreshSession::read(&c.custom))
-    {
-        jwt.revoke_family(&session.fam, session.ends_at(&auth))
-            .await;
-    }
     let user_id = claims.map(|c| c.sub);
     let meta = meta_from_parts(&extensions, &headers, Some("/auth/logout"));
+    let refresh = body.and_then(|Json(input)| input.refresh);
+
+    // The family too, so every token of this login ends (#2119). Read from
+    // any token signed for this tenant, expired or already rotated, so a
+    // thief's rotated refresh dies with it (#2419).
+    for token in std::iter::once(bearer.0.as_str()).chain(refresh.as_deref()) {
+        let Some(c) = jwt.decode_signed(token) else {
+            continue;
+        };
+        if c.custom_value("tenant").and_then(|v| v.as_str()) != Some(t.org.slug.as_str()) {
+            continue;
+        }
+        if let Some(session) = RefreshSession::read(&c.custom) {
+            jwt.revoke_family(&session.fam, session.ends_at(&auth))
+                .await;
+        }
+    }
 
     jwt.revoke(&bearer.0).await;
 
@@ -837,20 +846,18 @@ async fn logout_in(
     //
     // Tenant-pinned the same way the bearer is, so one subdomain cannot
     // revoke another tenant's token by posting it here.
-    if let Some(Json(input)) = body {
-        if let Some(refresh) = input.refresh.as_deref() {
-            let ok = match jwt.verify_refresh(refresh).await {
-                Some(c) => {
-                    c.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str())
-                }
-                // Unverifiable or expired: revoke best-effort, matching
-                // how the bearer is treated above. A stale token being
-                // logged out is still a valid thing to record.
-                None => true,
-            };
-            if ok {
-                jwt.revoke(refresh).await;
+    if let Some(refresh) = refresh.as_deref() {
+        let ok = match jwt.verify_refresh(refresh).await {
+            Some(c) => {
+                c.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str())
             }
+            // Unverifiable or expired: revoke best-effort, matching
+            // how the bearer is treated above. A stale token being
+            // logged out is still a valid thing to record.
+            None => true,
+        };
+        if ok {
+            jwt.revoke(refresh).await;
         }
     }
 

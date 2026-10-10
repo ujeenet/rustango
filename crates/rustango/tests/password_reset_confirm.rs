@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
-use rustango::auth_flows::{confirm_password_reset_pool_into, AuthFlowError, PasswordReset};
+use rustango::auth_flows::{
+    confirm_password_reset_pool_into, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
+};
 use rustango::core::SqlValue;
 use rustango::sql::Pool;
 
@@ -61,13 +63,14 @@ async fn current_hash(pool: &Pool, user_id: i64) -> String {
 async fn confirm_updates_password_on_valid_token() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
         Duration::from_secs(60),
     );
     let user_id = confirm_password_reset_pool_into(
-        &pool,
+        LinkTarget::audience(&pool, "app"),
         &url,
         "brand-new-strong-password",
         SECRET,
@@ -92,13 +95,14 @@ async fn confirm_updates_password_on_valid_token() {
 async fn weak_password_rejected_without_writing() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
-        &pool,
+        LinkTarget::audience(&pool, "app"),
         &url,
         "short",
         SECRET,
@@ -117,6 +121,7 @@ async fn weak_password_rejected_without_writing() {
 async fn tampered_signature_rejected() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -126,7 +131,7 @@ async fn tampered_signature_rejected() {
     // signature no longer matches.
     let tampered = url.replacen("user_id=1", "user_id=2", 1);
     let err = confirm_password_reset_pool_into(
-        &pool,
+        LinkTarget::audience(&pool, "app"),
         &tampered,
         "brand-new-strong-password",
         SECRET,
@@ -144,13 +149,14 @@ async fn tampered_signature_rejected() {
 async fn wrong_secret_rejected() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
+        &LinkScope::audience("app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
-        &pool,
+        LinkTarget::audience(&pool, "app"),
         &url,
         "brand-new-strong-password",
         b"different-secret-32-bytes-long-xxx",
