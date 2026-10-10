@@ -152,11 +152,11 @@ untouched.
 
 ### Purge deletes media objects
 
-Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it reports how many it left (#2569). `TenantPoolsConfig` and `decommission::Report` gain fields, so struct literals without `..Default::default()` need them.
+Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it lists the `(disk, key)` of each one it left (#2569). On MySQL and SQLite it deletes only when no other tenant and not the registry use the tenant's database. `TenantPoolsConfig` gains a field, so its struct literals need `..Default::default()`; `decommission::Report` is now `#[non_exhaustive]`.
 
 ### SSO sign-ins send auth signals
 
-SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`.
+SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`. A refusal names the IdP's email only when verified, else its subject.
 
 ### Member SSO no longer provisions users by default
 
@@ -164,7 +164,7 @@ SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receive
 
 ### Scoped MCP user keys stay scoped
 
-`create_user_key_pool` records `"scoped": true` in a scoped key's `Agent.data`; such a key with no grants left resolves to no tools instead of the owner's full set (#2537). Keys minted earlier lack the flag: an old scoped key whose grants are all gone still counts as unscoped, so revoke and reissue it.
+The framework now reads `Agent.data["scoped"]`: set at creation, on any grant or revoke, and on the next resolve of a key with grants. Such a key with no grants left resolves to no tools instead of the owner's full set (#2537). `data` is read-only in the agent admin. An old scoped key whose grants were all removed before upgrading still counts as unscoped; revoke and reissue it.
 
 ### Passkeys in `public` on schema-mode tenants
 
