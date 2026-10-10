@@ -262,6 +262,9 @@ pub struct ApiKey {
 // form could only store a row nobody can use (#1763).
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_api_keys", "add", |_, _| false);
+// The owner decides who the credential signs in as (#2520).
+#[cfg(feature = "admin")]
+crate::register_admin_superuser_fields!("rustango_api_keys", "change", &["user_id"]);
 
 /// Create the `rustango_api_keys` table if it doesn't exist.
 ///

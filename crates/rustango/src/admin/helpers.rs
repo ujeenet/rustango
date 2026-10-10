@@ -720,6 +720,7 @@ fn render_form_with_inlines_and_pickers(
         .admin
         .copied()
         .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let locked = state.locked_fields(model, if pk_locked { "change" } else { "add" });
 
     // #244 — collect every `generic_fk(...)` `ct_column` so the row
     // closure can swap a raw integer input for a ContentType `<select>`
@@ -746,7 +747,7 @@ fn render_form_with_inlines_and_pickers(
             }
             None => "",
         };
-        let is_readonly_field = admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
+        let is_readonly_field = locked.contains(&f.name);
         let extra = if f.primary_key {
             " <small>(pk)</small>"
         } else if is_readonly_field {

@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
+
+A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::signed_headers`, `sign_port` and `tenant_header`, and `RequestToSign` for clients.
+
+### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
+
+It allowed on the first match, so a second codename widened access instead of narrowing it.
+
+### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
+
+`is_superuser` is superuser-only on add and edit; `password_hash` and `email` on edit.
+
+### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
+
+A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!` locks fields for non-superusers.
+
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
 The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.

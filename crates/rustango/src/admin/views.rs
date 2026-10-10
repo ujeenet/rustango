@@ -1934,7 +1934,7 @@ pub(crate) async fn create_submit(
     parts: axum::http::request::Parts,
     Path(table): Path<String>,
     State(state): State<AppState>,
-    Form(form): Form<HashMap<String, String>>,
+    Form(mut form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
     let model = resolve_model(&state, &table)?;
     if !state.can_add(model.table) {
@@ -1954,7 +1954,13 @@ pub(crate) async fn create_submit(
     // `readonly_fields` are display-only, so they are not form input.
     // An auto PK never is; a `default_uuid_v7` one is stamped (#1725).
     let admin_cfg = admin_config_or_default(model);
-    let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
+    // A superuser-only field the user may not set gets its blank value.
+    let mut skip = admin_cfg.readonly_fields.to_vec();
+    for name in state.locked_fields(model, "add") {
+        if !skip.contains(&name) {
+            form.remove(name);
+        }
+    }
     skip.extend(FormLayout::of(model, &admin_cfg, false).unrendered(model));
     let mut collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
@@ -2246,7 +2252,7 @@ pub(crate) async fn update_submit(
     // skipped on the server too.
     let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
-    skip.extend(admin_cfg.readonly_fields.iter().copied());
+    skip.extend(state.locked_fields(model, "change"));
     // Fields the edit form hides are left as they are.
     skip.extend(FormLayout::of(model, &admin_cfg, true).unrendered(model));
     // An empty secret keeps the stored one.

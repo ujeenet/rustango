@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### HMAC auth on a tenant-resolved app (#2492)
+
+The tenant header and port are still unsigned by default. Behind `HeaderResolver`, add `.signed_headers(["x-org"])` or `.tenant_header("x-org", ..)`; behind `PortResolver`, `.sign_port()`. Clients then sign with `RequestToSign::header` / `port`.
+
+### `ViewSetPerms` is all-of (#2522)
+
+A user now needs every codename listed for an action, not any one. A list meant as alternatives needs a role that grants them together.
+
+### Admin superuser-only fields (#2520, #2521)
+
+`user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` is read-only for them on add and edit, `password_hash` and `email` on edit.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

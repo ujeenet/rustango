@@ -104,6 +104,48 @@ pub(crate) fn has_hook(table: &str, action: &str) -> bool {
         .any(|e| e.table == table && e.action == action)
 }
 
+/// Fields only a superuser may write through the admin on `action`
+/// (`"add"` or `"change"`), collected via
+/// [`crate::register_admin_superuser_fields!`]. For anyone else they render
+/// locked; a change keeps the stored value, an add stores the blank one.
+pub struct AdminSuperuserFields {
+    /// Model table. Must equal `ModelSchema::table`.
+    pub table: &'static str,
+    /// `"add"` or `"change"`.
+    pub action: &'static str,
+    /// Field names.
+    pub fields: &'static [&'static str],
+}
+
+inventory::collect!(AdminSuperuserFields);
+
+/// The superuser-only fields of `(table, action)`.
+pub(crate) fn superuser_fields(table: &str, action: &str) -> Vec<&'static str> {
+    inventory::iter::<AdminSuperuserFields>
+        .into_iter()
+        .filter(|e| e.table == table && e.action == action)
+        .flat_map(|e| e.fields.iter().copied())
+        .collect()
+}
+
+/// Mark fields of one model superuser-only for an admin action.
+///
+/// ```ignore
+/// rustango::register_admin_superuser_fields!("blog_post", "change", &["owner_id"]);
+/// ```
+#[macro_export]
+macro_rules! register_admin_superuser_fields {
+    ($table:expr, $action:expr, $fields:expr $(,)?) => {
+        $crate::inventory::submit! {
+            $crate::admin::object_permissions::AdminSuperuserFields {
+                table: $table,
+                action: $action,
+                fields: $fields,
+            }
+        }
+    };
+}
+
 /// Register a permission predicate for one model.
 ///
 /// `$action` is usually `"add"`, `"change"`, `"delete"` or `"view"`,
@@ -147,6 +189,14 @@ mod tests {
     fn is_allowed_returns_true_when_no_hooks_registered() {
         let p = parts();
         assert!(is_allowed("nonexistent", "change", &p, None));
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "mcp"))]
+    #[test]
+    fn credential_owner_is_superuser_only() {
+        for table in ["rustango_api_keys", "rustango_agents"] {
+            assert_eq!(superuser_fields(table, "change"), ["user_id"], "{table}");
+        }
     }
 
     #[test]

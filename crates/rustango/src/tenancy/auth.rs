@@ -178,6 +178,17 @@ inventory::submit! {
     }
 }
 
+// Superuser grant and the login credentials: one role must not take another
+// account (#2521). A new user's own password and email are harmless.
+#[cfg(feature = "admin")]
+crate::register_admin_superuser_fields!("rustango_users", "add", &["is_superuser"]);
+#[cfg(feature = "admin")]
+crate::register_admin_superuser_fields!(
+    "rustango_users",
+    "change",
+    &["is_superuser", "password_hash", "email"]
+);
+
 /// A row whose password matched, before any second factor. A weak stored
 /// hash is replaced only by `complete`, so a password alone cannot change
 /// the fingerprint that ends the user's other sessions (#2093).

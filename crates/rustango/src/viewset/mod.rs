@@ -123,9 +123,8 @@ use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
 
-/// Permission codenames required for each ViewSet action.
-///
-/// Any field left as an empty vec means "no permission check" for that action.
+/// Permission codenames required for each ViewSet action. The user
+/// needs every codename in the list; an empty vec skips the check.
 #[derive(Clone, Default)]
 pub struct ViewSetPerms {
     /// Codenames required to call `GET /` (list).
@@ -1561,7 +1560,7 @@ impl ViewSetState {
         Ok(AcquiredConn { pool, scope })
     }
 
-    /// Permission gate. An empty `codenames` skips the check.
+    /// Permission gate: every codename is required. An empty `codenames` skips the check.
     /// Superusers are allowed straight away; everyone else goes to
     /// the `tenancy::permissions` engine.
     async fn check_perm(
@@ -1586,12 +1585,13 @@ impl ViewSetState {
             if auth.is_superuser {
                 return PermOutcome::Allow;
             }
+            // All of them: a second codename narrows, never widens (#2522).
             for cn in codenames {
-                if conn.has_perm(auth.id, cn).await {
-                    return PermOutcome::Allow;
+                if !conn.has_perm(auth.id, cn).await {
+                    return PermOutcome::Forbidden;
                 }
             }
-            PermOutcome::Forbidden
+            PermOutcome::Allow
         }
         #[cfg(not(feature = "tenancy"))]
         {

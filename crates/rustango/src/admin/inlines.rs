@@ -1014,11 +1014,14 @@ impl InlineTarget {
         inline_readonly: &[&str],
         max_num: Option<usize>,
         scope: ParentScope,
+        state: &AppState,
         parts: &Parts,
     ) -> Option<Self> {
         let pk = child.primary_key()?;
         let cfg = admin_config_or_default(child);
-        let admin_readonly = cfg.readonly_fields;
+        // An inline row may be added or changed: lock for both.
+        let mut admin_readonly = state.locked_fields(child, "add");
+        admin_readonly.extend(state.locked_fields(child, "change"));
         let secrets = display
             .iter()
             .filter(|f| is_secret_field(&cfg, f.name))
@@ -1278,6 +1281,7 @@ async fn inline_targets(
             inline.readonly_fields,
             inline.max_num,
             scope,
+            state,
             parts,
         ));
     }
@@ -1315,6 +1319,7 @@ async fn inline_targets(
             inline.readonly_fields,
             inline.max_num,
             scope,
+            state,
             parts,
         ));
     }
