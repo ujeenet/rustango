@@ -158,6 +158,10 @@ untouched.
 
 `makemigrations` now refuses a chain with two leaves from one parent history; run `makemigrations --merge` first (#2574). `Migration` has a new `merges: Vec<String>` field (add `merges: Vec::new()` to struct literals), and `make_merge_migration_from` is gone: call `make_merge_migration(dir)`.
 
+### Keyed `String` fields need `max_length`
+
+A primary-key, `unique` or indexed `String` (field or container index) without `max_length` no longer compiles (#2575): MySQL cannot index its LONGTEXT. Add `max_length = N`; on PG and SQLite the next `makemigrations` emits the type change.
+
 ## 0.60.5
 
 ### Passkeys in `public` on schema-mode tenants

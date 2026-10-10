@@ -648,7 +648,7 @@ pub struct Kind {
     #[rustango(primary_key)]
     pub id: rustango::sql::Auto<i64>,
     pub r#type: String,
-    #[rustango(index)]
+    #[rustango(index, max_length = 64)]
     pub userName: String,
 }
 
