@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin superuser-only fields (#2520)
+
+`user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.

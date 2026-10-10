@@ -87,7 +87,7 @@ pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };
 pub use manage_admin::create_admin_cmd;
-pub use object_permissions::{AdminObjectPermission, ObjectPermissionFn};
+pub use object_permissions::{AdminObjectPermission, AdminSuperuserFields, ObjectPermissionFn};
 pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
 pub use session::{AdminSession, AdminSessionSecret};
 #[cfg(feature = "admin-sso")]

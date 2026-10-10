@@ -844,6 +844,30 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    /// `true` unless a per-user perm set or a non-superuser session is in play.
+    pub(crate) fn is_superuser(&self) -> bool {
+        self.config.user_perms.is_none() && super::session::current().is_none_or(|s| s.is_superuser)
+    }
+
+    /// Fields this user may not write on `action` (`"add"` / `"change"`):
+    /// `readonly_fields`, plus the superuser-only ones for a non-superuser.
+    pub(crate) fn locked_fields(
+        &self,
+        model: &'static crate::core::ModelSchema,
+        action: &str,
+    ) -> Vec<&'static str> {
+        let mut out = super::helpers::admin_config_or_default(model)
+            .readonly_fields
+            .to_vec();
+        if !self.is_superuser() {
+            out.extend(super::object_permissions::superuser_fields(
+                model.table,
+                action,
+            ));
+        }
+        out
+    }
+
     /// Whether this admin serves `table` at all. Index, sidebar, routes,
     /// custom views and docs all ask here, so they cannot disagree.
     pub(crate) fn is_visible(&self, table: &str) -> bool {

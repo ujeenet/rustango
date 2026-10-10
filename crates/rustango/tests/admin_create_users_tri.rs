@@ -31,8 +31,22 @@ fn unique(prefix: &str) -> String {
 }
 
 async fn send(pool: &Pool, method: Method, uri: &str, body: String) -> (StatusCode, String) {
+    send_as(pool, None, method, uri, body).await
+}
+
+/// `perms: Some(..)` is a non-superuser holding those codenames.
+async fn send_as(
+    pool: &Pool,
+    perms: Option<&[&str]>,
+    method: Method,
+    uri: &str,
+    body: String,
+) -> (StatusCode, String) {
     // One database stands in for both; the shared SSO providers live on the registry.
-    let builder = rustango::admin::Builder::new(pool.clone()).admin_prefix("");
+    let mut builder = rustango::admin::Builder::new(pool.clone()).admin_prefix("");
+    if let Some(perms) = perms {
+        builder = builder.with_user_perms(perms.iter().map(|p| (*p).to_owned()));
+    }
     let app = if uri.starts_with("/rustango_shared_sso_providers") {
         builder.registry_mode()
     } else {
@@ -267,6 +281,61 @@ async fn api_keys_are_not_added_through_the_admin(pool: &Pool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+async fn user_pk(pool: &Pool, name: &str) -> i64 {
+    user_named(pool, name).await.id.get().copied().unwrap()
+}
+
+/// A non-superuser with `change` cannot move a key onto another user (#2520).
+async fn api_key_owner_is_superuser_only(pool: &Pool) {
+    use rustango::tenancy::auth_backends::ApiKey;
+    let (owner, other) = (unique("kown"), unique("koth"));
+    create_user(pool, &owner, "pw-2520-a").await;
+    create_user(pool, &other, "pw-2520-b").await;
+    let (owner_pk, other_pk) = (user_pk(pool, &owner).await, user_pk(pool, &other).await);
+    rustango::tenancy::create_api_key(owner_pk, "k2520", None, pool)
+        .await
+        .unwrap();
+    let key_of = |uid: i64| async move {
+        ApiKey::objects()
+            .where_(ApiKey::user_id.eq(uid))
+            .fetch(pool)
+            .await
+            .unwrap()
+    };
+    let pk = key_of(owner_pk).await[0].id.get().copied().unwrap();
+    let uri = format!("/rustango_api_keys/{pk}");
+    let perms: &[&str] = &["rustango_api_keys.view", "rustango_api_keys.change"];
+
+    let (_, html) = send_as(
+        pool,
+        Some(perms),
+        Method::GET,
+        &format!("{uri}/edit"),
+        String::new(),
+    )
+    .await;
+    assert!(input_tag(&html, "user_id").contains("readonly"), "{html}");
+
+    let other_s = other_pk.to_string();
+    let body = || {
+        form(&[
+            ("user_id", other_s.as_str()),
+            ("label", "moved"),
+            ("expires_at", ""),
+        ])
+    };
+    let (status, html) = send_as(pool, Some(perms), Method::POST, &uri, body()).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    let kept = key_of(owner_pk).await;
+    assert_eq!(kept.len(), 1, "the key moved to another user");
+    assert_eq!(kept[0].label, "moved");
+
+    // A superuser still can.
+    let (status, html) = send(pool, Method::POST, &uri, body()).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert_eq!(key_of(other_pk).await.len(), 1);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -276,5 +345,6 @@ tri_dialect_test! {
         editing_a_user_keeps_or_rotates_the_password,
         admin_created_provider_secret_is_encrypted,
         api_keys_are_not_added_through_the_admin,
+        api_key_owner_is_superuser_only,
     ],
 }
