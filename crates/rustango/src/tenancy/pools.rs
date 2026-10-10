@@ -1089,7 +1089,7 @@ impl TenantPools<sqlx::Postgres> {
                     schema: Some(schema.clone()),
                     reset: Some(reset_pg_search_path),
                 };
-                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
+                let stmt = format!("SET search_path TO {}", search_path(schema));
                 rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
                 Ok(tc)
             }
@@ -1197,7 +1197,7 @@ impl TenantPools<sqlx::Postgres> {
         registry: &PgPool,
     ) -> Result<PgPool, TenancyError> {
         let mut opts = (*registry.connect_options()).clone();
-        opts = opts.options([("search_path", &format!("{schema},public") as &str)]);
+        opts = opts.options([("search_path", search_path_option(schema))]);
         let mut builder = PgPoolOptions::new()
             .max_connections(self.config.scoped_pool_max_connections)
             // Explicitly 0: these are cached now, and every one of
@@ -1472,6 +1472,25 @@ fn reset_pg_search_path(
 fn quote_ident(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+/// A tenant's `search_path`, quoted: unquoted, `Acme` folds into `acme`'s schema (#2325).
+#[cfg(feature = "postgres")]
+fn search_path(schema: &str) -> String {
+    format!("{},public", quote_ident(schema))
+}
+
+/// [`search_path`] as a startup option, which PG splits on unescaped whitespace.
+#[cfg(feature = "postgres")]
+fn search_path_option(schema: &str) -> String {
+    let mut out = String::new();
+    for c in search_path(schema).chars() {
+        if c == '\\' || c.is_ascii_whitespace() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]

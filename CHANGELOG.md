@@ -4,6 +4,22 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
+
+The check moved into `checked_request` and the org edit path. It reads the URL with the registry backend's sqlx parser, as the tenant pool will, so bare SQLite paths, `..`, `?host=`, sockets, SQLite `file:` URIs, default ports and `mariadb://` match the registry pool; an unreadable database URL is refused, a secret reference passes.
+
+### Fixed — a scoped tenant pool quotes its schema in `search_path` (#2325)
+
+A legacy `Acme` schema folded to `acme`, which another tenant may own; `scoped_pool` now matches `acquire`.
+
+### Fixed — `db:dump` and `db:restore` no longer put the database password in argv (#2324)
+
+`pg_dump` and `psql` get it through `PGPASSWORD`, so `ps` no longer shows it.
+
+### Fixed — a `make:worker` worker frees a killed worker's jobs while it runs (#2331)
+
+New `PgJobQueue::reclaim_stuck_after`: the queue unlocks stale rows at `start`, then every `min(older_than, 60s)`, using a new `locked_at` index. The template uses it instead of a reclaim after shutdown.
+
 ### Fixed — an admin inline DELETE stamps a `soft_delete` child instead of removing it (#2453)
 
 As the main admin delete does; trashed children no longer count toward the inline's `max_num`.

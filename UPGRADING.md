@@ -150,6 +150,19 @@ untouched.
 
 ## Unreleased
 
+### Workers from `make:worker` (#2331)
+
+The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
+`ensure_table` adds a `rustango_jobs_locked_idx` index at the next boot.
+
+### Tenant database URLs (#2320)
+
+Creating or editing a tenant now refuses a `postgres://`, `mysql://`, `mariadb://` or `sqlite:` URL that sqlx cannot parse. Secret references are not resolved there, so they pass unchecked.
+
+### Scoped pools quote the schema (#2325)
+
+Before, a legacy mixed-case schema such as `Acme` got `search_path` `acme`. Writes through `scoped_pool` may have landed in `acme` or `public`; check those for its rows.
+
 ### `SearchClause` with no columns
 
 A `SearchClause` with a non-empty query and no columns now matches no rows (`WHERE 1 = 0`); it used to be dropped. A ViewSet without `search_fields` still ignores `?search=` (#2391).

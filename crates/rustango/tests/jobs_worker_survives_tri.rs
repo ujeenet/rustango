@@ -523,6 +523,74 @@ async fn shutdown_releases_an_aborted_job(pool: &Pool) {
     );
 }
 
+/// #2331: a row a killed worker left locked runs again while the queue
+/// runs; before, only a sweep at exit freed it.
+async fn a_dead_workers_row_is_reclaimed_while_running(pool: &Pool) {
+    let tick = token(pool, "dead_worker");
+    let q = queue(pool, 1, Duration::from_millis(20))
+        .await
+        .reclaim_stuck_after(Duration::from_millis(200));
+    q.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = {}, locked_by = 'dead:w0'",
+        pool.dialect().placeholder(1)
+    );
+    rustango::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(chrono::Utc::now())])
+        .await
+        .expect("lock as a dead worker");
+    q.start().await;
+    wait_for("the reclaimed job", || counts(&tick).1 == 1).await;
+    q.shutdown().await;
+}
+
+/// The first sweep runs at `start`: the next one is a minute away.
+async fn a_dead_workers_row_is_reclaimed_at_boot(pool: &Pool) {
+    let tick = token(pool, "boot_reclaim");
+    let q = queue(pool, 1, Duration::from_millis(20))
+        .await
+        .reclaim_stuck_after(Duration::from_secs(3600));
+    q.dispatch(&Tick {
+        token: tick.clone(),
+    })
+    .await
+    .unwrap();
+    let sql = format!(
+        "UPDATE rustango_jobs SET locked_at = {}, locked_by = 'dead:w0'",
+        pool.dialect().placeholder(1)
+    );
+    let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+    rustango::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(two_hours_ago)])
+        .await
+        .expect("lock as a dead worker");
+    q.start().await;
+    wait_for("the job reclaimed at boot", || counts(&tick).1 == 1).await;
+    q.shutdown().await;
+}
+
+/// A threshold of five heartbeats leaves a live long job alone.
+async fn the_sweep_does_not_reclaim_a_live_job(pool: &Pool) {
+    let slow = token(pool, "sweep_live");
+    let q = queue(pool, 2, Duration::from_millis(100))
+        .await
+        .reclaim_stuck_after(Duration::from_millis(500));
+    q.dispatch(&Slow {
+        token: slow.clone(),
+        first_ms: 1200,
+        later_ms: 1200,
+    })
+    .await
+    .unwrap();
+    q.start().await;
+    wait_for("the run to finish", || counts(&slow).1 == 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    q.shutdown().await;
+    assert_eq!(counts(&slow).0, 1, "ran once");
+}
+
 /// #1677: `start` after `shutdown` runs jobs again; the stop flag was never reset.
 async fn start_after_shutdown_runs_jobs(pool: &Pool) {
     let tick = token(pool, "restart");
@@ -798,6 +866,9 @@ tri_dialect_test! {
         a_panicking_job_keeps_the_worker,
         attempt_counts_at_pickup,
         a_row_out_of_attempts_is_dead_lettered_not_run,
+        a_dead_workers_row_is_reclaimed_while_running,
+        a_dead_workers_row_is_reclaimed_at_boot,
+        the_sweep_does_not_reclaim_a_live_job,
         a_heartbeat_keeps_a_long_job_leased,
         a_lost_lease_does_not_finish_the_new_holders_row,
         a_job_without_a_handler_spends_no_attempts,

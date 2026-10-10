@@ -626,74 +626,9 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
     })
 }
 
-/// A libpq connection: the URL for argv, the password for `PGPASSWORD`,
-/// so it never shows in `ps` (#1864).
-struct Conn {
-    url: String,
-    password: Option<String>,
-}
+use crate::dbshell::LibpqConn as Conn;
 
 impl Conn {
-    fn new(url: &str) -> Self {
-        use crate::url_codec::percent_decode_path as decode;
-        let mut password = None;
-        let url = match crate::sql::connect_diagnosis::split_userinfo(url) {
-            Some((scheme, userinfo, host)) => match userinfo.split_once(':') {
-                Some((user, pw)) => {
-                    password = Some(decode(pw));
-                    format!("{scheme}://{user}@{host}")
-                }
-                None => url.to_owned(),
-            },
-            None => url.to_owned(),
-        };
-        // libpq also reads `?password=`.
-        let (base, query) = url.split_once('?').unwrap_or((&url, ""));
-        let kept: Vec<&str> = query
-            .split('&')
-            .filter(|kv| match kv.split_once('=') {
-                Some((k, v)) if decode(k) == "password" => {
-                    password = Some(decode(v));
-                    false
-                }
-                _ => !kv.is_empty(),
-            })
-            .collect();
-        let url = if kept.is_empty() {
-            base.to_owned()
-        } else {
-            format!("{base}?{}", kept.join("&"))
-        };
-        Self { url, password }
-    }
-
-    /// The same server and credentials, database `db`.
-    fn database(&self, db: &str) -> Self {
-        let (base, query) = self
-            .url
-            .split_once('?')
-            .map_or((&*self.url, None), |(b, q)| (b, Some(q)));
-        let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
-        let host = rest.split_once('/').map_or(rest, |(h, _)| h);
-        let mut url = format!("{scheme}://{host}/{db}");
-        if let Some(q) = query {
-            url = format!("{url}?{q}");
-        }
-        Self {
-            url,
-            password: self.password.clone(),
-        }
-    }
-
-    fn command(&self, program: &str) -> std::process::Command {
-        let mut cmd = std::process::Command::new(program);
-        if let Some(p) = &self.password {
-            cmd.env("PGPASSWORD", p);
-        }
-        cmd.arg("--dbname").arg(&self.url);
-        cmd
-    }
-
     fn psql(&self) -> std::process::Command {
         let mut cmd = self.command("psql");
         cmd.args(["--quiet", "--no-psqlrc", "-v", "ON_ERROR_STOP=1"]);
@@ -1304,23 +1239,6 @@ mod tests {
         for bad in ["", "Acme", "a*", "a.b", "a?", "a\"b", &"a".repeat(64)] {
             assert!(SchemaName::parse(bad).is_err(), "{bad}");
         }
-    }
-
-    /// #1864 — the password goes to `PGPASSWORD`, never argv.
-    #[test]
-    fn conn_keeps_the_password_out_of_the_url() {
-        let c = Conn::new("postgres://al:p%40ss@w/rd@h:5432/app?sslmode=require");
-        assert_eq!(c.url, "postgres://al@h:5432/app?sslmode=require");
-        assert_eq!(c.password.as_deref(), Some("p@ss@w/rd"));
-        let c = Conn::new("postgres://al@h/app?password=s%3Dx&sslmode=disable");
-        assert_eq!(c.url, "postgres://al@h/app?sslmode=disable");
-        assert_eq!(c.password.as_deref(), Some("s=x"));
-        let c = Conn::new("postgres://h/app").database("stage");
-        assert_eq!((c.url.as_str(), c.password), ("postgres://h/stage", None));
-        let c = Conn::new("postgres://al:pw@h/app?sslmode=require").database("stage");
-        assert_eq!(c.url, "postgres://al@h/stage?sslmode=require");
-        let argv: Vec<_> = c.command("psql").get_args().map(|a| a.to_owned()).collect();
-        assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
     /// #1864 — an empty target schema fails even with `public.rustango_users`
