@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an INSERT naming no column works on MySQL and in a SQLite bulk insert (#2416)
+
+MySQL writes `() VALUES ()`; a SQLite bulk insert fills an integer PK with `NULL`. New `Dialect::default_values_clause` and `Dialect::default_pk_cell`.
+
 ### Fixed — a ViewSet without a serializer decodes JSON by field type (#2530)
 
 JSON `null` on a NOT NULL field is a `400` instead of `false`/`{}` or a silent skip, and a Json field keeps a JSON string as sent. Form Bools accept only `true/false/1/0/on/off/yes/no`.

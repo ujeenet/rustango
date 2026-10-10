@@ -1197,11 +1197,7 @@ where
             column: pk.column,
         });
     }
-    let plain = InsertQuery {
-        returning: ::std::vec::Vec::new(),
-        ..query.clone()
-    };
-    let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
+    let stmt = super::mysql::DIALECT.compile_insert_auto_id(query)?;
     let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
         sqlx::query(&stmt.sql);
     for v in stmt.params {

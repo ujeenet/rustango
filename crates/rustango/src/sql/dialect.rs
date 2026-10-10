@@ -257,6 +257,16 @@ pub trait Dialect: Send + Sync {
         format!("ON CONFLICT ({}) DO NOTHING", conflict_cols.join(", "))
     }
 
+    /// The `INSERT` tail when no column is named (#2416).
+    fn default_values_clause(&self) -> &'static str {
+        " DEFAULT VALUES"
+    }
+
+    /// The VALUES cell asking for `pk`'s default in a multi-row insert (#2416).
+    fn default_pk_cell(&self, _pk: &crate::core::FieldSchema) -> &'static str {
+        "DEFAULT"
+    }
+
     /// `true` if `INSERT … RETURNING` works: always on Postgres,
     /// from 3.35 on SQLite, never on MySQL. When it is `false`, an
     /// `Auto<T>` insert has to read the id back with a second query.
