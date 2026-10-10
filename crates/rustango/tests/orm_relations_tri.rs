@@ -1,8 +1,8 @@
 //! Relation fetches on every backend: NULL FKs under `select_related` (#2293),
 //! shared select_related hops (#2294), bind-cap batching (#2295), M2M `set`
 //! with repeated ids (#2297), `prefetch_generic` on an i32 PK (#2298),
-//! reverse-generic prefetch batching (#2318) and bare columns under joins
-//! (#2411).
+//! reverse-generic prefetch batching (#2318), bare columns under joins
+//! (#2411) and `None` as `IS NULL` (#2413).
 //!
 //! The cap tests use 33k rows (x2 binds = 66k) or 70k keys: past SQLite's
 //! 32,766 and PG/MySQL's 65,535.
@@ -516,6 +516,40 @@ async fn bare_columns_qualified_under_joins(pool: &Pool) {
     assert_eq!(shifts.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
 }
 
+/// `None` as a filter value means `IS NULL`, as in Django (#2413).
+async fn none_filter_is_null(pool: &Pool) {
+    seed_articles(pool).await;
+    let ids = |qs: rustango::query::QuerySet<Article>| async move {
+        let rows: Vec<Article> = qs
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("None filter");
+        article_ids(&rows)
+    };
+    let none = None::<i64>;
+    assert_eq!(
+        ids(Article::objects().filter("editor", none)).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__exact", none)).await,
+        vec![1]
+    );
+    assert_eq!(
+        ids(Article::objects().exclude("editor", none)).await,
+        vec![2]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__ne", none)).await,
+        vec![2]
+    );
+    assert_eq!(
+        ids(Article::objects().filter("editor__name", None::<String>)).await,
+        vec![1]
+    );
+}
+
 /// Past every backend's bind cap: 33k rows x 2 binds, 70k `IN` keys.
 const ROWS: i64 = 33_000;
 
@@ -821,6 +855,7 @@ tri_dialect_test! {
         null_fk_on_a_deeper_hop,
         isnull_across_a_null_fk,
         bare_columns_qualified_under_joins,
+        none_filter_is_null,
         bulk_update_past_the_bind_cap,
         in_bulk_past_the_bind_cap,
         sliced_in_bulk_past_the_bind_cap_is_refused,

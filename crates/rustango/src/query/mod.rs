@@ -3238,11 +3238,22 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         }
     }
 
+    let (op, value) = null_as_is_null(raw.op, raw.value);
     Ok(Filter {
         column: field.column,
-        op: raw.op,
-        value: raw.value,
+        op,
+        value,
     })
+}
+
+/// `= NULL` matches no row, so an exact `None` means `IS NULL` and
+/// `ne` means `IS NOT NULL`, as in Django (#2413).
+fn null_as_is_null(op: Op, value: SqlValue) -> (Op, SqlValue) {
+    match (op, &value) {
+        (Op::Eq, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(true)),
+        (Op::Ne, SqlValue::Null) => (Op::IsNull, SqlValue::Bool(false)),
+        _ => (op, value),
+    }
 }
 
 /// Resolve a relation-spanning lookup key into its FK-chain LEFT JOINs
@@ -3279,11 +3290,15 @@ fn resolve_span(
     // Re-parse any trailing suffix through the normal grammar; bare
     // span (no suffix) is an exact match.
     let (op, value, transform) = if suffix_segs.is_empty() {
-        (Op::Eq, value, None)
+        let (op, value) = null_as_is_null(Op::Eq, value);
+        (op, value, None)
     } else {
         let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
         match parse_lookup(&synth, value) {
-            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
+            Ok(ParsedLookup::Raw { op, value, .. }) => {
+                let (op, value) = null_as_is_null(op, value);
+                (op, value, None)
+            }
             Ok(ParsedLookup::DateTransform {
                 transform,
                 op,

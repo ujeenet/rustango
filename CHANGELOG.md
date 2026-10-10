@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `filter(field, None)` matches NULL rows (#2413)
+
+An exact `None`, bare or through a relation span, now writes `IS NULL` (`ne` writes `IS NOT NULL`, `exclude` negates it); it wrote `= NULL`, which matches nothing.
+
 ### Fixed — bare columns are qualified when a query has joins (#2411)
 
 Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column.

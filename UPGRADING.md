@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `filter(field, None)` (#2413)
+
+`filter("parent", None)` and `filter("parent__exact", None)` now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `__ne` with `None` means `IS NOT NULL`.
+
 ### Workers from `make:worker` (#2331)
 
 The template's reclaim after `shutdown` never ran for a killed worker. In a worker you generated, drop that line and add `.reclaim_stuck_after(Duration::from_secs(300))` to the queue builder.
