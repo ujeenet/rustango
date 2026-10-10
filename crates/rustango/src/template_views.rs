@@ -2013,10 +2013,18 @@ async fn update_row(
     values: Vec<SqlValue>,
     this_row: WhereExpr,
 ) -> Result<u64, WriteFailed> {
-    let set = columns
+    let mut stamped: Vec<(&'static str, SqlValue)> = columns
         .iter()
-        .zip(&values)
-        .map(|(column, value)| crate::core::Assignment::new(*column, value.clone()))
+        .copied()
+        .zip(values.iter().cloned())
+        .collect();
+    // An empty form stays an error, not a bare restamp (#2527).
+    if !stamped.is_empty() {
+        crate::forms::stamp_auto_now(schema, &mut stamped);
+    }
+    let set = stamped
+        .into_iter()
+        .map(|(column, value)| crate::core::Assignment::new(column, value))
         .collect();
     let update_q = crate::core::UpdateQuery::new(schema, set, this_row.clone()).visible();
     match crate::audit::update(pool, &update_q).await {

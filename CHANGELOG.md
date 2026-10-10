@@ -16,9 +16,9 @@ JSON `null` on a NOT NULL field is a `400` instead of `false`/`{}` or a silent s
 
 The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. A `ModelForm` Bool stays an unticked box; PKs must still be sent.
 
-### Fixed — ViewSet PUT/PATCH and `ModelForm` updates restamp `auto_now` (#2527)
+### Fixed — ViewSet PUT/PATCH, `UpdateView` and `ModelForm` updates restamp `auto_now` (#2527)
 
-New `forms::stamp_auto_now`, shared with the admin; `ModelFormFor::into_update_query` uses it too.
+The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping helper.
 
 ### Fixed — a ViewSet write that breaks a field rule is a `400`, not a `500` (#2529)
 

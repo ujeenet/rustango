@@ -160,7 +160,7 @@ A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(defau
 
 ### `auto_now` on REST and form updates (#2527)
 
-ViewSet PUT/PATCH, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.
+ViewSet PUT/PATCH, template `UpdateView`, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.
 
 ### ViewSet field-rule errors (#2529)
 
