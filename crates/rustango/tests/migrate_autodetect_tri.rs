@@ -3440,10 +3440,67 @@ async fn unmanaged_model_keeps_its_table(pool: &Pool) {
     );
 }
 
+// ---------------------------------------------------------------- #2573
+
+/// The documented `--empty` rename: the next diff starts from the
+/// renamed shape instead of emitting Add+Drop.
+async fn empty_migration_renames_reach_the_snapshot(pool: &Pool) {
+    let (old_t, new_t) = ("mad_er_post", "mad_er_article");
+    let chain = Chain::new(pool, "er", &[old_t, new_t]).await;
+    let status = |name: &str| col(name, "string", json!({"max_length": 20}));
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(old_t, vec![id(), status("status")])]}),
+        )
+        .await
+        .expect("initial");
+    let mut mig =
+        rustango::migrate::manage::make_empty(chain.dir.path(), "rename").expect("--empty");
+    mig.forward = vec![
+        Operation::Schema(SchemaChange::RenameColumn {
+            table: old_t.into(),
+            old_column: "status".into(),
+            new_column: "state".into(),
+        }),
+        Operation::Schema(SchemaChange::RenameTable {
+            old_name: old_t.into(),
+            new_name: new_t.into(),
+        }),
+    ];
+    chain.write(&mig);
+    chain.migrate(pool).await.expect("the hand-written renames");
+    let renamed = |extra: bool| {
+        let mut f = vec![id(), status("state")];
+        if extra {
+            f.push(col("body", "string", json!({})));
+        }
+        json!({"tables": [table(new_t, f)]})
+    };
+    let next = make_migrations_from(chain.dir.path(), &snap(renamed(false)), None).expect("diff");
+    assert!(
+        next.is_none(),
+        "the renames are already applied: {:?}",
+        next.map(|m| m.forward)
+    );
+    chain
+        .step(pool, renamed(true))
+        .await
+        .expect("a later edit diffs from the renamed table");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: new_t.into(),
+            column: "body".into(),
+        })]
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
         unmanaged_model_keeps_its_table,
+        empty_migration_renames_reach_the_snapshot,
         type_change_with_a_default,
         dropped_exclude_unapplies,
         case_insensitive_change_applies,

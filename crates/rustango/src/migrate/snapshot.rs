@@ -590,6 +590,97 @@ impl SchemaSnapshot {
         self.sort();
     }
 
+    /// Apply a hand-written `RenameTable` / `RenameColumn`; one already in
+    /// the snapshot is a no-op (#2573).
+    pub(crate) fn apply_rename(&mut self, change: &super::SchemaChange) {
+        use super::SchemaChange as SC;
+        let swap = |s: &mut String, from: &str, to: &str| {
+            if s == from {
+                *s = to.to_owned();
+            }
+        };
+        match change {
+            SC::RenameTable { old_name, new_name } => {
+                if self.table(new_name).is_some() || self.table(old_name).is_none() {
+                    return;
+                }
+                for t in &mut self.tables {
+                    swap(&mut t.name, old_name, new_name);
+                    for rel in t.fields.iter_mut().filter_map(|f| f.fk.as_mut()) {
+                        swap(&mut rel.to, old_name, new_name);
+                    }
+                    for c in &mut t.composite_fks {
+                        swap(&mut c.to, old_name, new_name);
+                    }
+                }
+                for m in &mut self.m2m_tables {
+                    swap(&mut m.src_table, old_name, new_name);
+                    swap(&mut m.dst_table, old_name, new_name);
+                }
+                for i in &mut self.indexes {
+                    swap(&mut i.table, old_name, new_name);
+                }
+                for c in &mut self.checks {
+                    swap(&mut c.table, old_name, new_name);
+                }
+                for x in &mut self.excludes {
+                    swap(&mut x.table, old_name, new_name);
+                }
+            }
+            SC::RenameColumn {
+                table,
+                old_column,
+                new_column,
+            } => {
+                let (old, new) = (old_column.as_str(), new_column.as_str());
+                // A junction's own column: M2M diffs emit these.
+                if let Some(m) = self.m2m_tables.iter_mut().find(|m| m.through == *table) {
+                    if m.src_col != new && m.dst_col != new {
+                        swap(&mut m.src_col, old, new);
+                        swap(&mut m.dst_col, old, new);
+                    }
+                }
+                let Some(t) = self
+                    .tables
+                    .iter_mut()
+                    .find(|t| t.name == *table && t.field(new).is_none() && t.field(old).is_some())
+                else {
+                    return;
+                };
+                for f in &mut t.fields {
+                    swap(&mut f.column, old, new);
+                }
+                for c in t.composite_fks.iter_mut().flat_map(|c| c.from.iter_mut()) {
+                    swap(c, old, new);
+                }
+                for t in &mut self.tables {
+                    for rel in t.fields.iter_mut().filter_map(|f| f.fk.as_mut()) {
+                        if rel.to == *table {
+                            swap(&mut rel.on, old, new);
+                        }
+                    }
+                    for c in t.composite_fks.iter_mut().filter(|c| c.to == *table) {
+                        for on in &mut c.on {
+                            swap(on, old, new);
+                        }
+                    }
+                }
+                for i in self.indexes.iter_mut().filter(|i| i.table == *table) {
+                    for c in i.columns.iter_mut().chain(i.include.iter_mut()) {
+                        swap(c, old, new);
+                    }
+                }
+                for x in self.excludes.iter_mut().filter(|x| x.table == *table) {
+                    for (c, _) in &mut x.elements {
+                        swap(c, old, new);
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.sort();
+    }
+
     /// The order `from_registry` writes, so a rebuilt snapshot diffs clean.
     fn sort(&mut self) {
         self.tables.sort_by(|a, b| a.name.cmp(&b.name));

@@ -134,7 +134,7 @@ pub fn make_migrations_scoped(
     //      never create one of those tables.
     let mut prev_snapshot = prior_scoped
         .last()
-        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+        .map_or_else(empty_snapshot, |m| effective_snapshot(&prior_scoped, m));
     let in_chain = chain_membership(&prior_scoped);
     for m in &prior_scoped {
         if !in_chain.contains(m.name.as_str()) {
@@ -391,9 +391,10 @@ pub fn make_migrations_from(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
+    let chain: Vec<&Migration> = prior.iter().collect();
     let mut prev_snapshot = prior
         .last()
-        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+        .map_or_else(empty_snapshot, |m| effective_snapshot(&chain, m));
     // The framework owns its `rustango_*` tables: `migrate` creates
     // them from its own system migration chain on the first run. An
     // app diff must treat them as already present, or the next
@@ -475,6 +476,34 @@ fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<St
             .and_then(|m| m.prev.as_deref());
     }
     seen
+}
+
+/// `head`'s snapshot plus the renames hand-written into it and the copies
+/// before it: `--empty` copies its parent's snapshot and the edit never
+/// updates it (#2573). A snapshot that differs from its parent's already
+/// holds its ops, so the walk stops there.
+fn effective_snapshot(chain: &[&Migration], head: &Migration) -> SchemaSnapshot {
+    let parent = |m: &Migration| {
+        m.prev
+            .as_deref()
+            .and_then(|p| chain.iter().copied().find(|c| c.name == p))
+    };
+    let mut copies = vec![];
+    let mut m = head;
+    while let Some(p) = parent(m).filter(|p| p.snapshot == m.snapshot) {
+        copies.push(m);
+        if copies.len() > chain.len() {
+            break; // a cyclic `prev`
+        }
+        m = p;
+    }
+    let mut snap = head.snapshot.clone();
+    for op in copies.iter().rev().flat_map(|m| &m.forward) {
+        if let Operation::Schema(change) = op {
+            snap.apply_rename(change);
+        }
+    }
+    snap
 }
 
 /// Set every `rustango_*` table in `into` to its current shape. The
@@ -1170,6 +1199,41 @@ mod tests {
             snapshot,
             forward: vec![],
         }
+    }
+
+    /// Two `--empty` renames in a row: both reach the next diff (#2573).
+    #[test]
+    fn stacked_empty_renames_reach_the_baseline() {
+        let dir = tempdir();
+        let rename = |table: &str, old: &str, new: &str| {
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: table.into(),
+                old_column: old.into(),
+                new_column: new.into(),
+            })
+        };
+        let with = |cols: &[&str]| {
+            let mut table = t("posts");
+            for c in cols {
+                let mut f = table.fields[0].clone();
+                (f.name, f.column, f.primary_key, f.auto) =
+                    ((*c).into(), (*c).into(), false, false);
+                table.fields.push(f);
+            }
+            table.fields.sort_by(|a, b| a.column.cmp(&b.column));
+            snap_with(vec![table])
+        };
+        let old = with(&["a", "c"]);
+        write_mig(&dir, &mig_at("0001_initial", None, old.clone()));
+        let mut m2 = mig_at("0002_r1", Some("0001_initial"), old.clone());
+        m2.forward = vec![rename("posts", "a", "b")];
+        write_mig(&dir, &m2);
+        let mut m3 = mig_at("0003_r2", Some("0002_r1"), old);
+        m3.forward = vec![rename("posts", "c", "d")];
+        write_mig(&dir, &m3);
+        let next = make_migrations_from(&dir, &with(&["b", "d"]), None).unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 A model newly marked unmanaged, or turned into a view, keeps its snapshot entry, so `makemigrations` emits no `DropTable`. Re-managing it writes nothing unless the schema changed.
 
+### Fixed — `--empty` renames reach the next `makemigrations` (#2573)
+
+A hand-written `RenameTable` / `RenameColumn` in an `--empty` migration now updates the diff baseline, so the next run no longer emits Add+Drop for it.
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
