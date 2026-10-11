@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### API keys are keyed by the session secret (#2617)
+
+New and used API keys are HMACs under `RUSTANGO_SESSION_SECRET` (dev: `./var/.rustango_tenant_session.key`); rotating it invalidates them, and prod needs it set. Use `set_api_key_secret` for a separate key.
+
 ### CLI passwords are validated (#2589)
 
 The `manage` password verbs now refuse a password the forms refuse (under 8 characters). Scripts that set short passwords add `--skip-validation`; prefer `RUSTANGO_PASSWORD` or `--password-stdin` over `--password`.

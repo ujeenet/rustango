@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — API keys are stored as an HMAC, not argon2 (#2617)
+
+`key_hash` is `hmac-sha256$<hex>` keyed by the session secret, so a Bearer check needs no hashing slot. Old argon2 keys verify once and are rewritten. New `set_api_key_secret`.
+
 ### Fixed — CLI password verbs validate, confirm, and read off argv (#2589)
 
 `create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns.

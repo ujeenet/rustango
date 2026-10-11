@@ -316,8 +316,8 @@ pub struct ApiKey {
     /// 8-char hex prefix — public, used to look up the row. Stored in
     /// plaintext by design (it's the lookup index). Audit L4: this is an
     /// accepted, minor exposure — a DB leak reveals which prefixes exist
-    /// but NOT the secret (the secret half is argon2id-hashed in
-    /// `key_hash`), so a stolen prefix can't authenticate on its own.
+    /// but NOT the secret (only its keyed MAC is in `key_hash`), so a
+    /// stolen prefix can't authenticate on its own.
     ///
     /// Indexed: every Bearer request looks the row up by this column,
     /// so without one it is a sequential scan on the hit path — 5.9 ms
@@ -325,7 +325,8 @@ pub struct ApiKey {
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
     pub key_prefix: String,
-    /// argon2id hash of the 32-char secret. Never returned to callers.
+    /// `hmac-sha256$<hex>` keyed by the server secret (#2617); keys made
+    /// before that hold argon2id until first used. Never returned to callers.
     #[rustango(max_length = 255)]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
@@ -413,15 +414,29 @@ impl AuthBackend for ApiKeyBackend {
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
+        let mac = api_key_mac(api_key_secret().map_err(AuthError::from_hash)?, secret);
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
             .await?;
-        // The prefix is random, not unique: try every row (#2250). An unknown
-        // prefix still spends a verify (audit N4).
-        let key = password::first_verified(keys, secret, |k| &k.key_hash)
-            .await
-            .map_err(AuthError::from_hash)?;
+        // The prefix is random, not unique: try every row (#2250).
+        let (macs, legacy): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .partition(|k| k.key_hash.starts_with(API_KEY_MAC_SCHEME));
+        let key = match macs.into_iter().find(|k| mac_eq(&k.key_hash, &mac)) {
+            Some(k) => Some(k),
+            None if legacy.is_empty() => None,
+            // Pre-#2617 argon2 rows: verify once, then store the MAC.
+            None => {
+                let key = password::first_verified(legacy, secret, |k| &k.key_hash)
+                    .await
+                    .map_err(AuthError::from_hash)?;
+                if let Some(k) = &key {
+                    upgrade_api_key(pool, k, &mac).await;
+                }
+                key
+            }
+        };
         let Some(key) = key else {
             attempt.failed().await;
             return Ok(None);
@@ -453,6 +468,73 @@ impl AuthBackend for ApiKeyBackend {
     }
 }
 
+/// `key_hash` prefix of a key stored as an HMAC; anything else is argon2.
+const API_KEY_MAC_SCHEME: &str = "hmac-sha256$";
+/// Domain tag, so a key MAC is never a valid MAC of anything else.
+const API_KEY_MAC_TAG: &[u8] = b"rustango-apikey-v1.";
+
+static API_KEY_SECRET: std::sync::OnceLock<crate::session::SessionSecret> =
+    std::sync::OnceLock::new();
+
+/// Set the key that MACs API keys. The first call wins; returns `false` after.
+/// Unset, it is `RUSTANGO_SESSION_SECRET`, or in dev the tenant session key file.
+pub fn set_api_key_secret(secret: crate::session::SessionSecret) -> bool {
+    API_KEY_SECRET.set(secret).is_ok()
+}
+
+/// The CLI that mints a key and the server that checks it must agree, so
+/// this reads the env or the dev key file, never a per-process random key.
+fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::TenancyError> {
+    use crate::session::{is_prod_tier, tier_from_env, SessionSecret};
+    if let Some(s) = API_KEY_SECRET.get() {
+        return Ok(s);
+    }
+    let secret = if is_prod_tier(&tier_from_env()) {
+        SessionSecret::require_from_env().map_err(|e| {
+            tracing::error!(error = %e, "API keys need RUSTANGO_SESSION_SECRET on the prod tier");
+            super::TenancyError::Validation(e.to_string())
+        })?
+    } else {
+        SessionSecret::from_env_or_disk(std::path::Path::new(
+            "./var/.rustango_tenant_session.key",
+        ))
+    };
+    Ok(API_KEY_SECRET.get_or_init(|| secret))
+}
+
+/// `hmac-sha256$<hex>` of the secret half; the prefix is only the lookup.
+fn api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> String {
+    let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
+    format!(
+        "{API_KEY_MAC_SCHEME}{}",
+        to_hex(&crate::session::sign(key, &msg))
+    )
+}
+
+fn mac_eq(stored: &str, mac: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+    stored.len() == mac.len() && bool::from(stored.as_bytes().ct_eq(mac.as_bytes()))
+}
+
+/// Swap a verified argon2 hash for the MAC. A failure only costs one more
+/// argon2 next time, so it is logged, not raised.
+async fn upgrade_api_key(pool: &Pool, key: &ApiKey, mac: &str) {
+    use crate::core::Column as _;
+    use crate::sql::UpdaterPool as _;
+    let Some(id) = key.id.get().copied() else {
+        return;
+    };
+    if let Err(e) = ApiKey::objects()
+        .where_(ApiKey::id.eq(id))
+        .update()
+        .set("key_hash", mac.to_owned())
+        .execute_pool(pool)
+        .await
+    {
+        tracing::warn!(error = %e, key_id = id, "could not upgrade an argon2 API key");
+    }
+}
+
 /// Create an API key for `user_id`. Returns the full token (`prefix.secret`)
 /// — this is the only time the plaintext is available.
 ///
@@ -479,9 +561,7 @@ pub async fn create_api_key(
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
-    let hash = password::hash_async(&secret)
-        .await
-        .map_err(|e| crate::tenancy::error::TenancyError::Validation(e.to_string()))?;
+    let hash = api_key_mac(api_key_secret()?, &secret);
 
     let mut key = ApiKey {
         id: Auto::default(),
@@ -826,6 +906,21 @@ fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    /// The MAC depends on the server key and the secret.
+    #[test]
+    fn api_key_mac_binds_key_and_secret() {
+        use crate::session::SessionSecret;
+        let (a, b) = (
+            SessionSecret::from_bytes(vec![1; 32]),
+            SessionSecret::from_bytes(vec![2; 32]),
+        );
+        let mac = api_key_mac(&a, "s3cret");
+        assert!(mac.starts_with(API_KEY_MAC_SCHEME) && mac.len() < 255);
+        assert!(mac_eq(&mac, &api_key_mac(&a, "s3cret")));
+        assert_ne!(mac, api_key_mac(&b, "s3cret"));
+        assert_ne!(mac, api_key_mac(&a, "s3creu"));
+    }
 
     /// Authenticate `token` twice on `backend`; count revocation warnings.
     async fn revocation_warnings(backend: &JwtBackend, token: &str) -> usize {

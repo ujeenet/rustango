@@ -150,8 +150,8 @@ pub use auth::{
 #[cfg(feature = "postgres")]
 pub use auth_backends::ensure_api_keys_table;
 pub use auth_backends::{
-    create_api_key, ensure_api_keys_table_pool, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
-    BoxedBackend, JwtBackend, ModelBackend,
+    create_api_key, ensure_api_keys_table_pool, set_api_key_secret, ApiKeyBackend, AuthBackend,
+    AuthError, AuthUser, BoxedBackend, JwtBackend, ModelBackend,
 };
 pub use bootstrap::{init_tenancy, init_tenancy_with, InitTenancyReport};
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
