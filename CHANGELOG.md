@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `InMemoryJtiStore` prunes with an expiry heap (#2514)
+
+`mark_used` pops only expired entries instead of scanning the whole map under the lock on every refresh.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)
