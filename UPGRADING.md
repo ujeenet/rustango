@@ -181,8 +181,6 @@ A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a
 
 A primary-key, `unique`, indexed or foreign-key `String` (field or container index) without `max_length` no longer compiles (#2575): MySQL cannot index its LONGTEXT. Add `max_length = N`; on PG and SQLite the next `makemigrations` emits the type change.
 
-## 0.60.5
-
 ### Purge deletes media objects
 
 Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it lists the `(disk, key)` of each one it left (#2569). On MySQL and SQLite it deletes only when no other tenant and not the registry use the tenant's database. `TenantPoolsConfig` gains a field, so its struct literals need `..Default::default()`; `decommission::Report` is now `#[non_exhaustive]`.
@@ -198,22 +196,6 @@ SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receive
 ### Scoped MCP user keys stay scoped
 
 The framework now reads `Agent.data["scoped"]`: set at creation, on any grant or revoke, and on the next resolve of a key with grants. Such a key with no grants left resolves to no tools instead of the owner's full set (#2537). `data` is read-only in the agent admin. An old scoped key whose grants were all removed before upgrading still counts as unscoped; revoke and reissue it.
-
-### Passkeys in `public` on schema-mode tenants
-
-`migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.
-
-### Impersonation links use https by default
-
-Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
-
-### Password changes refuse a stale row
-
-A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
-
-### Auth links take a `LinkScope`
-
-`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
 
 ### HMAC auth on a tenant-resolved app (#2492)
 
@@ -240,6 +222,24 @@ A typed fetch filtered or ordered through `author__x` no longer loads `author`; 
 ### `filter(field, None)` (#2413)
 
 `filter("parent", None)`, `Q::eq("parent", None)` and any `=` against NULL now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `<>` against NULL means `IS NOT NULL`. Code that relied on a `None` id matching nothing must check for `None` first.
+
+## 0.60.5
+
+### Passkeys in `public` on schema-mode tenants
+
+`migrate-tenants` now creates `rustango_webauthn_credentials` in each tenant schema, which hides `public.rustango_webauthn_credentials`; passkeys stored there stop working (#2518). Rows are not copied, since user ids overlap across tenants. Before upgrading, move each tenant's rows by hand, e.g. `INSERT INTO "<schema>".rustango_webauthn_credentials SELECT * FROM public.rustango_webauthn_credentials WHERE user_id IN (<that tenant's user ids>)`, then delete them from `public`. `migrate-tenants` warns, naming the tenant, when it adds the table to a tenant that already had users while `public` holds rows.
+
+### Impersonation links use https by default
+
+Unset `RUSTANGO_TENANT_SCHEME` now means https when cookies are `Secure` (prod tier, or `[security] secure_cookies`), except on loopback hosts (#2425). A plain-http deploy on a real host must set `RUSTANGO_TENANT_SCHEME=http`.
+
+### Password changes refuse a stale row
+
+A password change or reset whose user changed password meanwhile now fails with "changed meanwhile; try again" instead of overwriting it (#2467).
+
+### Auth links take a `LinkScope`
+
+`PasswordReset`, `EmailVerification` and `MagicLink` `issue`/`verify`/`verify_single_use` take a `&LinkScope` as their first argument, and every `confirm_password_reset_*` takes a `LinkTarget` in place of the pool (#2472). In a tenant app pass the request's `&Tenant` to both (`LinkScope::from(&t)`, and `&t` to confirm); `LinkScope::audience` / `LinkTarget::audience(&pool, ..)` are for single-database apps. A link for another scope fails with the new `AuthFlowError::WrongScope`, and `AuthFlowError` is now `#[non_exhaustive]`: add a `_` arm to exhaustive matches. Links issued before the upgrade are refused.
 
 ### Workers from `make:worker` (#2331)
 

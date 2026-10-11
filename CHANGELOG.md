@@ -42,8 +42,6 @@ Two leaves from one history now stop `makemigrations` with "run `--merge`". The 
 
 `#[derive(Model)]` rejects a primary-key, unique, indexed or foreign-key `String` without `max_length`, which MySQL could not migrate (error 1170).
 
-## [0.60.5] — 2026-10-10
-
 ### Security — purging a tenant deletes its media objects (#2569)
 
 With the `media` feature, `purge-tenant` and the console purge delete each `rustango_media` object from `TenantPoolsConfig::media_storage` before the tenant's storage goes, and list each one left. Only storage proven to be the tenant's own is touched: the named schema, or a database no other tenant or the registry uses.
@@ -63,6 +61,40 @@ The key records that it is scoped in `Agent.data`, also when a grant is added or
 ### Security — media stores malformed MIME types as octet-stream (#2570)
 
 A type/subtype with non-token characters (a space, a control byte) or `multipart/x-mixed-replace` is stored and signed as `application/octet-stream`, so a browser can't sniff the body into HTML. `text/jscript`, `text/livescript`, `text/vbscript` and `text/css` are too.
+
+### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
+
+A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::bind_tenants` checks the resolved tenant; `signed_headers`, `sign_port` and the client's `RequestToSign` sign more of the request.
+
+### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
+
+It allowed on the first match, so a second codename widened access instead of narrowing it.
+
+### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
+
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are superuser-only on add and edit, `password_hash` on edit, and a superuser's row can only be changed or deleted by a superuser.
+
+### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
+
+A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!(Model, Change, [field])` locks fields for non-superusers.
+
+### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
+
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is deprecated and never returned.
+
+### Changed — `post.author` stays unloaded after a relation filter (#2412)
+
+A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds one helper column, which value rows drop. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
+
+### Fixed — `filter(field, None)` matches NULL rows (#2413)
+
+Every predicate comparing to NULL with `=` or `<>` (`filter`, `Q::eq`, a typed `eq`, a built `Filter` or `ExprCompare`) now writes `IS NULL` / `IS NOT NULL`; it wrote `= NULL`, which matches nothing. Unique-together and duplicate checks skip a NULL value.
+
+### Fixed — bare columns are qualified when a query has joins (#2411)
+
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column. A bare `F` naming a joined table's column stays bare.
+
+## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)
 
@@ -107,38 +139,6 @@ The tenant admin, operator console and CLI password writes, and operator activat
 ### Security — reset, verify and magic links are tenant-bound (#2472)
 
 `PasswordReset`, `EmailVerification` and `MagicLink` sign a `LinkScope` and refuse a link redeemed under another one, so a link from one tenant can no longer reset the same user id in another.
-
-### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
-
-A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::bind_tenants` checks the resolved tenant; `signed_headers`, `sign_port` and the client's `RequestToSign` sign more of the request.
-
-### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
-
-It allowed on the first match, so a second codename widened access instead of narrowing it.
-
-### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
-
-On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are superuser-only on add and edit, `password_hash` on edit, and a superuser's row can only be changed or deleted by a superuser.
-
-### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
-
-A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!(Model, Change, [field])` locks fields for non-superusers.
-
-### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
-
-They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is deprecated and never returned.
-
-### Changed — `post.author` stays unloaded after a relation filter (#2412)
-
-A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds one helper column, which value rows drop. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
-
-### Fixed — `filter(field, None)` matches NULL rows (#2413)
-
-Every predicate comparing to NULL with `=` or `<>` (`filter`, `Q::eq`, a typed `eq`, a built `Filter` or `ExprCompare`) now writes `IS NULL` / `IS NOT NULL`; it wrote `= NULL`, which matches nothing. Unique-together and duplicate checks skip a NULL value.
-
-### Fixed — bare columns are qualified when a query has joins (#2411)
-
-Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column. A bare `F` naming a joined table's column stays bare.
 
 ### Fixed — `api::create_tenant` and tenant edits refuse the registry's own database URL (#2320)
 
