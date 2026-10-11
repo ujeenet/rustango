@@ -3,16 +3,16 @@
 //! `NNNN_merge.json` file whose `prev` points at the lex-last leaf.
 //!
 //! The unit tests in `crates/rustango/src/migrate/make.rs::tests` cover
-//! `make_merge_migration_from` directly with synthetic snapshots; this
+//! `make_merge_migration` directly with synthetic snapshots; this
 //! file exercises the integration path — drop two divergent migration
 //! JSONs into a temp directory, invoke the public
-//! `make_merge_migration_from` entry point, and assert the resulting
+//! `make_merge_migration` entry point, and assert the resulting
 //! file is readable + parseable by `file::list_dir`.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
 use rustango::migrate::file::{list_dir, Migration};
-use rustango::migrate::make::make_merge_migration_from;
+use rustango::migrate::make::make_merge_migration;
 use rustango::migrate::snapshot::SchemaSnapshot;
 use rustango::migrate::MigrationScope;
 
@@ -34,6 +34,7 @@ fn mig_at(name: &str, prev: Option<&str>) -> Migration {
         atomic: true,
         scope: MigrationScope::Tenant,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: empty_snap(),
         forward: vec![],
     }
@@ -70,7 +71,7 @@ fn merge_round_trips_through_list_dir() {
     let before = list_dir(&dir).expect("list before merge");
     assert_eq!(before.len(), 3);
 
-    let mig = make_merge_migration_from(&dir, &empty_snap())
+    let mig = make_merge_migration(&dir)
         .expect("merge ok")
         .expect("expected a merge file to be written");
     assert_eq!(mig.name, "0003_merge");
@@ -104,7 +105,7 @@ fn merge_against_single_leaf_writes_nothing() {
     write(&dir, &mig_at("0001_initial", None));
     write(&dir, &mig_at("0002_add", Some("0001_initial")));
 
-    let result = make_merge_migration_from(&dir, &empty_snap()).expect("ok");
+    let result = make_merge_migration(&dir).expect("ok");
     assert!(result.is_none(), "linear chain → no merge file");
 
     // Directory contents unchanged.

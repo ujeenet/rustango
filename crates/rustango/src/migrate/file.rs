@@ -66,6 +66,9 @@ pub struct Migration {
     /// Empty for an ordinary migration, and then left out of the JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
+    /// The other leaves a `--merge` node joins; `prev` names the last one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merges: Vec<String>,
     /// Full schema snapshot **after** `forward` has been applied.
     pub snapshot: SchemaSnapshot,
     /// Ordered operations, schema and data mixed.

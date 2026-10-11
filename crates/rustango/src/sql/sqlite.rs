@@ -187,6 +187,15 @@ impl Dialect for Sqlite {
         32766
     }
 
+    /// No `DEFAULT` in VALUES; NULL makes an `INTEGER PRIMARY KEY` pick its rowid.
+    fn default_pk_cell(&self, pk: &crate::core::FieldSchema) -> &'static str {
+        if matches!(pk.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) {
+            "NULL"
+        } else {
+            "DEFAULT"
+        }
+    }
+
     fn supports_returning(&self) -> bool {
         // SQLite 3.35+. The runtime version is not checked, so an
         // older SQLite gives a parse error and must be upgraded.
@@ -781,6 +790,15 @@ mod tests {
         global_scopes: &[],
     };
 
+    /// #2416: SQLite has no `DEFAULT` in VALUES; NULL fills an integer PK.
+    #[test]
+    fn bulk_insert_of_no_columns_fills_an_integer_pk_with_null() {
+        let q = crate::core::BulkInsertQuery::new(&MODEL, vec![], vec![vec![], vec![]])
+            .returning(vec!["id"]);
+        let sql = Sqlite.compile_bulk_insert(&q).unwrap().sql;
+        assert!(sql.contains(r#"("id") VALUES (NULL), (NULL)"#), "{sql}");
+    }
+
     #[test]
     fn compile_select_smoke_test() {
         // Build a minimal SelectQuery and assert the SQL emission
@@ -805,6 +823,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = Sqlite.compile_select(&q).unwrap();
         // SQLite emits ANSI-quoted identifiers and `?` placeholders.

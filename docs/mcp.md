@@ -169,7 +169,7 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.60.5" },
+    "serverInfo": { "name": "rustango", "version": "0.60.6" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -276,7 +276,8 @@ re-resolve on the next token); revoke the key itself with
 the owner's **entitlement** (superuser → every skill; otherwise the skills
 mapped to a permission they hold) and the key's **scope** (skills pinned at
 creation). An unscoped key (`skills = &[]`) gets the owner's full entitlement;
-a scoped key (`skills = &["coach", …]`) is limited to those. Resolution always
+a scoped key (`skills = &["coach", …]`) is limited to those, and gets nothing
+once its last pinned skill is revoked. Resolution always
 re-intersects scope with the *current* entitlement — so a key can never exceed
 the owner's permissions, and losing a permission narrows every key on the next
 mint. Scoping to a skill the owner isn't entitled to is refused at creation.

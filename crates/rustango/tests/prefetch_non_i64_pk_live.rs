@@ -28,6 +28,7 @@ pub struct StrTenant {
 pub struct StrDoc {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
     pub tenant: ForeignKey<StrTenant, String>,
     #[rustango(max_length = 200)]
     pub title: String,

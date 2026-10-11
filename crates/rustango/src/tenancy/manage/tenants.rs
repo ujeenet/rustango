@@ -498,8 +498,14 @@ where
     if report.database_dropped.is_some() {
         writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
     }
+    if report.media_deleted > 0 {
+        writeln!(w, "  deleted {} media objects", report.media_deleted)?;
+    }
     for note in &report.notes {
         writeln!(w, "  {note}")?;
+    }
+    for (disk, key) in &report.media_left {
+        writeln!(w, "  media left in storage: disk `{disk}`, key `{key}`")?;
     }
     if report.row_deleted {
         writeln!(w, "  removed Org row")?;

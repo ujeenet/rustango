@@ -170,7 +170,7 @@ n'importe quel montage :
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.60.5" },
+    "serverInfo": { "name": "rustango", "version": "0.60.6" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -283,7 +283,7 @@ selon deux axes : les **droits** du propriétaire (superuser → tous les skills
 sinon les skills mappés à une permission qu'il détient) et la **portée** de la
 clé (les skills épinglés à la création). Une clé sans portée (`skills = &[]`)
 reçoit l'intégralité des droits du propriétaire ; une clé à portée limitée
-(`skills = &["coach", …]`) est restreinte à ceux-ci. La résolution re-intersecte
+(`skills = &["coach", …]`) est restreinte à ceux-ci, et ne reçoit plus rien une fois son dernier skill retiré. La résolution re-intersecte
 toujours la portée avec les droits *courants* — de sorte qu'une clé ne peut
 jamais dépasser les permissions du propriétaire, et perdre une permission
 rétrécit chaque clé à la prochaine émission. Restreindre la portée à un skill

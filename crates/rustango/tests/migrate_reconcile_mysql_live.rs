@@ -36,6 +36,7 @@ fn mig(name: &str, tables: &[String], replaces: &[String]) -> Migration {
         atomic: true,
         scope: migrate::MigrationScope::default(),
         replaces: replaces.to_vec(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot {
             tables: tables.iter().map(|t| table_snap(t)).collect(),
             ..Default::default()

@@ -119,6 +119,7 @@ pub fn make_migrations_scoped(
         .iter()
         .filter(|m| m.scope == migration_scope)
         .collect();
+    refuse_branched(&prior_scoped)?;
     // The last migration's snapshot is the obvious baseline, but it
     // is incomplete when a scope has more than one head. For example
     // `init-tenancy` writes its own `0001_` beside the user's, and
@@ -134,7 +135,7 @@ pub fn make_migrations_scoped(
     //      never create one of those tables.
     let mut prev_snapshot = prior_scoped
         .last()
-        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+        .map_or_else(empty_snapshot, |m| effective_snapshot(&prior_scoped, m));
     let in_chain = chain_membership(&prior_scoped);
     for m in &prior_scoped {
         if !in_chain.contains(m.name.as_str()) {
@@ -143,6 +144,9 @@ pub fn make_migrations_scoped(
     }
     fold_in_framework_tables(&mut prev_snapshot, current);
     let prev_snapshot = prev_snapshot.filtered_to_scope(model_scope);
+    let mut current = current.clone();
+    current.keep_unmanaged(&prev_snapshot);
+    let current = &current;
     let prev_name = prior_scoped.last().map(|m| m.name.clone());
     // Numbering looks at the whole directory, so a tenant `0002` and
     // a registry `0002` cannot collide as filenames.
@@ -180,6 +184,7 @@ pub fn make_migrations_scoped(
         atomic: true,
         scope: migration_scope,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -280,6 +285,7 @@ pub fn make_migrations_system(
         atomic: true,
         scope: migration_scope,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -388,9 +394,11 @@ pub fn make_migrations_from(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
+    let chain: Vec<&Migration> = prior.iter().collect();
+    refuse_branched(&chain)?;
     let mut prev_snapshot = prior
         .last()
-        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+        .map_or_else(empty_snapshot, |m| effective_snapshot(&chain, m));
     // The framework owns its `rustango_*` tables: `migrate` creates
     // them from its own system migration chain on the first run. An
     // app diff must treat them as already present, or the next
@@ -400,6 +408,9 @@ pub fn make_migrations_from(
     // `make_migrations_system` does not fold: there those tables are
     // the subject.
     fold_in_framework_tables(&mut prev_snapshot, current);
+    let mut current = current.clone();
+    current.keep_unmanaged(&prev_snapshot);
+    let current = &current;
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
         .last()
@@ -435,6 +446,7 @@ pub fn make_migrations_from(
         atomic: true,
         scope: super::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -447,28 +459,140 @@ pub fn make_migrations_from(
     Ok(Some(mig))
 }
 
-/// Names reachable from the last in-scope migration by following
-/// `prev` backwards. A name missing from this set belongs to a side
-/// chain whose tables would otherwise drop out of the baseline. See
-/// `make_migrations_scoped`.
+/// Names reachable from the last in-scope migration through every
+/// parent (`prev` and merged branches). A name missing from this set
+/// belongs to a side chain whose tables would otherwise drop out of the
+/// baseline. See `make_migrations_scoped`.
 fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<String> {
     let mut seen = std::collections::HashSet::new();
-    let Some(last) = prior_scoped.last() else {
-        return seen;
-    };
-    let mut cur: Option<&str> = Some(last.name.as_str());
-    while let Some(name) = cur {
+    let mut todo: Vec<&str> = prior_scoped
+        .last()
+        .map(|m| m.name.as_str())
+        .into_iter()
+        .collect();
+    while let Some(name) = todo.pop() {
+        // `insert` fails on a revisit, so a cyclic chain still ends.
         if !seen.insert(name.to_owned()) {
-            // A cyclic `prev` chain should not happen, but would
-            // loop forever here.
-            break;
+            continue;
         }
-        cur = prior_scoped
-            .iter()
-            .find(|m| m.name == name)
-            .and_then(|m| m.prev.as_deref());
+        if let Some(m) = prior_scoped.iter().find(|m| m.name == name) {
+            todo.extend(m.prev.as_deref());
+            todo.extend(merged_branches(prior_scoped, m));
+        }
     }
     seen
+}
+
+/// The branch leaves `m` merges. A merge file written before `merges`
+/// existed (0.60.5) joined every sibling of its `prev` named before it.
+fn merged_branches<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a str> {
+    if !m.merges.is_empty() {
+        return m.merges.iter().map(String::as_str).collect();
+    }
+    let legacy = m.forward.is_empty() && m.name.ends_with("_merge") && m.replaces.is_empty();
+    let Some(head) = m
+        .prev
+        .as_deref()
+        .and_then(|p| chain.iter().find(|c| c.name == p))
+        .filter(|_| legacy)
+    else {
+        return Vec::new();
+    };
+    chain
+        .iter()
+        .filter(|c| c.name != head.name && c.name < m.name && c.prev == head.prev)
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// `head`'s snapshot plus the renames hand-written into it and the copies
+/// before it: `--empty` copies its parent's snapshot and the edit never
+/// updates it (#2573). A snapshot that differs from its parent's already
+/// holds its ops, so the walk stops there.
+fn effective_snapshot(chain: &[&Migration], head: &Migration) -> SchemaSnapshot {
+    let parent = |m: &Migration| {
+        m.prev
+            .as_deref()
+            .and_then(|p| chain.iter().copied().find(|c| c.name == p))
+    };
+    let mut copies = vec![];
+    let mut m = head;
+    while let Some(p) = parent(m).filter(|p| p.snapshot == m.snapshot) {
+        copies.push(m);
+        if copies.len() > chain.len() {
+            break; // a cyclic `prev`
+        }
+        m = p;
+    }
+    let mut snap = head.snapshot.clone();
+    for op in copies.iter().rev().flat_map(|m| &m.forward) {
+        if let Operation::Schema(change) = op {
+            snap.apply_rename(change);
+        }
+    }
+    snap
+}
+
+/// `m` and its `prev` ancestors, newest first.
+fn ancestry<'a>(chain: &[&'a Migration], m: &'a Migration) -> Vec<&'a Migration> {
+    let mut out = vec![m];
+    while let Some(p) = out
+        .last()
+        .and_then(|c| c.prev.as_deref())
+        .and_then(|p| chain.iter().copied().find(|c| c.name == p))
+    {
+        if out.iter().any(|o| o.name == p.name) {
+            break; // a cyclic `prev`
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// Migrations no `prev`, merged branch or `replaces` names.
+fn leaves<'a>(chain: &[&'a Migration]) -> Vec<&'a Migration> {
+    let joined: std::collections::HashSet<&str> = chain
+        .iter()
+        .flat_map(|m| {
+            let named = m.prev.iter().chain(&m.replaces).map(String::as_str);
+            named.chain(merged_branches(chain, m))
+        })
+        .collect();
+    chain
+        .iter()
+        .copied()
+        .filter(|m| !joined.contains(m.name.as_str()))
+        .collect()
+}
+
+/// Leaves that branch from one history, grouped per root, each sorted by
+/// name. Side chains with their own root are not branches (#2574).
+fn branched_leaves<'a>(chain: &[&'a Migration]) -> Vec<Vec<&'a Migration>> {
+    let mut groups: std::collections::BTreeMap<&str, Vec<&Migration>> = Default::default();
+    for leaf in leaves(chain) {
+        let root = ancestry(chain, leaf).last().map_or("", |r| r.name.as_str());
+        groups.entry(root).or_default().push(leaf);
+    }
+    groups
+        .into_values()
+        .filter(|g| g.len() > 1)
+        .map(|mut g| {
+            g.sort_by(|a, b| a.name.cmp(&b.name));
+            g
+        })
+        .collect()
+}
+
+/// Refuse to diff a branched chain: its last file holds one branch only.
+fn refuse_branched(chain: &[&Migration]) -> Result<(), MigrateError> {
+    let Some(branch) = branched_leaves(chain).into_iter().next() else {
+        return Ok(());
+    };
+    let names: Vec<&str> = branch.iter().map(|m| m.name.as_str()).collect();
+    Err(MigrateError::Validation(format!(
+        "makemigrations: the chain has branched ({}); run `makemigrations --merge` first",
+        names.join(", ")
+    )))
 }
 
 /// Set every `rustango_*` table in `into` to its current shape. The
@@ -652,67 +776,56 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
 /// at random as its `prev`.
 ///
 /// This writes a new `NNNN_merge.json` with an empty `forward` whose
-/// `prev` is the last leaf, so the chain has one head again. An
-/// already-linear chain returns `Ok(None)` and writes nothing.
+/// `prev` is the last leaf and whose `merges` names the others, so the
+/// chain has one head again. Its snapshot joins the branches' snapshots,
+/// not the models, so unmigrated edits still reach the next
+/// `makemigrations`. An already-linear chain returns `Ok(None)`.
 ///
 /// # Errors
 /// Returns [`MigrateError::Validation`] when the chain cannot be
 /// merged, or [`MigrateError::Io`] / [`MigrateError::Json`] on file
 /// problems.
 pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
-    super::snapshot::check_registry_junctions()?;
-    let current = SchemaSnapshot::from_registry();
-    make_merge_migration_from(dir, &current)
-}
-
-/// [`make_merge_migration`] with the post-merge snapshot passed in,
-/// instead of read from the registry.
-///
-/// # Errors
-/// See [`make_merge_migration`].
-pub fn make_merge_migration_from(
-    dir: &Path,
-    current: &SchemaSnapshot,
-) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
     if prior.is_empty() {
         return Err(MigrateError::Validation(
             "makemigrations --merge: no migrations in directory — nothing to merge".into(),
         ));
     }
-
-    // A leaf is any migration NOT referenced as anyone else's `prev`.
-    let referenced: std::collections::HashSet<&str> =
-        prior.iter().filter_map(|m| m.prev.as_deref()).collect();
-    let mut leaves: Vec<&Migration> = prior
-        .iter()
-        .filter(|m| !referenced.contains(m.name.as_str()))
-        .collect();
-    leaves.sort_by(|a, b| a.name.cmp(&b.name));
-
-    if leaves.len() < 2 {
-        // Already linear, nothing to merge.
-        return Ok(None);
-    }
-
-    // Leaves with different parents are real diverging histories,
-    // not a branch collision, so refuse to merge them.
-    let parents: std::collections::HashSet<Option<String>> =
-        leaves.iter().map(|m| m.prev.clone()).collect();
-    if parents.len() > 1 {
-        let names: Vec<String> = leaves.iter().map(|m| m.name.clone()).collect();
+    let chain: Vec<&Migration> = prior.iter().collect();
+    let Some(branch) = branched_leaves(&chain).into_iter().next() else {
+        let heads: Vec<&str> = leaves(&chain).iter().map(|m| m.name.as_str()).collect();
+        if heads.len() < 2 {
+            return Ok(None);
+        }
+        // Separate roots are side chains, not branches of one history.
         return Err(MigrateError::Validation(format!(
             "makemigrations --merge: leaves don't share a common parent — \
              can't auto-reconcile. Leaves: {}",
-            names.join(", ")
+            heads.join(", ")
         )));
+    };
+
+    // The newest migration every leaf descends from.
+    let paths: Vec<Vec<&Migration>> = branch.iter().map(|l| ancestry(&chain, l)).collect();
+    let base = paths[0]
+        .iter()
+        .find(|a| {
+            paths[1..]
+                .iter()
+                .all(|p| p.iter().any(|m| m.name == a.name))
+        })
+        .map_or_else(empty_snapshot, |a| effective_snapshot(&chain, a));
+    let (head, others) = branch.split_last().expect("a branch has 2+ leaves");
+    let mut snapshot = effective_snapshot(&chain, head);
+    for leaf in others {
+        snapshot.merge_branch(&base, &effective_snapshot(&chain, leaf));
     }
 
-    // Point the merge node at the last leaf, so the chain has one
-    // head from here on. Name order already applies the other leaves
-    // first, and `forward` is empty, so running this file does
-    // nothing. Its only job is to anchor the chain.
-    let merge_prev = leaves.last().unwrap().name.clone();
+    // Point the merge node at the last leaf. Name order already applies
+    // the other leaves first, and `forward` is empty, so running this
+    // file does nothing.
+    let merge_prev = head.name.clone();
 
     // Number from the highest index in the whole directory, not
     // just among the leaves.
@@ -730,13 +843,11 @@ pub fn make_merge_migration_from(
         created_at,
         prev: Some(merge_prev),
         atomic: true,
-        scope: super::MigrationScope::default(),
+        scope: head.scope,
         // A merge joins two branches, it does not collapse history.
         replaces: Vec::new(),
-        // The registry already holds both branches' model changes by
-        // the time `--merge` runs, so it is the post-merge schema.
-        // Future `makemigrations` runs diff against this snapshot.
-        snapshot: current.clone(),
+        merges: others.iter().map(|m| m.name.clone()).collect(),
+        snapshot,
         forward: Vec::new(),
     };
 
@@ -863,6 +974,7 @@ mod tests {
             atomic: true,
             scope: MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap.clone(),
             forward: vec![],
         };
@@ -925,6 +1037,7 @@ mod tests {
             atomic: true,
             scope: MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap_with(vec![t("rustango_users")]),
             forward: vec![],
         };
@@ -960,6 +1073,7 @@ mod tests {
             atomic: true,
             scope: MigrationScope::Registry,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap_with(vec![t("rustango_orgs")]),
             forward: vec![],
         };
@@ -970,6 +1084,7 @@ mod tests {
             atomic: true,
             scope: MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap_with(vec![t("rustango_users")]),
             forward: vec![],
         };
@@ -1143,7 +1258,7 @@ mod tests {
     //
     // Reconciles a branched chain with an empty-forward
     // `NNNN_merge.json` whose `prev` is the last leaf. Its snapshot
-    // is the post-merge schema passed in as `current`.
+    // joins the leaves' snapshots.
 
     fn write_mig(dir: &std::path::Path, mig: &Migration) {
         std::fs::write(
@@ -1161,9 +1276,45 @@ mod tests {
             atomic: true,
             scope: MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot,
             forward: vec![],
         }
+    }
+
+    /// Two `--empty` renames in a row: both reach the next diff (#2573).
+    #[test]
+    fn stacked_empty_renames_reach_the_baseline() {
+        let dir = tempdir();
+        let rename = |table: &str, old: &str, new: &str| {
+            Operation::Schema(SchemaChange::RenameColumn {
+                table: table.into(),
+                old_column: old.into(),
+                new_column: new.into(),
+            })
+        };
+        let with = |cols: &[&str]| snap_with(vec![posts_with(cols)]);
+        let old = with(&["a", "c"]);
+        write_mig(&dir, &mig_at("0001_initial", None, old.clone()));
+        let mut m2 = mig_at("0002_r1", Some("0001_initial"), old.clone());
+        m2.forward = vec![rename("posts", "a", "b")];
+        write_mig(&dir, &m2);
+        let mut m3 = mig_at("0003_r2", Some("0002_r1"), old);
+        m3.forward = vec![rename("posts", "c", "d")];
+        write_mig(&dir, &m3);
+        let next = make_migrations_from(&dir, &with(&["b", "d"]), None).unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        // `makemigrations` itself takes the scoped path.
+        let next = make_migrations_scoped(
+            &dir,
+            &with(&["b", "d"]),
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1175,7 +1326,7 @@ mod tests {
             &dir,
             &mig_at("0002_add", Some("0001_initial"), snap.clone()),
         );
-        let r = make_merge_migration_from(&dir, &snap).unwrap();
+        let r = make_merge_migration(&dir).unwrap();
         assert!(
             r.is_none(),
             "single-leaf chain should NOT emit a merge file, got {r:?}"
@@ -1186,8 +1337,7 @@ mod tests {
     #[test]
     fn merge_errors_when_dir_is_empty() {
         let dir = tempdir();
-        let snap = snap_with(vec![t("posts")]);
-        let err = make_merge_migration_from(&dir, &snap).unwrap_err();
+        let err = make_merge_migration(&dir).unwrap_err();
         assert!(matches!(err, MigrateError::Validation(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1207,7 +1357,7 @@ mod tests {
             &mig_at("0002b_branch", Some("0001_initial"), snap.clone()),
         );
 
-        let mig = make_merge_migration_from(&dir, &snap)
+        let mig = make_merge_migration(&dir)
             .unwrap()
             .expect("two leaves should produce a merge file");
 
@@ -1238,7 +1388,7 @@ mod tests {
         write_mig(&dir, &mig_at("0001_a", None, snap.clone()));
         write_mig(&dir, &mig_at("0002_b", Some("0001_a"), snap.clone()));
         write_mig(&dir, &mig_at("0001_z", None, snap.clone()));
-        let err = make_merge_migration_from(&dir, &snap).unwrap_err();
+        let err = make_merge_migration(&dir).unwrap_err();
         match err {
             MigrateError::Validation(msg) => {
                 assert!(
@@ -1251,24 +1401,123 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn merge_uses_supplied_snapshot_for_post_merge_state() {
-        let dir = tempdir();
-        // The existing leaves hold a one-table snapshot; `current`
-        // holds two. The merge file must record `current`, so later
-        // `makemigrations` runs diff against the right baseline.
-        let pre = snap_with(vec![t("posts")]);
-        let post = snap_with(vec![t("posts"), t("comments")]);
-        write_mig(&dir, &mig_at("0001_initial", None, pre.clone()));
-        write_mig(&dir, &mig_at("0002a", Some("0001_initial"), pre.clone()));
-        write_mig(&dir, &mig_at("0002b", Some("0001_initial"), pre));
+    /// `posts` with `cols` beside its `id`.
+    fn posts_with(cols: &[&str]) -> TableSnapshot {
+        let mut table = t("posts");
+        for c in cols {
+            let mut f = table.fields[0].clone();
+            (f.name, f.column, f.primary_key, f.auto) = ((*c).into(), (*c).into(), false, false);
+            table.fields.push(f);
+        }
+        table.fields.sort_by(|a, b| a.column.cmp(&b.column));
+        table
+    }
 
-        let mig = make_merge_migration_from(&dir, &post).unwrap().unwrap();
-        assert_eq!(
-            mig.snapshot.tables.len(),
-            2,
-            "merge file snapshot must reflect the post-merge schema"
+    /// 0001 ← 0002a (adds `a`, drops `old`) and 0001 ← 0002b (adds `b`
+    /// and the `tags` table).
+    fn branched_dir() -> std::path::PathBuf {
+        let dir = tempdir();
+        let base = snap_with(vec![posts_with(&["old"])]);
+        write_mig(&dir, &mig_at("0001_initial", None, base));
+        let a = snap_with(vec![posts_with(&["a"])]);
+        write_mig(&dir, &mig_at("0002a", Some("0001_initial"), a));
+        let b = snap_with(vec![posts_with(&["b", "old"]), t("tags")]);
+        write_mig(&dir, &mig_at("0002b", Some("0001_initial"), b));
+        dir
+    }
+
+    /// A merged-in branch is part of the chain, not a side chain whose
+    /// tables and indexes fold back into the baseline.
+    #[test]
+    fn scoped_makemigrations_follows_merges() {
+        let dir = tempdir();
+        let mut base = snap_with(vec![posts_with(&[])]);
+        base.indexes = vec![idx("posts_x_idx", "posts")];
+        write_mig(&dir, &mig_at("0001_initial", None, base));
+        let mut a = snap_with(vec![posts_with(&["a"])]);
+        a.indexes = vec![idx("posts_x_idx", "posts")];
+        write_mig(&dir, &mig_at("0002a", Some("0001_initial"), a));
+        let b = snap_with(vec![posts_with(&[])]);
+        write_mig(&dir, &mig_at("0002b", Some("0001_initial"), b));
+        let mig = make_merge_migration(&dir).unwrap().unwrap();
+        assert!(mig.snapshot.indexes.is_empty(), "{:?}", mig.snapshot);
+        let next = make_migrations_scoped(
+            &dir,
+            &mig.snapshot,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A merge file from before `merges` existed still joins its branch.
+    #[test]
+    fn legacy_merge_file_still_joins_the_branch() {
+        let dir = branched_dir();
+        let joined = snap_with(vec![posts_with(&["a", "b"]), t("tags")]);
+        write_mig(&dir, &mig_at("0003_merge", Some("0002b"), joined.clone()));
+        assert!(make_migrations_from(&dir, &joined, None).unwrap().is_none());
+        let scoped = make_migrations_scoped(
+            &dir,
+            &joined,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(scoped.is_none(), "{:?}", scoped.map(|m| m.forward));
+        assert!(make_merge_migration(&dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Diffing one branch would re-add the other's column (#2574).
+    #[test]
+    fn makemigrations_refuses_a_branched_chain() {
+        let dir = branched_dir();
+        let current = snap_with(vec![posts_with(&["a", "b"]), t("tags")]);
+        let err = make_migrations_from(&dir, &current, None).unwrap_err();
+        assert!(
+            matches!(&err, MigrateError::Validation(m) if m.contains("--merge")),
+            "{err:?}"
         );
+        let err = make_migrations_scoped(
+            &dir,
+            &current,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MigrateError::Validation(_)), "{err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The merge snapshot joins both branches and keeps an unmigrated
+    /// model edit out, so the next diff still emits it (#2574).
+    #[test]
+    fn merge_joins_the_branches_not_the_models() {
+        let dir = branched_dir();
+        let mig = make_merge_migration(&dir).unwrap().unwrap();
+        assert_eq!(mig.merges, vec!["0002a".to_owned()]);
+        let joined = snap_with(vec![posts_with(&["a", "b"]), t("tags")]);
+        assert_eq!(mig.snapshot, joined);
+        let mut current = joined;
+        current.tables[0] = posts_with(&["a", "b", "c"]);
+        let next = make_migrations_from(&dir, &current, None)
+            .unwrap()
+            .expect("the unmigrated column");
+        assert_eq!(next.prev.as_deref(), Some(mig.name.as_str()));
+        assert_eq!(
+            next.forward,
+            vec![Operation::Schema(SchemaChange::AddColumn {
+                table: "posts".into(),
+                column: "c".into(),
+            })]
+        );
+        assert!(make_merge_migration(&dir).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

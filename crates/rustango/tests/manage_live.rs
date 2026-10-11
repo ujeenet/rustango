@@ -468,6 +468,7 @@ async fn migrate_tenants_runs_against_active_only() {
         atomic: true,
         scope: rmig::MigrationScope::Tenant,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({
             "tables": [{
                 "name": "thing", "model": "T",
@@ -545,6 +546,7 @@ async fn a_new_schema_tenant_does_not_read_publics_project_ledger() {
         atomic: true,
         scope: rmig::MigrationScope::Tenant,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({
             "tables": [{
                 "name": "ledger2143_thing", "model": "T",

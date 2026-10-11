@@ -151,6 +151,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::template_views` | Vues adossées à des templates |
 | `rustango::tenancy` | Multi-tenancy, général |
 | `rustango::tenancy::admin` | Admin de locataire |
+| `rustango::tenancy::decommission` | Désactivation et purge de locataire |
 | `rustango::tenancy::migrate_run` | Migrations par locataire |
 | `rustango::tenancy::operator_console` | Console opérateur |
 | `rustango::tenancy::pools` | Cycle de vie des pools de locataire |

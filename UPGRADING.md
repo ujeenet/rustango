@@ -150,6 +150,79 @@ untouched.
 
 ## Unreleased
 
+## 0.60.6
+
+### Strict Bool and null decoding (#2530)
+
+`parse_form_value` now rejects a Bool other than `true/false/1/0/on/off/yes/no` (any case) or empty; it used to read it as `true`. A ViewSet without a serializer answers `400` to JSON `null` on a NOT NULL field, and stores a JSON string sent to a Json field as a JSON string.
+
+### Column defaults on create (#2528)
+
+A ViewSet or `ModelForm` create that omits a non-PK field with `#[rustango(default = …)]` now stores the default, not `false`/`NULL` or a `400`, and the OpenAPI create body no longer lists it as `required`. A Bool follows its default only in a JSON body; in a form-encoded body or a `ModelForm` an absent Bool is still `false`.
+The value is the database's: a SQLite `CURRENT_TIMESTAMP` default uses SQLite's clock and `YYYY-MM-DD HH:MM:SS` format, so use `auto_now_add` for timestamps.
+
+### `auto_now` on REST and form updates (#2527)
+
+ViewSet PUT/PATCH, template `UpdateView`, `ModelForm` updates and `ModelFormFor::into_update_query` now set `auto_now` columns to the current time, as the admin did.
+
+### ViewSet field-rule errors (#2529)
+
+A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a `500`; it is now a `422 validation_failed` with `details` keyed by field, the same shape as serializer errors. Template views show the shorter messages for `choices` and validators too.
+
+### Unmanaged models keep their tables
+
+`makemigrations` no longer drops the table of a model you set to `managed = false` or `view` (#2576). To drop it, delete the model, or write a `DropTable` in an `--empty` migration.
+
+### Branched migration chains and `Migration::merges`
+
+`makemigrations` now refuses a chain with two leaves from one parent history; run `makemigrations --merge` first (#2574). `Migration` has a new `merges: Vec<String>` field (add `merges: Vec::new()` to struct literals), and `make_merge_migration_from` is gone: call `make_merge_migration(dir)`.
+
+### Keyed `String` fields need `max_length`
+
+A primary-key, `unique`, indexed or foreign-key `String` (field or container index) without `max_length` no longer compiles (#2575): MySQL cannot index its LONGTEXT. Add `max_length = N`; on PG and SQLite the next `makemigrations` emits the type change.
+
+### Purge deletes media objects
+
+Set `TenantPoolsConfig::media_storage` (for example via `Cli::with_tenant_pools`) to the registry your `MediaManager` uses; a purge then deletes the tenant's media objects, otherwise it lists the `(disk, key)` of each one it left (#2569). On MySQL and SQLite it deletes only when no other tenant and not the registry use the tenant's database. `TenantPoolsConfig` gains a field, so its struct literals need `..Default::default()`; `decommission::Report` is now `#[non_exhaustive]`.
+
+### SSO sign-ins send auth signals
+
+SSO logins and refusals now reach `user_logged_in` / `user_login_failed` receivers, as sources `admin_sso`, `tenant_admin_sso` and `member_sso` (#2559). A receiver that matched `source == "admin"` for the admin SSO code step must now match `admin_sso`. A refusal names the IdP's email only when verified, else its subject.
+
+### Member SSO no longer provisions users by default
+
+`MemberAuthConfig::default().auto_provision` is now `false`: an unknown verified email is refused (#2560). Set `auto_provision: true` to keep creating members on first sign-in.
+
+### Scoped MCP user keys stay scoped
+
+The framework now reads `Agent.data["scoped"]`: set at creation, on any grant or revoke, and on the next resolve of a key with grants. Such a key with no grants left resolves to no tools instead of the owner's full set (#2537). `data` is read-only in the agent admin. An old scoped key whose grants were all removed before upgrading still counts as unscoped; revoke and reissue it.
+
+### HMAC auth on a tenant-resolved app (#2492)
+
+The tenant header and port are still unsigned by default. Add `.bind_tenants(..)` to tie keys to their tenant; `.signed_headers(["x-org"])` and `.sign_port()` sign more, and clients then sign with `RequestToSign::header` / `port`.
+
+### `ViewSetPerms` is all-of (#2522)
+
+A user now needs every codename listed for an action, not any one. A list meant as alternatives needs a role that grants them together.
+
+### Admin superuser-only fields (#2520, #2521)
+
+`user_id` on `rustango_api_keys` and `rustango_agents` is now read-only on edit for non-superusers.
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are read-only for them on add and edit, `password_hash` on edit, and superuser rows refuse their edits and deletes.
+An admin built with `with_user_perms` treats the user as a non-superuser even with a superuser session. An admin with no login now lets anyone edit SSO links and providers, as it does every other table.
+
+### Set operations on `update()` / `delete()` (#2452)
+
+A queryset with `union`, `intersection` or `difference` now fails `update()` and `delete()` with `QueryError::SetOperationDml`, bounded or not. Match that instead of `BoundedDmlReason::SetOperation`, which is deprecated and never returned. Filter the rows with `where_in_subquery` / `where_not_in_subquery` instead.
+
+### `post.author` after a relation filter (#2412)
+
+A typed fetch filtered or ordered through `author__x` no longer loads `author`; reading it is one more query. Add `select_related("author")` where the code reads it. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. A hand-built `SelectQuery` with joins must set the new `select_related` field to their aliases, or the related rows stay unloaded.
+
+### `filter(field, None)` (#2413)
+
+`filter("parent", None)`, `Q::eq("parent", None)` and any `=` against NULL now return the rows where `parent` is NULL, and `exclude` the rest; they used to return no rows. `<>` against NULL means `IS NOT NULL`. Code that relied on a `None` id matching nothing must check for `None` first.
+
 ## 0.60.5
 
 ### Passkeys in `public` on schema-mode tenants

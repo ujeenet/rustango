@@ -25,6 +25,7 @@ fn migration(name: &str, table: &str, scope: MigrationScope) -> Migration {
         atomic: true,
         scope,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({
             "tables": [{
                 "name": table, "model": "T",

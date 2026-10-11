@@ -549,6 +549,219 @@ impl SchemaSnapshot {
     pub fn table(&self, name: &str) -> Option<&TableSnapshot> {
         self.tables.iter().find(|t| t.name == name)
     }
+
+    /// Carry `prev`'s entries for tables whose model is now unmanaged or a
+    /// view: migrations stop owning the table but never drop it (#2576).
+    pub(crate) fn keep_unmanaged(&mut self, prev: &Self) {
+        let kept: std::collections::HashSet<&str> = prev
+            .tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|t| {
+                self.table(t).is_none()
+                    && ModelEntry::for_table(t)
+                        .is_some_and(|e| !e.schema.managed || e.schema.is_view)
+            })
+            .collect();
+        if kept.is_empty() {
+            return;
+        }
+        let on_kept = |t: &str| kept.contains(t);
+        for t in prev.tables.iter().filter(|t| on_kept(&t.name)) {
+            self.tables.push(t.clone());
+        }
+        let m2m: Vec<M2MTableSnapshot> = prev
+            .m2m_tables
+            .iter()
+            .filter(|m| on_kept(&m.src_table) || on_kept(&m.dst_table))
+            .filter(|m| self.m2m_table(&m.through).is_none())
+            .cloned()
+            .collect();
+        self.m2m_tables.extend(m2m);
+        for i in prev.indexes.iter().filter(|i| on_kept(&i.table)) {
+            self.indexes.push(i.clone());
+        }
+        for c in prev.checks.iter().filter(|c| on_kept(&c.table)) {
+            self.checks.push(c.clone());
+        }
+        for x in prev.excludes.iter().filter(|x| on_kept(&x.table)) {
+            self.excludes.push(x.clone());
+        }
+        self.sort();
+    }
+
+    /// Apply a hand-written `RenameTable` / `RenameColumn`; one already in
+    /// the snapshot is a no-op (#2573).
+    pub(crate) fn apply_rename(&mut self, change: &super::SchemaChange) {
+        use super::SchemaChange as SC;
+        let swap = |s: &mut String, from: &str, to: &str| {
+            if s == from {
+                *s = to.to_owned();
+            }
+        };
+        match change {
+            SC::RenameTable { old_name, new_name } => {
+                if self.table(new_name).is_some() || self.table(old_name).is_none() {
+                    return;
+                }
+                for t in &mut self.tables {
+                    swap(&mut t.name, old_name, new_name);
+                    for rel in t.fields.iter_mut().filter_map(|f| f.fk.as_mut()) {
+                        swap(&mut rel.to, old_name, new_name);
+                    }
+                    for c in &mut t.composite_fks {
+                        swap(&mut c.to, old_name, new_name);
+                    }
+                }
+                for m in &mut self.m2m_tables {
+                    swap(&mut m.src_table, old_name, new_name);
+                    swap(&mut m.dst_table, old_name, new_name);
+                }
+                for i in &mut self.indexes {
+                    swap(&mut i.table, old_name, new_name);
+                }
+                for c in &mut self.checks {
+                    swap(&mut c.table, old_name, new_name);
+                }
+                for x in &mut self.excludes {
+                    swap(&mut x.table, old_name, new_name);
+                }
+            }
+            SC::RenameColumn {
+                table,
+                old_column,
+                new_column,
+            } => {
+                let (old, new) = (old_column.as_str(), new_column.as_str());
+                // A junction's own column: M2M diffs emit these.
+                if let Some(m) = self.m2m_tables.iter_mut().find(|m| m.through == *table) {
+                    if m.src_col != new && m.dst_col != new {
+                        swap(&mut m.src_col, old, new);
+                        swap(&mut m.dst_col, old, new);
+                    }
+                }
+                let Some(t) = self
+                    .tables
+                    .iter_mut()
+                    .find(|t| t.name == *table && t.field(new).is_none() && t.field(old).is_some())
+                else {
+                    return;
+                };
+                for f in &mut t.fields {
+                    swap(&mut f.column, old, new);
+                }
+                for c in t.composite_fks.iter_mut().flat_map(|c| c.from.iter_mut()) {
+                    swap(c, old, new);
+                }
+                for t in &mut self.tables {
+                    for rel in t.fields.iter_mut().filter_map(|f| f.fk.as_mut()) {
+                        if rel.to == *table {
+                            swap(&mut rel.on, old, new);
+                        }
+                    }
+                    for c in t.composite_fks.iter_mut().filter(|c| c.to == *table) {
+                        for on in &mut c.on {
+                            swap(on, old, new);
+                        }
+                    }
+                }
+                for i in self.indexes.iter_mut().filter(|i| i.table == *table) {
+                    for c in i.columns.iter_mut().chain(i.include.iter_mut()) {
+                        swap(c, old, new);
+                    }
+                }
+                for x in self.excludes.iter_mut().filter(|x| x.table == *table) {
+                    for (c, _) in &mut x.elements {
+                        swap(c, old, new);
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.sort();
+    }
+
+    /// Add what branch `theirs` changed since `base`, so a merge node holds
+    /// both branches and nothing unmigrated (#2574).
+    pub(crate) fn merge_branch(&mut self, base: &Self, theirs: &Self) {
+        for b in &base.tables {
+            if theirs.table(&b.name).is_none() {
+                self.tables.retain(|t| t.name != b.name);
+            }
+        }
+        for t in &theirs.tables {
+            let was = base.table(&t.name);
+            if was == Some(t) {
+                continue;
+            }
+            let Some(ours) = self.tables.iter_mut().find(|o| o.name == t.name) else {
+                self.tables.push(t.clone());
+                continue;
+            };
+            let (fields, fks) = was.map_or((&[][..], &[][..]), |w| {
+                (&w.fields[..], &w.composite_fks[..])
+            });
+            merge_keyed(fields, &mut ours.fields, &t.fields, |f| f.column.clone());
+            merge_keyed(fks, &mut ours.composite_fks, &t.composite_fks, |c| {
+                c.name.clone()
+            });
+            if was.is_none_or(|w| w.model != t.model) {
+                ours.model.clone_from(&t.model);
+            }
+        }
+        merge_keyed(
+            &base.m2m_tables,
+            &mut self.m2m_tables,
+            &theirs.m2m_tables,
+            |m| m.through.clone(),
+        );
+        merge_keyed(&base.indexes, &mut self.indexes, &theirs.indexes, |i| {
+            i.name.clone()
+        });
+        merge_keyed(&base.checks, &mut self.checks, &theirs.checks, |c| {
+            c.name.clone()
+        });
+        merge_keyed(&base.excludes, &mut self.excludes, &theirs.excludes, |x| {
+            x.name.clone()
+        });
+        self.sort();
+    }
+
+    /// The order `from_registry` writes, so a rebuilt snapshot diffs clean.
+    fn sort(&mut self) {
+        self.tables.sort_by(|a, b| a.name.cmp(&b.name));
+        for t in &mut self.tables {
+            t.fields.sort_by(|a, b| a.column.cmp(&b.column));
+        }
+        self.m2m_tables.sort_by(|a, b| a.through.cmp(&b.through));
+        self.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        self.checks.sort_by(|a, b| a.name.cmp(&b.name));
+        self.excludes.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+/// Three-way merge by `key`: each entry `theirs` added, changed or dropped
+/// since `base` lands in `ours`.
+fn merge_keyed<T: Clone + PartialEq>(
+    base: &[T],
+    ours: &mut Vec<T>,
+    theirs: &[T],
+    key: impl Fn(&T) -> String,
+) {
+    for b in base {
+        if !theirs.iter().any(|t| key(t) == key(b)) {
+            ours.retain(|o| key(o) != key(b));
+        }
+    }
+    for t in theirs {
+        if base.iter().any(|b| b == t && key(b) == key(t)) {
+            continue;
+        }
+        match ours.iter_mut().find(|o| key(o) == key(t)) {
+            Some(o) => *o = t.clone(),
+            None => ours.push(t.clone()),
+        }
+    }
 }
 
 impl TableSnapshot {

@@ -27,7 +27,13 @@ use axum::{
 use super::session::{self, AdminSession, SESSION_COOKIE};
 use super::urls::AppState;
 use super::user::AdminUser;
-use crate::sso::link::{Account, AccountLookup, EmailLookup};
+use crate::signals::auth::{
+    meta_from_parts, send_user_logged_in, AuthFailureReason, AuthRequestMeta, UserLoggedInContext,
+};
+use crate::sso::link::{signal_refused, Account, AccountLookup, EmailLookup};
+
+/// The auth-signal `source` for a bare-admin SSO sign-in.
+const SIGNAL_SOURCE: &str = "admin_sso";
 
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
@@ -199,6 +205,7 @@ async fn sso_callback(
     // so a verified email never creates a link here.
     let key = cfg.key(LinkSource::Admin);
     let accounts = AdminAccounts(&state.pool);
+    let meta = || meta_from_parts(&extensions, &headers, Some(&format!("/login/sso/{slug}")));
     let uid =
         match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, &accounts).await {
             Ok(uid) => uid,
@@ -211,6 +218,9 @@ async fn sso_callback(
                     subject = %normalized.provider_user_id,
                     "sso refused: {e}"
                 );
+                if let Some(reason) = e.failure_reason() {
+                    signal_refused(SIGNAL_SOURCE, &normalized, reason, meta()).await;
+                }
                 return login_error(&state, "nouser");
             }
         };
@@ -218,6 +228,13 @@ async fn sso_callback(
         return login_error(&state, "nouser");
     };
     if !user.active {
+        signal_refused(
+            SIGNAL_SOURCE,
+            &normalized,
+            AuthFailureReason::Inactive,
+            meta(),
+        )
+        .await;
         return login_error(&state, "inactive");
     }
     // A confirmed device owes its code first, as on the password login (#2249).
@@ -233,15 +250,16 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     }
-    mint_session(&state, secret, &user)
+    mint_session(&state, secret, &user, meta()).await
 }
 
 /// Mint the normal admin session, bound to the user's stored password
 /// hash, exactly as a successful password login does.
-fn mint_session(
+async fn mint_session(
     state: &AppState,
     secret: &session::AdminSessionSecret,
     user: &AdminUser,
+    request: AuthRequestMeta,
 ) -> Response {
     let uid = user.id.get().copied().unwrap_or_default();
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
@@ -265,6 +283,14 @@ fn mint_session(
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
     clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+    send_user_logged_in(UserLoggedInContext {
+        source: SIGNAL_SOURCE,
+        user_id: uid,
+        username: user.username.clone(),
+        is_superuser: user.is_superuser,
+        request,
+    })
+    .await;
     resp
 }
 
@@ -420,7 +446,7 @@ mod second_factor {
             }
             use crate::signals::auth::{send_user_login_failed, AuthFailureReason};
             send_user_login_failed(crate::signals::auth::UserLoginFailedContext {
-                source: "admin",
+                source: SIGNAL_SOURCE,
                 attempted_username: Some(user.username.clone()),
                 reason: AuthFailureReason::InvalidCredentials,
                 request: crate::signals::auth::meta_from_parts(
@@ -439,7 +465,8 @@ mod second_factor {
             .await;
         }
         attempt.succeeded().await;
-        let mut resp = mint_session(&state, secret, &user);
+        let meta = meta_from_parts(&extensions, &headers, Some("/login/sso-totp"));
+        let mut resp = mint_session(&state, secret, &user, meta).await;
         clear_cookie(&mut resp, PENDING_COOKIE);
         resp
     }

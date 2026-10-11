@@ -30,6 +30,33 @@ pub struct FieldSchema {
     pub primary_key: bool,
     pub relation: Option<Relation>,
     /// Maximum string length in characters. Only meaningful for `FieldType::String`.
+    ///
+    /// A key needs one: MySQL cannot index the LONGTEXT an unbounded
+    /// `String` becomes (#2575).
+    ///
+    /// ```compile_fail
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_keyed")]
+    /// pub struct Keyed {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(unique)]
+    ///     pub email: String,
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
+    /// ```
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_keyed")]
+    /// pub struct Keyed {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(unique, max_length = 254)]
+    ///     pub email: String,
+    /// }
+    /// # fn main() {}
+    /// ```
     pub max_length: Option<u32>,
     /// Inclusive integer lower bound. Only meaningful for `I32`/`I64`.
     pub min: Option<i64>,
@@ -43,8 +70,8 @@ pub struct FieldSchema {
     /// migration writer reads this flag; the macro's INSERT path does
     /// the omission.
     pub auto: bool,
-    /// `#[rustango(auto_now)]`: restamped on every update, so schema-driven
-    /// writers (the admin) can tell it from `auto_now_add`.
+    /// `#[rustango(auto_now)]`: restamped on every update by the admin,
+    /// ViewSet, `ModelForm` and `UpdateView`, unlike `auto_now_add`.
     pub auto_now: bool,
     /// `true` when `#[rustango(unique)]` is present. The DDL writer emits
     /// `UNIQUE` inline on the column definition.
@@ -130,6 +157,97 @@ pub struct FieldSchema {
     /// [`crate::core::QueryError::UnknownValidator`].
     pub validators: &'static [&'static str],
 }
+
+/// Each keyed `String` shape is refused without `max_length` (#2575):
+/// primary key, field index, a container index on a renamed column, and
+/// a foreign key. The first block is the twin that compiles.
+/// ```
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail")]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+#[cfg(doctest)]
+pub struct KeyedStringsNeedMaxLength;
 
 impl FieldSchema {
     /// A plain `NOT NULL` column; every other field is off or empty,

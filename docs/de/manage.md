@@ -149,14 +149,14 @@ Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat
 wenn zwei Personen jeweils `makemigrations` auf ihrem eigenen Feature-Branch
 ausführen, sodass beide neuen Dateien auf denselben Elternknoten zeigen.
 Nachdem beide Branches gemergt sind, hat die Historie zwei „Blätter"
-(Endpunkte), und das nächste `makemigrations` würde willkürlich eines davon
-als Elternknoten wählen.
+(Endpunkte), und `makemigrations` verweigert die Arbeit, bis sie
+zusammengeführt sind.
 
 `--merge` erkennt dies und schreibt eine leere `NNNN_merge.json`, deren
-Elternknoten auf das alphabetisch letzte Blatt zeigt und die Historie wieder
-zu einer einzigen Kette vereint. Ihr Schema-Snapshot spiegelt den kombinierten
-Zustand wider, gelesen aus der lebendigen Modell-Registry — die Modelle beider
-Branches sind zu diesem Zeitpunkt einkompiliert, sodass der Snapshot genau ist.
+Elternknoten auf das alphabetisch letzte Blatt zeigt und deren `merges` die
+übrigen nennt; so wird die Historie wieder zu einer einzigen Kette vereint. Ihr
+Schema-Snapshot vereint die Snapshots der Zweige, sodass noch nicht migrierte
+Modelländerungen im nächsten `makemigrations` erscheinen.
 
 ```bash
 cargo run -- makemigrations --merge
@@ -636,7 +636,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.60.5
+rustango 0.60.6
 ```
 
 ### `about`
@@ -648,7 +648,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.60.5
+  version:        0.60.6
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

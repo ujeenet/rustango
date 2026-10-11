@@ -1395,6 +1395,7 @@ impl Chain {
             atomic: true,
             scope: prev.scope,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snap(current),
             forward,
         });
@@ -3389,9 +3390,165 @@ async fn type_change_with_a_default(pool: &Pool) {
     assert_eq!(got, [(3,)], "the old default is back");
 }
 
+// ---------------------------------------------------------------- #2576
+
+/// Registered as `managed = false`; its table came from a managed past.
+#[derive(rustango::Model)]
+#[rustango(table = "mad_um_legacy", managed = false)]
+#[allow(dead_code)]
+pub struct UmLegacy {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+/// A newly unmanaged model keeps its table: no DROP, and re-managing
+/// it unchanged writes nothing.
+async fn unmanaged_model_keeps_its_table(pool: &Pool) {
+    let (t, keep) = ("mad_um_legacy", "mad_um_other");
+    let chain = Chain::new(pool, "um", &[t, keep]).await;
+    let both = |extra: bool| {
+        let mut f = vec![id()];
+        if extra {
+            f.push(col("note", "string", json!({"max_length": 20})));
+        }
+        json!({"tables": [table(t, vec![id()]), table(keep, f)]})
+    };
+    chain.step(pool, both(false)).await.expect("initial");
+    exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[t, "id"])
+        .await
+        .unwrap();
+    // `from_registry` once the model is unmanaged, plus another edit.
+    let unmanaged = json!({"tables": [table(keep, vec![id(),
+        col("note", "string", json!({"max_length": 20}))])]});
+    chain
+        .step(pool, unmanaged)
+        .await
+        .expect("only the other edit");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: keep.into(),
+            column: "note".into(),
+        })],
+        "no DropTable for an unmanaged model"
+    );
+    assert_eq!(rows(pool, t).await, 1, "the table and its rows stay");
+    let back = make_migrations_from(chain.dir.path(), &snap(both(true)), None).expect("diff");
+    assert!(
+        back.is_none(),
+        "re-managing an unchanged model writes nothing: {:?}",
+        back.map(|m| m.forward)
+    );
+}
+
+// ---------------------------------------------------------------- #2573
+
+/// The documented `--empty` rename: the next diff starts from the
+/// renamed shape instead of emitting Add+Drop.
+async fn empty_migration_renames_reach_the_snapshot(pool: &Pool) {
+    let (old_t, new_t) = ("mad_er_post", "mad_er_article");
+    let chain = Chain::new(pool, "er", &[old_t, new_t]).await;
+    let status = |name: &str| col(name, "string", json!({"max_length": 20}));
+    chain
+        .step(
+            pool,
+            json!({"tables": [table(old_t, vec![id(), status("status")])]}),
+        )
+        .await
+        .expect("initial");
+    let mut mig =
+        rustango::migrate::manage::make_empty(chain.dir.path(), "rename").expect("--empty");
+    mig.forward = vec![
+        Operation::Schema(SchemaChange::RenameColumn {
+            table: old_t.into(),
+            old_column: "status".into(),
+            new_column: "state".into(),
+        }),
+        Operation::Schema(SchemaChange::RenameTable {
+            old_name: old_t.into(),
+            new_name: new_t.into(),
+        }),
+    ];
+    chain.write(&mig);
+    chain.migrate(pool).await.expect("the hand-written renames");
+    let renamed = |extra: bool| {
+        let mut f = vec![id(), status("state")];
+        if extra {
+            f.push(col("body", "string", json!({})));
+        }
+        json!({"tables": [table(new_t, f)]})
+    };
+    let next = make_migrations_from(chain.dir.path(), &snap(renamed(false)), None).expect("diff");
+    assert!(
+        next.is_none(),
+        "the renames are already applied: {:?}",
+        next.map(|m| m.forward)
+    );
+    chain
+        .step(pool, renamed(true))
+        .await
+        .expect("a later edit diffs from the renamed table");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: new_t.into(),
+            column: "body".into(),
+        })]
+    );
+}
+
+// ---------------------------------------------------------------- #2574
+
+/// Two branches' `0002`s: makemigrations refuses until `--merge`, and the
+/// merge snapshot keeps an unmigrated model edit for the next diff.
+async fn branched_chain_needs_a_merge(pool: &Pool) {
+    let t = "mad_br_post";
+    let chain = Chain::new(pool, "br", &[t]).await;
+    let s = |name: &str| col(name, "string", json!({"max_length": 20}));
+    let with = |cols: &[&str]| {
+        let mut f = vec![id()];
+        f.extend(cols.iter().map(|c| s(c)));
+        json!({"tables": [table(t, f)]})
+    };
+    let initial = chain.step(pool, with(&[])).await.expect("initial");
+    chain.step(pool, with(&["a"])).await.expect("branch a");
+    chain.write(&Migration {
+        name: "0002_branch_b".into(),
+        prev: Some(initial),
+        snapshot: snap(with(&["b"])),
+        forward: vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "b".into(),
+        })],
+        ..chain.head()
+    });
+    chain.migrate(pool).await.expect("both branches");
+    let err = make_migrations_from(chain.dir.path(), &snap(with(&["a", "b"])), None)
+        .expect_err("a branched chain");
+    assert!(err.to_string().contains("--merge"), "{err}");
+    rustango::migrate::make::make_merge_migration(chain.dir.path())
+        .expect("merge")
+        .expect("a merge file");
+    chain.migrate(pool).await.expect("the merge node");
+    chain
+        .step(pool, with(&["a", "b", "c"]))
+        .await
+        .expect("the unmigrated edit");
+    assert_eq!(
+        chain.head().forward,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: t.into(),
+            column: "c".into(),
+        })]
+    );
+}
+
 tri_dialect_test!(
     setup: no_setup,
     scenarios: [
+        unmanaged_model_keeps_its_table,
+        empty_migration_renames_reach_the_snapshot,
+        branched_chain_needs_a_merge,
         type_change_with_a_default,
         dropped_exclude_unapplies,
         case_insensitive_change_applies,

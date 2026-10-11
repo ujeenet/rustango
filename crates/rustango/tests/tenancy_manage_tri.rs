@@ -208,6 +208,7 @@ fn migration(dir: &Path, name: &str, sql: &str) {
         atomic: true,
         scope: rustango::migrate::MigrationScope::Tenant,
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
         forward: vec![rustango::migrate::Operation::Data(
             rustango::migrate::DataOp {

@@ -484,6 +484,7 @@ async fn mixed_scope_tenants_use_the_committed_system_chain() {
             atomic: true,
             scope,
             replaces: Vec::new(),
+            merges: Vec::new(),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(
                 table.name.clone(),
             ))],

@@ -1453,7 +1453,21 @@ async fn member_callback_signs_in_by_link_only() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx));
+    // #2560: the default refuses an unknown email.
+    let strict = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx.clone()));
+    env.idp.assert("sub-stranger", "stranger@example.com");
+    let resp = handshake(&strict, &env.tenants[0].host, "/auth", "corp").await;
+    assert!(
+        !set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "default config provisioned a stranger"
+    );
+    let app = member_sso_router(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
     let member = |sub: &'static str, email: &'static str| {
         let app = app.clone();
         let env = &env;
@@ -1510,8 +1524,11 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
-        .layer(axum::Extension(ctx));
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
     let begin = send(
         &app,
         Request::builder()
@@ -1553,6 +1570,106 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
         body.contains("href=\"/acme/auth\""),
         "back link keeps the prefix: {body}"
     );
+}
+
+/// #2559 — every SSO surface fires `user_logged_in` and `user_login_failed`.
+#[tokio::test]
+async fn sso_sign_ins_fire_the_auth_signals() {
+    use rustango::extractors::TenantContext;
+    use rustango::signals::auth as sig;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    let _g = SUITE.lock().await;
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (s1, s2) = (seen.clone(), seen.clone());
+    let in_id = sig::connect_user_logged_in(move |c| {
+        s1.lock()
+            .unwrap()
+            .push(format!("in:{}:{}", c.source, c.username));
+        async {}
+    });
+    let fail_id = sig::connect_user_login_failed(move |c| {
+        s2.lock().unwrap().push(format!(
+            "failed:{}:{:?}:{}",
+            c.source,
+            c.reason,
+            c.attempted_username.unwrap_or_default()
+        ));
+        async {}
+    });
+    let take = || std::mem::take(&mut *seen.lock().unwrap());
+
+    // Bare admin: refused without a link, signed in with one.
+    let (app, pool, idp) = bare_admin().await;
+    idp.assert("sub-root", "root@example.com");
+    handshake(&app, "admin.test", "/login", "corp").await;
+    assert_eq!(
+        take(),
+        ["failed:admin_sso:InvalidCredentials:root@example.com"]
+    );
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    let root = rustango::admin::AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", root.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    handshake(&app, "admin.test", "/login", "corp").await;
+    assert_eq!(take(), ["in:admin_sso:root"]);
+
+    // Tenant console.
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", false).await;
+    assert!(env.sso("corp", "sub-ann", "ann@example.com").await.is_err());
+    assert_eq!(
+        take(),
+        ["failed:tenant_admin_sso:InvalidCredentials:ann@example.com"]
+    );
+    env.tenant_provider("open", true).await;
+    assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_ok());
+    assert_eq!(take(), ["in:tenant_admin_sso:ann"]);
+    // An unverified email is never named; the subject is.
+    *env.idp.claims.lock().unwrap() =
+        serde_json::json!({"sub": "sub-x", "email": "x@example.com", "email_verified": false});
+    handshake(&env.admin, &env.tenants[0].host, "/__login", "open").await;
+    assert_eq!(take(), ["failed:tenant_admin_sso:InvalidCredentials:sub-x"]);
+    env.deactivate(ann).await;
+    assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_err());
+    assert_eq!(take(), ["failed:tenant_admin_sso:Inactive:ann@example.com"]);
+
+    // Member SSO: the default refuses a stranger; provisioning signs in.
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let host = env.tenants[0].host.clone();
+    let strict = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx.clone()));
+    env.idp.assert("sub-new", "new@example.com");
+    handshake(&strict, &host, "/auth", "corp").await;
+    assert_eq!(
+        take(),
+        ["failed:member_sso:InvalidCredentials:new@example.com"]
+    );
+    let open = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    handshake(&open, &host, "/auth", "corp").await;
+    assert_eq!(take(), ["in:member_sso:new"]);
+
+    sig::disconnect_user_logged_in(in_id);
+    sig::disconnect_user_login_failed(fail_id);
 }
 
 // ---- upgrade: a framework column lives only in the system chain ----------

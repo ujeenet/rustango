@@ -133,6 +133,11 @@ pub enum QueryError {
         reason: BoundedDmlReason,
     },
 
+    /// `update()`/`delete()` on a `union`/`intersection`/`difference`:
+    /// the statement cannot carry the set operation, so it is refused (#2452).
+    #[error("`{model}`: update()/delete() refused: the queryset has a set operation")]
+    SetOperationDml { model: &'static str },
+
     /// The value does not fit the lookup: `__in` without a list,
     /// `__isnull` without a bool, `__between` without exactly two
     /// elements.
@@ -199,6 +204,52 @@ pub enum QueryError {
     GroupByJoinUnreachable { model: &'static str, column: String },
 }
 
+impl QueryError {
+    /// `(field, message)` when a field's declared rules rejected the value:
+    /// the client's error, not the server's (#2529).
+    #[must_use]
+    #[cfg_attr(
+        not(any(feature = "admin", feature = "tenancy", feature = "template_views")),
+        allow(dead_code)
+    )]
+    pub(crate) fn value_rejection(&self) -> Option<(&str, String)> {
+        match self {
+            Self::MaxLengthExceeded {
+                field, max, actual, ..
+            } => Some((
+                field,
+                format!("must be {max} characters or fewer (got {actual})"),
+            )),
+            Self::OutOfRange {
+                field,
+                value,
+                min,
+                max,
+                ..
+            } => Some((
+                field,
+                match (min, max) {
+                    (Some(lo), Some(hi)) => format!("must be between {lo} and {hi} (got {value})"),
+                    (Some(lo), None) => format!("must be ≥ {lo} (got {value})"),
+                    (None, Some(hi)) => format!("must be ≤ {hi} (got {value})"),
+                    (None, None) => format!("invalid value: {value}"),
+                },
+            )),
+            Self::InvalidChoice {
+                field,
+                value,
+                allowed,
+                ..
+            } => Some((
+                field,
+                format!("`{value}` is not one of: {}", allowed.join(", ")),
+            )),
+            Self::ValidatorFailed { field, reason, .. } => Some((field, reason.clone())),
+            _ => None,
+        }
+    }
+}
+
 /// Why a bounded `update()`/`delete()` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -207,6 +258,11 @@ pub enum BoundedDmlReason {
     NoSinglePrimaryKey,
     #[error("order_by spans a relation")]
     RelationOrderBy,
+    /// Never returned: a set operation is now [`QueryError::SetOperationDml`].
+    #[deprecated(
+        since = "0.60.6",
+        note = "match `QueryError::SetOperationDml`; removed in 0.61.0"
+    )]
     #[error("the queryset has a set operation")]
     SetOperation,
     #[error("limit or offset is negative")]

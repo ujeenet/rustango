@@ -1385,6 +1385,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
         atomic: true,
         scope: super::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: prev_snapshot,
         forward: vec![],
     };
@@ -1441,6 +1442,7 @@ pub fn make_data_migration(
         atomic: true,
         scope: super::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: prev_snapshot,
         forward: vec![op],
     };

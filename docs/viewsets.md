@@ -715,7 +715,7 @@ your own handlers send (#1193):
 > (below), put it behind the [auth middleware](auth-backends.md) (`require_auth`),
 > or both, before exposing writes.
 
-**Permissions** gate each action on codenames (OR within an action):
+**Permissions** gate each action on codenames. A user needs all of an action's codenames:
 
 ```rust
 use rustango::viewset::{ViewSet, ViewSetPerms};

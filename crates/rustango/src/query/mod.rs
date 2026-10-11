@@ -1218,7 +1218,7 @@ impl<T: Model> QuerySet<T> {
     ///
     /// | Suffix | SQL | Value treatment |
     /// |---|---|---|
-    /// | (none) / `__exact` | `<col> = ?` | as-is |
+    /// | (none) / `__exact` | `<col> = ?` | as-is; `None` gives `<col> IS NULL` |
     /// | `__iexact` | `<col> ILIKE ?` | as-is (no wildcards) |
     /// | `__contains` | `<col> LIKE ?` | wrap `%value%` |
     /// | `__icontains` | `<col> ILIKE ?` | wrap `%value%` |
@@ -1228,7 +1228,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__iendswith` | `<col> ILIKE ?` | wrap `%value` |
     /// | `__like` / `__ilike` / `__not_like` / `__not_ilike` | `<col> [NOT] (I)LIKE ?` | value bound verbatim — caller controls `%` / `_` placement. Eloquent `whereLike` / `whereNotLike` parity. |
     /// | `__gt` / `__gte` / `__lt` / `__lte` | direct map | as-is |
-    /// | `__ne` | `<col> <> ?` | as-is |
+    /// | `__ne` | `<col> <> ?` | as-is; `None` gives `<col> IS NOT NULL` |
     /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
     /// | `__not_in` | `<col> NOT IN (...)` | value must be `SqlValue::List`. Eloquent `whereNotIn` parity. |
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
@@ -1972,6 +1972,7 @@ impl<T: Model> QuerySet<T> {
         let (pending, span_joins) = lower_relation_spans(model, self.pending)?;
         let where_clause = resolve_pending(model, pending)?;
         let mut joins = lower_select_related(model, &self.select_related)?;
+        let select_related: Vec<&'static str> = joins.iter().map(|j| j.alias).collect();
         // Ad-hoc joins come after the FK-driven select_related ones, so
         // column order stays stable and user joins sit next to the user
         // WHERE.
@@ -2092,6 +2093,7 @@ impl<T: Model> QuerySet<T> {
             compound_order_by,
             compound_limit,
             compound_offset: comb_offset,
+            select_related,
         })
     }
 
@@ -2190,7 +2192,8 @@ impl<T: Model> QuerySet<T> {
     ///
     /// # Errors
     /// As [`QuerySet::compile`], plus [`QueryError::BoundedDmlUnsupported`]
-    /// when a limit or offset cannot be bounded.
+    /// when a limit or offset cannot be bounded and
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Fold global scopes into the WHERE, so a bulk delete honours
         // the same filters as a fetch. A `published_only` scope means
@@ -2413,7 +2416,8 @@ impl<T: Model> UpdateBuilder<T> {
     /// unknown field, [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type, and
     /// [`QueryError::BoundedDmlUnsupported`] if the queryset's limit or
-    /// offset cannot be bounded by primary key.
+    /// offset cannot be bounded by primary key, or
+    /// [`QueryError::SetOperationDml`] on a set operation.
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
@@ -3081,6 +3085,7 @@ fn never_match_clause(
 }
 
 /// Bound an UPDATE/DELETE: `<where> AND pk IN (SELECT pk … ORDER BY …, pk LIMIT … OFFSET …)`.
+/// A set operation is refused with or without a bound.
 /// The outer `<where>` stays so a row changed by a concurrent writer is not claimed.
 /// Without a limit or offset the order cannot change the row set, so it is left out.
 fn bound_dml_where(
@@ -3092,6 +3097,10 @@ fn bound_dml_where(
     has_compound: bool,
 ) -> Result<WhereExpr, QueryError> {
     use crate::core::BoundedDmlReason as Why;
+    // UPDATE/DELETE has no set operation; dropping it widens the write.
+    if has_compound {
+        return Err(QueryError::SetOperationDml { model: model.name });
+    }
     if limit.is_none() && offset.is_none() {
         return Ok(where_clause);
     }
@@ -3104,9 +3113,6 @@ fn bound_dml_where(
     // SQLite reads `LIMIT -1` as no limit at all.
     if limit.is_some_and(|n| n < 0) || offset.is_some_and(|n| n < 0) {
         return refuse(Why::Negative);
-    }
-    if has_compound {
-        return refuse(Why::SetOperation);
     }
     let mut pks = model.fields.iter().filter(|f| f.primary_key);
     let pk = match (pks.next(), pks.next()) {
@@ -3408,7 +3414,8 @@ fn resolve_span_chain(
                     alias_path = format!("{alias_path}__{seg}");
                     intern_join_alias(&alias_path)?
                 };
-                let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+                // A span only filters or orders, so it projects nothing:
+                // extra columns broke DISTINCT, values() and IN subqueries (#2412).
                 joins.push(Join {
                     target,
                     alias,
@@ -3421,7 +3428,7 @@ fn resolve_span_chain(
                         op: Op::Eq,
                         rhs: Expr::AliasedColumn { alias, column: on },
                     },
-                    project,
+                    project: Vec::new(),
                 });
                 current = target;
                 prev_alias = alias;
@@ -4532,7 +4539,7 @@ impl<T: Model> DateTimesQuerySet<T> {
 /// column list, then delegates to `QuerySet::compile` and stamps the
 /// projection onto the resulting [`SelectQuery`].
 fn compile_values_select<T: Model>(
-    qs: QuerySet<T>,
+    mut qs: QuerySet<T>,
     cols: Vec<&'static str>,
 ) -> Result<SelectQuery, QueryError> {
     if cols.is_empty() {
@@ -4547,6 +4554,8 @@ fn compile_values_select<T: Model>(
             });
         }
     }
+    // A projection reads no related row, so `select_related` adds nothing.
+    qs.select_related.clear();
     let mut q = qs.compile()?;
     project_every_branch(&mut q, &cols);
     Ok(q)

@@ -119,7 +119,7 @@ pub struct Doc {
     tags: serde_json::Value,
     #[rustango(index(method = "brin"))]
     created_at: chrono::DateTime<chrono::Utc>,
-    #[rustango(index)]
+    #[rustango(index, max_length = 200)]
     title: String,
 }
 

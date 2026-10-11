@@ -178,8 +178,8 @@ Monta dos rutas por slug a partir de `login_base`:
 
 Diferencias respecto al flujo del admin:
 
-- **Aprovisionamiento automático.** Con `auto_provision = true` (el valor por
-  defecto), un correo de IdP verificado sin una fila `rustango_users` coincidente
+- **Aprovisionamiento automático.** Con `auto_provision = true` (opcional; el valor por
+  defecto es `false`), un correo de IdP verificado sin una fila `rustango_users` coincidente
   **crea** una — nombre de usuario a partir de la parte local del correo (deduplicado
   ante un choque), un hash de contraseña aleatorio real pero inutilizable (los
   usuarios de SSO no pueden iniciar sesión con contraseña) — y la enlaza. Un
