@@ -866,11 +866,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .column
             .clone()
             .unwrap_or_else(|| ident_name(field.ident.as_ref().expect("named")));
-        if fa.primary_key || fa.unique || all_indexes.iter().any(|i| i.columns.contains(&col)) {
+        // MySQL indexes every foreign-key column too.
+        let relation = det.fk_inner.is_some() || fa.fk.is_some() || fa.o2o.is_some();
+        if fa.primary_key
+            || fa.unique
+            || relation
+            || all_indexes.iter().any(|i| i.columns.contains(&col))
+        {
             return Err(syn::Error::new_spanned(
                 field,
-                "a primary-key, unique or indexed `String` needs `max_length`: \
-                 MySQL cannot index an unbounded (LONGTEXT) column",
+                "a primary-key, unique, indexed or foreign-key `String` needs \
+                 `max_length`: MySQL cannot index an unbounded (LONGTEXT) column",
             ));
         }
     }

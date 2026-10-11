@@ -158,6 +158,97 @@ pub struct FieldSchema {
     pub validators: &'static [&'static str],
 }
 
+/// Each keyed `String` shape is refused without `max_length` (#2575):
+/// primary key, field index, a container index on a renamed column, and
+/// a foreign key. The first block is the twin that compiles.
+/// ```
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail")]
+///     pub email: String,
+///     #[rustango(max_length = 8, on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # #[derive(Clone, rustango::Model)] #[rustango(table = "doc_parent")]
+/// # pub struct Parent { #[rustango(primary_key, max_length = 8)] pub code: String }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_keys", index("mail"))]
+/// pub struct Keys {
+///     #[rustango(primary_key, max_length = 8)]
+///     pub code: String,
+///     #[rustango(index, max_length = 32)]
+///     pub tag: String,
+///     #[rustango(column = "mail", max_length = 254)]
+///     pub email: String,
+///     #[rustango(on = "code")]
+///     pub parent: rustango::sql::ForeignKey<Parent, String>,
+/// }
+/// # fn main() {}
+/// ```
+#[cfg(doctest)]
+pub struct KeyedStringsNeedMaxLength;
+
 impl FieldSchema {
     /// A plain `NOT NULL` column; every other field is off or empty,
     /// except `editable`. Set the rest by assigning fields:

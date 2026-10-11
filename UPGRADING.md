@@ -179,7 +179,7 @@ A write breaking `choices`, `max_length`, `min`/`max` or a named validator was a
 
 ### Keyed `String` fields need `max_length`
 
-A primary-key, `unique` or indexed `String` (field or container index) without `max_length` no longer compiles (#2575): MySQL cannot index its LONGTEXT. Add `max_length = N`; on PG and SQLite the next `makemigrations` emits the type change.
+A primary-key, `unique`, indexed or foreign-key `String` (field or container index) without `max_length` no longer compiles (#2575): MySQL cannot index its LONGTEXT. Add `max_length = N`; on PG and SQLite the next `makemigrations` emits the type change.
 
 ## 0.60.5
 
