@@ -9,9 +9,9 @@
 //!
 //! ```text
 //! cargo run -- create-admin alice                          # prompts for password
-//! cargo run -- create-admin alice --password secret        # explicit
+//! cargo run -- create-admin alice --password-stdin         # scripts
 //! cargo run -- create-admin alice --generate               # mints a random one + prints
-//! cargo run -- create-admin alice --password secret --superuser
+//! cargo run -- create-admin alice --generate --superuser
 //! ```
 
 use std::io::Write;
@@ -39,6 +39,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
     let mut password: Option<String> = None;
     let mut generate = false;
     let mut is_superuser = false;
+    let mut password_stdin = false;
+    let mut skip_validation = false;
 
     while let Some(token) = iter.next() {
         match token.as_str() {
@@ -50,10 +52,13 @@ pub async fn create_admin_cmd<W: Write + Send>(
             }
             "--generate" => generate = true,
             "--superuser" => is_superuser = true,
+            "--password-stdin" => password_stdin = true,
+            "--skip-validation" => skip_validation = true,
             "--help" | "-h" => {
                 writeln!(
                     w,
-                    "create-admin <username> [--password <p> | --generate] [--superuser]"
+                    "create-admin <username> [--password <p> | --password-stdin | --generate] \
+                     [--skip-validation] [--superuser]"
                 )?;
                 return Ok(());
             }
@@ -72,7 +77,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
             }
         }
     }
-    if generate && password.is_some() {
+    if generate && (password.is_some() || password_stdin) {
         return Err(MigrateError::Validation(
             "create-admin: --generate and --password are mutually exclusive".into(),
         ));
@@ -95,16 +100,15 @@ pub async fn create_admin_cmd<W: Write + Send>(
         let plain = generate_password(20);
         (plain, true)
     } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("Password: ")
-                .map_err(|e| MigrateError::Validation(format!("prompt failed: {e}")))?
-                .ok_or_else(|| {
-                    MigrateError::Validation(
-                        "create-admin requires --password (or run interactively)".into(),
-                    )
-                })?,
+        // Same reader and validators as the tenancy verbs (#2589).
+        use manage_interactive::{NewPasswordError, PasswordInput};
+        let err = |e: NewPasswordError| match e {
+            NewPasswordError::Io(e) => MigrateError::Io(e),
+            e => MigrateError::Validation(format!("create-admin: {e}")),
         };
+        let input = PasswordInput::from_flags(password, password_stdin).map_err(err)?;
+        let p = manage_interactive::read_new_password(input, skip_validation, "Password: ")
+            .map_err(err)?;
         (p, false)
     };
 

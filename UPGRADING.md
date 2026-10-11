@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### CLI passwords are validated (#2589)
+
+The `manage` password verbs now refuse a password the forms refuse (under 8 characters). Scripts that set short passwords add `--skip-validation`; prefer `RUSTANGO_PASSWORD` or `--password-stdin` over `--password`.
+
 ### Login attempts are reserved up front (#2378)
 
 HTTP Basic and API-key checks now hold a per-IP and account-lock slot while they verify, so more than `ip_limit` (or `max_attempts` for one account) uncached checks in flight at once get `429`. An attempt dropped without an outcome is refunded.

@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — CLI password verbs validate, confirm, and read off argv (#2589)
+
+`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns.
+
 ### Fixed — HTTP Basic skips argon2 for a credential verified in the last 30 s (#2617)
 
 The in-memory cache key includes the stored hash, so a password change misses; `active` is read on every request. A hit skips the login limits.

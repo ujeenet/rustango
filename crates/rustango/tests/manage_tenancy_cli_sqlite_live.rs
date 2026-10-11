@@ -162,13 +162,27 @@ async fn create_user_never_takes_a_flag_as_the_username() {
     let b = boot().await;
     b.tenant("acme").await;
     let res = b
-        .run(&["create-user", "acme", "--superuser", "--password", "pw"])
+        .run(&[
+            "create-user",
+            "acme",
+            "--superuser",
+            "--skip-validation",
+            "--password",
+            "pw",
+        ])
         .await;
     assert!(res.is_err(), "no username given, but: {res:?}");
 
     // Flags before and after the positionals mean the same thing.
     let out = b
-        .run(&["create-superuser", "--password", "pw", "acme", "bob"])
+        .run(&[
+            "create-superuser",
+            "--skip-validation",
+            "--password",
+            "pw",
+            "acme",
+            "bob",
+        ])
         .await
         .expect("create-superuser");
     assert!(
@@ -195,9 +209,16 @@ async fn a_valued_flag_never_takes_the_next_flag_as_its_value() {
 async fn grant_perm_refuses_a_misspelt_role_flag() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     for verb in ["grant-perm", "revoke-perm"] {
         let res = b.run(&[verb, "acme", "bob", "post.change", "--rol"]).await;
         assert!(res.is_err(), "{verb} ignored `--rol`: {res:?}");
@@ -251,9 +272,16 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
 async fn role_and_operator_verbs_refuse_extra_arguments() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     b.run(&["create-role", "acme", "editor"])
         .await
         .expect("role");
@@ -269,9 +297,15 @@ async fn role_and_operator_verbs_refuse_extra_arguments() {
     }
 
     for name in ["alice", "carol"] {
-        b.run(&["create-operator", name, "--password", "pw"])
-            .await
-            .expect("operator");
+        b.run(&[
+            "create-operator",
+            name,
+            "--skip-validation",
+            "--password",
+            "pw",
+        ])
+        .await
+        .expect("operator");
     }
     let res = b
         .run(&["set-operator-active", "alice", "carol", "--off"])
@@ -286,9 +320,16 @@ async fn role_and_operator_verbs_refuse_extra_arguments() {
 async fn user_verbs_take_flags_anywhere() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     let res = b
         .run(&["set-superuser", "acme", "bob", "--on", "--off"])
         .await;
@@ -298,9 +339,16 @@ async fn user_verbs_take_flags_anywhere() {
         .await
         .expect("leading flag");
     assert!(out.contains("is_superuser=false"), "{out}");
-    b.run(&["reset-password", "--password", "pw2", "acme", "bob"])
-        .await
-        .expect("leading flag");
+    b.run(&[
+        "reset-password",
+        "--skip-validation",
+        "--password",
+        "pw2",
+        "acme",
+        "bob",
+    ])
+    .await
+    .expect("leading flag");
 }
 
 /// set-superuser and reset-password write through the ORM (#1952).
@@ -308,9 +356,16 @@ async fn user_verbs_take_flags_anywhere() {
 async fn set_superuser_and_reset_password_write_the_row() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     let url = format!("sqlite://{}", b._tmp.path().join("acme.db").display());
     let tenant = sqlx::SqlitePool::connect(&url).await.expect("tenant db");
     let is_super = || {
@@ -326,15 +381,23 @@ async fn set_superuser_and_reset_password_write_the_row() {
     assert!(!is_super().await.unwrap());
     assert!(b.run(&["set-superuser", "acme", "nobody"]).await.is_err());
 
-    b.run(&["reset-password", "acme", "bob", "--password", "pw2"])
-        .await
-        .expect("reset");
+    b.run(&[
+        "reset-password",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw2",
+    ])
+    .await
+    .expect("reset");
     b.run(&[
         "change-password",
         "acme",
         "bob",
         "--current",
         "pw2",
+        "--skip-validation",
         "--password",
         "pw3",
     ])
@@ -347,19 +410,39 @@ async fn set_superuser_and_reset_password_write_the_row() {
 async fn password_and_key_verbs_take_flags_anywhere() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-operator", "--password", "pw", "alice"])
-        .await
-        .expect("create-operator");
-    b.run(&["reset-operator-password", "--password", "pw2", "alice"])
-        .await
-        .expect("reset-operator-password");
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-operator",
+        "--skip-validation",
+        "--password",
+        "pw",
+        "alice",
+    ])
+    .await
+    .expect("create-operator");
+    b.run(&[
+        "reset-operator-password",
+        "--skip-validation",
+        "--password",
+        "pw2",
+        "alice",
+    ])
+    .await
+    .expect("reset-operator-password");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     b.run(&[
         "change-password",
         "--current",
         "pw",
+        "--skip-validation",
         "--password",
         "pw2",
         "acme",
@@ -381,9 +464,16 @@ async fn password_and_key_verbs_take_flags_anywhere() {
 async fn api_key_expiry_out_of_range_is_refused() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
     for days in ["999999999999", "0", "-3"] {
         let err = b
             .run(&["create-api-key", "acme", "bob", "--expires-days", days])
@@ -401,9 +491,16 @@ async fn api_key_expiry_out_of_range_is_refused() {
 async fn flush_never_touches_the_registry() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
 
     let plain = b.run(&["flush", "--yes"]).await;
     let listed = b.run(&["list-tenants"]).await.expect("list");
@@ -437,9 +534,16 @@ async fn flush_never_touches_the_registry() {
 async fn flush_tenant_dry_run_unknown_slug_and_no_filter() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["create-user", "acme", "bob", "--password", "pw"])
-        .await
-        .expect("user");
+    b.run(&[
+        "create-user",
+        "acme",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("user");
 
     let out = b
         .run(&["flush", "--tenant", "acme"])
