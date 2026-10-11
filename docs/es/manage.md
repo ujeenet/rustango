@@ -145,14 +145,14 @@ Corrige un historial de migraciones que se ha dividido en dos ramas
 (issue #346). Esto ocurre cuando
 dos personas ejecutan cada una `makemigrations` en su propia rama de
 característica, de modo que ambos archivos nuevos apuntan al mismo padre. Tras
-fusionar ambas ramas, el historial tiene dos «hojas» (puntos finales), y el
-siguiente `makemigrations` elegiría arbitrariamente una como su padre.
+fusionar ambas ramas, el historial tiene dos «hojas» (puntos finales), y
+`makemigrations` se niega a ejecutarse hasta que se fusionen.
 
 `--merge` detecta esto y escribe un `NNNN_merge.json` vacío cuyo padre apunta a
-la última hoja en orden alfabético, reunificando el historial en una sola
-cadena. Su instantánea de esquema refleja el estado combinado, leído del
-registro de modelos vivo — los modelos de ambas ramas están compilados en este
-punto, así que la instantánea es precisa.
+la última hoja en orden alfabético y cuyo `merges` nombra las demás,
+reunificando el historial en una sola cadena. Su instantánea de esquema une las
+instantáneas de las ramas, así que los cambios de modelo aún sin migrar aparecen
+en el siguiente `makemigrations`.
 
 ```bash
 cargo run -- makemigrations --merge

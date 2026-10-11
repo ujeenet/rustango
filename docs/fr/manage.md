@@ -152,15 +152,14 @@ Corrige un historique de migrations qui s'est scindé en deux branches
 se produit quand deux personnes exécutent chacune `makemigrations` sur leur
 propre branche de fonctionnalité, de sorte que les deux nouveaux fichiers
 pointent vers le même parent. Une fois les deux branches fusionnées,
-l'historique compte deux « feuilles » (points de fin), et le prochain
-`makemigrations` en choisirait une arbitrairement comme parent.
+l'historique compte deux « feuilles » (points de fin), et
+`makemigrations` refuse de s'exécuter tant qu'elles ne sont pas fusionnées.
 
 `--merge` détecte cette situation et écrit un `NNNN_merge.json` vide dont
-le parent pointe vers la dernière feuille par ordre alphabétique,
-réunissant l'historique en une seule chaîne. Son instantané de schéma
-reflète l'état combiné, lu depuis le registre de modèles en direct — les
-modèles des deux branches sont compilés à ce stade, donc l'instantané est
-exact.
+le parent pointe vers la dernière feuille par ordre alphabétique et dont
+`merges` nomme les autres, réunissant l'historique en une seule chaîne. Son
+instantané de schéma joint ceux des branches, donc les modifications de
+modèles pas encore migrées apparaissent au prochain `makemigrations`.
 
 ```bash
 cargo run -- makemigrations --merge
