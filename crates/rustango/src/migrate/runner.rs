@@ -649,7 +649,7 @@ async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateErr
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), body).await
+    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), Box::pin(body)).await
 }
 
 /// The creation schema of `pool`'s sessions, for FK targets (#1718).
@@ -2738,10 +2738,13 @@ async fn with_migrate_lock_pool<F, R>(
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, async {
-        create_ledger_locked(pool, ledger).await?;
-        body.await
-    })
+    hold_migrate_lock(
+        pool,
+        Box::pin(async {
+            create_ledger_locked(pool, ledger).await?;
+            body.await
+        }),
+    )
     .await
 }
 
@@ -2760,7 +2763,7 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, body(LockHeld(()))).await
+    hold_migrate_lock(pool, Box::pin(body(LockHeld(())))).await
 }
 
 tokio::task_local! {
@@ -2799,7 +2802,12 @@ fn refuse_nested_lock() -> Result<(), MigrateError> {
     Ok(())
 }
 
-async fn hold_migrate_lock<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
+/// `body` is boxed: inline, every caller's future carried it and migrate
+/// overflowed a 2 MiB stack in debug builds (#2305).
+async fn hold_migrate_lock<F, R>(
+    pool: &crate::sql::Pool,
+    body: std::pin::Pin<Box<F>>,
+) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {

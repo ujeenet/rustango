@@ -6,6 +6,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.60.6] — 2026-10-10
 
+### Fixed — `migrate` fits a 2 MiB stack again (#2305)
+
+The migrate-lock body is boxed, so each migrate future shrinks from ~50 KB to ~9 KB; `migrate <target>` no longer overflows a debug tokio worker.
+
 ### Fixed — an INSERT naming no column works on MySQL and in a SQLite bulk insert (#2416)
 
 MySQL writes `() VALUES ()`; a SQLite bulk insert fills an integer PK with `NULL`. New `Dialect::default_values_clause` and `Dialect::default_pk_cell`.
