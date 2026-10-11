@@ -928,7 +928,11 @@ async fn basic_counts_only_failures_per_ip() {
         let r = env.basic(&bad, &format!("ghost{n}"), "x").await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
-    assert!(is_429(&env.basic(&bad, &name, PASS).await));
+    // A credential not verified moments ago is refused; a cached one is
+    // no guess and skips the limits (#2617).
+    let fresh = unique("svc");
+    env.user(&fresh).await;
+    assert!(is_429(&env.basic(&bad, &fresh, PASS).await));
 }
 
 /// Failed form logins do not lock the same user's HTTP Basic access.

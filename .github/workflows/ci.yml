@@ -1088,6 +1088,7 @@ jobs:
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
+          --test basic_auth_cache_tri
           --test system_chain_order_tri
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
@@ -1334,6 +1335,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
+      - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test basic_auth_cache_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri

@@ -98,19 +98,77 @@ async fn begin(
     scope: fn(String) -> LoginScope,
     username: &str,
 ) -> Result<LoginAttempt, AuthError> {
-    let Some(slug) = parts.extensions.get::<super::TenantSlug>() else {
-        tracing::error!("auth backend ran without a TenantSlug; use require_auth / optional_auth");
-        return Err(AuthError::InvalidToken);
-    };
+    let slug = tenant_slug(parts)?;
     let ip = parts
         .extensions
         .get::<ClientIp>()
         .cloned()
         .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers));
     crate::login_throttle::shared()
-        .begin(&scope(slug.0.clone()), &ip, username)
+        .begin(&scope(slug.to_owned()), &ip, username)
         .await
         .map_err(AuthError::Refused)
+}
+
+fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
+    match parts.extensions.get::<super::TenantSlug>() {
+        Some(slug) => Ok(&slug.0),
+        None => {
+            tracing::error!(
+                "auth backend ran without a TenantSlug; use require_auth / optional_auth"
+            );
+            Err(AuthError::InvalidToken)
+        }
+    }
+}
+
+/// How long a verified Basic credential skips argon2 (#2617).
+const BASIC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Entries the Basic cache holds before it evicts.
+const BASIC_CACHE_CAP: usize = 1024;
+
+type BasicCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
+
+fn basic_cache() -> &'static std::sync::Mutex<BasicCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BasicCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(BasicCache::new()))
+}
+
+/// SHA-256 over the tenant, the credential and the stored hash. A password
+/// change rewrites the hash, so it misses; `active` is read per request.
+fn basic_cache_key(slug: &str, username: &str, password: &str, stored_hash: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for part in [slug, username, password, stored_hash] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn basic_cache_hit(key: &[u8; 32], user_id: i64) -> bool {
+    let Ok(cache) = basic_cache().lock() else {
+        return false;
+    };
+    cache
+        .get(key)
+        .is_some_and(|(id, at)| *id == user_id && at.elapsed() < BASIC_CACHE_TTL)
+}
+
+fn basic_cache_put(key: [u8; 32], user_id: i64) {
+    let Ok(mut cache) = basic_cache().lock() else {
+        return;
+    };
+    if cache.len() >= BASIC_CACHE_CAP && !cache.contains_key(&key) {
+        cache.retain(|_, (_, at)| at.elapsed() < BASIC_CACHE_TTL);
+        if cache.len() >= BASIC_CACHE_CAP {
+            let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+    }
+    cache.insert(key, (user_id, std::time::Instant::now()));
 }
 
 // ------------------------------------------------------------------ Trait
@@ -158,15 +216,33 @@ impl AuthBackend for ModelBackend {
             None => return Ok(None),
         };
 
-        // Own lock scope, apart from the login forms; only failures count.
-        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
-
+        let slug = tenant_slug(parts)?;
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
             .await?;
+        let user = users.into_iter().next();
 
-        let Some(user) = users.into_iter().next() else {
+        // A credential verified moments ago against this same stored hash
+        // skips argon2 and the limits: it is not a guess (#2617).
+        let cache_key = user
+            .as_ref()
+            .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
+        if let (Some(u), Some(key)) = (&user, &cache_key) {
+            let uid = u.id.get().copied().unwrap_or(0);
+            if u.active && uid != 0 && basic_cache_hit(key, uid) {
+                return Ok(Some(AuthUser {
+                    id: uid,
+                    username: u.username.clone(),
+                    is_superuser: u.is_superuser,
+                }));
+            }
+        }
+
+        // Own lock scope, apart from the login forms; only failures count.
+        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
+
+        let Some(user) = user else {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
@@ -198,8 +274,12 @@ impl AuthBackend for ModelBackend {
         }
 
         attempt.succeeded().await;
+        let id = user.id.get().copied().unwrap_or(0);
+        if let (Some(key), true) = (cache_key, id != 0) {
+            basic_cache_put(key, id);
+        }
         Ok(Some(AuthUser {
-            id: user.id.get().copied().unwrap_or(0),
+            id,
             username: user.username,
             is_superuser: user.is_superuser,
         }))
@@ -775,6 +855,30 @@ mod tests {
             .access;
         let backend = JwtBackend::new(vec![7u8; 32]);
         assert_eq!(revocation_warnings(&backend, &token).await, 1);
+    }
+
+    /// #2617 — the Basic cache key changes with the stored hash and the
+    /// tenant, so a password change or another tenant never hits.
+    #[test]
+    fn basic_cache_key_binds_hash_and_tenant() {
+        let k = basic_cache_key("t", "alice", "pw", "$argon2id$a");
+        assert_eq!(k, basic_cache_key("t", "alice", "pw", "$argon2id$a"));
+        assert_ne!(k, basic_cache_key("t", "alice", "pw", "$argon2id$b"));
+        assert_ne!(k, basic_cache_key("u", "alice", "pw", "$argon2id$a"));
+        assert_ne!(k, basic_cache_key("t", "alice", "pw2", "$argon2id$a"));
+        assert_ne!(
+            basic_cache_key("t", "ab", "c", "h"),
+            basic_cache_key("t", "a", "bc", "h")
+        );
+    }
+
+    #[test]
+    fn basic_cache_hit_needs_the_same_user() {
+        let key = basic_cache_key("t-hit", "bob", "pw", "h");
+        assert!(!basic_cache_hit(&key, 7));
+        basic_cache_put(key, 7);
+        assert!(basic_cache_hit(&key, 7));
+        assert!(!basic_cache_hit(&key, 8));
     }
 
     /// A token with no `jti` can't be revoked, so there is nothing to warn about.
