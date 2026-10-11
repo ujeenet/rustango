@@ -195,7 +195,17 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
     agent.secret_prefix = prefix;
     agent.secret_hash = hash;
     agent.secret_rotated_at = Some(chrono::Utc::now());
-    agent.save_pool(pool).await?;
+    // Only the secret: `data` (the scoped flag) has its own writers.
+    agent
+        .save_partial_typed(
+            (
+                Agent::secret_prefix,
+                Agent::secret_hash,
+                Agent::secret_rotated_at,
+            ),
+            pool,
+        )
+        .await?;
     Ok(AgentSecret { agent, token })
 }
 
