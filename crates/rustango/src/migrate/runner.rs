@@ -2595,21 +2595,9 @@ pub(crate) async fn try_table_exists_here(
     pool: &crate::sql::Pool,
     table: &str,
 ) -> Result<bool, sqlx::Error> {
-    let n = match pool {
+    Ok(match pool {
         #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            // Indexed catalog lookup: sign-in runs it per request (#2366).
-            // Checks `current_schema()` only, never the rest of `search_path`.
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = current_schema() AND c.relname = $1 \
-             AND c.relkind IN ('r', 'p', 'v', 'f')",
-            )
-            .bind(table)
-            .fetch_one(pg)
-            .await?
-        }
+        crate::sql::Pool::Postgres(pg) => pg_table_exists(pg, None, table).await?,
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             sqlx::query_scalar::<_, i64>(
@@ -2619,6 +2607,7 @@ pub(crate) async fn try_table_exists_here(
             .bind(table)
             .fetch_one(my)
             .await?
+                > 0
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -2628,9 +2617,9 @@ pub(crate) async fn try_table_exists_here(
             .bind(table)
             .fetch_one(sq)
             .await?
+                > 0
         }
-    };
-    Ok(n > 0)
+    })
 }
 
 /// Whether `schema.table` exists, by name: unlike [`try_table_exists_here`]
@@ -2641,10 +2630,22 @@ pub(crate) async fn try_table_exists_in_schema(
     schema: &str,
     table: &str,
 ) -> Result<bool, sqlx::Error> {
+    pg_table_exists(pg, Some(schema), table).await
+}
+
+/// Indexed catalog lookup, run per request at sign-in (#2366). `None` is
+/// `current_schema()` only, never the rest of `search_path`.
+#[cfg(feature = "postgres")]
+async fn pg_table_exists(
+    pg: &sqlx::PgPool,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
     let n = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM pg_catalog.pg_class c \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
+         WHERE n.nspname = COALESCE($1::name, current_schema()) AND c.relname = $2 \
+         AND c.relkind IN ('r', 'p', 'v', 'f')",
     )
     .bind(schema)
     .bind(table)
