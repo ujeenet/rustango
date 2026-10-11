@@ -168,6 +168,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
             atomic: true,
             scope: rmig::MigrationScope::Registry,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snapshot_with_table(&reg_table),
             forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
                 reg_table.clone(),
@@ -183,6 +184,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
             atomic: true,
             scope: rmig::MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snapshot_with_table(&tenant_table),
             forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
                 tenant_table.clone(),
@@ -288,6 +290,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
             atomic: true,
             scope: rmig::MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snapshot_with_table("items"),
             forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
                 "items".into(),
@@ -410,6 +413,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
             atomic: true,
             scope: rmig::MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: snapshot_with_table("thing"),
             forward: vec![rmig::Operation::Schema(rmig::SchemaChange::CreateTable(
                 "thing".into(),
@@ -549,6 +553,7 @@ async fn schema_mode_tenants_share_citext() {
             atomic: true,
             scope: rmig::MigrationScope::Tenant,
             replaces: Vec::new(),
+            merges: Vec::new(),
             snapshot: rmig::SchemaSnapshot {
                 tables: vec![table],
                 ..Default::default()

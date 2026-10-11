@@ -94,6 +94,16 @@ fn column_types<R: sqlx::Row>(
     })
 }
 
+/// Cells of a value row: the projection, then each join's columns. Any
+/// after them are DISTINCT's ORDER BY helpers, which the row drops.
+fn values_width(query: &SelectQuery) -> usize {
+    let own = query
+        .projection
+        .as_ref()
+        .map_or_else(|| query.model.scalar_fields().count(), Vec::len);
+    own + query.joins.iter().map(|j| j.project.len()).sum::<usize>()
+}
+
 /// The model columns a SELECT emits first: its projection, else every
 /// field, then each join's projected `alias__col`.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
@@ -315,6 +325,7 @@ pub async fn fetch_values_dict(
     query: &SelectQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
+    let width = values_width(query);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -328,7 +339,7 @@ pub async fn fetch_values_dict(
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
+                for (i, col) in row.columns().iter().enumerate().take(width) {
                     map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
                 }
                 out.push(map);
@@ -349,7 +360,7 @@ pub async fn fetch_values_dict(
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
+                for (i, col) in row.columns().iter().enumerate().take(width) {
                     map.insert(
                         col.name().to_owned(),
                         my_cell_to_sqlvalue(row, i, col_types[i]),
@@ -373,7 +384,7 @@ pub async fn fetch_values_dict(
                 use sqlx::Column as _;
                 use sqlx::Row as _;
                 let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
+                for (i, col) in row.columns().iter().enumerate().take(width) {
                     map.insert(
                         col.name().to_owned(),
                         sqlite_cell_to_sqlvalue(row, i, col_types[i]),
@@ -483,6 +494,7 @@ pub async fn fetch_values_list(
     query: &SelectQuery,
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
+    let width = values_width(query);
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -494,7 +506,7 @@ pub async fn fetch_values_list(
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
-                let n = row.columns().len();
+                let n = row.columns().len().min(width);
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
                     v.push(pg_cell_to_sqlvalue(row, i));
@@ -515,7 +527,7 @@ pub async fn fetch_values_list(
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
-                let n = row.columns().len();
+                let n = row.columns().len().min(width);
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
                     v.push(my_cell_to_sqlvalue(row, i, col_types[i]));
@@ -536,7 +548,7 @@ pub async fn fetch_values_list(
             let mut out = Vec::with_capacity(rows.len());
             for row in &rows {
                 use sqlx::Row as _;
-                let n = row.columns().len();
+                let n = row.columns().len().min(width);
                 let mut v = Vec::with_capacity(n);
                 for i in 0..n {
                     v.push(sqlite_cell_to_sqlvalue(row, i, col_types[i]));
@@ -1009,6 +1021,7 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
             use crate::sql::Dialect as _;
             crate::sql::Postgres.compile_select(&query)?
         };
+        let width = values_width(&query);
         let rows = super::pg_on_query(&stmt.sql, stmt.params)
             .fetch_all(executor)
             .await?;
@@ -1016,7 +1029,7 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
         for row in &rows {
             use sqlx::{Column as _, Row as _};
             let mut map = std::collections::HashMap::new();
-            for (i, col) in row.columns().iter().enumerate() {
+            for (i, col) in row.columns().iter().enumerate().take(width) {
                 map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
             }
             out.push(map);

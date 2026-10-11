@@ -30,9 +30,27 @@ pub struct MySql;
 #[cfg(feature = "mysql")]
 pub static DIALECT: &MySql = &MySql;
 
+#[cfg(feature = "mysql")]
+impl MySql {
+    /// The INSERT without `RETURNING`; the id comes from the reply, so an
+    /// INSERT naming no column is still a write (#2416).
+    pub(crate) fn compile_insert_auto_id(
+        &self,
+        query: &InsertQuery,
+    ) -> Result<CompiledStatement, SqlError> {
+        let mut b = Sql::with_capacity(self, query.values.len());
+        super::writers::write_insert_rows(&mut b, query)?;
+        Ok(b.finish())
+    }
+}
+
 impl Dialect for MySql {
     fn name(&self) -> &'static str {
         "mysql"
+    }
+
+    fn default_values_clause(&self) -> &'static str {
+        " () VALUES ()"
     }
 
     /// MySQL has no `NULLS FIRST` or `NULLS LAST`, so the writer
@@ -1166,6 +1184,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(
@@ -1199,6 +1218,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("LOWER(`name`) NOT LIKE LOWER(?)"));
@@ -1228,6 +1248,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("NOT (`email` <=> ?)"));
@@ -1257,6 +1278,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // No outer NOT; bare null-safe equality.
@@ -1288,6 +1310,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("JSON_CONTAINS(`meta`, ?)"));
@@ -1318,6 +1341,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // Argument order is swapped vs JSON_CONTAINS — value first.
@@ -1348,6 +1372,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1382,6 +1407,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1417,6 +1443,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1509,6 +1536,7 @@ mod tests {
             compound_order_by: vec![],
             compound_limit: None,
             compound_offset: None,
+            select_related: vec![],
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(

@@ -90,6 +90,7 @@ async fn fake_initial_reconciles_existing_table_on_mysql() {
         atomic: true,
         scope: migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };
@@ -199,6 +200,7 @@ async fn partial_state_creates_only_missing_tables_on_mysql() {
         atomic: true,
         scope: migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot {
             tables: vec![table_snap(&t_have), table_snap(&t_missing)],
             ..Default::default()

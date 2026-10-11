@@ -4,6 +4,100 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.6] — 2026-10-10
+
+### Fixed — `migrate` fits a 2 MiB stack again (#2305)
+
+The migrate-lock body is boxed, so each migrate future shrinks from ~50 KB to ~9 KB; `migrate <target>` no longer overflows a debug tokio worker.
+
+### Fixed — an INSERT naming no column works on MySQL and in a SQLite bulk insert (#2416)
+
+MySQL writes `() VALUES ()`; a SQLite bulk insert fills an integer PK with `NULL`. New `Dialect::default_values_clause` and `Dialect::default_pk_cell`.
+
+### Fixed — a ViewSet without a serializer decodes JSON by field type (#2530)
+
+JSON `null` on a NOT NULL field is a `400` instead of `false`/`{}` or a silent skip, and a Json field keeps a JSON string as sent. Form Bools accept only `true/false/1/0/on/off/yes/no`.
+
+### Fixed — a REST or `ModelForm` create applies the column `default` of an omitted field (#2528)
+
+The field is left out of the INSERT, and the OpenAPI create body no longer marks it `required`. In a form-encoded body an absent Bool is still an unticked box; PKs must still be sent.
+
+### Fixed — ViewSet PUT/PATCH, `UpdateView` and `ModelForm` updates restamp `auto_now` (#2527)
+
+The admin, `ModelFormFor::into_update_query` and template `UpdateView` share one stamping step; `auto_now_add` is left alone.
+
+### Fixed — a ViewSet write that breaks a field rule is a `422`, not a `500` (#2529)
+
+`choices`, `max_length`, `min`/`max` and named validators are checked before the write and answer `422 validation_failed` with `details: {field: [message]}`, as serializer errors do.
+
+### Fixed — `managed = false` no longer drops the table (#2576)
+
+A model newly marked unmanaged, or turned into a view, keeps its snapshot entry, so `makemigrations` emits no `DropTable`. Re-managing it writes nothing unless the schema changed.
+
+### Fixed — `--empty` renames reach the next `makemigrations` (#2573)
+
+A hand-written `RenameTable` / `RenameColumn` in an `--empty` migration now updates the diff baseline, so the next run no longer emits Add+Drop for it.
+
+### Fixed — `makemigrations` refuses a branched chain; `--merge` keeps unmigrated edits (#2574)
+
+Two leaves from one history now stop `makemigrations` with "run `--merge`". The merge node names the other leaves in a new `merges` field, and its snapshot joins the branches instead of reading the models.
+
+### Fixed — a keyed `String` needs `max_length` (#2575)
+
+`#[derive(Model)]` rejects a primary-key, unique, indexed or foreign-key `String` without `max_length`, which MySQL could not migrate (error 1170).
+
+### Security — purging a tenant deletes its media objects (#2569)
+
+With the `media` feature, `purge-tenant` and the console purge delete each `rustango_media` object from `TenantPoolsConfig::media_storage` before the tenant's storage goes, and list each one left. Only storage proven to be the tenant's own is touched: the named schema, or a database no other tenant or the registry uses.
+
+### Fixed — SSO sign-ins fire `user_logged_in` and `user_login_failed` (#2559)
+
+The bare-admin, tenant console and member SSO callbacks send both, with sources `admin_sso`, `tenant_admin_sso` and `member_sso`. The admin SSO TOTP failure now uses `admin_sso` too, not `admin`.
+
+### Security — member SSO auto-provisioning is opt-in (#2560)
+
+`MemberAuthConfig::auto_provision` defaults to `false`, so a provider added for console SSO no longer creates a user for any verified email.
+
+### Security — a scoped MCP user key no longer widens when its last skill is revoked (#2537)
+
+The key records that it is scoped in `Agent.data`, also when a grant is added or revoked later; with no grants left it gets no tools instead of the owner's full entitlement.
+
+### Security — media stores malformed MIME types as octet-stream (#2570)
+
+A type/subtype with non-token characters (a space, a control byte) or `multipart/x-mixed-replace` is stored and signed as `application/octet-stream`, so a browser can't sniff the body into HTML. `text/jscript`, `text/livescript`, `text/vbscript` and `text/css` are too.
+
+### Fixed — `hmac_auth` can sign the tenant header and port, and bind a key to a tenant (#2492)
+
+A request signed for `X-Org: acme` could be replayed with `X-Org: globex` or to another port. New `HmacAuthLayer::bind_tenants` checks the resolved tenant; `signed_headers`, `sign_port` and the client's `RequestToSign` sign more of the request.
+
+### Fixed — `ViewSetPerms` requires every codename in an action's list (#2522)
+
+It allowed on the first match, so a second codename widened access instead of narrowing it.
+
+### Fixed — `rustango_users.change` no longer lets a non-superuser grant superuser or take an account (#2521)
+
+On `rustango_users` and `rustango_admin_users`, `is_superuser` and `email` are superuser-only on add and edit, `password_hash` on edit, and a superuser's row can only be changed or deleted by a superuser.
+
+### Fixed — only a superuser can change an API key's or agent's owner in the admin (#2520)
+
+A role with `change` could move its key onto a superuser and sign in as them. New `register_admin_superuser_fields!(Model, Change, [field])` locks fields for non-superusers.
+
+### Fixed — `update()` and `delete()` refuse a `union`, `intersection` or `difference` (#2452)
+
+They dropped the set operation and wrote every row the first queryset matched. New `QueryError::SetOperationDml`; `BoundedDmlReason::SetOperation` is deprecated and never returned.
+
+### Changed — `post.author` stays unloaded after a relation filter (#2412)
+
+A `filter("author__x", ..)` or `order_by("author__x")` join no longer adds the author's columns to the SELECT, so the fetch no longer loads `author`; reading it costs a query unless you add `select_related("author")`. Under `distinct()` an ordering span adds one helper column, which value rows drop. `values_dict` / `values_list` / `values_list_flat` ignore `select_related`. DISTINCT, value rows and IN subqueries now see only the asked columns. Typed fetches decode the joins in the new `SelectQuery::select_related`.
+
+### Fixed — `filter(field, None)` matches NULL rows (#2413)
+
+Every predicate comparing to NULL with `=` or `<>` (`filter`, `Q::eq`, a typed `eq`, a built `Filter` or `ExprCompare`) now writes `IS NULL` / `IS NOT NULL`; it wrote `= NULL`, which matches nothing. Unique-together and duplicate checks skip a NULL value.
+
+### Fixed — bare columns are qualified when a query has joins (#2411)
+
+Date transforms, `where_column_op`, `filter_dwithin` and `order_by_expr(F(..))` wrote a bare column, which was ambiguous next to a joined table with the same column. A bare `F` naming a joined table's column stays bare.
+
 ## [0.60.5] — 2026-10-10
 
 ### Fixed — a schema-mode tenant no longer takes over an existing schema (#2394)

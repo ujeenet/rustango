@@ -101,6 +101,20 @@ pub struct Doc {
     pub name: String,
 }
 
+/// `auto_now` beside `auto_now_add` (#2527).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv2527_memo", app = "tv1915")]
+pub struct Memo {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub title: String,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
 const CSRF: &str = "tv1915-csrf-token-tv1915-csrf-token-tv1915x";
 const UUID_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -114,6 +128,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Slot>(pool).await;
     slot_unique_index(pool).await;
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Memo>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -197,6 +212,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("form.html")
                 .success_url("/docs")
                 .router("/docs", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Memo::SCHEMA)
+                .template("form.html")
+                .success_url("/memos")
+                .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -450,9 +471,44 @@ async fn create_view_writes_natural_and_v7_pks(pool: &Pool) {
     assert_eq!(id.get_version_num(), 7, "{id}");
 }
 
+/// UpdateView restamps `auto_now` and leaves `auto_now_add` (#2527).
+async fn update_view_restamps_auto_now(pool: &Pool) {
+    use rustango::core::{Assignment, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
+    let mut memo = Memo {
+        id: Auto::Unset,
+        title: "a".into(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
+    };
+    memo.insert_pool(pool).await.expect("seed");
+    let id = *memo.id.get().expect("pk");
+    let old = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let age = UpdateQuery::new(
+        Memo::SCHEMA,
+        vec![
+            Assignment::new("created_at", SqlValue::DateTime(old)),
+            Assignment::new("updated_at", SqlValue::DateTime(old)),
+        ],
+        WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(id))),
+    );
+    rustango::sql::update_pool(pool, &age)
+        .await
+        .expect("age the row");
+
+    let (status, body) = send(pool, Method::POST, &format!("/memos/{id}/edit"), "title=b").await;
+    assert!(status.is_redirection(), "{status} {body}");
+    let memos: Vec<Memo> = Memo::objects().fetch(pool).await.expect("memos");
+    assert_eq!(memos[0].title, "b");
+    assert_eq!(memos[0].created_at.get(), Some(&old), "auto_now_add moved");
+    assert!(memos[0].updated_at.get() > Some(&old), "auto_now stale");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        update_view_restamps_auto_now,
         a_duplicate_create_is_a_form_error,
         a_duplicate_update_is_a_form_error,
         a_composite_unique_clash_is_a_form_wide_error,

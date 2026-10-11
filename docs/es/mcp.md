@@ -169,7 +169,7 @@ montaje:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.60.5" },
+    "serverInfo": { "name": "rustango", "version": "0.60.6" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -280,7 +280,7 @@ dos ejes: los **derechos** del propietario (superusuario → todos los skills; d
 contrario los skills mapeados a un permiso que posee) y el **alcance** de la clave
 (los skills fijados en la creación). Una clave sin alcance (`skills = &[]`) obtiene
 la totalidad de los derechos del propietario; una clave con alcance
-(`skills = &["coach", …]`) se limita a esos. La resolución siempre reintersecta el
+(`skills = &["coach", …]`) se limita a esos, y no recibe nada cuando se revoca su último skill. La resolución siempre reintersecta el
 alcance con los derechos *actuales* — de modo que una clave nunca puede exceder
 los permisos del propietario, y perder un permiso estrecha cada clave en la
 siguiente emisión. Acotar a un skill al que el propietario no tiene derecho se

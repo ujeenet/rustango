@@ -90,6 +90,12 @@ inventory::submit! {
     }
 }
 
+super::object_permissions::lock_user_credentials!(AdminUser, "rustango_admin_users");
+#[cfg(feature = "admin-sso")]
+crate::register_admin_superuser_fields!(AdminUser, Add, [email]);
+#[cfg(feature = "admin-sso")]
+crate::register_admin_superuser_fields!(AdminUser, Change, [email]);
+
 impl AdminUser {
     /// Hash the password and build an `AdminUser` ready to insert.
     /// Sync: in a request handler, hash with `passwords::hash_async` instead.

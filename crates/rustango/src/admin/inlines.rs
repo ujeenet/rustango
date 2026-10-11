@@ -1014,11 +1014,14 @@ impl InlineTarget {
         inline_readonly: &[&str],
         max_num: Option<usize>,
         scope: ParentScope,
+        state: &AppState,
         parts: &Parts,
     ) -> Option<Self> {
         let pk = child.primary_key()?;
         let cfg = admin_config_or_default(child);
-        let admin_readonly = cfg.readonly_fields;
+        // An inline row may be added or changed: lock for both.
+        let add = state.locked_fields(child, super::object_permissions::AdminWrite::Add);
+        let change = state.locked_fields(child, super::object_permissions::AdminWrite::Change);
         let secrets = display
             .iter()
             .filter(|f| is_secret_field(&cfg, f.name))
@@ -1031,7 +1034,8 @@ impl InlineTarget {
                 f.column != pk.column
                     && !scope.pins(f.column)
                     && !inline_readonly.contains(&f.name)
-                    && !admin_readonly.contains(&f.name)
+                    && !add.contains(f.name)
+                    && !change.contains(f.name)
             })
             .collect();
         Some(Self {
@@ -1278,6 +1282,7 @@ async fn inline_targets(
             inline.readonly_fields,
             inline.max_num,
             scope,
+            state,
             parts,
         ));
     }
@@ -1315,6 +1320,7 @@ async fn inline_targets(
             inline.readonly_fields,
             inline.max_num,
             scope,
+            state,
             parts,
         ));
     }

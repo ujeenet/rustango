@@ -193,8 +193,8 @@ Il monte deux routes par slug sous `login_base` :
 
 Différences avec le flux admin :
 
-- **Provisionnement automatique.** Avec `auto_provision = true` (le
-  défaut), un email IdP vérifié sans ligne `rustango_users`
+- **Provisionnement automatique.** Avec `auto_provision = true` (optionnel ; le
+  défaut est `false`), un email IdP vérifié sans ligne `rustango_users`
   correspondante en **crée** une — nom d'utilisateur issu de la partie
   locale de l'email (dédupliqué en cas de collision), avec un hash de mot
   de passe aléatoire réel mais inutilisable (les utilisateurs SSO ne

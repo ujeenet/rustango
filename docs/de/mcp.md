@@ -171,7 +171,7 @@ jedem Mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.60.5" },
+    "serverInfo": { "name": "rustango", "version": "0.60.6" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -283,7 +283,7 @@ zweier Achsen: die **Berechtigung** des Eigentümers (Superuser → jeder Skill;
 sonst die einer von ihm gehaltenen Permission zugeordneten Skills) und der
 **Scope** des Keys (bei der Erstellung gepinnte Skills). Ein Key ohne Scope
 (`skills = &[]`) erhält die volle Berechtigung des Eigentümers; ein gescopeter Key
-(`skills = &["coach", …]`) ist auf diese beschränkt. Die Auflösung schneidet den
+(`skills = &["coach", …]`) ist auf diese beschränkt und erhält nichts mehr, sobald ihr letzter Skill entzogen ist. Die Auflösung schneidet den
 Scope stets erneut mit der *aktuellen* Berechtigung — sodass ein Key niemals die
 Berechtigungen des Eigentümers überschreiten kann, und der Verlust einer
 Permission jeden Key bei der nächsten Ausstellung einengt. Ein Scope auf einen

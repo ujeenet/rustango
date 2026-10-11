@@ -394,6 +394,7 @@ async fn a_failed_migration_stores_no_driver_text() {
         atomic: true,
         scope: Default::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: Default::default(),
         forward: vec![Operation::Data(DataOp {
             sql: "SELECT * FROM boom_missing_tbl".into(),

@@ -649,7 +649,7 @@ async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateErr
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), body).await
+    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), Box::pin(body)).await
 }
 
 /// The creation schema of `pool`'s sessions, for FK targets (#1718).
@@ -2595,21 +2595,9 @@ pub(crate) async fn try_table_exists_here(
     pool: &crate::sql::Pool,
     table: &str,
 ) -> Result<bool, sqlx::Error> {
-    let n = match pool {
+    Ok(match pool {
         #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            // Indexed catalog lookup: sign-in runs it per request (#2366).
-            // Checks `current_schema()` only, never the rest of `search_path`.
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = current_schema() AND c.relname = $1 \
-             AND c.relkind IN ('r', 'p', 'v', 'f')",
-            )
-            .bind(table)
-            .fetch_one(pg)
-            .await?
-        }
+        crate::sql::Pool::Postgres(pg) => pg_table_exists(pg, None, table).await?,
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             sqlx::query_scalar::<_, i64>(
@@ -2619,6 +2607,7 @@ pub(crate) async fn try_table_exists_here(
             .bind(table)
             .fetch_one(my)
             .await?
+                > 0
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -2628,8 +2617,40 @@ pub(crate) async fn try_table_exists_here(
             .bind(table)
             .fetch_one(sq)
             .await?
+                > 0
         }
-    };
+    })
+}
+
+/// Whether `schema.table` exists, by name: unlike [`try_table_exists_here`]
+/// a missing schema never falls back to the search path (#2569).
+#[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
+pub(crate) async fn try_table_exists_in_schema(
+    pg: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    pg_table_exists(pg, Some(schema), table).await
+}
+
+/// Indexed catalog lookup, run per request at sign-in (#2366). `None` is
+/// `current_schema()` only, never the rest of `search_path`.
+#[cfg(feature = "postgres")]
+async fn pg_table_exists(
+    pg: &sqlx::PgPool,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    let n = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = COALESCE($1::name, current_schema()) AND c.relname = $2 \
+         AND c.relkind IN ('r', 'p', 'v', 'f')",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_one(pg)
+    .await?;
     Ok(n > 0)
 }
 
@@ -2717,10 +2738,13 @@ async fn with_migrate_lock_pool<F, R>(
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, async {
-        create_ledger_locked(pool, ledger).await?;
-        body.await
-    })
+    hold_migrate_lock(
+        pool,
+        Box::pin(async {
+            create_ledger_locked(pool, ledger).await?;
+            body.await
+        }),
+    )
     .await
 }
 
@@ -2739,7 +2763,7 @@ where
     F: FnOnce(LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<R, MigrateError>>,
 {
-    hold_migrate_lock(pool, body(LockHeld(()))).await
+    hold_migrate_lock(pool, Box::pin(body(LockHeld(())))).await
 }
 
 tokio::task_local! {
@@ -2778,7 +2802,12 @@ fn refuse_nested_lock() -> Result<(), MigrateError> {
     Ok(())
 }
 
-async fn hold_migrate_lock<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
+/// `body` is boxed: inline, every caller's future carried it and migrate
+/// overflowed a 2 MiB stack in debug builds (#2305).
+async fn hold_migrate_lock<F, R>(
+    pool: &crate::sql::Pool,
+    body: std::pin::Pin<Box<F>>,
+) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {

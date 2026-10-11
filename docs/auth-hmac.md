@@ -13,8 +13,8 @@ tower layer.
 > **New to a term here?** *HMAC*, *shared secret*, *replay*, *constant-time compare* —
 > see the [glossary](glossary.md).
 
-> **Source:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`, `sign_now`,
-> `sign_request`) — behind the `hmac-auth` feature (on by default; replay
+> **Source:** `rustango::hmac_auth` (`HmacAuthLayer`, `KeyResolver`,
+> `KeyTenantResolver`, `RequestToSign`, `sign_now`, `sign_request`) — behind the `hmac-auth` feature (on by default; replay
 > protection additionally needs `cache`).
 >
 > **Runnable version:** every snippet is copied from
@@ -138,6 +138,21 @@ let req = http::Request::post("/api/charge")
 The signature is base64; the body-hash inside the canonical string is hex. Send
 the body byte-for-byte as signed — any proxy that rewrites it (recompression,
 JSON re-serialization) breaks verification.
+
+---
+
+## Multi-tenant apps
+
+The tenant header and the port are not signed by default, and the layer knows
+no tenant. On a tenant-resolved app:
+
+- `.bind_tenants(tenant_of)` maps each key id to the tenant slug it may act
+  for. The layer resolves the request's tenant with the mounted tenant context
+  and answers `403` when it differs, or when there is none.
+- `.signed_headers(["x-org"])` adds headers to the signed string, and
+  `.sign_port()` adds the port in `Host`. Each adds a `name:value` line, sorted
+  by name. The client signs the same list with `RequestToSign::header` and
+  `port`; a header the request leaves out signs as empty.
 
 ---
 

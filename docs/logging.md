@@ -149,6 +149,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::template_views` | Template-backed views |
 | `rustango::tenancy` | Tenancy, general |
 | `rustango::tenancy::admin` | Tenant admin |
+| `rustango::tenancy::decommission` | Tenant decommission and purge |
 | `rustango::tenancy::migrate_run` | Per-tenant migrations |
 | `rustango::tenancy::operator_console` | Operator console |
 | `rustango::tenancy::pools` | Tenant pool lifecycle |

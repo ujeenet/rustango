@@ -150,6 +150,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::template_views` | Vistas basadas en plantillas |
 | `rustango::tenancy` | Multi-tenancy, general |
 | `rustango::tenancy::admin` | Admin de inquilino |
+| `rustango::tenancy::decommission` | Baja y purga de inquilinos |
 | `rustango::tenancy::migrate_run` | Migraciones por inquilino |
 | `rustango::tenancy::operator_console` | Consola de operador |
 | `rustango::tenancy::pools` | Ciclo de vida de los pools de inquilino |

@@ -152,3 +152,85 @@ async fn prepare_save_updates_existing_row_with_overridden_value() {
     assert_eq!(title, "form-edit", "form's title should land");
     assert_eq!(author, 99, "view-side override should win over form value");
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ps_stamped")]
+#[allow(dead_code)]
+pub struct Stamped {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 100)]
+    pub title: String,
+    #[rustango(max_length = 10, default = "'draft'")]
+    pub status: String,
+    #[rustango(default = "true")]
+    pub is_public: bool,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn stamped_pool() -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        r#"CREATE TABLE "ps_stamped" (
+            "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
+            "title"      TEXT NOT NULL,
+            "status"     TEXT NOT NULL DEFAULT 'draft',
+            "is_public"  BOOLEAN NOT NULL DEFAULT true,
+            "updated_at" TEXT NOT NULL
+        )"#,
+        Vec::new(),
+    )
+    .await
+    .expect("create");
+    pool
+}
+
+/// #2527: a `ModelForm` update restamps `auto_now`.
+#[tokio::test]
+async fn model_form_update_restamps_auto_now() {
+    let pool = stamped_pool().await;
+    rustango::sql::raw_execute_pool(
+        &pool,
+        r#"INSERT INTO ps_stamped (id, title, status, updated_at)
+           VALUES (1, 'old', 'draft', '2000-01-01T00:00:00Z')"#,
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+    let body = HashMap::from([
+        ("title".to_owned(), "new".to_owned()),
+        ("status".to_owned(), "live".to_owned()),
+    ]);
+    ModelForm::for_update(Stamped::SCHEMA, body, SqlValue::I64(1))
+        .save(&pool)
+        .await
+        .expect("update");
+    let stamp: String = sqlx::query_scalar("SELECT updated_at FROM ps_stamped WHERE id = 1")
+        .fetch_one(sqlite_pool(&pool))
+        .await
+        .expect("fetch");
+    assert!(
+        !stamp.starts_with("2000-"),
+        "updated_at left stale: {stamp}"
+    );
+}
+
+/// #2528: a `ModelForm` insert that leaves out a defaulted field gets the column default.
+#[tokio::test]
+async fn model_form_insert_applies_column_default() {
+    let pool = stamped_pool().await;
+    let body = HashMap::from([("title".to_owned(), "x".to_owned())]);
+    ModelForm::new(Stamped::SCHEMA, body)
+        .save(&pool)
+        .await
+        .expect("insert");
+    let stored: (String, bool) =
+        sqlx::query_as("SELECT status, is_public FROM ps_stamped WHERE title = 'x'")
+            .fetch_one(sqlite_pool(&pool))
+            .await
+            .expect("fetch");
+    // An absent Bool is an unticked box, not its default.
+    assert_eq!(stored, ("draft".into(), false));
+}

@@ -31,6 +31,10 @@
 //! The host is the `Host` header (or the HTTP/2 authority) without the
 //! port. Unpinned, a replay to another service sharing the key passes
 //! if it keeps the first `Host`; shared keys need [`HmacAuthLayer::host`].
+//! [`HmacAuthLayer::signed_headers`] and [`HmacAuthLayer::sign_port`] append
+//! one `name:value` line each, sorted; sign those with [`RequestToSign`].
+//! The tenant header is not signed unless listed (#2492). On a tenant-resolved
+//! app, [`HmacAuthLayer::bind_tenants`] ties each key to its tenant.
 //! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
 //! The body is hashed first, so the verifier hashes it only once.
 //!
@@ -84,6 +88,13 @@ const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// Return `None` to reject the request with 401.
 pub type KeyResolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
+/// Maps a `key_id` to the tenant slug it is bound to; `None` = any tenant.
+#[cfg(feature = "tenancy")]
+pub type KeyTenantResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Pseudo-header name of the signed port; no real header can take it.
+const PORT_LINE: &str = ":port";
+
 #[derive(Clone)]
 pub struct HmacAuthLayer {
     inner: Arc<HmacAuthConfig>,
@@ -96,6 +107,13 @@ struct HmacAuthConfig {
     body_limit: usize,
     /// Signed host when set; else the request's own.
     host: Option<SignedHost>,
+    /// Extra headers in the signature, lowercase.
+    signed_headers: Vec<axum::http::HeaderName>,
+    /// Sign the port the request came in on.
+    sign_port: bool,
+    /// The tenant slug each key is bound to.
+    #[cfg(feature = "tenancy")]
+    tenant_of: Option<KeyTenantResolver>,
     /// Optional replay defence. When set, each valid signature is
     /// stored for twice the tolerance and a repeat is rejected. The
     /// `X-Date` window alone only limits how long a replay works;
@@ -113,6 +131,10 @@ impl HmacAuthLayer {
                 tolerance_secs: DEFAULT_TOLERANCE_SECS,
                 body_limit: DEFAULT_BODY_LIMIT,
                 host: None,
+                signed_headers: Vec::new(),
+                sign_port: false,
+                #[cfg(feature = "tenancy")]
+                tenant_of: None,
                 #[cfg(feature = "cache")]
                 nonce_store: None,
             }),
@@ -159,6 +181,48 @@ impl HmacAuthLayer {
         let pinned = SignedHost::parse(host)
             .unwrap_or_else(|| panic!("HmacAuthLayer::host: invalid host {host:?}"));
         Arc::make_mut(&mut self.inner).host = Some(pinned);
+        self
+    }
+
+    /// Sign these headers too, such as the tenant header (#2492). A missing
+    /// one signs as empty, so the client signs every listed header.
+    ///
+    /// # Panics
+    /// If a name is not a valid header name.
+    #[must_use]
+    pub fn signed_headers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let cfg = Arc::make_mut(&mut self.inner);
+        for name in names {
+            let name = axum::http::HeaderName::try_from(name.as_ref())
+                .unwrap_or_else(|_| panic!("HmacAuthLayer: invalid header {:?}", name.as_ref()));
+            if !cfg.signed_headers.contains(&name) {
+                cfg.signed_headers.push(name);
+            }
+        }
+        self
+    }
+
+    /// Sign the port in `Host` (empty when it has none), as the client
+    /// sends it. A proxy that rewrites `Host` breaks this; the tenant a
+    /// port resolves to is bound with [`Self::bind_tenants`], not here.
+    #[must_use]
+    pub fn sign_port(mut self) -> Self {
+        Arc::make_mut(&mut self.inner).sign_port = true;
+        self
+    }
+
+    /// Bind keys to tenants (#2492): a key `tenant_of` maps to a slug is
+    /// refused (403) unless the request resolves to that tenant, through the
+    /// mounted tenant context's resolver chain. No context or no tenant
+    /// refuses too. Keys it maps to `None` act for any tenant.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn bind_tenants(mut self, tenant_of: KeyTenantResolver) -> Self {
+        Arc::make_mut(&mut self.inner).tenant_of = Some(tenant_of);
         self
     }
 
@@ -248,6 +312,21 @@ async fn verify_request(
             Err(msg) => return Err(deny(msg)),
         },
     };
+    let mut extras = SignedExtras::default();
+    for name in &cfg.signed_headers {
+        let value = match req.headers().get(name).map(|v| v.to_str()) {
+            Some(Ok(v)) => v,
+            Some(Err(_)) => return Err(deny("malformed signed header")),
+            None => "",
+        };
+        extras.insert(name.as_str(), value);
+    }
+    if cfg.sign_port {
+        extras.insert(
+            PORT_LINE,
+            &request_port(&req).map_or(String::new(), |p| p.to_string()),
+        );
+    }
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or("").to_owned();
@@ -266,11 +345,16 @@ async fn verify_request(
         &query,
         &date,
         &body_hash,
+        &extras,
     );
     let expected_sig = hmac_sha256(&secret, canonical.as_bytes());
 
     if expected_sig.ct_eq(&parsed.signature).unwrap_u8() == 0 {
         return Err(deny("signature mismatch"));
+    }
+    #[cfg(feature = "tenancy")]
+    if let Some(slug) = cfg.tenant_of.as_ref().and_then(|f| f(&parsed.key_id)) {
+        bound_tenant_matches(&parts, &slug).await?;
     }
 
     // Replay defence. It runs only after the signature checks out, so
@@ -393,6 +477,51 @@ fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
     }
 }
 
+/// The tenant this request resolves to must be `slug`; fails closed.
+#[cfg(feature = "tenancy")]
+async fn bound_tenant_matches(
+    parts: &axum::http::request::Parts,
+    slug: &str,
+) -> Result<(), Response<Body>> {
+    let refuse = || ApiError::forbidden("key is bound to another tenant").into_response();
+    let Some(mounted) = crate::extractors::MountedTenantContext::of(&parts.extensions) else {
+        return Err(refuse());
+    };
+    match mounted.resolve(parts).await {
+        Ok(Some(org)) if org.slug == slug => Ok(()),
+        Ok(_) => Err(refuse()),
+        Err(e) => {
+            tracing::warn!(target: "rustango::hmac_auth", error = %e, "tenant lookup failed");
+            Err(
+                ApiError::from_status(StatusCode::SERVICE_UNAVAILABLE, "tenant lookup failed")
+                    .into_response(),
+            )
+        }
+    }
+}
+
+/// The port in `Host`, else in the request target.
+fn request_port(req: &Request<Body>) -> Option<u16> {
+    req.headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.parse::<axum::http::uri::Authority>().ok())
+        .and_then(|a| a.port_u16())
+        .or_else(|| req.uri().port_u16())
+}
+
+/// Signed headers and port, one `name:value` line each, sorted by name.
+/// Empty adds nothing, so a layer without them verifies the old format.
+#[derive(Debug, Default)]
+struct SignedExtras(std::collections::BTreeMap<String, String>);
+
+impl SignedExtras {
+    fn insert(&mut self, name: &str, value: &str) {
+        self.0
+            .insert(name.to_ascii_lowercase(), value.trim().to_owned());
+    }
+}
+
 fn canonical_request(
     method: &str,
     host: Option<&SignedHost>,
@@ -400,9 +529,11 @@ fn canonical_request(
     query: &str,
     date: &str,
     body_hash_hex: &str,
+    extras: &SignedExtras,
 ) -> String {
+    use std::fmt::Write as _;
     let sorted_query = sort_query(query);
-    format!(
+    let mut out = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
         host.map_or("", |h| h.0.as_str()),
@@ -410,7 +541,11 @@ fn canonical_request(
         sorted_query,
         date,
         body_hash_hex
-    )
+    );
+    for (name, value) in &extras.0 {
+        let _ = write!(out, "\n{name}:{value}");
+    }
+    out
 }
 
 fn sort_query(q: &str) -> String {
@@ -458,18 +593,73 @@ pub fn sign_request(
     date_rfc3339: &str,
     body: &[u8],
 ) -> String {
-    let body_hash = sha256_hex(body);
-    let canonical = canonical_request(
-        method,
-        SignedHost::parse(host).as_ref(),
-        path,
-        query,
-        date_rfc3339,
-        &body_hash,
-    );
-    let sig = hmac_sha256(secret, canonical.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig);
-    format!("{SCHEME} keyId={key_id},signature={sig_b64}")
+    RequestToSign::new(method, host, path, query, date_rfc3339, body).authorization(key_id, secret)
+}
+
+/// A request to sign, for a layer with [`HmacAuthLayer::signed_headers`]
+/// or [`HmacAuthLayer::sign_port`]. Sign every header the layer lists.
+pub struct RequestToSign<'a> {
+    method: &'a str,
+    host: &'a str,
+    path: &'a str,
+    query: &'a str,
+    date: &'a str,
+    body: &'a [u8],
+    extras: SignedExtras,
+}
+
+impl<'a> RequestToSign<'a> {
+    /// The fields [`sign_request`] takes; `date_rfc3339` goes in `X-Date`.
+    #[must_use]
+    pub fn new(
+        method: &'a str,
+        host: &'a str,
+        path: &'a str,
+        query: &'a str,
+        date_rfc3339: &'a str,
+        body: &'a [u8],
+    ) -> Self {
+        Self {
+            method,
+            host,
+            path,
+            query,
+            date: date_rfc3339,
+            body,
+            extras: SignedExtras::default(),
+        }
+    }
+
+    /// Sign a header with the value the request sends.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.extras.insert(name, value);
+        self
+    }
+
+    /// Sign the port the request's `Host` names.
+    #[must_use]
+    pub fn port(mut self, port: u16) -> Self {
+        self.extras.insert(PORT_LINE, &port.to_string());
+        self
+    }
+
+    /// The `Authorization` header value.
+    #[must_use]
+    pub fn authorization(&self, key_id: &str, secret: &[u8]) -> String {
+        let canonical = canonical_request(
+            self.method,
+            SignedHost::parse(self.host).as_ref(),
+            self.path,
+            self.query,
+            self.date,
+            &sha256_hex(self.body),
+            &self.extras,
+        );
+        let sig = hmac_sha256(secret, canonical.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig);
+        format!("{SCHEME} keyId={key_id},signature={sig_b64}")
+    }
 }
 
 /// Sign with the current time and return both headers: the RFC 3339
@@ -700,6 +890,178 @@ mod tests {
             status_for(layer(), "a.test", "/r", Some("a.test.")).await,
             200
         );
+    }
+
+    /// Send `/r` signed by `signer`, with `x-org: org` and `Host: host`.
+    async fn send_signed(
+        layer: HmacAuthLayer,
+        signer: RequestToSign<'_>,
+        org: &str,
+        host: &str,
+    ) -> u16 {
+        let auth = signer.authorization("k1", b"secret");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/r")
+            .header("host", host)
+            .header("x-org", org)
+            .header(HEADER_DATE, signer.date)
+            .header(HEADER_AUTH, auth)
+            .body(Body::from("x"))
+            .unwrap();
+        let svc = layer.layer(app().into_service::<Body>());
+        svc.oneshot(req).await.unwrap().status().as_u16()
+    }
+
+    fn now() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// #2492 — a request signed for one tenant header fails for another.
+    #[tokio::test]
+    async fn a_signed_header_cannot_be_swapped() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret")).signed_headers(["X-Org"]);
+        let date = now();
+        let signer =
+            || RequestToSign::new("POST", HOST, "/r", "", &date, b"x").header("x-org", "acme");
+        assert_eq!(send_signed(layer(), signer(), "acme", HOST).await, 200);
+        assert_eq!(send_signed(layer(), signer(), "globex", HOST).await, 401);
+        // Unconfigured, the header is not part of the signature.
+        let plain = RequestToSign::new("POST", HOST, "/r", "", &date, b"x");
+        let open = HmacAuthLayer::new(resolver_for("k1", b"secret"));
+        assert_eq!(send_signed(open, plain, "globex", HOST).await, 200);
+    }
+
+    /// #2492 — with `sign_port`, a replay to another port fails.
+    #[tokio::test]
+    async fn a_signed_port_cannot_be_swapped() {
+        let layer = || HmacAuthLayer::new(resolver_for("k1", b"secret")).sign_port();
+        let date = now();
+        let signer = || RequestToSign::new("POST", HOST, "/r", "", &date, b"x").port(8001);
+        assert_eq!(
+            send_signed(layer(), signer(), "", "api.test:8001").await,
+            200
+        );
+        assert_eq!(
+            send_signed(layer(), signer(), "", "api.test:8002").await,
+            401
+        );
+    }
+
+    /// A listed header the request leaves out signs as empty.
+    #[tokio::test]
+    async fn a_missing_signed_header_signs_as_empty() {
+        let date = now();
+        let signer = RequestToSign::new("POST", HOST, "/r", "", &date, b"x").header("x-org", "");
+        let auth = signer.authorization("k1", b"secret");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/r")
+            .header("host", HOST)
+            .header(HEADER_DATE, date.as_str())
+            .header(HEADER_AUTH, auth)
+            .body(Body::from("x"))
+            .unwrap();
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).signed_headers(["x-org"]);
+        let svc = layer.layer(app().into_service::<Body>());
+        assert_eq!(svc.oneshot(req).await.unwrap().status(), 200);
+    }
+
+    /// Known answers from an independent HMAC: the old format is unchanged,
+    /// and extras append sorted `name:value` lines.
+    #[test]
+    fn signatures_match_known_answers() {
+        let date = "2026-05-02T12:00:00Z";
+        assert_eq!(
+            sign_request("k1", b"secret", "POST", "api.test", "/r", "b=2&a=1", date, b"hello"),
+            "HMAC-SHA256 keyId=k1,signature=N/zvl45ZE9AHEbwor9Ee5H3utDQyMqfbZ0AC7vOPDmQ="
+        );
+        let extras = RequestToSign::new("POST", "api.test", "/r", "b=2&a=1", date, b"hello")
+            .header("X-Org", "acme")
+            .port(8001);
+        assert_eq!(
+            extras.authorization("k1", b"secret"),
+            "HMAC-SHA256 keyId=k1,signature=CV9W2AYnWKQLdNixr9CzH4cu8W4KpQ3QrdAOiy9uFE4="
+        );
+    }
+
+    /// A tenant from the subdomain, as `SubdomainResolver` would give.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    struct FirstLabel;
+
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[async_trait::async_trait]
+    impl crate::tenancy::OrgResolver for FirstLabel {
+        async fn resolve(
+            &self,
+            parts: &axum::http::request::Parts,
+            _: &crate::sql::Pool,
+        ) -> Result<Option<crate::tenancy::Org>, crate::tenancy::TenancyError> {
+            let host = parts.headers.get("host").and_then(|h| h.to_str().ok());
+            Ok(host
+                .and_then(|h| h.split_once('.'))
+                .map(|(slug, _)| crate::tenancy::Org {
+                    slug: slug.to_owned(),
+                    ..crate::testkit::org()
+                }))
+        }
+    }
+
+    /// #2492 — a bound key acts only on the tenant the request resolves to,
+    /// whatever a signed `X-Org` says; unbound keys act anywhere.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_bound_key_only_acts_on_its_resolved_tenant() {
+        use crate::extractors::DatabaseTenantContext;
+        use crate::tenancy::{session::SessionSecret, BackendKind, ChainResolver, DatabasePools};
+        let ctx = Arc::new(DatabaseTenantContext {
+            pools: Arc::new(DatabasePools::<crate::sql::sqlx::Sqlite>::new(
+                BackendKind::Sqlite,
+            )),
+            resolver: ChainResolver::new().push(FirstLabel),
+            session_secret: SessionSecret::from_bytes(vec![1; 32]),
+            operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+            registry: crate::sql::Pool::Sqlite(
+                crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
+            ),
+        });
+        let keys: KeyResolver = Arc::new(|k| matches!(k, "k1" | "k2").then(|| b"secret".to_vec()));
+        let tenant_of: KeyTenantResolver = Arc::new(|k| (k == "k1").then(|| "acme".to_owned()));
+        let date = now();
+        let send = |key: &'static str, host: &'static str, mounted: bool| {
+            let (ctx, keys, tenant_of, date) =
+                (ctx.clone(), keys.clone(), tenant_of.clone(), date.clone());
+            async move {
+                let auth = RequestToSign::new("POST", host, "/r", "", &date, b"x")
+                    .header("x-org", "acme")
+                    .authorization(key, b"secret");
+                let mut req = Request::builder()
+                    .method("POST")
+                    .uri("/r")
+                    .header("host", host)
+                    .header("x-org", "acme")
+                    .header(HEADER_DATE, date.as_str())
+                    .header(HEADER_AUTH, auth)
+                    .body(Body::from("x"))
+                    .unwrap();
+                if mounted {
+                    req.extensions_mut().insert(ctx);
+                }
+                let layer = HmacAuthLayer::new(keys)
+                    .signed_headers(["x-org"])
+                    .bind_tenants(tenant_of);
+                let svc = layer.layer(app().into_service::<Body>());
+                svc.oneshot(req).await.unwrap().status().as_u16()
+            }
+        };
+        assert_eq!(send("k1", "acme.app.test", true).await, 200);
+        // `X-Org: acme` is signed, but the subdomain resolves globex.
+        assert_eq!(send("k1", "globex.app.test", true).await, 403);
+        // No tenant context or no tenant: refused.
+        assert_eq!(send("k1", "acme.app.test", false).await, 403);
+        assert_eq!(send("k1", "localhost", true).await, 403);
+        // An unbound key acts on any tenant.
+        assert_eq!(send("k2", "globex.app.test", true).await, 200);
     }
 
     #[tokio::test]
@@ -1003,6 +1365,7 @@ mod tests {
             "x=1&y=2",
             "2026-05-02T12:00:00Z",
             "abc",
+            &SignedExtras::default(),
         );
         let b = canonical_request(
             "post",
@@ -1011,6 +1374,7 @@ mod tests {
             "y=2&x=1",
             "2026-05-02T12:00:00Z",
             "abc",
+            &SignedExtras::default(),
         );
         // Method case + query order shouldn't change the canonical form.
         assert_eq!(a, b);

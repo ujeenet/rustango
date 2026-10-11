@@ -350,6 +350,7 @@ async fn recording_a_migration_binds_applied_at() {
         atomic: true,
         scope: migrate::MigrationScope::default(),
         replaces: Vec::new(),
+        merges: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         forward: vec![Operation::Data(file::DataOp {
             sql: "SELECT 1".to_owned(),
