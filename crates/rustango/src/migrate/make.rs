@@ -1304,6 +1304,16 @@ mod tests {
         write_mig(&dir, &m3);
         let next = make_migrations_from(&dir, &with(&["b", "d"]), None).unwrap();
         assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+        // `makemigrations` itself takes the scoped path.
+        let next = make_migrations_scoped(
+            &dir,
+            &with(&["b", "d"]),
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+        )
+        .unwrap();
+        assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
