@@ -173,7 +173,7 @@ async fn purge_media<DB: Database>(
             .await
             .map_err(|e| e.to_string())?;
         let rows = async {
-            // URLs compare as text; the registry's own table catches an alias of its database.
+            // Defence in depth: the registry's own table catches a twin the identity missed.
             if mode == StorageMode::Database
                 && !pg_exclusive
                 && crate::migrate::try_table_exists_here(&pool, Org::SCHEMA.table)
@@ -276,8 +276,9 @@ where
         .await
         .map_err(|e| e.to_string())?;
     let me = DbIdentity::of_url(&url)
+        .await?
         .ok_or_else(|| shared("its URL names no existing file or server database".into()))?;
-    if DbIdentity::of_pool(registry).as_ref() == Some(&me) {
+    if DbIdentity::of_pool(registry).await?.as_ref() == Some(&me) {
         return Err(shared("it is the registry's".into()));
     }
     let others: Vec<Org> = Org::objects()
@@ -289,61 +290,67 @@ where
         .iter()
         .filter(|o| o.id.get() != org.id.get() && o.database_url.is_some())
     {
+        let cant = |e: String| shared(format!("tenant `{}` can't be checked: {e}", other.slug));
         let url = pools
             .resolved_database_url(other)
             .await
-            .map_err(|_| shared(format!("tenant `{}`'s URL can't be resolved", other.slug)))?;
-        if DbIdentity::of_url(&url).as_ref() == Some(&me) {
+            .map_err(|e| cant(e.to_string()))?;
+        if !me.same_backend(&url) {
+            continue;
+        }
+        if DbIdentity::of_url(&url).await.map_err(cant)?.as_ref() == Some(&me) {
             return Err(shared(format!("tenant `{}` uses it too", other.slug)));
         }
     }
     Ok(())
 }
 
-/// Where a SQLite or MySQL database lives, as far as its URL tells.
-/// Text-level for a server, so `localhost` and `127.0.0.1` differ.
+/// Which database a SQLite or MySQL tenant uses: a canonical file, or the
+/// live server's uuid and database, so a host alias can't hide a twin.
 #[cfg(feature = "media")]
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(all(feature = "sqlite", feature = "mysql")), allow(dead_code))]
 enum DbIdentity {
     File(std::path::PathBuf),
-    Server {
-        host: String,
-        port: u16,
-        database: String,
-    },
+    Server { uuid: String, database: String },
 }
 
 #[cfg(feature = "media")]
 impl DbIdentity {
-    fn of_url(url: &str) -> Option<Self> {
+    /// `Ok(None)` for another backend or a missing / in-memory SQLite file.
+    async fn of_url(url: &str) -> Result<Option<Self>, String> {
         #[cfg(feature = "sqlite")]
         if url.starts_with("sqlite:") {
-            let o =
-                <sqlx::sqlite::SqliteConnectOptions as std::str::FromStr>::from_str(url).ok()?;
-            return Self::file(o.get_filename());
+            let o = <sqlx::sqlite::SqliteConnectOptions as std::str::FromStr>::from_str(url)
+                .map_err(|e| e.to_string())?;
+            return Ok(Self::file(o.get_filename()));
         }
         #[cfg(feature = "mysql")]
         if url.starts_with("mysql:") || url.starts_with("mariadb:") {
-            let o = <sqlx::mysql::MySqlConnectOptions as std::str::FromStr>::from_str(url).ok()?;
-            return Self::server(o.get_host(), o.get_port(), o.get_database());
+            let pool = crate::sql::Pool::connect(url)
+                .await
+                .map_err(|e| e.to_string())?;
+            let id = Self::of_pool(&pool).await;
+            pool.close().await;
+            return id;
         }
         let _ = url;
-        None
+        Ok(None)
     }
 
-    fn of_pool(pool: &crate::sql::Pool) -> Option<Self> {
+    async fn of_pool(pool: &crate::sql::Pool) -> Result<Option<Self>, String> {
         #[allow(unreachable_patterns)]
         match pool {
             #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(p) => Self::file(p.connect_options().get_filename()),
+            crate::sql::Pool::Sqlite(p) => Ok(Self::file(p.connect_options().get_filename())),
             #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(p) => {
-                let o = p.connect_options();
-                Self::server(o.get_host(), o.get_port(), o.get_database())
-            }
-            _ => None,
+            crate::sql::Pool::Mysql(p) => Self::server(p).await.map(Some),
+            _ => Ok(None),
         }
+    }
+
+    fn same_backend(&self, url: &str) -> bool {
+        matches!(self, Self::File(_)) == url.starts_with("sqlite:")
     }
 
     /// An existing file, canonical: `None` for a missing or in-memory one.
@@ -352,13 +359,19 @@ impl DbIdentity {
         std::fs::canonicalize(path).ok().map(Self::File)
     }
 
+    /// Raw SQL: server identity has no ORM model. Names fold as the server
+    /// folds them (`lower_case_table_names`).
     #[cfg(feature = "mysql")]
-    fn server(host: &str, port: u16, database: Option<&str>) -> Option<Self> {
-        Some(Self::Server {
-            host: host.to_ascii_lowercase(),
-            port,
-            database: database?.to_owned(),
-        })
+    async fn server(pool: &sqlx::MySqlPool) -> Result<Self, String> {
+        let (uuid, database): (String, Option<String>) = sqlx::query_as(
+            "SELECT CAST(@@server_uuid AS CHAR), \
+             CAST(IF(@@lower_case_table_names = 0, DATABASE(), LOWER(DATABASE())) AS CHAR)",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let database = database.ok_or("the connection selects no database")?;
+        Ok(Self::Server { uuid, database })
     }
 }
 

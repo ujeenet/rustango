@@ -177,11 +177,24 @@ async fn purge_deletes_the_tenants_media_objects() {
     let reg_keys = upload(&reg, &storage).await;
     let report = purge(org_on("onreg", url("reg.db")).await, with_storage()).await;
     assert_eq!(report.media_deleted, 0, "{:?}", report.notes);
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("it is the registry's")),
+        "{:?}",
+        report.notes
+    );
     all_exist(reg_keys).await;
     let twin_keys = upload(&Pool::connect(&url("twin.db")).await.unwrap(), &storage).await;
     org_on("twin-a", url("twin.db")).await;
     let report = purge(org_on("twin-b", url("twin.db")).await, with_storage()).await;
     assert_eq!(report.media_deleted, 0, "{:?}", report.notes);
+    assert!(
+        report.notes.iter().any(|n| n.contains("uses it too")),
+        "{:?}",
+        report.notes
+    );
     all_exist(twin_keys).await;
 
     // A missing tenant file is not created by the purge.
@@ -190,6 +203,133 @@ async fn purge_deletes_the_tenants_media_objects() {
         !path("gone.db").exists(),
         "the purge created the tenant file"
     );
+}
+
+/// #2569 — MySQL identity is the live server, so a host alias of the
+/// registry's or another tenant's database is still refused.
+#[cfg(all(feature = "mysql", feature = "media"))]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn mysql_purge_sees_through_a_host_alias() {
+    use rustango::storage::Storage as _;
+    use rustango::tenancy::TenantPoolsConfig;
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::MySql.pool().await else {
+        eprintln!("MYSQL_TEST_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Mysql(my) = &pool else {
+        unreachable!()
+    };
+    let base = std::env::var("MYSQL_TEST_URL").unwrap();
+    let alias = |url: &str| {
+        if url.contains("@127.0.0.1") {
+            url.replace("@127.0.0.1", "@localhost")
+        } else {
+            url.replace("@localhost", "@127.0.0.1")
+        }
+    };
+    assert_ne!(
+        alias(&base),
+        base,
+        "MYSQL_TEST_URL host is no localhost / 127.0.0.1"
+    );
+    let pid = std::process::id();
+    let db_url = |db: &str| format!("{}/{db}", base.rsplit_once('/').unwrap().0);
+    let (shared, own) = (
+        format!("rustango_purge_tw_{pid}"),
+        format!("rustango_purge_own_{pid}"),
+    );
+    for db in [&shared, &own] {
+        rustango::sql::sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS `{db}`"))
+            .execute(my)
+            .await
+            .unwrap();
+    }
+    let (disk, storage) = media_disk();
+    let pools = TenantPools::new(my.clone()).config(TenantPoolsConfig {
+        media_storage: Some(storage.clone()),
+        ..TenantPoolsConfig::default()
+    });
+    let org_on = |tag: &str, url: String| {
+        let (pool, slug) = (pool.clone(), format!("purge-my-{tag}-{pid}"));
+        async move {
+            let mut org = Org {
+                slug: slug.clone(),
+                display_name: slug.clone(),
+                backend_kind: "mysql".into(),
+                database_url: Some(url),
+                ..rustango::testkit::org()
+            };
+            org.save_pool(&pool).await.unwrap();
+            slug
+        }
+    };
+    let purge = |slug: String| {
+        let pools = &pools;
+        async move {
+            let action = Action::Purge {
+                purge_database: true,
+            };
+            decommission(pools, &slug, action).await.unwrap()
+        }
+    };
+    let notes_say = |report: &Report, what: &str| {
+        assert_eq!(report.media_deleted, 0, "{:?}", report.notes);
+        assert!(
+            report.notes.iter().any(|n| n.contains(what)),
+            "{:?}",
+            report.notes
+        );
+    };
+
+    let reg_keys = upload(&pool, &storage).await;
+    notes_say(
+        &purge(org_on("onreg", alias(&base)).await).await,
+        "it is the registry's",
+    );
+    let tenant = Pool::connect(&db_url(&shared)).await.unwrap();
+    let twin_keys = upload(&tenant, &storage).await;
+    tenant.close().await;
+    org_on("twin-a", db_url(&shared)).await;
+    notes_say(
+        &purge(org_on("twin-b", alias(&db_url(&shared))).await).await,
+        "uses it too",
+    );
+    for key in reg_keys.iter().chain(&twin_keys) {
+        assert!(disk.exists(key).await.unwrap(), "{key} was deleted");
+    }
+    let tenant = Pool::connect(&db_url(&own)).await.unwrap();
+    let keys = upload(&tenant, &storage).await;
+    tenant.close().await;
+    let report = purge(org_on("own", db_url(&own)).await).await;
+    assert_eq!(report.media_deleted, 2, "{:?}", report.notes);
+    for key in &keys {
+        assert!(!disk.exists(key).await.unwrap(), "{key} survived the purge");
+    }
+
+    let twin_a = format!("purge-my-twin-a-{pid}");
+    decommission(
+        &pools,
+        &twin_a,
+        Action::Purge {
+            purge_database: true,
+        },
+    )
+    .await
+    .unwrap();
+    let mine = rustango::media::Media::objects()
+        .where_(rustango::media::Media::storage_key.is_in(reg_keys))
+        .compile_delete()
+        .unwrap();
+    rustango::sql::delete_pool(&pool, &mine).await.unwrap();
+    for db in [&shared, &own] {
+        rustango::sql::sqlx::query(&format!("DROP DATABASE IF EXISTS `{db}`"))
+            .execute(my)
+            .await
+            .unwrap();
+    }
 }
 
 /// An in-memory media disk and a registry holding it as `default`.
