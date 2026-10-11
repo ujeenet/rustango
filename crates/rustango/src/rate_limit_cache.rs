@@ -211,25 +211,6 @@ impl CacheRateLimitLayer {
         })
     }
 
-    /// [`Self::try_take`] without counting: `Err(retry_after_secs)` when full.
-    pub(crate) async fn try_peek(
-        &self,
-        key: &str,
-    ) -> Result<Result<(), u64>, crate::cache::CacheError> {
-        let (now, window_start) = self.window_now();
-        let count = self
-            .cache
-            .get(&self.cache_key(key, window_start))
-            .await?
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        Ok(if count >= i64::from(self.capacity) {
-            Err(self.retry_after(now, window_start))
-        } else {
-            Ok(())
-        })
-    }
-
     /// Refund a slot [`Self::try_take`] counted in `window_start`. A past
     /// window has expired, and a counter is never taken below 0: an
     /// evicted key would otherwise hand out an extra slot.
@@ -431,7 +412,7 @@ mod tests {
         l.give_back_at("k", past).await;
         assert_eq!(l.cache.get(&l.cache_key("k", past)).await.unwrap(), None);
         assert!(
-            l.try_peek("k").await.unwrap().is_err(),
+            l.try_take("k").await.unwrap().is_err(),
             "this window refunded"
         );
     }

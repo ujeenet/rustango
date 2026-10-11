@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — login lock and per-IP limits reserve before the password check (#2378)
+
+`LoginThrottle::begin` counts the attempt up front and refunds it on success, so a parallel burst no longer passes a peek hundreds of times. New `Lockout::reserve` / `reserved_failed` / `release`.
+
 ### Fixed — `InMemoryJtiStore` prunes with an expiry heap (#2514)
 
 `mark_used` pops only expired entries instead of scanning the whole map under the lock on every refresh.

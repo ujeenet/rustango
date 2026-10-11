@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Login attempts are reserved up front (#2378)
+
+HTTP Basic and API-key checks now hold a per-IP and account-lock slot while they verify, so more than `ip_limit` (or `max_attempts` for one account) uncached checks in flight at once get `429`. An attempt dropped without an outcome is refunded.
+
 ## 0.60.6
 
 ### Strict Bool and null decoding (#2530)

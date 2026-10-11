@@ -1,17 +1,19 @@
 //! One gate in front of every built-in password login.
 //!
-//! [`LoginThrottle::begin`] runs before the user lookup and checks, in
-//! order, the account lock, a per-IP limit and the scope's global limit.
-//! A request refused by one check spends nothing from the later ones.
+//! [`LoginThrottle::begin`] runs before the user lookup and reserves, in
+//! order, an account-lock attempt, a per-IP token and a token from the
+//! scope's global limit. Reserving before the password check means a
+//! parallel burst cannot all pass a peek (#2378). A request refused by
+//! one check spends nothing from the later ones.
 //!
 //! - **Account lock**: keyed by the normalized *submitted* username, so
 //!   an unknown name is limited exactly like a real one. Once the row is
 //!   found, [`LoginAttempt::resolve`] adds the stored username, so every
 //!   spelling the database matches to one account shares one lock.
 //! - **Per IP** (IPv6 by /64) and **per scope** ([`LoginScope`]): only
-//!   failed attempts use them up; a successful login gives its token back.
-//!   Credentials sent on every request (HTTP Basic, API keys) are only
-//!   charged when they fail.
+//!   failed attempts use them up; a successful login gives its token back,
+//!   so credentials sent on every request (HTTP Basic, API keys) only hold
+//!   a token while they are checked.
 //!
 //! Shared across scopes: the per-IP buckets, the account-lock store and
 //! the password-hashing queue ([`crate::passwords`]).
@@ -99,9 +101,9 @@ pub enum LoginScope {
     Operator,
     /// A tenant's admin login form and JWT login (one user table).
     Tenant(String),
-    /// HTTP Basic against a tenant. Only failures count.
+    /// HTTP Basic against a tenant. Only failures keep their token.
     TenantBasic(String),
-    /// API keys against a tenant. Only failures count; no account lock.
+    /// API keys against a tenant. Only failures keep their token; no account lock.
     TenantApiKey(String),
 }
 
@@ -114,11 +116,6 @@ impl LoginScope {
             Self::TenantBasic(slug) => format!("tenant-basic:{slug}"),
             Self::TenantApiKey(slug) => format!("tenant-apikey:{slug}"),
         }
-    }
-
-    /// Sent on every request, so normal traffic must not use up limits.
-    fn per_request(&self) -> bool {
-        matches!(self, Self::TenantBasic(_) | Self::TenantApiKey(_))
     }
 
     fn locks_accounts(&self) -> bool {
@@ -218,19 +215,6 @@ enum Spent {
 }
 
 impl Limit {
-    async fn peek(&self, key: &str) -> Result<(), u64> {
-        match self {
-            Self::Memory(l) => l.peek(key).await,
-            Self::Cache { shared, fallback } => match shared.try_peek(key).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache read failed");
-                    fallback.peek(key).await
-                }
-            },
-        }
-    }
-
     async fn take(&self, key: &str) -> Result<Spent, u64> {
         match self {
             Self::Memory(l) => l.take(key).await.map(|_| Spent::Memory),
@@ -344,33 +328,30 @@ impl LoginThrottle {
         let throttled = |retry_after_secs| LoginRefused::Throttled { retry_after_secs };
         self.warn_once_on_weak_store();
         let scope_key = scope.key();
-        let per_request = scope.per_request();
         let mut keys = Vec::with_capacity(2);
         if scope.locks_accounts() {
             let key = account_key(&scope_key, username);
-            check_lock(&key).await?;
+            reserve_lock(&key).await?;
             keys.push(key);
         }
         let b = &self.0;
         let mut ip_spent = Spent::Nothing;
         if let Some(ip) = &ip.0 {
-            if per_request {
-                b.ip.peek(ip).await.map_err(throttled)?;
-            } else {
-                ip_spent = b.ip.take(ip).await.map_err(throttled)?;
+            match b.ip.take(ip).await {
+                Ok(spent) => ip_spent = spent,
+                Err(secs) => {
+                    release_locks(&keys).await;
+                    return Err(throttled(secs));
+                }
             }
         }
-        let global = if per_request {
-            b.global.peek(&scope_key).await.map(|()| Spent::Nothing)
-        } else {
-            b.global.take(&scope_key).await
-        };
-        let global_spent = match global {
+        let global_spent = match b.global.take(&scope_key).await {
             Ok(spent) => spent,
             Err(secs) => {
                 if let Some(ip) = &ip.0 {
                     b.ip.give_back(ip, ip_spent).await;
                 }
+                release_locks(&keys).await;
                 return Err(throttled(secs));
             }
         };
@@ -378,9 +359,9 @@ impl LoginThrottle {
             buckets: Arc::clone(b),
             scope_key,
             ip: ip.0.clone(),
-            per_request,
             spent: (ip_spent, global_spent),
             keys,
+            reported: false,
         })
     }
 
@@ -423,15 +404,23 @@ fn memory_global(limits: LoginLimits) -> RateLimitLayer {
     RateLimitLayer::global(limits.global_limit.max(1), limits.global_window)
 }
 
-async fn check_lock(key: &str) -> Result<(), LoginRefused> {
+/// Count the attempt against the account before the password check.
+async fn reserve_lock(key: &str) -> Result<(), LoginRefused> {
     let lockout = crate::account_lockout::shared();
     crate::account_lockout::warn_once_on_weak_store(lockout);
-    if lockout.is_locked(key).await {
+    if !lockout.reserve(key).await {
         return Err(LoginRefused::Throttled {
             retry_after_secs: lockout.lock_duration().as_secs().max(1),
         });
     }
     Ok(())
+}
+
+async fn release_locks(keys: &[String]) {
+    let lockout = crate::account_lockout::shared();
+    for key in keys {
+        lockout.release(key).await;
+    }
 }
 
 /// One admitted attempt. Report [`Self::failed`] or [`Self::succeeded`].
@@ -440,11 +429,33 @@ pub struct LoginAttempt {
     buckets: Arc<Buckets>,
     scope_key: String,
     ip: Option<String>,
-    per_request: bool,
     /// What `begin` counted per IP and globally, refunded on success.
     spent: (Spent, Spent),
     /// Account-lock keys: the submitted name, then the stored one.
     keys: Vec<String>,
+    /// `false` until an outcome is reported; an unreported attempt
+    /// (busy, DB error) is given back on drop, as it checked nothing.
+    reported: bool,
+}
+
+impl Drop for LoginAttempt {
+    fn drop(&mut self) {
+        if self.reported {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let attempt = LoginAttempt {
+            buckets: Arc::clone(&self.buckets),
+            scope_key: std::mem::take(&mut self.scope_key),
+            ip: self.ip.take(),
+            spent: self.spent,
+            keys: std::mem::take(&mut self.keys),
+            reported: false,
+        };
+        rt.spawn(attempt.prompted());
+    }
 }
 
 impl LoginAttempt {
@@ -460,28 +471,25 @@ impl LoginAttempt {
         }
         let key = account_key(&self.scope_key, stored_username);
         if !self.keys.contains(&key) {
-            check_lock(&key).await?;
+            reserve_lock(&key).await?;
             self.keys.push(key);
         }
         Ok(())
     }
 
-    /// Count a failure against the username, known or not.
-    pub async fn failed(self) {
+    /// Count a failure against the username, known or not. `begin`
+    /// already counted it; this keeps the tokens and may lock the account.
+    pub async fn failed(mut self) {
+        self.reported = true;
         let lockout = crate::account_lockout::shared();
         for key in &self.keys {
-            let _ = lockout.record_failure(key).await;
-        }
-        if self.per_request {
-            if let Some(ip) = &self.ip {
-                let _ = self.buckets.ip.take(ip).await;
-            }
-            let _ = self.buckets.global.take(&self.scope_key).await;
+            lockout.reserved_failed(key).await;
         }
     }
 
     /// Clear the username's failures and give back the limit tokens.
-    pub async fn succeeded(self) {
+    pub async fn succeeded(mut self) {
+        self.reported = true;
         let lockout = crate::account_lockout::shared();
         for key in &self.keys {
             if lockout.attempt_count(key).await > 0 {
@@ -493,7 +501,9 @@ impl LoginAttempt {
 
     /// The password was right and the form now asks for a second
     /// factor: give back the limit tokens, keep the username's failures.
-    pub async fn prompted(self) {
+    pub async fn prompted(mut self) {
+        self.reported = true;
+        release_locks(&self.keys).await;
         self.give_back().await;
     }
 
@@ -704,7 +714,7 @@ mod tests {
         }
     }
 
-    /// Per-request credentials are charged only when they fail.
+    /// Per-request credentials keep a token only when they fail.
     #[tokio::test]
     async fn per_request_scopes_count_only_failures() {
         let t = LoginThrottle::new(LoginLimits {
@@ -712,13 +722,12 @@ mod tests {
             ..LoginLimits::default()
         });
         let s = LoginScope::TenantApiKey("t-key".into());
-        // Five in flight at once, more than the limit.
-        let mut held = Vec::new();
         for _ in 0..5 {
-            held.push(t.begin(&s, &ip("10.9.3.1"), "").await);
-        }
-        for a in held {
-            a.unwrap().succeeded().await;
+            t.begin(&s, &ip("10.9.3.1"), "")
+                .await
+                .unwrap()
+                .succeeded()
+                .await;
         }
         for _ in 0..2 {
             t.begin(&s, &ip("10.9.3.1"), "")
@@ -728,6 +737,86 @@ mod tests {
                 .await;
         }
         assert!(t.begin(&s, &ip("10.9.3.1"), "").await.is_err());
+    }
+
+    /// #2378 — a parallel burst on a per-request scope reserves its tokens
+    /// before any verify, so no more than the per-IP limit gets through.
+    #[tokio::test]
+    async fn per_request_burst_is_capped_by_the_ip_limit() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 3,
+            ..LoginLimits::default()
+        });
+        let s = LoginScope::TenantApiKey("t-burst".into());
+        let mut held = Vec::new();
+        for _ in 0..20 {
+            if let Ok(a) = t.begin(&s, &ip("10.9.3.9"), "").await {
+                held.push(a);
+            }
+        }
+        assert_eq!(held.len(), 3, "in-flight attempts must hold their token");
+        for a in held {
+            a.failed().await;
+        }
+    }
+
+    /// #2378 — a burst at one Basic account passes the lock at most
+    /// `max_attempts` times, even before any failure is reported.
+    #[tokio::test]
+    async fn basic_burst_is_capped_by_the_account_lock() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 1000,
+            ..LoginLimits::default()
+        });
+        let s = LoginScope::TenantBasic("t-burst-lock".into());
+        let mut held = Vec::new();
+        for n in 0..50 {
+            if let Ok(a) = t.begin(&s, &ip(&format!("10.9.10.{n}")), "victim").await {
+                held.push(a);
+            }
+        }
+        assert_eq!(
+            held.len(),
+            crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize,
+            "the lock check must reserve, not peek"
+        );
+        for a in held {
+            a.failed().await;
+        }
+        let r = t.begin(&s, &ip("10.9.11.1"), "victim").await;
+        assert!(matches!(r, Err(LoginRefused::Throttled { .. })));
+    }
+
+    /// An attempt dropped unreported (busy, DB error) gives its
+    /// reservations back instead of counting toward the lock.
+    #[tokio::test]
+    async fn an_unreported_attempt_is_given_back() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 1,
+            ..LoginLimits::default()
+        });
+        let s = tenant("t-drop");
+        for _ in 0..10 {
+            drop(t.begin(&s, &ip("10.9.13.1"), "dropper").await.unwrap());
+            // The refund runs on a spawned task.
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    /// Succeeding attempts give the account reservation back.
+    #[tokio::test]
+    async fn successes_free_the_account_reservation() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let s = tenant("t-lock-ok");
+        for _ in 0..20 {
+            t.begin(&s, &ip("10.9.12.1"), "regular")
+                .await
+                .unwrap()
+                .succeeded()
+                .await;
+        }
     }
 
     fn on_cache(cache: &BoxedCache, limits: LoginLimits) -> LoginThrottle {
