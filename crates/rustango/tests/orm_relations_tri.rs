@@ -709,6 +709,7 @@ async fn distinct_order_by_relation(pool: &Pool) {
 
 /// A relation filter on the tx and executor paths: the filter join is not
 /// decoded, a `select_related` one still is.
+#[allow(irrefutable_let_patterns)]
 async fn relation_filter_on_tx_and_executor(pool: &Pool) {
     use rustango::sql::{transaction_pool, FetcherTx as _};
     seed_articles(pool).await;
