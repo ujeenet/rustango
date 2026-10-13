@@ -780,6 +780,10 @@ jobs:
           # No row had it, so `signing` gated on it without its crypto
           # deps went unseen (#1678).
           - sqlite,storage-s3
+          # Shares `storage::transport` with S3; each must build alone.
+          - sqlite,storage-azure
+          # `StorageRegistry::from_settings` with no remote driver.
+          - sqlite,config,storage
           # Both enable `crypto` and did not compile alone.
           - sqlite,csrf
           - sqlite,totp

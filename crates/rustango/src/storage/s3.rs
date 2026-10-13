@@ -57,6 +57,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
+use super::transport::{canonical_header_value, encode_key, encode_query, Http};
+#[cfg(test)]
+use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
 
 /// How to reach the bucket.
@@ -86,68 +89,6 @@ pub struct S3Storage {
     signing_key: std::sync::Mutex<Option<(String, Arc<[u8]>)>>,
     #[cfg(test)]
     derivations: std::sync::atomic::AtomicUsize,
-}
-
-/// Default client timeouts; [`S3Storage::with_http`] replaces them.
-const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Waiting for a reply or the next body chunk; a total cap would fail big objects.
-const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// The slowest upload rate the default PUT timeout allows, in bytes per second.
-const MIN_UPLOAD_RATE: u64 = 256 * 1024;
-
-/// The HTTP clients. Only the defaults get a size-based upload timeout.
-enum Http {
-    /// reqwest's read timeout runs through an upload, so PUT uses a client without one.
-    Default {
-        http: reqwest::Client,
-        upload: reqwest::Client,
-        read_timeout: std::time::Duration,
-    },
-    /// From [`S3Storage::with_http`]: its own timeouts apply to every request.
-    Custom(reqwest::Client),
-}
-
-impl Http {
-    fn defaults() -> Self {
-        Self::with_read_timeout(DEFAULT_READ_TIMEOUT)
-    }
-
-    fn with_read_timeout(read_timeout: std::time::Duration) -> Self {
-        // A redirect could take signed requests to a host the config never named (#1780).
-        let base = || {
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        };
-        // A stalled endpoint must fail, not hang the request holding it (#2220).
-        Self::Default {
-            http: base()
-                .read_timeout(read_timeout)
-                .build()
-                .expect("reqwest client builds"),
-            upload: base().build().expect("reqwest client builds"),
-            read_timeout,
-        }
-    }
-
-    fn request(&self, method: reqwest::Method, url: &str, len: usize) -> reqwest::RequestBuilder {
-        match self {
-            Self::Default {
-                upload,
-                read_timeout,
-                ..
-            } if method == reqwest::Method::PUT => upload
-                .request(method, url)
-                .timeout(upload_timeout(*read_timeout, len)),
-            Self::Default { http, .. } | Self::Custom(http) => http.request(method, url),
-        }
-    }
-}
-
-/// The read timeout plus the time to send `len` bytes at [`MIN_UPLOAD_RATE`].
-fn upload_timeout(read_timeout: std::time::Duration, len: usize) -> std::time::Duration {
-    let len = u64::try_from(len).unwrap_or(u64::MAX);
-    read_timeout + std::time::Duration::from_millis(len.saturating_mul(1000) / MIN_UPLOAD_RATE)
 }
 
 /// The endpoint without its `http(s)://` scheme.
@@ -554,23 +495,6 @@ impl Storage for S3Storage {
 // SigV4 primitives
 // =====================================================================
 
-/// A header value as SigV4 signs it: trimmed, inner runs of spaces
-/// collapsed to one. `None` when empty; control characters are refused.
-fn canonical_header_value(v: Option<&str>) -> Result<Option<String>, StorageError> {
-    let Some(v) = v else { return Ok(None) };
-    if v.chars().any(|c| c.is_control() && c != '\t') {
-        return Err(StorageError::Io(format!(
-            "content type {v:?} has a control character"
-        )));
-    }
-    let v = v
-        .split([' ', '\t'])
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok((!v.is_empty()).then_some(v))
-}
-
 /// Format unix seconds as `YYYYMMDDTHHMMSSZ`, which SigV4 wants.
 fn format_amz_date(unix_secs: u64) -> String {
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_secs as i64, 0)
@@ -588,37 +512,6 @@ fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> 
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     hmac_sha256(&k_service, b"aws4_request")
-}
-
-/// Percent-encode a key the way SigV4 wants. `/` stays as it is,
-/// because S3 keys use it as a separator; everything outside the
-/// unreserved set is escaped.
-fn encode_key(key: &str) -> String {
-    let mut out = String::with_capacity(key.len());
-    for &b in key.as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{b:02X}"));
-        }
-    }
-    out
-}
-
-/// Like [`encode_key`], but it escapes `/` as well. The canonical
-/// query string escapes everything outside the unreserved set.
-fn encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{b:02X}"));
-        }
-    }
-    out
 }
 
 #[cfg(test)]

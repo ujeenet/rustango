@@ -92,7 +92,7 @@
 //! | `jwt` / `oauth2` | Token auth; social / OIDC login. |
 //! | `jobs` / `jobs-postgres` | Background jobs (in-memory / durable). |
 //! | `cache` / `cache-redis` | Cache layer; Redis backend. |
-//! | `storage` / `storage-s3` / `media` | File storage + the `Media` model. |
+//! | `storage` / `storage-s3` / `storage-azure` / `media` | File storage + the `Media` model. |
 //! | `mcp` | Model Context Protocol server over HTTP. |
 //! | `openapi` | OpenAPI 3.1 schema auto-derive. |
 //!
@@ -520,6 +520,7 @@ pub mod jsonapi;
 #[cfg(any(
     feature = "_signing",
     feature = "storage-s3",
+    feature = "storage-azure",
     feature = "csrf",
     feature = "totp",
 ))]

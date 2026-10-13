@@ -4,6 +4,18 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — Azure Blob Storage backend (`storage-azure`)
+
+`storage::azure::AzureBlobStorage` signs requests with the account's Shared Key and presigns with service SAS; a create-only PUT gets `c` without `w`. In `batteries`. Works with Azurite through `endpoint`.
+
+### Added — storage disks from config
+
+`[storage]` declares named disks (`driver = "local" | "s3" | "azure"`), any number of each; `StorageRegistry::from_settings` builds them, with CDNs, a default disk and an optional `public_endpoint` for presigned links. Account keys and secrets come from `RUSTANGO__STORAGE__DISKS__<NAME>__…`, and `{:?}` redacts them.
+
+### Added — `Storage::presigned_put_headers`
+
+The headers a direct upload must send. Defaults to `PutConditions::headers`; Azure adds `x-ms-blob-type`. `MediaManager::begin_upload` uses it for `ticket.headers`.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)

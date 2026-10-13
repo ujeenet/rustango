@@ -496,7 +496,7 @@ impl MediaManager {
             disk: intent.disk,
             storage_key: key,
             content_type,
-            headers: put.headers(),
+            headers: storage.presigned_put_headers(&put),
         })
     }
 
