@@ -1,12 +1,11 @@
 //! `.values()` and `.values_list()`: fetch chosen columns as plain
 //! data instead of decoding whole models.
 //!
-//! Each backend decodes a cell into a `SqlValue` its own way, then
-//! the `fetch_values_*` functions shape the rows into dicts, tuples
-//! or a flat list.
+//! [`super::decode`] turns cells into `SqlValue`s; the `fetch_values_*`
+//! functions shape the rows into dicts, tuples or a flat list.
 
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{PgArguments, PgRow};
+use sqlx::postgres::PgArguments;
 #[cfg(feature = "postgres")]
 use sqlx::query::Query;
 
@@ -25,74 +24,11 @@ use super::bind_query_my;
 #[cfg(feature = "sqlite")]
 use super::bind_query_sqlite;
 
-/// Decode column `i` of a row into a `SqlValue`. It tries scalars
-/// first and JSON after, the same order the aggregate decoder uses,
-/// so both agree on mixed types. A NULL or an unknown type gives
-/// [`SqlValue::Null`].
-#[cfg(feature = "postgres")]
-fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
-    use sqlx::Row as _;
-    if let Ok(v) = row.try_get::<i64, _>(i) {
-        SqlValue::I64(v)
-    } else if let Ok(v) = row.try_get::<i32, _>(i) {
-        SqlValue::I32(v)
-    } else if let Ok(v) = row.try_get::<f64, _>(i) {
-        SqlValue::F64(v)
-    } else if let Ok(v) = row.try_get::<bool, _>(i) {
-        SqlValue::Bool(v)
-    } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
-        // `NUMERIC`, which PG widens a `SUM` to. Neither the i64 nor
-        // the f64 probe decodes it, so it would come back as Null.
-        SqlValue::Decimal(v)
-    } else if let Ok(v) = row.try_get::<uuid::Uuid, _>(i) {
-        SqlValue::Uuid(v)
-    } else if let Some(v) = chrono_cell(row, i) {
-        v
-    } else if let Ok(v) = row.try_get::<String, _>(i) {
-        SqlValue::String(v)
-    } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
-        SqlValue::Json(v)
-    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
-        SqlValue::Binary(v)
-    } else {
-        SqlValue::Null
-    }
-}
-
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+use super::decode::TypedCol;
+use super::decode::{rows_to_dicts, rows_to_lists};
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 use crate::core::joins::joined_label;
-
-/// A leading result column: its output name and the type its model declares.
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-type TypedCol = (
-    std::borrow::Cow<'static, str>,
-    Option<crate::core::FieldType>,
-);
-
-/// Per result column, the type its model declares. MySQL and SQLite
-/// store a UUID as text and MySQL a bool as an integer, so only the model tells.
-///
-/// Only the leading `typed` columns count: an annotation or aggregate alias that
-/// shares a column name (`SUM(x) AS flag`) is not that column (#2296).
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn column_types<R: sqlx::Row>(
-    rows: &[R],
-    typed: &[TypedCol],
-) -> Vec<Option<crate::core::FieldType>> {
-    use sqlx::Column as _;
-    rows.first().map_or_else(Vec::new, |row| {
-        row.columns()
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                typed
-                    .get(i)
-                    .filter(|(name, _)| name == c.name())
-                    .and_then(|(_, ty)| *ty)
-            })
-            .collect()
-    })
-}
 
 /// Cells of a value row: the projection, then each join's columns. Any
 /// after them are DISTINCT's ORDER BY helpers, which the row drops.
@@ -152,168 +88,6 @@ fn aggregate_group_cols(query: &AggregateQuery) -> Vec<TypedCol> {
         .collect()
 }
 
-#[cfg(feature = "mysql")]
-fn my_cell_to_sqlvalue(
-    row: &sqlx::mysql::MySqlRow,
-    i: usize,
-    ty: Option<crate::core::FieldType>,
-) -> SqlValue {
-    use crate::core::FieldType;
-    use sqlx::{Column as _, Row as _, TypeInfo as _};
-    if ty == Some(FieldType::Bool) {
-        if let Ok(Some(b)) = row.try_get::<Option<bool>, _>(i) {
-            return SqlValue::Bool(b);
-        }
-    }
-    // A JSON column decodes neither as String nor as bytes (#2296).
-    if row.column(i).type_info().name() == "JSON" {
-        if let Ok(Some(v)) = row.try_get::<Option<serde_json::Value>, _>(i) {
-            return SqlValue::Json(v);
-        }
-    }
-    if ty == Some(FieldType::Uuid) {
-        if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
-            if let Ok(u) = uuid::Uuid::parse_str(&s) {
-                return SqlValue::Uuid(u);
-            }
-        }
-    }
-    // `COUNT(*)` and the window ranking functions return BIGINT
-    // UNSIGNED, which the i64 probe cannot decode. sqlx's permissive
-    // bool decode would then claim it and lose the number, so check
-    // the column type first. A real boolean column is not UNSIGNED,
-    // so it still reaches the bool probe below.
-    if row.column(i).type_info().name().contains("UNSIGNED") {
-        if let Ok(v) = row.try_get::<u64, _>(i) {
-            // A value above i64::MAX becomes a string rather than
-            // saturating, though no real rank gets that large.
-            return i64::try_from(v)
-                .map_or_else(|_| SqlValue::String(v.to_string()), SqlValue::I64);
-        }
-        if let Ok(v) = row.try_get::<u32, _>(i) {
-            return SqlValue::I64(i64::from(v));
-        }
-    }
-    if let Ok(v) = row.try_get::<i64, _>(i) {
-        SqlValue::I64(v)
-    } else if let Ok(v) = row.try_get::<i32, _>(i) {
-        SqlValue::I32(v)
-    } else if let Ok(v) = row.try_get::<f64, _>(i) {
-        SqlValue::F64(v)
-    } else if let Ok(v) = row.try_get::<bool, _>(i) {
-        SqlValue::Bool(v)
-    } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
-        // `DECIMAL`, which a `SUM` over an integer column returns.
-        // Neither the i64 nor the f64 probe decodes it.
-        SqlValue::Decimal(v)
-    } else if let Some(v) = chrono_cell(row, i) {
-        v
-    } else if let Ok(v) = row.try_get::<String, _>(i) {
-        SqlValue::String(v)
-    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
-        SqlValue::Binary(v)
-    } else {
-        SqlValue::Null
-    }
-}
-
-/// A date or timestamp cell, which the other probes leave as `Null` (#2004).
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-fn chrono_cell<'r, R>(row: &'r R, i: usize) -> Option<SqlValue>
-where
-    R: sqlx::Row,
-    usize: sqlx::ColumnIndex<R>,
-    chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    chrono::NaiveDateTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-{
-    if let Ok(v) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(i) {
-        Some(SqlValue::DateTime(v))
-    } else if let Ok(v) = row.try_get::<chrono::NaiveDateTime, _>(i) {
-        Some(SqlValue::DateTime(v.and_utc()))
-    } else {
-        row.try_get::<chrono::NaiveDate, _>(i)
-            .ok()
-            .map(SqlValue::Date)
-    }
-}
-
-#[cfg(feature = "sqlite")]
-fn sqlite_cell_to_sqlvalue(
-    row: &sqlx::sqlite::SqliteRow,
-    i: usize,
-    ty: Option<crate::core::FieldType>,
-) -> SqlValue {
-    use sqlx::{Row as _, TypeInfo as _, ValueRef as _};
-    let is_uuid = ty == Some(crate::core::FieldType::Uuid);
-    // SQLite is dynamically typed, and an expression column such as
-    // a scalar subquery has a storage class but no useful declared
-    // type. `try_get::<T>` checks against the declared type, which
-    // reads as INTEGER here, so `try_get::<i64>` would turn a text
-    // value into `0` while `try_get::<String>` would fail outright.
-    //
-    // So when the runtime storage class is TEXT, read the bytes with
-    // `try_get_unchecked`. Everything else goes to the probe below,
-    // which handles it correctly — including correlated aggregates,
-    // whose `type_info()` SQLite also misreports.
-    if let Ok(raw) = row.try_get_raw(i) {
-        let is_null = raw.is_null();
-        let (is_text, is_blob) = {
-            let storage = raw.type_info();
-            (storage.name() == "TEXT", storage.name() == "BLOB")
-        };
-        // Decode while `raw` is still in scope: calling `type_info()`
-        // inline just before this can make it fail for no reason.
-        let as_text = row.try_get_unchecked::<String, _>(i);
-        // A NULL would decode as `0` below (#1766).
-        if is_null {
-            return SqlValue::Null;
-        }
-        if is_text {
-            return match as_text {
-                Ok(s) if is_uuid => {
-                    uuid::Uuid::parse_str(&s).map_or(SqlValue::String(s), SqlValue::Uuid)
-                }
-                // JSON is stored as text; read it as `Json` like PG and MySQL.
-                Ok(s) if ty == Some(crate::core::FieldType::Json) => {
-                    serde_json::from_str(&s).map_or(SqlValue::String(s), SqlValue::Json)
-                }
-                Ok(s) => SqlValue::String(s),
-                Err(_) => SqlValue::Null,
-            };
-        }
-        // sqlx writes a Uuid as 16 raw bytes; no probe below reads a BLOB.
-        if is_blob {
-            return match row.try_get_unchecked::<Vec<u8>, _>(i) {
-                Ok(b) if is_uuid && b.len() == 16 => {
-                    uuid::Uuid::from_slice(&b).map_or(SqlValue::Binary(b), SqlValue::Uuid)
-                }
-                Ok(b) => SqlValue::Binary(b),
-                Err(_) => SqlValue::Null,
-            };
-        }
-    }
-    // A bool column stores an integer; read it as `Bool` like PG (#2296).
-    if ty == Some(crate::core::FieldType::Bool) {
-        if let Ok(v) = row.try_get_unchecked::<bool, _>(i) {
-            return SqlValue::Bool(v);
-        }
-    }
-    if let Ok(v) = row.try_get::<i64, _>(i) {
-        SqlValue::I64(v)
-    } else if let Ok(v) = row.try_get::<i32, _>(i) {
-        SqlValue::I32(v)
-    } else if let Ok(v) = row.try_get::<f64, _>(i) {
-        SqlValue::F64(v)
-    } else if let Ok(v) = row.try_get::<bool, _>(i) {
-        SqlValue::Bool(v)
-    } else if let Ok(v) = row.try_get::<String, _>(i) {
-        SqlValue::String(v)
-    } else {
-        SqlValue::Null
-    }
-}
-
 /// Run a [`SelectQuery`] with a projection and return each row as a
 /// map from column name to value. Backs
 /// [`crate::query::ValuesQuerySet::fetch`].
@@ -334,17 +108,7 @@ pub async fn fetch_values_dict(
                 q = bind_query(q, v);
             }
             let rows = q.fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate().take(width) {
-                    map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(&rows, &[], width))
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -354,21 +118,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, &select_model_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate().take(width) {
-                    map.insert(
-                        col.name().to_owned(),
-                        my_cell_to_sqlvalue(row, i, col_types[i]),
-                    );
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(&rows, &select_model_cols(query), width))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -378,21 +128,7 @@ pub async fn fetch_values_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, &select_model_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate().take(width) {
-                    map.insert(
-                        col.name().to_owned(),
-                        sqlite_cell_to_sqlvalue(row, i, col_types[i]),
-                    );
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(&rows, &select_model_cols(query), width))
         }
     }
 }
@@ -420,17 +156,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query(q, v);
             }
             let rows = q.fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(&rows, &[], usize::MAX))
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -440,21 +166,11 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, &aggregate_group_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(
-                        col.name().to_owned(),
-                        my_cell_to_sqlvalue(row, i, col_types[i]),
-                    );
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(
+                &rows,
+                &aggregate_group_cols(query),
+                usize::MAX,
+            ))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -464,21 +180,11 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, &aggregate_group_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Column as _;
-                use sqlx::Row as _;
-                let mut map = std::collections::HashMap::new();
-                for (i, col) in row.columns().iter().enumerate() {
-                    map.insert(
-                        col.name().to_owned(),
-                        sqlite_cell_to_sqlvalue(row, i, col_types[i]),
-                    );
-                }
-                out.push(map);
-            }
-            Ok(out)
+            Ok(rows_to_dicts(
+                &rows,
+                &aggregate_group_cols(query),
+                usize::MAX,
+            ))
         }
     }
 }
@@ -503,17 +209,7 @@ pub async fn fetch_values_list(
                 q = bind_query(q, v);
             }
             let rows = q.fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Row as _;
-                let n = row.columns().len().min(width);
-                let mut v = Vec::with_capacity(n);
-                for i in 0..n {
-                    v.push(pg_cell_to_sqlvalue(row, i));
-                }
-                out.push(v);
-            }
-            Ok(out)
+            Ok(rows_to_lists(&rows, &[], width))
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -523,18 +219,7 @@ pub async fn fetch_values_list(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            let col_types = column_types(&rows, &select_model_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Row as _;
-                let n = row.columns().len().min(width);
-                let mut v = Vec::with_capacity(n);
-                for i in 0..n {
-                    v.push(my_cell_to_sqlvalue(row, i, col_types[i]));
-                }
-                out.push(v);
-            }
-            Ok(out)
+            Ok(rows_to_lists(&rows, &select_model_cols(query), width))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -544,18 +229,7 @@ pub async fn fetch_values_list(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            let col_types = column_types(&rows, &select_model_cols(query));
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                use sqlx::Row as _;
-                let n = row.columns().len().min(width);
-                let mut v = Vec::with_capacity(n);
-                for i in 0..n {
-                    v.push(sqlite_cell_to_sqlvalue(row, i, col_types[i]));
-                }
-                out.push(v);
-            }
-            Ok(out)
+            Ok(rows_to_lists(&rows, &select_model_cols(query), width))
         }
     }
 }
@@ -1025,16 +699,7 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
         let rows = super::pg_on_query(&stmt.sql, stmt.params)
             .fetch_all(executor)
             .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            use sqlx::{Column as _, Row as _};
-            let mut map = std::collections::HashMap::new();
-            for (i, col) in row.columns().iter().enumerate().take(width) {
-                map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
-            }
-            out.push(map);
-        }
-        Ok(out)
+        Ok(rows_to_dicts(&rows, &[], width))
     }
 }
 

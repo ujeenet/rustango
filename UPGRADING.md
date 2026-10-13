@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `values()` cell types follow the column type (#2655, #2486)
+
+`values()`, `values_list()`, `annotate()` and their `fetch_on` read SMALLINT as `I16`, INT as `I32` and REAL/FLOAT as `F32` on every backend; MySQL and SQLite used to give `I64` / `F64`. SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`, not `String` / `F64`. PG `fetch_aggregate_on` now reads NUMERIC, UUID, dates and times as well. Match the narrower variants too, or widen with `i64::from`.
+
 ## 0.60.6
 
 ### Strict Bool and null decoding (#2530)

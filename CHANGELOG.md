@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `values()` / `values_list()` / `annotate()` decode each column once, by its type (#2655, #2486)
+
+The decoder is picked per result set from the column type and the model, not by trying ten types per cell; the blog index's values reads cost ~18× less CPU. SMALLINT, REAL and TIME no longer read as `Null` on PG, MySQL TIME reads as `Time`, and SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)
