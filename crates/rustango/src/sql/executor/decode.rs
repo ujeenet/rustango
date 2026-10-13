@@ -55,17 +55,19 @@ pub(super) trait DecodeRow: sqlx::Row {
     fn decode_cell(&self, i: usize, cell: Cell) -> SqlValue;
 }
 
-/// The decoders for a result set's first `width` columns, from its first row.
-struct RowPlan {
+/// The names and decoders of a result set's first `width` columns, from
+/// its first row.
+struct RowPlan<'r> {
+    names: Vec<&'r str>,
     cells: Vec<Cell>,
 }
 
-impl RowPlan {
+impl<'r> RowPlan<'r> {
     /// Only the leading `typed` columns count: an alias that shares a
     /// column name (`SUM(x) AS flag`) is not that column (#2296).
-    fn new<R: DecodeRow>(first: &R, typed: &[TypedCol], width: usize) -> Self {
+    fn new<R: DecodeRow>(first: &'r R, typed: &[TypedCol], width: usize) -> Self {
         use sqlx::Column as _;
-        let cells = first
+        let (names, cells) = first
             .columns()
             .iter()
             .take(width)
@@ -75,10 +77,10 @@ impl RowPlan {
                     .get(i)
                     .filter(|(name, _)| name == c.name())
                     .and_then(|(_, ty)| *ty);
-                first.plan_cell(i, declared)
+                (c.name(), first.plan_cell(i, declared))
             })
-            .collect();
-        Self { cells }
+            .unzip();
+        Self { names, cells }
     }
 
     fn row<'a, R: DecodeRow>(&'a self, row: &'a R) -> impl Iterator<Item = SqlValue> + 'a {
@@ -102,7 +104,9 @@ pub(super) fn rows_to_lists<R: DecodeRow>(
     rows.iter().map(|row| plan.row(row).collect()).collect()
 }
 
-/// Each row as a map from column name to its first `width` cells.
+/// Each row as a map from column name to its first `width` cells. The
+/// public type needs an owned key per cell; the names are read once and
+/// each map is sized up front (#2661).
 pub(super) fn rows_to_dicts<R: DecodeRow>(
     rows: &[R],
     typed: &[TypedCol],
@@ -114,10 +118,9 @@ pub(super) fn rows_to_dicts<R: DecodeRow>(
     let plan = RowPlan::new(first, typed, width);
     rows.iter()
         .map(|row| {
-            use sqlx::Column as _;
-            let mut map = HashMap::new();
-            for (col, v) in row.columns().iter().zip(plan.row(row)) {
-                map.insert(col.name().to_owned(), v);
+            let mut map = HashMap::with_capacity(plan.names.len());
+            for (name, v) in plan.names.iter().zip(plan.row(row)) {
+                map.insert((*name).to_owned(), v);
             }
             map
         })
