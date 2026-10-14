@@ -1,14 +1,15 @@
 # Benchmarks: Rustango vs Go vs Python vs Laravel vs WordPress
 
-The same blog served by ten runtimes: **Go** (standard-library `net/http` +
+The same blog served by twelve runtimes: **Go** (standard-library `net/http` +
 `pgx`), **Rustango** on axum and on actix-web, plain **axum** and
-**actix-web** with raw `sqlx`, a **Python** framework on gunicorn and on
-Hypercorn, **Laravel** on php-fpm and on Octane, and **WordPress**. Every app
-renders the same HTML from the same data.
+**actix-web** with raw `sqlx`, a **Python** framework on gunicorn, Hypercorn,
+Uvicorn and Granian, **Laravel** on php-fpm and on Octane, and **WordPress**.
+Every app renders the same HTML from the same data.
 
 Measured on **13 October 2026**: rustango release 0.60.6 in the main tables, rustango
-0.60.7 in [its own table](#rustango-0607). One harness, one machine, the same
-rules for every app.
+0.60.7 in [its own table](#rustango-0607). The four Python servers were
+measured on 14 October 2026. One harness, one machine, the same rules for
+every app.
 
 ## Summary
 
@@ -20,8 +21,10 @@ rules for every app.
   near 0.45 ms (Go: 2.0–2.4 ms).
 - **Interpreted runtimes** are 5–40× behind the compiled apps on uncached
   pages. On cached pages WordPress is the fastest of them (21k req/s).
+- **Python:** gunicorn (sync) is fastest; async views on ASGI servers do not
+  beat it. Granian is the fastest ASGI server.
 - **Memory under load:** Rust apps 7–8 MiB, Go 17–21 MiB, interpreted
-  runtimes 89–296 MiB.
+  runtimes 89–293 MiB.
 
 ---
 
@@ -51,8 +54,10 @@ post-tag links and **10 000 comments**. Relations load eagerly (no N+1).
 | **rustango · actix** | actix-web 4 | rustango ORM | Redis GET/SET by hand |
 | **axum + sqlx** | axum 0.8 | raw `sqlx`, Go's SQL text | Redis GET/SET by hand |
 | **actix + sqlx** | actix-web 4 | raw `sqlx`, Go's SQL text | Redis GET/SET by hand |
-| **Python · gunicorn** | gunicorn, 4 × 8 gthread (WSGI) | the framework's ORM, built-in psycopg pool | framework Redis cache |
-| **Python · Hypercorn** | Hypercorn, 4 workers (ASGI, sync views) | same | same |
+| **Python · gunicorn** | gunicorn, 4 × 8 gthread (WSGI, sync views) | the framework's ORM, built-in psycopg pool | framework Redis cache |
+| **Python · Hypercorn** | Hypercorn, 4 workers, uvloop (ASGI, async views) | the framework's async ORM API, same pool | `redis.asyncio`, one GET per hit |
+| **Python · Uvicorn** | Uvicorn, 4 workers, uvloop + httptools (ASGI, async views) | same | same |
+| **Python · Granian** | Granian, 4 workers, uvloop (ASGI, async views) | same | same |
 | **Laravel · php-fpm** | nginx + php-fpm, 16 static children | Eloquent, `with()` + `withCount()` | `Cache::remember`, phpredis |
 | **Laravel · Octane** | Octane + Swoole, 4 workers | same | same |
 | **WordPress** | nginx + php-fpm, 16 static children | `WP_Query`, `get_the_tags`, `get_comments` on **MySQL 8.4** | `advanced-cache.php` drop-in, phpredis |
@@ -74,7 +79,10 @@ framework's own engine, Blade for Laravel, a small theme for WordPress.
   HTML; a mismatch stops the run. No compression, so every app sends the
   same ~6.4 KB index page.
 - **Production settings.** Debug off. PHP: OPcache on, timestamp checks off,
-  `php artisan optimize`. Python: pooled connections.
+  `php artisan optimize`. Python: pooled connections, access logs off.
+- **Python async apps.** `async def` views on the framework's async ORM API,
+  an async middleware wrapper, and one shared `redis.asyncio` pool of 16 per
+  process. A cached hit is one Redis GET of raw HTML.
 - **Other services.** PostgreSQL 16, MySQL 8.4 and Redis 7 on cores 4–7; the
   load generator [`oha`](https://github.com/hatoo/oha) 1.16.0 on cores 8–11,
   inside the Docker network. 50 connections, keep-alive on.
@@ -82,7 +90,8 @@ framework's own engine, Blade for Laravel, a small theme for WordPress.
   HTTP 200 responses count.
 - **Builds.** rustc 1.99.0 (`opt-level=3`, fat LTO, `codegen-units=1`,
   `panic=abort`), Go 1.25.14, PHP 8.3.35, Laravel 13.36.0, Swoole 6.2.3,
-  WordPress 6.9.10.
+  WordPress 6.9.10, Uvicorn 0.54.0, Granian 2.8.3, uvloop 0.22.1,
+  httptools 0.8.0.
 
 Host: Apple M3 Pro, Docker VM with 12 CPUs and 16 GB.
 
@@ -145,36 +154,73 @@ Rustango 0.60.7 reaches 93% of axum + sqlx.
 
 ## Interpreted runtimes
 
-### Throughput: requests per second (higher is better)
+The four Python servers come from one run (14 October 2026); Laravel and
+WordPress from 13 October 2026.
 
-| Endpoint | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
-|---|--:|--:|--:|--:|--:|
-| index, not cached | 683 | 601 | 518 | **1 098** | 599 |
-| index, cached | 11 052 | 2 744 | 3 326 | 5 884 | **21 285** |
-| detail, not cached | **2 865** | 1 314 | 572 | 1 712 | 687 |
-| detail, cached | 11 473 | 2 644 | 3 013 | 5 836 | **21 591** |
-| tag, not cached | **1 337** | 786 | 490 | 1 102 | 647 |
-| compute | 410 | 353 | **1 611** | 1 521 | 732 |
+### Python servers
 
-### Latency: p50 / p99 in ms (lower is better)
+#### Throughput: requests per second (higher is better)
 
-| Endpoint | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
-|---|--:|--:|--:|--:|--:|
-| index, not cached | 74.5 / 137.7 | 96.4 / 213.0 | 95.5 / 122.6 | **44.1** / 110.1 | 78.1 / **103.9** |
-| index, cached | 4.4 / 12.5 | 18.7 / 40.4 | 14.6 / 22.4 | 7.4 / 57.7 | **2.3 / 3.5** |
-| detail, not cached | **14.2 / 43.0** | 35.3 / 76.2 | 86.5 / 113.4 | 27.9 / 96.2 | 70.5 / 99.0 |
-| detail, cached | 4.1 / 11.4 | 19.0 / 48.2 | 16.4 / 21.6 | 7.4 / 58.2 | **2.3 / 3.6** |
-| tag, not cached | **35.6 / 77.0** | 66.0 / 131.1 | 100.8 / 130.1 | 44.0 / 110.9 | 75.9 / 97.0 |
-| compute | 117.9 / 222.5 | 129.6 / 245.3 | **31.3 / 38.7** | 32.7 / 78.5 | 67.0 / 89.0 |
+| Endpoint | gunicorn | Hypercorn | Uvicorn | Granian |
+|---|--:|--:|--:|--:|
+| index, not cached | **697** | 663 | 675 | 692 |
+| index, cached | **11 012** | 5 151 | 6 233 | 7 706 |
+| detail, not cached | **2 778** | 1 550 | 1 654 | 1 854 |
+| detail, cached | **11 848** | 5 085 | 6 215 | 7 810 |
+| tag, not cached | **1 411** | 906 | 948 | 1 020 |
+| compute | **422** | 388 | 385 | 404 |
 
-### Footprint
+#### Latency: p50 / p99 in ms (lower is better)
 
-| | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
-|---|--:|--:|--:|--:|--:|
-| Image (uncompressed) | **294 MB** | **294 MB** | 844 MB | 895 MB | 1.01 GB |
-| RAM, idle | 128 MiB | 172 MiB | **54 MiB** | 219 MiB | 61 MiB |
-| RAM, index under load | 224 MiB | 296 MiB | **89 MiB** | 241 MiB | 142 MiB |
-| CPU, index under load (of 400%) | 260% | 323% | 380% | 337% | 405% |
+| Endpoint | gunicorn | Hypercorn | Uvicorn | Granian |
+|---|--:|--:|--:|--:|
+| index, not cached | **66.9** / 155.8 | 71.2 / 128.1 | 72.8 / **113.6** | 69.9 / 119.9 |
+| index, cached | **4.9 / 10.1** | 9.3 / 23.5 | 7.1 / 19.6 | 6.4 / 15.4 |
+| detail, not cached | **18.9 / 34.9** | 30.5 / 57.0 | 29.2 / 52.5 | 26.0 / 47.6 |
+| detail, cached | **3.8 / 8.5** | 9.7 / 24.5 | 7.7 / 21.1 | 6.2 / 15.1 |
+| tag, not cached | **27.9** / 89.0 | 52.3 / 95.0 | 52.4 / 84.4 | 49.0 / **80.3** |
+| compute | **113.0** / 215.8 | 128.6 / 160.6 | 131.7 / **154.5** | 117.9 / 187.1 |
+
+#### Footprint
+
+| | gunicorn | Hypercorn | Uvicorn | Granian |
+|---|--:|--:|--:|--:|
+| Image (uncompressed, shared) | 345 MB | 345 MB | 345 MB | 345 MB |
+| RAM, index under load | **224 MiB** | 255 MiB | 249 MiB | 293 MiB |
+| CPU, index under load (of 400%) | 244% | 323% | 314% | 303% |
+
+### PHP
+
+#### Throughput: requests per second (higher is better)
+
+| Endpoint | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|
+| index, not cached | 518 | **1 098** | 599 |
+| index, cached | 3 326 | 5 884 | **21 285** |
+| detail, not cached | 572 | **1 712** | 687 |
+| detail, cached | 3 013 | 5 836 | **21 591** |
+| tag, not cached | 490 | **1 102** | 647 |
+| compute | **1 611** | 1 521 | 732 |
+
+#### Latency: p50 / p99 in ms (lower is better)
+
+| Endpoint | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|
+| index, not cached | 95.5 / 122.6 | **44.1** / 110.1 | 78.1 / **103.9** |
+| index, cached | 14.6 / 22.4 | 7.4 / 57.7 | **2.3 / 3.5** |
+| detail, not cached | 86.5 / 113.4 | **27.9** / 96.2 | 70.5 / **99.0** |
+| detail, cached | 16.4 / 21.6 | 7.4 / 58.2 | **2.3 / 3.6** |
+| tag, not cached | 100.8 / 130.1 | **44.0** / 110.9 | 75.9 / **97.0** |
+| compute | **31.3 / 38.7** | 32.7 / 78.5 | 67.0 / 89.0 |
+
+#### Footprint
+
+| | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|
+| Image (uncompressed) | **844 MB** | 895 MB | 1.01 GB |
+| RAM, idle | **54 MiB** | 219 MiB | 61 MiB |
+| RAM, index under load | **89 MiB** | 241 MiB | 142 MiB |
+| CPU, index under load (of 400%) | 380% | 337% | 405% |
 
 One of WordPress's three uncached-index runs returned 14 253 "database
 connection" errors in 7 s; the median comes from a clean run.
@@ -208,12 +254,21 @@ Measured facts only; where a cause was not profiled, it says so.
   ([#2660](https://github.com/ujeenet/rustango/issues/2660)).
 - **Cached pages, interpreted.** WordPress answers from Redis in
   `advanced-cache.php`, before WordPress itself loads (21k req/s). The Python
-  app and Laravel run their framework and middleware first, then read the
-  cache (11k and 3–6k).
+  apps and Laravel run their framework and middleware first, then read the
+  cache (Python 5–12k, Laravel 3–6k).
 - **Laravel: Octane 2–3× php-fpm on uncached pages.** php-fpm boots the
   framework on every request; Octane keeps it in memory.
-- **Python: gunicorn 2–4× Hypercorn.** The views are synchronous, so under
-  ASGI each request goes through a threadpool.
+- **Python: async views do not beat gunicorn.** gunicorn serves 1.4–2.3× the
+  ASGI servers on cached pages and 1.4–1.8× on uncached detail and tag; on
+  the uncached index all four are equal (663–697). From the framework's code:
+  the async ORM runs the sync ORM in a thread (`sync_to_async`), there is no
+  async database pool, and the ASGI handler creates a thread executor per
+  request plus about 3 thread hops (request signals, response close). The
+  async cached path does less cache work than gunicorn's (one Redis GET of
+  raw HTML against two GETs and an unpickle) and is still slower. The share
+  of each cost was not profiled.
+- **ASGI servers: Granian > Uvicorn > Hypercorn.** Cached index 7 706 /
+  6 233 / 5 151 req/s, uncached detail 1 854 / 1 654 / 1 550. Not profiled.
 - **Compute, interpreted.** PHP 8.3 with OPcache runs the integer loop about
   4× faster than CPython.
 - **WordPress uncached** runs 11–13 queries per page on MySQL, against 3–4 on
