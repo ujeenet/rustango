@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — API keys are stored as an HMAC, not argon2 (#2617)
+
+`key_hash` is `hmac-sha256$<hex>` keyed by the session secret, so a Bearer check needs no hashing slot. Old argon2 keys verify once and are rewritten. New `set_api_key_secret`.
+
+### Fixed — CLI password verbs validate, confirm, and read off argv (#2589)
+
+`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns.
+
+### Fixed — HTTP Basic skips argon2 for a credential verified in the last 30 s (#2617)
+
+The in-memory cache key includes the stored hash, so a password change misses; `active` is read on every request. A hit skips the login limits.
+
+### Fixed — login lock and per-IP limits reserve before the password check (#2378)
+
+`LoginThrottle::begin` counts the attempt up front and refunds it on success, so a parallel burst no longer passes a peek hundreds of times. New `Lockout::reserve` / `reserved_failed` / `release`.
+
+### Fixed — `InMemoryJtiStore` prunes with an expiry heap (#2514)
+
+`mark_used` pops only expired entries instead of scanning the whole map under the lock on every refresh.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)

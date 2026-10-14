@@ -193,6 +193,44 @@ impl Lockout {
         next
     }
 
+    /// Count an attempt before its password is checked, so a parallel
+    /// burst cannot all pass [`Self::is_locked`] at once (#2378). `false`
+    /// when locked or `max_attempts` attempts are already counted. Report
+    /// the outcome with [`Self::reserved_failed`], [`Self::release`] or
+    /// [`Self::clear`]. A cache error admits the attempt, as in
+    /// [`Self::record_failure`].
+    pub async fn reserve(&self, account: &str) -> bool {
+        if self.is_locked(account).await {
+            return false;
+        }
+        match self.count_failure(account).await {
+            Ok(Some(n)) if n > i64::from(self.max_attempts) => {
+                self.release(account).await;
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// A [`Self::reserve`]d attempt failed: lock once the window holds
+    /// `max_attempts`.
+    pub async fn reserved_failed(&self, account: &str) {
+        if self.attempt_count(account).await >= self.max_attempts {
+            let _ = self
+                .cache
+                .set(&self.lock_key(account), "1", Some(self.lockout_duration))
+                .await;
+            self.clear_window(account).await;
+        }
+    }
+
+    /// Give back a [`Self::reserve`]d attempt that proved nothing.
+    pub async fn release(&self, account: &str) {
+        if let Ok(Some(key)) = self.counter_key(account, false).await {
+            let _ = self.cache.incr(&key, -1, None).await;
+        }
+    }
+
     /// `Ok(None)` when no window could be opened. The counter expires with
     /// its window, even where `incr` resets the TTL on every call.
     async fn count_failure(&self, account: &str) -> Result<Option<i64>, CacheError> {
@@ -426,6 +464,36 @@ mod tests {
         assert!(!l.is_locked("alice").await);
         l.record_failure("alice").await;
         assert!(l.is_locked("alice").await);
+    }
+
+    /// #2378 — reservations count before the verify, so a burst stops at
+    /// the limit and the last failure locks.
+    #[tokio::test]
+    async fn reserve_caps_a_burst_and_failure_locks() {
+        let l = lockout(3);
+        let admitted = {
+            let mut n = 0;
+            for _ in 0..10 {
+                if l.reserve("bob").await {
+                    n += 1;
+                }
+            }
+            n
+        };
+        assert_eq!(admitted, 3);
+        assert!(!l.is_locked("bob").await);
+        l.reserved_failed("bob").await;
+        assert!(l.is_locked("bob").await);
+    }
+
+    #[tokio::test]
+    async fn release_gives_the_reservation_back() {
+        let l = lockout(1);
+        for _ in 0..5 {
+            assert!(l.reserve("carol").await);
+            l.release("carol").await;
+        }
+        assert_eq!(l.attempt_count("carol").await, 0);
     }
 
     #[tokio::test]

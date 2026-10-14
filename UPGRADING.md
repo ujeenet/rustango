@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### API keys are keyed by the session secret (#2617)
+
+New and used API keys are HMACs under `RUSTANGO_SESSION_SECRET` (dev: `./var/.rustango_tenant_session.key`); rotating it invalidates them, and prod needs it set. Use `set_api_key_secret` for a separate key.
+
+### CLI passwords are validated (#2589)
+
+The `manage` password verbs now refuse a password the forms refuse (under 8 characters). Scripts that set short passwords add `--skip-validation`; prefer `RUSTANGO_PASSWORD` or `--password-stdin` over `--password`.
+
+### Login attempts are reserved up front (#2378)
+
+HTTP Basic and API-key checks now hold a per-IP and account-lock slot while they verify, so more than `ip_limit` (or `max_attempts` for one account) uncached checks in flight at once get `429`. An attempt dropped without an outcome is refunded.
+
 ## 0.60.6
 
 ### Strict Bool and null decoding (#2530)

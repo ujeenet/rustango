@@ -13,8 +13,8 @@
 //!
 //! - [`InMemoryJtiStore`] — process-local map, the default for every
 //!   shipped consumer. Good for one instance, dev and tests.
-//!   `mark_used` prunes expired entries on each call, so memory stays
-//!   bounded with no background sweeper.
+//!   `mark_used` pops expired entries off an expiry heap, so memory
+//!   stays bounded with no sweeper and no full-map scan.
 //! - Anything else — implement [`JtiStore`] over Redis, a database
 //!   table, or another shared store.
 //!   [`RedisCache`](crate::cache::redis_backend::RedisCache) is the
@@ -23,10 +23,11 @@
 //! [`InMemoryJtiStore`]: crate::jti_store::InMemoryJtiStore
 //! [`JtiStore`]: crate::jti_store::JtiStore
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Future returned by the [`JtiStore`] methods.
 ///
@@ -108,21 +109,56 @@ pub trait JtiStore: Send + Sync {
 /// consumer. Its entries are lost on restart and not shared with other
 /// processes, so a revoked `jti` can still be replayed there.
 pub struct InMemoryJtiStore {
-    inner: Mutex<HashMap<String, i64>>,
+    inner: Mutex<JtiMap>,
+}
+
+/// `jti -> exp` plus a min-heap on `exp`, so a prune pops only the
+/// expired entries instead of scanning the whole map (#2514).
+#[derive(Default)]
+struct JtiMap {
+    map: HashMap<Arc<str>, i64>,
+    expiry: BinaryHeap<Reverse<(i64, Arc<str>)>>,
+}
+
+impl JtiMap {
+    fn prune(&mut self, now: i64) {
+        while let Some(Reverse((exp, _))) = self.expiry.peek() {
+            if *exp > now {
+                break;
+            }
+            let Some(Reverse((exp, jti))) = self.expiry.pop() else {
+                break;
+            };
+            // Only drop the entry this heap node was pushed for.
+            if self.map.get(&jti) == Some(&exp) {
+                self.map.remove(&jti);
+            }
+        }
+    }
+
+    fn insert(&mut self, jti: &str, exp: i64) {
+        let key: Arc<str> = Arc::from(jti);
+        self.map.insert(Arc::clone(&key), exp);
+        self.expiry.push(Reverse((exp, key)));
+    }
 }
 
 impl InMemoryJtiStore {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(JtiMap::default()),
         }
     }
 
     /// Test-only entry count.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map
+            .len()
     }
 }
 
@@ -141,28 +177,33 @@ impl JtiStore for InMemoryJtiStore {
     // crosses a suspend point.
     fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
         Box::pin(async move {
-            let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            map.contains_key(jti)
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.map.contains_key(jti)
         })
     }
 
     fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
         Box::pin(async move {
-            let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            // Prune expired entries so memory stays bounded without a
-            // background sweeper.
-            let now = chrono::Utc::now().timestamp();
-            map.retain(|_, &mut e| e > now);
-            if map.contains_key(jti) {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.prune(chrono::Utc::now().timestamp());
+            if inner.map.contains_key(jti) {
                 return false;
             }
-            map.insert(jti.to_owned(), exp_unix);
+            inner.insert(jti, exp_unix);
             true
         })
     }
 
     fn approx_size(&self) -> JtiFuture<'_, Option<usize>> {
-        Box::pin(async move { Some(self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()) })
+        Box::pin(async move {
+            Some(
+                self.inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .map
+                    .len(),
+            )
+        })
     }
 }
 
@@ -212,11 +253,7 @@ mod tests {
         let already_expired = chrono::Utc::now().timestamp() - 60;
         // Insert the expired entry through the lock: `mark_used`
         // would prune it right away.
-        store
-            .inner
-            .lock()
-            .unwrap()
-            .insert("stale".to_owned(), already_expired);
+        store.inner.lock().unwrap().insert("stale", already_expired);
         assert_eq!(store.len(), 1);
         let fresh_exp = chrono::Utc::now().timestamp() + 60;
         assert!(store.mark_used("fresh", fresh_exp).await);
@@ -224,6 +261,29 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(!store.is_used("stale").await);
         assert!(store.is_used("fresh").await);
+    }
+
+    /// A stale heap node for a re-used jti must not drop the live entry.
+    #[test]
+    fn prune_pops_only_expired_and_keeps_reinserted_jti() {
+        let mut m = JtiMap::default();
+        m.insert("a", 10);
+        m.insert("b", 100);
+        m.prune(50);
+        assert!(!m.map.contains_key("a"));
+        assert!(m.map.contains_key("b"));
+        // Heap node for `b` stays; nothing else was scanned.
+        assert_eq!(m.expiry.len(), 1);
+        m.insert("a", 200);
+        m.insert("c", 20);
+        m.map.insert(Arc::from("c"), 300); // live exp moved past the old node
+        m.prune(150);
+        assert!(m.map.contains_key("a"));
+        assert!(
+            m.map.contains_key("c"),
+            "stale heap node removed a live entry"
+        );
+        assert!(!m.map.contains_key("b"));
     }
 
     #[test]

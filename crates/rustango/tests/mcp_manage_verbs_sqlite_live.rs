@@ -100,7 +100,14 @@ async fn user_key_and_skill_permission_verbs_round_trip_on_sqlite() {
         &pools,
         &url,
         dir,
-        &["create-user", "acme", "alice", "--password", "hunter2"],
+        &[
+            "create-user",
+            "acme",
+            "alice",
+            "--skip-validation",
+            "--password",
+            "hunter2",
+        ],
     )
     .await;
 

@@ -47,7 +47,9 @@ const TENANT: &str = "acme";
 const USERNAME: &str = "alice";
 const PASSWORD: &str = "tenantpw";
 
-fn url() -> Option<String> { std::env::var("DATABASE_URL").ok() }
+fn url() -> Option<String> {
+    std::env::var("DATABASE_URL").ok()
+}
 
 fn db_url() -> Option<String> {
     let base = url()?;
@@ -57,18 +59,25 @@ fn db_url() -> Option<String> {
 
 async fn reset_db() {
     let Some(base) = url() else { return };
-    let admin_pool = sqlx::PgPool::connect(&base).await.expect("connect to admin db");
+    let admin_pool = sqlx::PgPool::connect(&base)
+        .await
+        .expect("connect to admin db");
     // Kick off any lingering connections from a previous failed run
     // before DROP — otherwise Postgres rejects with 55006.
     let _ = sqlx::query(&format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
          WHERE datname = '{DB_NAME}' AND pid <> pg_backend_pid()"
     ))
-    .execute(&admin_pool).await;
+    .execute(&admin_pool)
+    .await;
     sqlx::query(&format!("DROP DATABASE IF EXISTS {DB_NAME}"))
-        .execute(&admin_pool).await.unwrap();
+        .execute(&admin_pool)
+        .await
+        .unwrap();
     sqlx::query(&format!("CREATE DATABASE {DB_NAME}"))
-        .execute(&admin_pool).await.unwrap();
+        .execute(&admin_pool)
+        .await
+        .unwrap();
 }
 
 fn manage(verb: &str, args: &[&str], db: &str) -> std::process::Output {
@@ -191,21 +200,47 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
 
     // Bootstrap registry + tenant + user.
     let m = manage("migrate", &[], &db);
-    assert!(m.status.success(), "migrate: {}", String::from_utf8_lossy(&m.stderr));
-    let m = manage("create-operator", &["admin", "--password", "letmein"], &db);
-    assert!(m.status.success(), "create-operator: {}", String::from_utf8_lossy(&m.stderr));
+    assert!(
+        m.status.success(),
+        "migrate: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
     let m = manage(
-        "create-tenant",
-        &[TENANT, "--display-name", TENANT, "--host-pattern", &format!("{TENANT}.{APEX}")],
+        "create-operator",
+        &["admin", "--skip-validation", "--password", "letmein"],
         &db,
     );
-    assert!(m.status.success(), "create-tenant: {}", String::from_utf8_lossy(&m.stderr));
+    assert!(
+        m.status.success(),
+        "create-operator: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
+    let m = manage(
+        "create-tenant",
+        &[
+            TENANT,
+            "--display-name",
+            TENANT,
+            "--host-pattern",
+            &format!("{TENANT}.{APEX}"),
+        ],
+        &db,
+    );
+    assert!(
+        m.status.success(),
+        "create-tenant: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
     let m = manage(
         "create-user",
         &[TENANT, USERNAME, "--password", PASSWORD, "--superuser"],
         &db,
     );
-    assert!(m.status.success(), "create-user: {}", String::from_utf8_lossy(&m.stderr));
+    assert!(
+        m.status.success(),
+        "create-user: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
 
     // Boot.
     let mut server = spawn_server(&db);
@@ -225,7 +260,11 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 401, "anonymous /whoami should be 401");
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "anonymous /whoami should be 401"
+    );
 
     // Step 2 — log in via the tenant `/login` cookie route.
     //
@@ -274,7 +313,11 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "logged-in /whoami should be 200");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "logged-in /whoami should be 200"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["username"], USERNAME);
     assert_eq!(body["is_superuser"], true);
@@ -328,10 +371,7 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     // `rustango_users` / `rustango_api_keys` resolve to the tenant's
     // schema) for the require_auth middleware below.
     let pool = tenant_pool(&db).await;
-    let backends: Vec<Arc<dyn AuthBackend>> = vec![
-        Arc::new(ModelBackend),
-        Arc::new(ApiKeyBackend),
-    ];
+    let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend), Arc::new(ApiKeyBackend)];
     async fn profile(CurrentUser(user): CurrentUser) -> axum::response::Response {
         match user {
             Some(u) => axum::Json(serde_json::json!({
@@ -370,8 +410,7 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
 
     // (b) HTTP Basic with right password → 200 with username.
     use base64::Engine as _;
-    let basic = base64::engine::general_purpose::STANDARD
-        .encode(format!("{USERNAME}:{PASSWORD}"));
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:{PASSWORD}"));
     let (status, body) = oneshot(
         app.clone(),
         Method::GET,
@@ -380,13 +419,17 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
         Some(("Authorization", &format!("Basic {basic}"))),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "Basic auth should succeed; body: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Basic auth should succeed; body: {body}"
+    );
     assert_eq!(body["username"], USERNAME);
     assert_eq!(body["is_superuser"], true);
 
     // (c) HTTP Basic with WRONG password → 401 (no backend accepted).
-    let bad = base64::engine::general_purpose::STANDARD
-        .encode(format!("{USERNAME}:wrong-password"));
+    let bad =
+        base64::engine::general_purpose::STANDARD.encode(format!("{USERNAME}:wrong-password"));
     let (status, _body) = oneshot(
         app.clone(),
         Method::GET,
@@ -440,9 +483,13 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
 async fn current_user_without_middleware_is_none() {
     let req = Request::builder().uri("/").body(()).unwrap();
     let (mut parts, _) = req.into_parts();
-    let CurrentUser(user) =
-        CurrentUser::from_request_parts(&mut parts, &()).await.unwrap();
-    assert!(user.is_none(), "no middleware in stack → CurrentUser is None");
+    let CurrentUser(user) = CurrentUser::from_request_parts(&mut parts, &())
+        .await
+        .unwrap();
+    assert!(
+        user.is_none(),
+        "no middleware in stack → CurrentUser is None"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -467,7 +514,10 @@ async fn oneshot(
         }
         None => Body::empty(),
     };
-    let resp = router.oneshot(req.body(body).unwrap()).await.expect("response");
+    let resp = router
+        .oneshot(req.body(body).unwrap())
+        .await
+        .expect("response");
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);

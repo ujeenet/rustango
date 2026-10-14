@@ -312,23 +312,6 @@ impl RateLimitLayer {
         }
     }
 
-    /// [`Self::take`] without spending: `Err(retry_after_secs)` when
-    /// the bucket is empty. Never adds a bucket.
-    #[cfg(feature = "admin")] // only `login_throttle` calls it
-    pub(crate) async fn peek(&self, key: &str) -> Result<(), u64> {
-        let store = self.store.lock().await;
-        let Some(b) = store.get(key) else {
-            return Ok(());
-        };
-        let elapsed = Instant::now().duration_since(b.last_refill).as_secs_f64();
-        let tokens = (b.tokens + elapsed * self.rate_per_sec()).min(f64::from(self.capacity));
-        if tokens >= 1.0 {
-            Ok(())
-        } else {
-            Err(self.retry_after(tokens))
-        }
-    }
-
     /// Return one token spent by [`Self::take`].
     #[cfg(feature = "admin")]
     pub(crate) async fn give_back(&self, key: &str) {
@@ -483,14 +466,12 @@ mod tests {
 
     #[cfg(feature = "admin")]
     #[tokio::test]
-    async fn peek_spends_nothing_and_give_back_refunds() {
+    async fn give_back_refunds() {
         let l = RateLimitLayer::global(1, Duration::from_secs(60));
-        assert!(l.peek("k").await.is_ok());
         assert!(l.take("k").await.is_ok());
-        assert!(l.peek("k").await.is_err());
         l.give_back("k").await;
-        assert!(l.peek("k").await.is_ok());
         assert!(l.take("k").await.is_ok());
+        assert!(l.take("k").await.is_err());
     }
 
     #[tokio::test]

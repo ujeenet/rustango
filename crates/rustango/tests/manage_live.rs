@@ -964,7 +964,13 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
         &pools,
         &url,
         &dir,
-        &["create-operator", &op_user, "--password", "letmein"],
+        &[
+            "create-operator",
+            &op_user,
+            "--skip-validation",
+            "--password",
+            "letmein",
+        ],
     )
     .await;
     res.unwrap();
@@ -1030,6 +1036,7 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
             "create-user",
             &slug,
             "alice",
+            "--skip-validation",
             "--password",
             "hunter2",
             "--superuser",
@@ -1051,7 +1058,14 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     // 6b. set-superuser / reset-password update the schema-mode row (#1952).
     for parts in [
         &["set-superuser", &slug, "alice", "--off"][..],
-        &["reset-password", &slug, "alice", "--password", "hunter3"],
+        &[
+            "reset-password",
+            &slug,
+            "alice",
+            "--skip-validation",
+            "--password",
+            "hunter3",
+        ],
     ] {
         let (_out, res) = run(&pools, &url, &dir, parts).await;
         res.unwrap();
@@ -1109,7 +1123,14 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
         &pools,
         &url,
         &dir,
-        &["create-user", &slug, "bob", "--password", "hunter2"],
+        &[
+            "create-user",
+            &slug,
+            "bob",
+            "--skip-validation",
+            "--password",
+            "hunter2",
+        ],
     )
     .await;
     res.unwrap();
