@@ -14,10 +14,11 @@ Harness, auf einer Maschine, nach denselben Regeln.
 > beim nicht gecachten Index um **34 %**, liegt auf der Tag-Seite gleichauf und
 > bleibt auf der nicht gecachten Detailseite **18 %** zurück. Auf Redis-gecachten
 > Seiten liefert jede Rust-Anwendung das **1,5- bis 2,2-Fache** der Requests von Go,
-> mit einem p99 von etwa **0,45 ms** (Go: 2,0–2,4 ms). **Rustango** kostet
-> **5–32 %** gegenüber rohem sqlx auf demselben Server mit denselben Abfragen;
-> damit liegt es beim Index auf dem Niveau von Go und beim Detail 22 % hinter Go.
-> Die interpretierten Laufzeiten liegen bei nicht gecachten Seiten **5- bis
+> mit einem p99 von etwa **0,45 ms** (Go: 2,0–2,4 ms). In 0.60.6 kostete
+> **Rustango** **5–32 %** gegenüber rohem sqlx auf demselben Server mit denselben
+> Abfragen; **0.60.7 schließt diese Lücke**: Rustango liefert jetzt **93–104 %**
+> von rohem axum + sqlx beim nicht gecachten Index und 94–100 % auf den anderen
+> Seiten (siehe [0.60.7](#0607-die-orm-lücke-schließen)). Die interpretierten Laufzeiten liegen bei nicht gecachten Seiten **5- bis
 > 40-fach** zurück; am schnellsten sind dort die Python-Anwendung beim Detail
 > (2.865 Req/s) und Laravel auf Octane beim Index (1.098). Alle Rust-Anwendungen
 > laufen unter Last mit **7–8 MiB**; Go mit 17–21 MiB; die interpretierten
@@ -150,11 +151,38 @@ plus das Binary, also stammt der Großteil ihrer Größe vom Basis-Image.
 - **Rustango vs rohes sqlx** (gleicher axum-Server, gleiche Abfragen): −32 % beim
   Index, −5 % beim Detail, −12 % beim Tag. Rustango ist die einzige Anwendung, die
   ihr volles CPU-Budget ausschöpft (393 %). Der Großteil der Lücke ist eine
-  Funktion; siehe [Bekannte Kosten](#bekannte-kosten-in-rustango).
+  Funktion; siehe [Bekannte Kosten](#bekannte-kosten-in-rustango). 0.60.7
+  schließt sie; siehe unten.
 - **actix-web vs axum.** Mit einem gemeinsamen sqlx-Pool bleiben die
   actix-Anwendungen bei 272–296 % CPU und liegen bei nicht gecachten Seiten
   hinter axum. Die Ursache ist noch nicht geklärt
   ([#2660](https://github.com/ujeenet/rustango/issues/2660)).
+
+### 0.60.7: die ORM-Lücke schließen
+
+Die Tabelle oben zeigt rustango 0.60.6. 0.60.7 dekodiert jede Spalte einmal nach
+ihrem Typ, statt pro Zelle zehn Typen zu probieren
+([#2655](https://github.com/ujeenet/rustango/issues/2655)), liest die
+Spaltennamen einmal pro Ergebnismenge
+([#2661](https://github.com/ujeenet/rustango/issues/2661)) und quotiert
+Bezeichner mit einer einzigen Allokation
+([#2662](https://github.com/ujeenet/rustango/issues/2662)). Gemessen in einem
+Lauf, gleiche Methode, alter und neuer Rustango nebeneinander (Median Req/s,
+keine anderen Builds liefen):
+
+| Endpunkt | axum + sqlx | rustango 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
+|---|--:|--:|--:|--:|
+| Index, nicht gecacht | 10.750 | 8.596 | **11.143** | 104 % |
+| Detail, nicht gecacht | 17.907 | 17.024 | 16.875 | 94 % |
+| Tag, nicht gecacht | 6.242 | 5.596 | 6.023 | 96 % |
+| compute | 15.091 | 14.736 | 15.084 | 100 % |
+
+Das Dekodieren sank von 46 % der CPU der Anwendung auf 4,9 %, so viel wie die
+typisierten Lesezugriffe von rohem sqlx (5,0 %). Der nicht gecachte Index
+schwankte zwischen den Läufen; vergleicht man den besten Lauf jeder Anwendung,
+erreicht Rustango 93 % von axum + sqlx. Der Rest ist beiden Anwendungen gemeinsam:
+Tera-Rendering (etwa 26 %) und die Verbindungsprüfung des Pools beim Ausleihen
+(etwa 18 %).
 
 ---
 
@@ -270,18 +298,18 @@ gemessen:
 
 Diese zeigten sich beim Angleichen an die Abfragen von Go. Sie sind Arbeit für das
 Framework, keine Probleme des Harness. Die CPU-Anteile stammen aus `perf`-Profilen
-der rustango-Anwendung unter derselben Last. Jeder Punkt hat ein Ticket:
+der rustango-Anwendung unter derselben Last (0.60.6). Jeder Punkt hat ein Ticket:
 
-| Kosten | Ticket |
-|---|---|
-| `values_list`-Zeilen auf PostgreSQL probieren pro Zelle etwa zehn Typen und bauen für jeden Fehlversuch einen Fehler. **46 % der CPU der Anwendung** beim nicht gecachten Index; einmaliges Dekodieren nach Spaltentyp senkt das Dekodieren der Posts-Abfrage von 87 µs auf 5 µs. | [#2655](https://github.com/ujeenet/rustango/issues/2655) |
-| `CachePageLayer` speichert den Rumpf als base64 in JSON, also parst jeder Treffer JSON und dekodiert base64: **etwa 21 % der CPU pro Treffer**, 165k Treffer/s gegenüber 214k für ein einfaches Redis-`GET`. | [#2656](https://github.com/ujeenet/rustango/issues/2656) |
-| `values()` und `annotate()` bauen für jede Zeile eine `HashMap` mit eigenen String-Schlüsseln: etwa 6–7 % der CPU beim nicht gecachten Index. | [#2661](https://github.com/ujeenet/rustango/issues/2661) |
-| Jede Anfrage baut und kompiliert dieselben Querysets neu: etwa 2 % der CPU. | [#2662](https://github.com/ujeenet/rustango/issues/2662) |
-| `.only()` und `values_list` können keine verknüpfte Spalte wie `author__name` auswählen; um die Spalten von Go zu treffen, braucht es einen manuellen `Join` mit `project`. | [#2657](https://github.com/ujeenet/rustango/issues/2657) |
-| Es gibt keinen `= ANY($1)`-Array-Bind; eine `IN`-Liste wird zu `$1..$n`, also ist jede Listenlänge ein eigenes Prepared Statement. In diesem Benchmark keine CPU-Kosten (unter 0,5 %). | [#2658](https://github.com/ujeenet/rustango/issues/2658) |
-| Es gibt kein Batch-Prefetch für Viele-zu-Viele über eine Liste von Zeilen; Tags kommen über einen Join auf die Zwischentabelle. | [#2659](https://github.com/ujeenet/rustango/issues/2659) |
-| actix-web-Anwendungen nutzen mit einem gemeinsamen sqlx-Pool weniger als 300 % ihrer 4 CPUs. Auch ohne rustango zu sehen. | [#2660](https://github.com/ujeenet/rustango/issues/2660) |
+| Kosten | Ticket | Status |
+|---|---|---|
+| `values_list`-Zeilen auf PostgreSQL probieren pro Zelle etwa zehn Typen und bauen für jeden Fehlversuch einen Fehler. **46 % der CPU der Anwendung** beim nicht gecachten Index. | [#2655](https://github.com/ujeenet/rustango/issues/2655) | **Behoben in 0.60.7** (jetzt 4,9 %) |
+| `CachePageLayer` speichert den Rumpf als base64 in JSON, also parst jeder Treffer JSON und dekodiert base64: **etwa 21 % der CPU pro Treffer**, 165k Treffer/s gegenüber 214k für ein einfaches Redis-`GET`. | [#2656](https://github.com/ujeenet/rustango/issues/2656) | Offen |
+| `values()` und `annotate()` bauen für jede Zeile eine `HashMap` mit eigenen String-Schlüsseln: etwa 6–7 % der CPU beim nicht gecachten Index. | [#2661](https://github.com/ujeenet/rustango/issues/2661) | **Behoben in 0.60.7** (Namen werden einmal gelesen; der eigene Schlüssel bleibt, er ist der öffentliche Typ) |
+| Jede Anfrage baut und kompiliert dieselben Querysets neu: etwa 2 % der CPU. | [#2662](https://github.com/ujeenet/rustango/issues/2662) | Teilweise behoben in 0.60.7 (Quotierung); Cache für kompiliertes SQL offen |
+| `.only()` und `values_list` können keine verknüpfte Spalte wie `author__name` auswählen; um die Spalten von Go zu treffen, braucht es einen manuellen `Join` mit `project`. | [#2657](https://github.com/ujeenet/rustango/issues/2657) | Offen |
+| Es gibt keinen `= ANY($1)`-Array-Bind; eine `IN`-Liste wird zu `$1..$n`, also ist jede Listenlänge ein eigenes Prepared Statement. In diesem Benchmark keine CPU-Kosten (unter 0,5 %). | [#2658](https://github.com/ujeenet/rustango/issues/2658) | Offen |
+| Es gibt kein Batch-Prefetch für Viele-zu-Viele über eine Liste von Zeilen; Tags kommen über einen Join auf die Zwischentabelle. | [#2659](https://github.com/ujeenet/rustango/issues/2659) | Offen |
+| actix-web-Anwendungen nutzen mit einem gemeinsamen sqlx-Pool weniger als 300 % ihrer 4 CPUs. Auch ohne rustango zu sehen. | [#2660](https://github.com/ujeenet/rustango/issues/2660) | Offen |
 
 ---
 
