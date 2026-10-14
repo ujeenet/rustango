@@ -12,7 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — CLI password verbs validate, confirm, and read off argv (#2589)
 
-`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns.
+`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns. New `manage_interactive::{PASSWORD_ENV, PasswordInput, NewPasswordError, read_new_password}`.
 
 ### Fixed — HTTP Basic skips argon2 for a credential verified in the last 30 s (#2617)
 
