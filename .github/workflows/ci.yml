@@ -1035,6 +1035,7 @@ jobs:
             --test database_pools_sqlite_live \
             --test database_tenant_sqlite_live \
             --test explain_pool_tri \
+            --test pool_acquire_ping_tri \
             --test first_last_sqlite_live \
             --test fixtures_sqlite_live \
             --test foreign_key_sqlite_live \
@@ -1304,6 +1305,7 @@ jobs:
       # one guards the FK-ordering regression.
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql,testkit --test explain_pool_tri
+      - run: cargo test -p rustango --features mysql,testkit --test pool_acquire_ping_tri
       - run: cargo test -p rustango --features mysql,testkit --test bulk_upsert_tri
       # #1461 — the rest of the tri-dialect suites. A `_tri` file runs its
       # PostgreSQL and SQLite arms for free in `postgres_test`, so a

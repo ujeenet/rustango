@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Performance — pools skip sqlx's ping before every checkout (#2674)
+
+The ping cost 8–16% of request CPU. New `[database].pool_test_before_acquire` / `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` turns it back on; the default is off on all three backends.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

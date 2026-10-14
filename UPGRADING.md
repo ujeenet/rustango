@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Pools no longer ping before every checkout (#2674)
+
+`test_before_acquire` is now off: a connection the server dropped while idle fails one query, then sqlx discards it. sqlx's 10 min idle / 30 min lifetime bounds still recycle connections; set `pool_test_before_acquire = true` or `RUSTANGO_DB_TEST_BEFORE_ACQUIRE=true` to restore the ping. `PoolTuning` and `DatabaseSettings` gain a field, so struct literals need it or `..Default::default()`.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

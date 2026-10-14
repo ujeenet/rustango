@@ -96,6 +96,7 @@ load.
 | `pool_acquire_timeout_secs` | `RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS` | 5 | How long a caller waits for a connection before erroring. |
 | `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | driver default | Close a connection that has sat idle this long. |
 | `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | driver default | Close a connection this old regardless of use. |
+| `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Ping each connection before a checkout. Off, a connection dropped while idle fails one query and is then discarded. |
 
 Leaving a knob unset is not the same as setting it to zero. Unset means
 *the driver's own default applies* — the behaviour you had before the
