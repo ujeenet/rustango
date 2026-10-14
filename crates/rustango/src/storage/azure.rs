@@ -10,12 +10,9 @@
 //! use rustango::storage::azure::{AzureBlobStorage, AzureConfig};
 //! use std::sync::Arc;
 //!
-//! let blobs = AzureBlobStorage::new(AzureConfig {
-//!     account: "myaccount".into(),
-//!     account_key: std::env::var("AZURE_STORAGE_KEY").unwrap(),
-//!     container: "uploads".into(),
-//!     endpoint: None, // None -> https://myaccount.blob.core.windows.net
-//! })?;
+//! // https://myaccount.blob.core.windows.net unless `.endpoint(..)` is set
+//! let key = std::env::var("AZURE_STORAGE_KEY").unwrap();
+//! let blobs = AzureBlobStorage::new(AzureConfig::new("myaccount", key, "uploads"))?;
 //! let storage: rustango::storage::BoxedStorage = Arc::new(blobs);
 //! storage.save("avatars/alice.png", &png_bytes).await?;
 //! ```
@@ -56,8 +53,9 @@ const API_VERSION: &str = "2021-08-06";
 /// The same ceiling S3 puts on a presign: 7 days.
 const MAX_SAS_SECS: u64 = 604_800;
 
-/// How to reach the container.
+/// How to reach the container. Build it with [`AzureConfig::new`].
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AzureConfig {
     /// Storage account name.
     pub account: String,
@@ -67,6 +65,30 @@ pub struct AzureConfig {
     /// `None` means `https://<account>.blob.core.windows.net`. Set it for
     /// Azurite, a sovereign cloud or a custom domain; a path is kept.
     pub endpoint: Option<String>,
+}
+
+impl AzureConfig {
+    /// The account's default endpoint; see [`Self::endpoint`].
+    #[must_use]
+    pub fn new(
+        account: impl Into<String>,
+        account_key: impl Into<String>,
+        container: impl Into<String>,
+    ) -> Self {
+        Self {
+            account: account.into(),
+            account_key: account_key.into(),
+            container: container.into(),
+            endpoint: None,
+        }
+    }
+
+    /// Azurite, a sovereign cloud or a custom domain; a path is kept.
+    #[must_use]
+    pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
 }
 
 impl std::fmt::Debug for AzureConfig {

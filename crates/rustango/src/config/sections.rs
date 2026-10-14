@@ -540,6 +540,7 @@ pub struct MailSettings {
 /// Keep keys out of the file: `RUSTANGO__STORAGE__DISKS__UPLOADS__ACCOUNT_KEY`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct StorageSettings {
     /// The disk `StorageRegistry::default_disk` returns.
     pub default: Option<String>,
@@ -550,6 +551,7 @@ pub struct StorageSettings {
 /// One storage disk. `driver` picks which of the other keys apply.
 #[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct DiskSettings {
     /// `"local"`, `"s3"` or `"azure"`.
     pub driver: String,

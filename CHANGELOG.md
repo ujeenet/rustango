@@ -42,7 +42,7 @@ Each row's map is sized up front. The owned key per cell stays: it is part of th
 
 ### Added — Azure Blob Storage backend (`storage-azure`)
 
-`storage::azure::AzureBlobStorage` signs requests with the account's Shared Key and presigns with service SAS; a create-only PUT gets `c` without `w`. In `batteries`. Works with Azurite through `endpoint`.
+`storage::azure::AzureBlobStorage` signs requests with the account's Shared Key and presigns with service SAS; a create-only PUT gets `c` without `w`. In `batteries`. Works with Azurite through `endpoint`. Build the config with `AzureConfig::new(..).endpoint(..)`.
 
 ### Added — storage disks from config
 

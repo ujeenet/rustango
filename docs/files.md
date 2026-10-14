@@ -172,12 +172,10 @@ account's Shared Key and hands out service SAS URLs for presigned GET and PUT:
 ```rust
 use rustango::storage::azure::{AzureBlobStorage, AzureConfig};
 
-let storage: BoxedStorage = Arc::new(AzureBlobStorage::new(AzureConfig {
-    account: "myaccount".into(),
-    account_key: std::env::var("AZURE_STORAGE_KEY")?,   // base64, from the portal
-    container: "uploads".into(),
-    endpoint: None,   // Azurite: Some("http://127.0.0.1:10000/devstoreaccount1".into())
-})?);
+let key = std::env::var("AZURE_STORAGE_KEY")?; // base64, from the portal
+let cfg = AzureConfig::new("myaccount", key, "uploads");
+// Azurite: cfg.endpoint("http://127.0.0.1:10000/devstoreaccount1")
+let storage: BoxedStorage = Arc::new(AzureBlobStorage::new(cfg)?);
 ```
 
 Differences from S3 a direct upload has to respect:
