@@ -301,7 +301,15 @@ where
 #[cfg(feature = "postgres")]
 impl<T, K> ForeignKey<T, K>
 where
-    T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,
+    T: Model
+        + for<'r> FromRow<'r, PgRow>
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + Send
+        + Unpin
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated,
     K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
     /// Resolve the parent row and cache it on the field. Subsequent

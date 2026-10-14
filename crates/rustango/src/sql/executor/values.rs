@@ -9,7 +9,7 @@ use sqlx::postgres::PgArguments;
 #[cfg(feature = "postgres")]
 use sqlx::query::Query;
 
-use super::ExecError;
+use super::{run_on, ExecError, Rows, SqlExecutor};
 use crate::core::{AggregateQuery, SelectQuery, SqlValue};
 use crate::sql::Pool;
 use crate::sql::{
@@ -111,39 +111,23 @@ pub async fn fetch_values_dict(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
-    let stmt = pool.dialect().compile_select(query)?;
+    fetch_values_dict_on(pool, query).await
+}
+
+async fn fetch_values_dict_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &SelectQuery,
+) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+    let stmt = exec.dialect().compile_select(query)?;
     let width = values_width(query);
-    match pool {
+    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows_to_dicts(&rows, &[], width))
-        }
+        Rows::Postgres(rows) => rows_to_dicts(&rows, &[], width),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows_to_dicts(&rows, &select_model_cols(query), width))
-        }
+        Rows::Mysql(rows) => rows_to_dicts(&rows, &select_model_cols(query), width),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows_to_dicts(&rows, &select_model_cols(query), width))
-        }
-    }
+        Rows::Sqlite(rows) => rows_to_dicts(&rows, &select_model_cols(query), width),
+    })
 }
 
 /// [`fetch_values_dict`] for an [`AggregateQuery`]: each row comes
@@ -160,38 +144,22 @@ pub async fn fetch_aggregate_dict(
     pool: &Pool,
     query: &AggregateQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
-    let stmt = pool.dialect().compile_aggregate(query)?;
-    match pool {
+    fetch_aggregate_dict_on(pool, query).await
+}
+
+async fn fetch_aggregate_dict_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &AggregateQuery,
+) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+    let stmt = exec.dialect().compile_aggregate(query)?;
+    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows_to_dicts(&rows, &[], usize::MAX))
-        }
+        Rows::Postgres(rows) => rows_to_dicts(&rows, &[], usize::MAX),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX))
-        }
+        Rows::Mysql(rows) => rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX))
-        }
-    }
+        Rows::Sqlite(rows) => rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX),
+    })
 }
 
 /// Run a [`SelectQuery`] with a projection and return each row as a
@@ -204,39 +172,23 @@ pub async fn fetch_values_list(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
-    let stmt = pool.dialect().compile_select(query)?;
+    fetch_values_list_on(pool, query).await
+}
+
+async fn fetch_values_list_on<'c, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &SelectQuery,
+) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+    let stmt = exec.dialect().compile_select(query)?;
     let width = values_width(query);
-    match pool {
+    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows_to_lists(&rows, &[], width))
-        }
+        Rows::Postgres(rows) => rows_to_lists(&rows, &[], width),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows_to_lists(&rows, &select_model_cols(query), width))
-        }
+        Rows::Mysql(rows) => rows_to_lists(&rows, &select_model_cols(query), width),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_query_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows_to_lists(&rows, &select_model_cols(query), width))
-        }
-    }
+        Rows::Sqlite(rows) => rows_to_lists(&rows, &select_model_cols(query), width),
+    })
 }
 
 /// The bound `.values_list_flat::<U>(…)` needs on Postgres. With the
@@ -567,50 +519,23 @@ pub async fn fetch_values_flat<U: FlatScalar>(
     pool: &Pool,
     query: &SelectQuery,
 ) -> Result<Vec<U>, ExecError> {
-    let stmt = pool.dialect().compile_select(query)?;
-    fetch_flat_raw(pool, &stmt.sql, stmt.params).await
+    fetch_values_flat_on(pool, query).await
 }
 
-/// [`fetch_values_flat`] for a one-column SQL string in the dialect's shape.
-///
-/// # Errors
-/// Driver failure, or a decode error as for [`fetch_values_flat`].
-async fn fetch_flat_raw<U: FlatScalar>(
-    pool: &Pool,
-    sql: &str,
-    params: Vec<SqlValue>,
+async fn fetch_values_flat_on<'c, U: FlatScalar, E: SqlExecutor<'c>>(
+    exec: E,
+    query: &SelectQuery,
 ) -> Result<Vec<U>, ExecError> {
-    match pool {
+    let stmt = exec.dialect().compile_select(query)?;
+    let rows: Result<Vec<U>, sqlx::Error> = match run_on(exec, &stmt.sql, stmt.params).await? {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-            for v in params {
-                q = bind_query(q, v);
-            }
-            let rows = q.fetch_all(pg).await?;
-            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
-        }
+        Rows::Postgres(rows) => rows.iter().map(decode_flat).collect(),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(sql);
-            for v in params {
-                q = bind_query_my(q, v);
-            }
-            let rows = q.fetch_all(my).await?;
-            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
-        }
+        Rows::Mysql(rows) => rows.iter().map(decode_flat).collect(),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(sql);
-            for v in params {
-                q = bind_query_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await?;
-            Ok(rows.iter().map(decode_flat).collect::<Result<_, _>>()?)
-        }
-    }
+        Rows::Sqlite(rows) => rows.iter().map(decode_flat).collect(),
+    };
+    Ok(rows?)
 }
 
 /// Run a two-column [`SelectQuery`] and decode each row into
@@ -680,31 +605,17 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
 }
 
 impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
-    /// [`Self::fetch`] on a borrowed executor instead of the pool.
-    /// Use it for a tenant-scoped query: a schema-mode tenant is
-    /// selected by `SET search_path` on one connection, so going
-    /// through the pool would read `public` instead.
+    /// [`Self::fetch`] on a [`SqlExecutor`], e.g. a held [`crate::sql::PoolConn`]
+    /// or a schema-mode tenant's connection, which holds its `search_path`.
     ///
     /// # Errors
     /// As [`Self::fetch`].
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_on<'c, E>(
+    pub async fn fetch_on<'c, E: SqlExecutor<'c>>(
         self,
-        executor: E,
-    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
-        let query = self.compile()?;
-        let stmt = {
-            use crate::sql::Dialect as _;
-            crate::sql::Postgres.compile_select(&query)?
-        };
-        let width = values_width(&query);
-        let rows = super::pg_on_query(&stmt.sql, stmt.params)
-            .fetch_all(executor)
-            .await?;
-        Ok(rows_to_dicts(&rows, &[], width))
+        exec: E,
+    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+        let q = self.compile()?;
+        fetch_values_dict_on(exec, &q).await
     }
 }
 
@@ -729,30 +640,25 @@ impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
         fetch_aggregate_dict(pool, &q).await
     }
 
-    /// [`Self::fetch`] on a borrowed executor instead of the pool,
-    /// for a tenant-scoped query. See
+    /// [`Self::fetch`] on a [`SqlExecutor`]. See
     /// [`crate::query::QuerySet::fetch_on`].
     ///
     /// ```ignore
     /// SetLog::objects()
     ///     .values(&["member_id"])
     ///     .annotate("total", sum("volume").into())
-    ///     .fetch_on(t.conn())   // runs in the tenant's schema
+    ///     .fetch_on(&mut conn)
     ///     .await?;
     /// ```
     ///
     /// # Errors
     /// As [`Self::fetch`].
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_on<'c, E>(
+    pub async fn fetch_on<'c, E: SqlExecutor<'c>>(
         self,
-        executor: E,
-    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
+        exec: E,
+    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
         let q = self.compile()?;
-        super::fetch_aggregate_on(&q, executor).await
+        fetch_aggregate_dict_on(exec, &q).await
     }
 }
 
@@ -764,6 +670,18 @@ impl<T: crate::core::Model> crate::query::ValuesListQuerySet<T> {
     pub async fn fetch(self, pool: &Pool) -> Result<Vec<Vec<SqlValue>>, ExecError> {
         let q = self.compile()?;
         fetch_values_list(pool, &q).await
+    }
+
+    /// [`Self::fetch`] on a [`SqlExecutor`].
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    pub async fn fetch_on<'c, E: SqlExecutor<'c>>(
+        self,
+        exec: E,
+    ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
+        let q = self.compile()?;
+        fetch_values_list_on(exec, &q).await
     }
 }
 
@@ -1132,10 +1050,35 @@ impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
     {
         // Rebuild with `LIMIT 1`. `compile()` consumes `self.qs`, so
         // the limit has to go on through the builder.
+        self.first_on(pool).await
+    }
+
+    /// [`Self::fetch`] on a [`SqlExecutor`].
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    pub async fn fetch_on<'c, U: FlatScalar>(
+        self,
+        exec: impl SqlExecutor<'c>,
+    ) -> Result<Vec<U>, ExecError> {
+        let q = self.compile()?;
+        fetch_values_flat_on(exec, &q).await
+    }
+
+    /// [`Self::first`] on a [`SqlExecutor`].
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    pub async fn first_on<'c, U: FlatScalar>(
+        self,
+        exec: impl SqlExecutor<'c>,
+    ) -> Result<Option<U>, ExecError> {
+        // Rebuild with `LIMIT 1`. `compile()` consumes `self.qs`, so
+        // the limit has to go on through the builder.
         let col = self.col;
         let qs = self.qs.limit(1);
         let q = crate::query::ValuesFlatQuerySet { qs, col }.compile()?;
-        let rows = fetch_values_flat::<U>(pool, &q).await?;
+        let rows: Vec<U> = fetch_values_flat_on(exec, &q).await?;
         Ok(rows.into_iter().next())
     }
 }

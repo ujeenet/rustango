@@ -1756,15 +1756,22 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` is **Postgres-only** (`#[cfg(feature = "postgres")]`, bound to
-`Database = sqlx::Postgres`) and takes any *Postgres* sqlx executor — `&PgPool`,
-`&mut PgConnection`, or a `Transaction`. It exists for exactly the case above:
-schema-mode tenants share the registry pool but rely on a per-checkout
+Schema-mode tenants share the registry pool but rely on a per-checkout
 `SET search_path`, so passing `&PgPool` would silently hit the wrong schema.
 
-`fetch` is **not** sugar for it. It is a separate `FetcherPool` method taking
-`&Pool`, dispatching per dialect, and available on all three backends — so on a
-MySQL or SQLite build `fetch` is the only one of the two that exists.
+## One connection per request
+
+Each `fetch(&pool)` checks out its own connection. To run a handler's queries
+on one, take it with `let mut conn = pool.acquire().await?;` (a `PoolConn`) and
+pass `&mut conn` to the `_on` methods, e.g. `Post::objects().fetch_on(&mut conn)`.
+This works on all three backends. `conn.begin()` opens a `PoolTx` on the same
+connection.
+
+The `_on` methods are `fetch_on`, `first_on`, `count_on`, `exists_on` on a
+queryset, and `fetch_on` on `values()`, `values_list()`, `values_list_flat()`
+(plus `first_on`) and `aggregate()`. They take any `SqlExecutor`: `&mut PoolConn`,
+`&mut PoolTx`, `&Pool`, or on Postgres any sqlx executor (`&PgPool`,
+`&mut PgConnection`, `t.conn()`).
 
 ---
 
