@@ -260,6 +260,11 @@ impl AzureBlobStorage {
         let expiry = (chrono::Utc::now() + chrono::Duration::seconds(secs))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
+        Ok(self.sas_url_until(key, permissions, &expiry))
+    }
+
+    /// [`Self::sas_url`] expiring at `expiry` (`%Y-%m-%dT%H:%M:%SZ`).
+    fn sas_url_until(&self, key: &str, permissions: &str, expiry: &str) -> String {
         // Refuse plain http when the endpoint is https.
         let protocol = if self.origin.starts_with("https://") {
             "https"
@@ -267,12 +272,12 @@ impl AzureBlobStorage {
             ""
         };
         let resource = format!("/blob/{}/{}/{key}", self.account, self.container);
-        let sig = self.sign(&sas_string(permissions, &expiry, &resource, protocol));
+        let sig = self.sign(&sas_string(permissions, expiry, &resource, protocol));
         let mut query = vec![
             ("sv", API_VERSION),
             ("sr", "b"),
             ("sp", permissions),
-            ("se", expiry.as_str()),
+            ("se", expiry),
         ];
         if !protocol.is_empty() {
             query.push(("spr", protocol));
@@ -282,12 +287,7 @@ impl AzureBlobStorage {
             .iter()
             .map(|(k, v)| format!("{k}={}", encode_query(v)))
             .collect();
-        Ok(format!(
-            "{}{}?{}",
-            self.origin,
-            self.path(key),
-            query.join("&")
-        ))
+        format!("{}{}?{}", self.origin, self.path(key), query.join("&"))
     }
 
     async fn blob(
@@ -556,6 +556,75 @@ mod tests {
         assert!(shared_key_string("GET", 0, None, &[], "/r").starts_with("GET\n\n\n\n"));
     }
 
+    // tests-003 — known answers. The strings follow Microsoft's documented
+    // layouts; the signatures were computed apart from this code (Python hmac).
+
+    #[test]
+    fn shared_key_matches_a_known_answer() {
+        let date = "Fri, 26 Jun 2015 23:39:12 GMT";
+        let sts = "GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:Fri, 26 Jun 2015 23:39:12 GMT\n\
+                   x-ms-version:2021-08-06\n/acct/media/a%20b.txt";
+        let ms = [
+            ("x-ms-date", date.to_owned()),
+            ("x-ms-version", API_VERSION.to_owned()),
+        ];
+        let built = shared_key_string("GET", 0, None, &ms, "/acct/media/a%20b.txt");
+        assert_eq!(built, sts);
+        let s = AzureBlobStorage::new(cfg()).unwrap();
+        assert_eq!(s.sign(sts), "5RsQE6wn+6G2f4efZ9R7ckXr5AoqTeph5BS8GkEBBnI=");
+    }
+
+    #[test]
+    fn service_sas_matches_a_known_answer() {
+        let se = "2026-01-02T03:04:05Z";
+        assert_eq!(
+            sas_string("r", se, "/blob/acct/media/dir/a b.csv", "https"),
+            "r\n\n2026-01-02T03:04:05Z\n/blob/acct/media/dir/a b.csv\n\n\nhttps\n2021-08-06\nb\n\n\n\n\n\n\n"
+        );
+        let s = AzureBlobStorage::new(cfg()).unwrap();
+        assert_eq!(
+            s.sas_url_until("dir/a b.csv", "r", se),
+            "https://acct.blob.core.windows.net/media/dir/a%20b.csv?sv=2021-08-06&sr=b&sp=r\
+             &se=2026-01-02T03%3A04%3A05Z&spr=https&sig=wjB5n7%2FJ0gN22ZlUCg2NcaXwJITF3yiDnxLRMAb6lsY%3D"
+        );
+        let azurite = AzureBlobStorage::new(
+            AzureConfig::new("devstoreaccount1", DEV_KEY, "media")
+                .endpoint("http://127.0.0.1:10000/devstoreaccount1"),
+        )
+        .unwrap();
+        assert_eq!(
+            azurite.sas_url_until("k", "c", se),
+            "http://127.0.0.1:10000/devstoreaccount1/media/k?sv=2021-08-06&sr=b&sp=c\
+             &se=2026-01-02T03%3A04%3A05Z&sig=fLbuL%2BiUNswC%2Bjzrqbn%2BgSf0V2sD7P8iaSX6vSdyJCY%3D"
+        );
+    }
+
+    /// A query parameter joins the canonicalized resource as `\nname:value`.
+    #[tokio::test]
+    async fn create_container_signs_the_documented_layout() {
+        let (ep, req) = mock(201).await;
+        assert!(mock_storage(ep).create_container().await.unwrap());
+        let head = req.await.unwrap();
+        assert!(head.starts_with("PUT /acct/media?restype=container "), "{head}");
+        let sts = format!(
+            "PUT\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{}\nx-ms-version:2021-08-06\n\
+             /acct/acct/media\nrestype:container",
+            header(&head, "x-ms-date")
+        );
+        let key = B64.decode(DEV_KEY).unwrap();
+        let sig = B64.encode(hmac_sha256(&key, sts.as_bytes()));
+        assert_eq!(header(&head, "authorization"), format!("SharedKey acct:{sig}"));
+    }
+
+    fn header(head: &str, name: &str) -> String {
+        head.lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| panic!("no {name} in {head}"))
+    }
+
     #[tokio::test]
     async fn sas_get_is_read_only_and_verifies() {
         let s = AzureBlobStorage::new(cfg()).unwrap();
@@ -673,14 +742,7 @@ mod tests {
             .await
             .unwrap();
         let head = req.await.unwrap();
-        let get = |name: &str| {
-            head.lines()
-                .find_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
-                })
-                .unwrap_or_else(|| panic!("no {name} in {head}"))
-        };
+        let get = |name: &str| header(&head, name);
         assert!(head.starts_with("PUT /acct/media/a%20b.txt "), "{head}");
         assert_eq!(get("x-ms-blob-type"), "BlockBlob");
         let ms = vec![
