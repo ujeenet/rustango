@@ -140,7 +140,9 @@ macro_rules! first_compatible {
     }};
 }
 
-/// One typed read; NULL and a failed read are both `None`.
+/// One typed read; NULL and a failed read are both `None`. Unchecked:
+/// the plan already matched `T` to the column type, and sqlx's per-cell
+/// check clones and compares the type info (~2% of a values read).
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn get<'r, R, T>(row: &'r R, i: usize) -> Option<T>
 where
@@ -148,7 +150,7 @@ where
     usize: sqlx::ColumnIndex<R>,
     T: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    row.try_get::<Option<T>, _>(i).ok().flatten()
+    row.try_get_unchecked::<Option<T>, _>(i).ok().flatten()
 }
 
 /// The cells PG and MySQL decode alike.
