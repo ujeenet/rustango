@@ -635,7 +635,10 @@ mod tests {
     async fn one_failure_among_reservations_does_not_lock() {
         let l = lockout(3);
         let slots: Vec<_> = (0..3).map(|_| l.reserve("erin")).collect();
-        let mut slots = futures_util::future::join_all(slots).await.into_iter().map(counted);
+        let mut slots = futures_util::future::join_all(slots)
+            .await
+            .into_iter()
+            .map(counted);
         l.reserved_failed("erin", slots.next().unwrap()).await;
         assert!(!l.is_locked("erin").await);
         for s in slots {

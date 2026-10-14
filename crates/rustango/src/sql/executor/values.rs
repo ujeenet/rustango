@@ -179,11 +179,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            Ok(rows_to_dicts(
-                &rows,
-                &aggregate_cols(query),
-                usize::MAX,
-            ))
+            Ok(rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -193,11 +189,7 @@ pub async fn fetch_aggregate_dict(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            Ok(rows_to_dicts(
-                &rows,
-                &aggregate_cols(query),
-                usize::MAX,
-            ))
+            Ok(rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX))
         }
     }
 }

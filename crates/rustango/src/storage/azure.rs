@@ -612,7 +612,10 @@ mod tests {
         let (ep, req) = mock(201).await;
         assert!(mock_storage(ep).create_container().await.unwrap());
         let head = req.await.unwrap();
-        assert!(head.starts_with("PUT /acct/media?restype=container "), "{head}");
+        assert!(
+            head.starts_with("PUT /acct/media?restype=container "),
+            "{head}"
+        );
         let sts = format!(
             "PUT\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{}\nx-ms-version:2021-08-06\n\
              /acct/acct/media\nrestype:container",
@@ -620,7 +623,10 @@ mod tests {
         );
         let key = B64.decode(DEV_KEY).unwrap();
         let sig = B64.encode(hmac_sha256(&key, sts.as_bytes()));
-        assert_eq!(header(&head, "authorization"), format!("SharedKey acct:{sig}"));
+        assert_eq!(
+            header(&head, "authorization"),
+            format!("SharedKey acct:{sig}")
+        );
     }
 
     fn header(head: &str, name: &str) -> String {

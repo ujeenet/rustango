@@ -209,8 +209,12 @@ const IN_FLIGHT_POLL: Duration = Duration::from_millis(50);
 struct InFlight(std::sync::Mutex<std::collections::HashMap<String, (usize, Arc<Notify>)>>);
 
 impl InFlight {
-    fn map(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (usize, Arc<Notify>)>> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn map(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (usize, Arc<Notify>)>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn enter(&self, gate: &str) {
@@ -266,7 +270,11 @@ enum Blocked {
 impl Buckets {
     /// Wait for an attempt in flight at the full gate to settle; refuse
     /// when none is, and answer busy past `deadline`.
-    async fn wait(&self, blocked: Blocked, deadline: tokio::time::Instant) -> Result<(), LoginRefused> {
+    async fn wait(
+        &self,
+        blocked: Blocked,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), LoginRefused> {
         let (gate, retry_after_secs) = match blocked {
             Blocked::Refused(r) => return Err(r),
             Blocked::Full {
@@ -501,7 +509,10 @@ impl LoginThrottle {
                 Err(retry_after_secs) => {
                     held.release().await;
                     let gate = ip_gate(ip);
-                    return Err(Blocked::Full { gate, retry_after_secs });
+                    return Err(Blocked::Full {
+                        gate,
+                        retry_after_secs,
+                    });
                 }
             }
         }
@@ -513,7 +524,10 @@ impl LoginThrottle {
             Err(retry_after_secs) => {
                 let gate = global_gate(&held.scope_key);
                 held.release().await;
-                return Err(Blocked::Full { gate, retry_after_secs });
+                return Err(Blocked::Full {
+                    gate,
+                    retry_after_secs,
+                });
             }
         }
         Ok(held)
@@ -1020,7 +1034,10 @@ mod tests {
         assert_eq!(n, 20);
         let s = LoginScope::TenantApiKey("t-par-key".into());
         let none = |_| ClientIp::default();
-        assert_eq!(burst(&t, &s, |_| ip("10.9.15.2"), "", 25, |_| false).await, 25);
+        assert_eq!(
+            burst(&t, &s, |_| ip("10.9.15.2"), "", 25, |_| false).await,
+            25
+        );
         assert_eq!(burst(&t, &s, none, "", 5, |_| false).await, 5);
     }
 
@@ -1049,8 +1066,14 @@ mod tests {
             },
         );
         let s = LoginScope::TenantApiKey("t-cache-burst".into());
-        assert_eq!(burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| false).await, 20);
-        assert_eq!(burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| true).await, 3);
+        assert_eq!(
+            burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| false).await,
+            20
+        );
+        assert_eq!(
+            burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| true).await,
+            3
+        );
     }
 
     /// An attempt dropped unreported (busy, DB error) gives its

@@ -129,7 +129,10 @@ async fn parallel_cold_logins_all_pass(pool: &Pool) {
         async move { ModelBackend.authenticate(&parts, pool).await }
     });
     for r in futures_util::future::join_all(runs).await {
-        assert!(matches!(r, Ok(Some(_))), "a right password was refused: {r:?}");
+        assert!(
+            matches!(r, Ok(Some(_))),
+            "a right password was refused: {r:?}"
+        );
     }
 }
 

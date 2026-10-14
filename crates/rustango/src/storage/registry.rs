@@ -185,8 +185,7 @@ impl StorageRegistry {
             let env_safe = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
             if name.is_empty() || !name.chars().all(env_safe) {
                 return Err(err(super::StorageError::Io(
-                    "a disk name must be lowercase [a-z0-9_], so env overrides can reach it"
-                        .into(),
+                    "a disk name must be lowercase [a-z0-9_], so env overrides can reach it".into(),
                 )));
             }
             let store = build_disk(disk, disk.endpoint.as_deref()).map_err(err)?;
@@ -615,7 +614,10 @@ mod tests {
         assert_eq!(via.metadata("a.csv").await.unwrap().unwrap().size, 3);
         let ttl = std::time::Duration::from_secs(60);
         let get = via.presigned_get_url("a.csv", ttl).await.unwrap();
-        assert!(get.starts_with("https://files.example.com/up/a.csv?"), "{get}");
+        assert!(
+            get.starts_with("https://files.example.com/up/a.csv?"),
+            "{get}"
+        );
     }
 
     /// correctness-002 — a name env overrides cannot reach is refused.
@@ -624,7 +626,9 @@ mod tests {
     fn from_settings_refuses_a_name_env_cannot_reach() {
         for name in ["Uploads", "user-media"] {
             let toml = format!("[disks.\"{name}\"]\ndriver = \"local\"\nroot = \"/tmp/x\"\n");
-            let err = StorageRegistry::from_settings(&settings(&toml)).err().unwrap();
+            let err = StorageRegistry::from_settings(&settings(&toml))
+                .err()
+                .unwrap();
             assert!(err.to_string().contains("lowercase"), "{err}");
         }
     }
