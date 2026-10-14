@@ -35,11 +35,15 @@ async fn setup(pool: &Pool) {
 }
 
 fn parts(user: &str, pass: &str) -> Parts {
-    use base64::Engine as _;
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let addr: std::net::SocketAddr = format!("10.61.{}.{}:1", (n >> 8) & 255, n & 255)
         .parse()
         .unwrap();
+    parts_at(user, pass, addr)
+}
+
+fn parts_at(user: &str, pass: &str, addr: std::net::SocketAddr) -> Parts {
+    use base64::Engine as _;
     let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     Request::builder()
         .header(header::AUTHORIZATION, format!("Basic {creds}"))
@@ -113,10 +117,43 @@ async fn a_deactivation_is_not_masked(pool: &Pool) {
     );
 }
 
+/// security-002 — more parallel cold logins than the lock allows all
+/// pass with the right password.
+async fn parallel_cold_logins_all_pass(pool: &Pool) {
+    let _g = SUITE.lock().await;
+    let name = unique(pool, "parallel");
+    seed(pool, &name).await;
+    let addr: std::net::SocketAddr = "10.60.0.1:1".parse().unwrap();
+    let runs = (0..8).map(|_| {
+        let parts = parts_at(&name, PASS, addr);
+        async move { ModelBackend.authenticate(&parts, pool).await }
+    });
+    for r in futures_util::future::join_all(runs).await {
+        assert!(matches!(r, Ok(Some(_))), "a right password was refused: {r:?}");
+    }
+}
+
+/// security-003 — a locked account is refused even on a cache hit.
+async fn a_locked_account_is_refused_on_a_cache_hit(pool: &Pool) {
+    let _g = SUITE.lock().await;
+    let name = unique(pool, "locked");
+    seed(pool, &name).await;
+    assert!(ok(pool, &name, PASS).await);
+    for _ in 0..rustango::account_lockout::DEFAULT_MAX_ATTEMPTS {
+        assert!(!ok(pool, &name, "wrong-pass").await);
+    }
+    assert!(
+        !ok(pool, &name, PASS).await,
+        "a cached credential skipped the lock"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         a_hit_skips_argon2_until_the_password_changes,
         a_deactivation_is_not_masked,
+        parallel_cold_logins_all_pass,
+        a_locked_account_is_refused_on_a_cache_hit,
     ],
 }

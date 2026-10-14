@@ -180,7 +180,9 @@ impl CacheRateLimitLayer {
     /// Call `cache.incr(...)` yourself if you need fail-closed.
     pub async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
         match self.try_take(key).await {
-            Ok(r) => r.map(|(count, window_start)| (count, window_start + self.window_secs())),
+            Ok(r) => r
+                .map(|(count, window_start)| (count, window_start + self.window_secs()))
+                .map_err(|(retry_after, _)| retry_after),
             Err(e) => {
                 // Fail-open: cache outage shouldn't deny all traffic.
                 tracing::warn!(error = %e, "rate-limit cache incr failed; allowing request");
@@ -189,11 +191,12 @@ impl CacheRateLimitLayer {
         }
     }
 
-    /// [`Self::take`] that reports a cache error: `Ok((count, window_start))`.
+    /// [`Self::take`] that reports a cache error: `Ok((count, window_start))`,
+    /// or `Err((retry_after_secs, window_start))` when full.
     pub(crate) async fn try_take(
         &self,
         key: &str,
-    ) -> Result<Result<(u32, u64), u64>, crate::cache::CacheError> {
+    ) -> Result<Result<(u32, u64), (u64, u64)>, crate::cache::CacheError> {
         let (now, window_start) = self.window_now();
         let count = self
             .cache
@@ -204,10 +207,30 @@ impl CacheRateLimitLayer {
             )
             .await?;
         Ok(if count > i64::from(self.capacity) {
-            Err(self.retry_after(now, window_start))
+            Err((self.retry_after(now, window_start), window_start))
         } else {
             // Fits in u32: capacity is u32 and the check above passed.
             Ok((u32::try_from(count).unwrap_or(u32::MAX), window_start))
+        })
+    }
+
+    /// [`Self::try_take`] without counting: `Err(retry_after_secs)` when full.
+    #[cfg(feature = "admin")] // only `login_throttle` calls it
+    pub(crate) async fn try_peek(
+        &self,
+        key: &str,
+    ) -> Result<Result<(), u64>, crate::cache::CacheError> {
+        let (now, window_start) = self.window_now();
+        let count = self
+            .cache
+            .get(&self.cache_key(key, window_start))
+            .await?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(if count >= i64::from(self.capacity) {
+            Err(self.retry_after(now, window_start))
+        } else {
+            Ok(())
         })
     }
 

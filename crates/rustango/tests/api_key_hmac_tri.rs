@@ -40,6 +40,10 @@ fn parts(token: &str) -> Parts {
     let addr: std::net::SocketAddr = format!("10.62.{}.{}:1", (n >> 8) & 255, n & 255)
         .parse()
         .unwrap();
+    parts_at(token, addr)
+}
+
+fn parts_at(token: &str, addr: std::net::SocketAddr) -> Parts {
     Request::builder()
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .extension(TenantSlug("api-key-hmac".into()))
@@ -138,10 +142,28 @@ async fn a_legacy_argon2_key_is_upgraded_on_use(pool: &Pool) {
     assert!(hit, "the upgraded key ran argon2");
 }
 
+/// tenancy-001 — more parallel calls from one IP than the per-IP limit
+/// all pass with a valid key.
+async fn parallel_calls_from_one_ip_all_pass(pool: &Pool) {
+    let _g = SUITE.lock().await;
+    let uid = seed_user(pool, &unique(pool, "parallel")).await;
+    let token = create_api_key(uid, "t", None, pool).await.unwrap();
+    let addr: std::net::SocketAddr = "10.63.0.1:1".parse().unwrap();
+    let n = rustango::login_throttle::DEFAULT_IP_LIMIT as usize + 5;
+    let runs = (0..n).map(|_| {
+        let parts = parts_at(&token, addr);
+        async move { ApiKeyBackend.authenticate(&parts, pool).await }
+    });
+    for r in futures_util::future::join_all(runs).await {
+        assert!(matches!(r, Ok(Some(_))), "a valid key was refused: {r:?}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         a_new_key_is_an_hmac_and_skips_argon2,
         a_legacy_argon2_key_is_upgraded_on_use,
+        parallel_calls_from_one_ip_all_pass,
     ],
 }

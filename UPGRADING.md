@@ -162,7 +162,7 @@ The `manage` password verbs now refuse a password the forms refuse (under 8 char
 
 ### Login attempts are reserved up front (#2378)
 
-HTTP Basic and API-key checks now hold a per-IP and account-lock slot while they verify, so more than `ip_limit` (or `max_attempts` for one account) uncached checks in flight at once get `429`. An attempt dropped without an outcome is refunded.
+Every login reserves its account-lock slot before the password check; HTTP Basic and API-key checks also hold a per-IP and per-tenant-scope token while they verify. When a limit is full only with checks still in flight, the next one waits (up to `hash_wait`, then `503`) instead of getting `429`. Only failures lock an account, and a locked account is refused before the user lookup, cached Basic credentials included.
 
 ### `values()` cell types follow the column type (#2655, #2486)
 

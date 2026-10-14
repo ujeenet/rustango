@@ -4,7 +4,9 @@
 //! order, an account-lock attempt, a per-IP token and a token from the
 //! scope's global limit. Reserving before the password check means a
 //! parallel burst cannot all pass a peek (#2378). A request refused by
-//! one check spends nothing from the later ones.
+//! one check spends nothing from the later ones. A limit full only with
+//! attempts still in flight in this process makes the next one wait, so
+//! parallel right credentials are delayed, never refused.
 //!
 //! - **Account lock**: keyed by the normalized *submitted* username, so
 //!   an unknown name is limited exactly like a real one. Once the row is
@@ -13,7 +15,7 @@
 //! - **Per IP** (IPv6 by /64) and **per scope** ([`LoginScope`]): only
 //!   failed attempts use them up; a successful login gives its token back,
 //!   so credentials sent on every request (HTTP Basic, API keys) only hold
-//!   a token while they are checked.
+//!   a token while they are checked. Only failures lock an account.
 //!
 //! Shared across scopes: the per-IP buckets, the account-lock store and
 //! the password-hashing queue ([`crate::passwords`]).
@@ -35,6 +37,9 @@ use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderMap};
 use axum::response::Response;
 
+use tokio::sync::Notify;
+
+use crate::account_lockout::{Reservation, ReservedSlot};
 use crate::cache::BoxedCache;
 use crate::rate_limit::RateLimitLayer;
 use crate::rate_limit_cache::CacheRateLimitLayer;
@@ -191,6 +196,108 @@ struct Buckets {
     ip: Limit,
     /// Keyed by [`LoginScope::key`].
     global: Limit,
+    in_flight: InFlight,
+}
+
+/// How often a waiting attempt re-checks a limit held elsewhere.
+const IN_FLIGHT_POLL: Duration = Duration::from_millis(50);
+
+/// Attempts this process admitted and has not settled, per gate (an
+/// account key, `ip:<ip>` or `global:<scope>`). A limit that is full only
+/// because of these makes the next attempt wait, not fail.
+#[derive(Default)]
+struct InFlight(std::sync::Mutex<std::collections::HashMap<String, (usize, Arc<Notify>)>>);
+
+impl InFlight {
+    fn map(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (usize, Arc<Notify>)>> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn enter(&self, gate: &str) {
+        self.map().entry(gate.to_owned()).or_default().0 += 1;
+    }
+
+    fn leave(&self, gate: &str) {
+        let mut map = self.map();
+        if let Some((n, notify)) = map.get_mut(gate) {
+            *n -= 1;
+            notify.notify_waiters();
+            if *n == 0 {
+                map.remove(gate);
+            }
+        }
+    }
+
+    /// `Some` while this process has attempts in flight at `gate`.
+    fn busy(&self, gate: &str) -> Option<Arc<Notify>> {
+        self.map().get(gate).map(|(_, notify)| Arc::clone(notify))
+    }
+}
+
+/// The gates one attempt holds; leaving them on drop wakes the waiters.
+struct Gates {
+    buckets: Arc<Buckets>,
+    held: Vec<String>,
+}
+
+impl Gates {
+    fn enter(&mut self, gate: String) {
+        self.buckets.in_flight.enter(&gate);
+        self.held.push(gate);
+    }
+}
+
+impl Drop for Gates {
+    fn drop(&mut self) {
+        for gate in &self.held {
+            self.buckets.in_flight.leave(gate);
+        }
+    }
+}
+
+/// Why an attempt was not admitted.
+enum Blocked {
+    /// Locked, or a limit spent by settled failures.
+    Refused(LoginRefused),
+    /// Full at `gate`; it may free up when an attempt there settles.
+    Full { gate: String, retry_after_secs: u64 },
+}
+
+impl Buckets {
+    /// Wait for an attempt in flight at the full gate to settle; refuse
+    /// when none is, and answer busy past `deadline`.
+    async fn wait(&self, blocked: Blocked, deadline: tokio::time::Instant) -> Result<(), LoginRefused> {
+        let (gate, retry_after_secs) = match blocked {
+            Blocked::Refused(r) => return Err(r),
+            Blocked::Full {
+                gate,
+                retry_after_secs,
+            } => (gate, retry_after_secs),
+        };
+        let Some(notify) = self.in_flight.busy(&gate) else {
+            return Err(LoginRefused::Throttled { retry_after_secs });
+        };
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.in_flight.busy(&gate).is_none() {
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(LoginRefused::Busy);
+        }
+        let _ = tokio::time::timeout(left.min(IN_FLIGHT_POLL), notified).await;
+        Ok(())
+    }
+}
+
+fn ip_gate(ip: &str) -> String {
+    format!("ip:{ip}")
+}
+
+fn global_gate(scope_key: &str) -> String {
+    format!("global:{scope_key}")
 }
 
 /// Where one limit counts.
@@ -215,14 +322,33 @@ enum Spent {
 }
 
 impl Limit {
+    /// Spend one token. A refused take counts nothing, so attempts that
+    /// wait and retry do not fill the window themselves.
     async fn take(&self, key: &str) -> Result<Spent, u64> {
         match self {
             Self::Memory(l) => l.take(key).await.map(|_| Spent::Memory),
             Self::Cache { shared, fallback } => match shared.try_take(key).await {
-                Ok(r) => r.map(|(_, window)| Spent::Window(window)),
+                Ok(Ok((_, window))) => Ok(Spent::Window(window)),
+                Ok(Err((secs, window))) => {
+                    shared.give_back_at(key, window).await;
+                    Err(secs)
+                }
                 Err(e) => {
                     tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache incr failed");
                     fallback.take(key).await.map(|_| Spent::Memory)
+                }
+            },
+        }
+    }
+
+    async fn peek(&self, key: &str) -> Result<(), u64> {
+        match self {
+            Self::Memory(l) => l.peek(key).await,
+            Self::Cache { shared, fallback } => match shared.try_peek(key).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(target: "rustango::rate_limit", error = %e, "login limit cache read failed");
+                    fallback.peek(key).await
                 }
             },
         }
@@ -257,6 +383,7 @@ impl LoginThrottle {
             limits,
             ip: Limit::Memory(memory_ip(limits)),
             global: Limit::Memory(memory_global(limits)),
+            in_flight: InFlight::default(),
         }))
     }
 
@@ -282,6 +409,7 @@ impl LoginThrottle {
                 shared: global.key_prefix("login-global"),
                 fallback: memory_global(limits),
             },
+            in_flight: InFlight::default(),
         }))
     }
 
@@ -316,52 +444,113 @@ impl LoginThrottle {
     /// lookup, then report the outcome on the returned [`LoginAttempt`].
     /// `username` is ignored for [`LoginScope::TenantApiKey`].
     ///
+    /// A limit that is full only with attempts still in flight here waits
+    /// for one to settle, so right credentials are never refused by
+    /// parallel successes; wrong ones still get no more than each limit.
+    ///
     /// # Errors
     /// [`LoginRefused::Throttled`] when the account is locked or a limit
-    /// is spent.
+    /// is spent by failures; [`LoginRefused::Busy`] when in-flight
+    /// attempts do not settle within [`crate::passwords::hash_wait`].
     pub async fn begin(
         &self,
         scope: &LoginScope,
         ip: &ClientIp,
         username: &str,
     ) -> Result<LoginAttempt, LoginRefused> {
-        let throttled = |retry_after_secs| LoginRefused::Throttled { retry_after_secs };
         self.warn_once_on_weak_store();
-        let scope_key = scope.key();
-        let mut keys = Vec::with_capacity(2);
-        if scope.locks_accounts() {
-            let key = account_key(&scope_key, username);
-            reserve_lock(&key).await?;
-            keys.push(key);
+        let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        loop {
+            match self.try_begin(scope, ip, username).await {
+                Ok(held) => return Ok(LoginAttempt(Some(held))),
+                Err(blocked) => self.0.wait(blocked, deadline).await?,
+            }
         }
+    }
+
+    /// Reserve the account, per-IP and global slots in that order. A
+    /// request refused by one spends nothing from the later ones.
+    async fn try_begin(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) -> Result<Held, Blocked> {
         let b = &self.0;
-        let mut ip_spent = Spent::Nothing;
+        let mut held = Held {
+            buckets: Arc::clone(b),
+            scope_key: scope.key(),
+            ip: ip.0.clone(),
+            spent: (Spent::Nothing, Spent::Nothing),
+            locks: Vec::with_capacity(2),
+            gates: Gates {
+                buckets: Arc::clone(b),
+                held: Vec::with_capacity(4),
+            },
+        };
+        if scope.locks_accounts() {
+            held.reserve_lock(account_key(&held.scope_key, username))
+                .await?;
+        }
         if let Some(ip) = &ip.0 {
             match b.ip.take(ip).await {
-                Ok(spent) => ip_spent = spent,
-                Err(secs) => {
-                    release_locks(&keys).await;
-                    return Err(throttled(secs));
+                Ok(spent) => {
+                    held.spent.0 = spent;
+                    held.gates.enter(ip_gate(ip));
+                }
+                Err(retry_after_secs) => {
+                    held.release().await;
+                    let gate = ip_gate(ip);
+                    return Err(Blocked::Full { gate, retry_after_secs });
                 }
             }
         }
-        let global_spent = match b.global.take(&scope_key).await {
-            Ok(spent) => spent,
-            Err(secs) => {
-                if let Some(ip) = &ip.0 {
-                    b.ip.give_back(ip, ip_spent).await;
-                }
-                release_locks(&keys).await;
-                return Err(throttled(secs));
+        match b.global.take(&held.scope_key).await {
+            Ok(spent) => {
+                held.spent.1 = spent;
+                held.gates.enter(global_gate(&held.scope_key));
             }
+            Err(retry_after_secs) => {
+                let gate = global_gate(&held.scope_key);
+                held.release().await;
+                return Err(Blocked::Full { gate, retry_after_secs });
+            }
+        }
+        Ok(held)
+    }
+
+    /// Refuse, before the user lookup, what [`Self::begin`] would refuse
+    /// for good: a locked account or a limit spent by failures. Reserves
+    /// nothing; call [`Self::begin`] before checking the password.
+    ///
+    /// # Errors
+    /// [`LoginRefused::Throttled`].
+    pub async fn check(
+        &self,
+        scope: &LoginScope,
+        ip: &ClientIp,
+        username: &str,
+    ) -> Result<(), LoginRefused> {
+        let scope_key = scope.key();
+        if scope.locks_accounts() {
+            let lockout = crate::account_lockout::shared();
+            if lockout.is_locked(&account_key(&scope_key, username)).await {
+                return Err(LoginRefused::Throttled {
+                    retry_after_secs: lockout.lock_duration().as_secs().max(1),
+                });
+            }
+        }
+        let b = &self.0;
+        let spent = |gate: &str, r: Result<(), u64>| match r {
+            Err(retry_after_secs) if b.in_flight.busy(gate).is_none() => {
+                Err(LoginRefused::Throttled { retry_after_secs })
+            }
+            _ => Ok(()),
         };
-        Ok(LoginAttempt(Some(Held {
-            buckets: Arc::clone(b),
-            scope_key,
-            ip: ip.0.clone(),
-            spent: (ip_spent, global_spent),
-            keys,
-        })))
+        if let Some(ip) = &ip.0 {
+            spent(&ip_gate(ip), b.ip.peek(ip).await)?;
+        }
+        spent(&global_gate(&scope_key), b.global.peek(&scope_key).await)
     }
 
     /// Run a signed-in user's current-password check through the gate, so a
@@ -403,41 +592,25 @@ fn memory_global(limits: LoginLimits) -> RateLimitLayer {
     RateLimitLayer::global(limits.global_limit.max(1), limits.global_window)
 }
 
-/// Count the attempt against the account before the password check.
-async fn reserve_lock(key: &str) -> Result<(), LoginRefused> {
-    let lockout = crate::account_lockout::shared();
-    crate::account_lockout::warn_once_on_weak_store(lockout);
-    if !lockout.reserve(key).await {
-        return Err(LoginRefused::Throttled {
-            retry_after_secs: lockout.lock_duration().as_secs().max(1),
-        });
-    }
-    Ok(())
-}
-
-async fn release_locks(keys: &[String]) {
-    let lockout = crate::account_lockout::shared();
-    for key in keys {
-        lockout.release(key).await;
-    }
-}
-
 /// One admitted attempt. Report [`Self::failed`] or [`Self::succeeded`].
 /// `None` once reported; an unreported attempt (busy, DB error) is given
 /// back on drop, as it checked nothing.
 #[must_use = "report the outcome, or failures never lock the account"]
 pub struct LoginAttempt(Option<Held>);
 
-/// What an admitted attempt holds. No `Drop`, so a refund that never runs
-/// (runtime shutting down) cannot re-enter [`LoginAttempt`]'s.
+/// What an admitted attempt holds. Dropping it only leaves the in-process
+/// gates and never spawns, so a refund that never runs (runtime shutting
+/// down) cannot re-enter [`LoginAttempt`]'s `Drop`.
 struct Held {
     buckets: Arc<Buckets>,
     scope_key: String,
     ip: Option<String>,
     /// What `begin` counted per IP and globally, refunded on success.
     spent: (Spent, Spent),
-    /// Account-lock keys: the submitted name, then the stored one.
-    keys: Vec<String>,
+    /// Account-lock slots: the submitted name, then the stored one.
+    locks: Vec<(String, ReservedSlot)>,
+    /// Dropped last, after the refunds, so waiters see them.
+    gates: Gates,
 }
 
 impl Drop for LoginAttempt {
@@ -466,35 +639,40 @@ impl LoginAttempt {
         let Some(held) = self.0.as_mut() else {
             return Ok(());
         };
-        if held.keys.is_empty() {
+        if held.locks.is_empty() {
             return Ok(());
         }
         let key = account_key(&held.scope_key, stored_username);
-        if !held.keys.contains(&key) {
-            reserve_lock(&key).await?;
-            held.keys.push(key);
+        if held.locks.iter().any(|(k, _)| *k == key) {
+            return Ok(());
         }
-        Ok(())
+        // Waits only on attempts past `resolve`, which never wait again.
+        let buckets = Arc::clone(&held.buckets);
+        let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
+        loop {
+            match held.reserve_lock(key.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(blocked) => buckets.wait(blocked, deadline).await?,
+            }
+        }
     }
 
     /// Count a failure against the username, known or not. `begin`
     /// already counted it; this keeps the tokens and may lock the account.
     pub async fn failed(mut self) {
-        let held = self.held();
+        let mut held = self.held();
         let lockout = crate::account_lockout::shared();
-        for key in &held.keys {
-            lockout.reserved_failed(key).await;
+        for (key, slot) in held.locks.drain(..) {
+            lockout.reserved_failed(&key, slot).await;
         }
     }
 
     /// Clear the username's failures and give back the limit tokens.
     pub async fn succeeded(mut self) {
-        let held = self.held();
+        let mut held = self.held();
         let lockout = crate::account_lockout::shared();
-        for key in &held.keys {
-            if lockout.attempt_count(key).await > 0 {
-                lockout.clear(key).await;
-            }
+        for (key, slot) in held.locks.drain(..) {
+            lockout.reserved_succeeded(&key, slot).await;
         }
         held.give_back().await;
     }
@@ -507,9 +685,32 @@ impl LoginAttempt {
 }
 
 impl Held {
+    /// Count the attempt against the account before the password check.
+    async fn reserve_lock(&mut self, key: String) -> Result<(), Blocked> {
+        let lockout = crate::account_lockout::shared();
+        crate::account_lockout::warn_once_on_weak_store(lockout);
+        match lockout.reserve(&key).await {
+            Reservation::Counted(slot) => {
+                self.gates.enter(key.clone());
+                self.locks.push((key, slot));
+                Ok(())
+            }
+            Reservation::Locked => Err(Blocked::Refused(LoginRefused::Throttled {
+                retry_after_secs: lockout.lock_duration().as_secs().max(1),
+            })),
+            _ => Err(Blocked::Full {
+                gate: key,
+                retry_after_secs: 1,
+            }),
+        }
+    }
+
     /// Give back everything `begin` reserved.
-    async fn release(self) {
-        release_locks(&self.keys).await;
+    async fn release(mut self) {
+        let lockout = crate::account_lockout::shared();
+        for (key, slot) in self.locks.drain(..) {
+            lockout.release(&key, slot).await;
+        }
         self.give_back().await;
     }
 
@@ -745,8 +946,36 @@ mod tests {
         assert!(t.begin(&s, &ip("10.9.3.1"), "").await.is_err());
     }
 
-    /// #2378 — a parallel burst on a per-request scope reserves its tokens
-    /// before any verify, so no more than the per-IP limit gets through.
+    /// Start `n` attempts at once; each holds its reservation for a moment,
+    /// then reports `fail` or success. Returns how many were admitted.
+    async fn burst(
+        t: &LoginThrottle,
+        s: &LoginScope,
+        ip_of: impl Fn(usize) -> ClientIp,
+        user: &str,
+        n: usize,
+        fail: impl Fn(usize) -> bool,
+    ) -> usize {
+        let runs = (0..n).map(|i| {
+            let (ip, fail) = (ip_of(i), fail(i));
+            async move {
+                let Ok(a) = t.begin(s, &ip, user).await else {
+                    return 0;
+                };
+                tokio::time::sleep(Duration::from_millis(if fail { 1 } else { 20 })).await;
+                if fail {
+                    a.failed().await;
+                } else {
+                    a.succeeded().await;
+                }
+                1
+            }
+        });
+        futures_util::future::join_all(runs).await.iter().sum()
+    }
+
+    /// #2378 — a parallel burst of wrong keys from one IP gets no more
+    /// than the per-IP limit checked.
     #[tokio::test]
     async fn per_request_burst_is_capped_by_the_ip_limit() {
         let t = LoginThrottle::new(LoginLimits {
@@ -754,20 +983,12 @@ mod tests {
             ..LoginLimits::default()
         });
         let s = LoginScope::TenantApiKey("t-burst".into());
-        let mut held = Vec::new();
-        for _ in 0..20 {
-            if let Ok(a) = t.begin(&s, &ip("10.9.3.9"), "").await {
-                held.push(a);
-            }
-        }
-        assert_eq!(held.len(), 3, "in-flight attempts must hold their token");
-        for a in held {
-            a.failed().await;
-        }
+        let n = burst(&t, &s, |_| ip("10.9.3.9"), "", 20, |_| true).await;
+        assert_eq!(n, 3, "in-flight attempts must hold their token");
     }
 
-    /// #2378 — a burst at one Basic account passes the lock at most
-    /// `max_attempts` times, even before any failure is reported.
+    /// #2378 — a burst of wrong passwords at one Basic account gets
+    /// `max_attempts` guesses, then the account is locked.
     #[tokio::test]
     async fn basic_burst_is_capped_by_the_account_lock() {
         let t = LoginThrottle::new(LoginLimits {
@@ -775,22 +996,61 @@ mod tests {
             ..LoginLimits::default()
         });
         let s = LoginScope::TenantBasic("t-burst-lock".into());
-        let mut held = Vec::new();
-        for n in 0..50 {
-            if let Ok(a) = t.begin(&s, &ip(&format!("10.9.10.{n}")), "victim").await {
-                held.push(a);
-            }
-        }
+        let at = |n: usize| ip(&format!("10.9.10.{n}"));
+        let n = burst(&t, &s, at, "victim", 50, |_| true).await;
         assert_eq!(
-            held.len(),
+            n,
             crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize,
             "the lock check must reserve, not peek"
         );
-        for a in held {
-            a.failed().await;
-        }
         let r = t.begin(&s, &ip("10.9.11.1"), "victim").await;
         assert!(matches!(r, Err(LoginRefused::Throttled { .. })));
+    }
+
+    /// security-002 — parallel right credentials wait for each other;
+    /// in-flight successes never refuse one.
+    #[tokio::test]
+    async fn parallel_successes_are_never_refused() {
+        let t = LoginThrottle::new(LoginLimits {
+            ip_limit: 3,
+            ..LoginLimits::default()
+        });
+        let s = LoginScope::TenantBasic("t-par-ok".into());
+        let n = burst(&t, &s, |_| ip("10.9.15.1"), "svc", 20, |_| false).await;
+        assert_eq!(n, 20);
+        let s = LoginScope::TenantApiKey("t-par-key".into());
+        let none = |_| ClientIp::default();
+        assert_eq!(burst(&t, &s, |_| ip("10.9.15.2"), "", 25, |_| false).await, 25);
+        assert_eq!(burst(&t, &s, none, "", 5, |_| false).await, 5);
+    }
+
+    /// security-002 — one wrong password among in-flight successes
+    /// counts once; it does not lock the account.
+    #[tokio::test]
+    async fn one_failure_in_a_good_burst_does_not_lock() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let s = LoginScope::TenantBasic("t-one-bad".into());
+        let n = burst(&t, &s, |_| ip("10.9.16.1"), "svc2", 5, |i| i == 0).await;
+        assert_eq!(n, 5);
+        let a = t.begin(&s, &ip("10.9.16.1"), "svc2").await;
+        assert!(a.is_ok(), "one failure locked the account");
+    }
+
+    /// A wrong burst on the cache-backed limits is capped too, and the
+    /// refused retries do not fill the window themselves.
+    #[tokio::test]
+    async fn cache_backed_burst_is_capped_and_successes_wait() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let t = on_cache(
+            &cache,
+            LoginLimits {
+                ip_limit: 3,
+                ..LoginLimits::default()
+            },
+        );
+        let s = LoginScope::TenantApiKey("t-cache-burst".into());
+        assert_eq!(burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| false).await, 20);
+        assert_eq!(burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| true).await, 3);
     }
 
     /// An attempt dropped unreported (busy, DB error) gives its

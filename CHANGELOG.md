@@ -16,11 +16,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — HTTP Basic skips argon2 for a credential verified in the last 30 s (#2617)
 
-The in-memory cache key includes the stored hash, so a password change misses; `active` is read on every request. A hit skips the login limits.
+The in-memory cache key includes the stored hash, so a password change misses; `active` is read on every request. A hit skips the login limits but not the account lock.
 
 ### Fixed — login lock and per-IP limits reserve before the password check (#2378)
 
-`LoginThrottle::begin` counts the attempt up front and refunds it on success, so a parallel burst no longer passes a peek hundreds of times. New `Lockout::reserve` / `reserved_failed` / `release`.
+`LoginThrottle::begin` counts the attempt up front and refunds it on success, so a parallel burst no longer passes a peek hundreds of times. Parallel right credentials wait for in-flight checks instead of getting `429`, and only failures lock. New `LoginThrottle::check`, `Lockout::reserve` (a `Reservation`) / `reserved_failed` / `reserved_succeeded` / `release`.
 
 ### Fixed — `InMemoryJtiStore` prunes with an expiry heap (#2514)
 

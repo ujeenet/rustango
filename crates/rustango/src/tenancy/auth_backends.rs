@@ -99,15 +99,18 @@ async fn begin(
     username: &str,
 ) -> Result<LoginAttempt, AuthError> {
     let slug = tenant_slug(parts)?;
-    let ip = parts
+    crate::login_throttle::shared()
+        .begin(&scope(slug.to_owned()), &client_ip(parts), username)
+        .await
+        .map_err(AuthError::Refused)
+}
+
+fn client_ip(parts: &Parts) -> ClientIp {
+    parts
         .extensions
         .get::<ClientIp>()
         .cloned()
-        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers));
-    crate::login_throttle::shared()
-        .begin(&scope(slug.to_owned()), &ip, username)
-        .await
-        .map_err(AuthError::Refused)
+        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers))
 }
 
 fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
@@ -216,7 +219,17 @@ impl AuthBackend for ModelBackend {
             None => return Ok(None),
         };
 
+        // Own lock scope, apart from the login forms; only failures count.
+        // A locked or spent caller is refused before the lookup.
         let slug = tenant_slug(parts)?;
+        let scope = LoginScope::TenantBasic(slug.to_owned());
+        let ip = client_ip(parts);
+        let throttle = crate::login_throttle::shared();
+        let refused = AuthError::Refused;
+        throttle
+            .check(&scope, &ip, &username)
+            .await
+            .map_err(refused)?;
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
@@ -228,19 +241,30 @@ impl AuthBackend for ModelBackend {
         let cache_key = user
             .as_ref()
             .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
-        if let (Some(u), Some(key)) = (&user, &cache_key) {
+        let cached = |u: &super::auth::User| {
             let uid = u.id.get().copied().unwrap_or(0);
-            if u.active && uid != 0 && basic_cache_hit(key, uid) {
-                return Ok(Some(AuthUser {
-                    id: uid,
-                    username: u.username.clone(),
-                    is_superuser: u.is_superuser,
-                }));
+            let key = cache_key.as_ref()?;
+            (u.active && uid != 0 && basic_cache_hit(key, uid)).then(|| AuthUser {
+                id: uid,
+                username: u.username.clone(),
+                is_superuser: u.is_superuser,
+            })
+        };
+        if let Some(hit) = user.as_ref().and_then(cached) {
+            // The stored name's lock too, when the submitted one differs.
+            if hit.username != username {
+                throttle
+                    .check(&scope, &ip, &hit.username)
+                    .await
+                    .map_err(refused)?;
             }
+            return Ok(Some(hit));
         }
 
-        // Own lock scope, apart from the login forms; only failures count.
-        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
+        let mut attempt = throttle
+            .begin(&scope, &ip, &username)
+            .await
+            .map_err(refused)?;
 
         let Some(user) = user else {
             // Audit H1/N4 — spend a verify's worth of work on the
@@ -256,6 +280,11 @@ impl AuthBackend for ModelBackend {
             .resolve(&user.username)
             .await
             .map_err(AuthError::Refused)?;
+        // A parallel request may have verified it while this one waited.
+        if let Some(hit) = cached(&user) {
+            attempt.succeeded().await;
+            return Ok(Some(hit));
+        }
 
         // Verify before the active check so active vs inactive accounts
         // take the same time (audit H1/N4).
@@ -972,6 +1001,35 @@ mod tests {
         basic_cache_put(key, 7);
         assert!(basic_cache_hit(&key, 7));
         assert!(!basic_cache_hit(&key, 8));
+    }
+
+    /// performance-001 / security-003 — a locked Basic account is refused
+    /// before the user lookup: here there is no user table to look in.
+    #[tokio::test]
+    async fn a_locked_basic_account_is_refused_before_the_lookup() {
+        use crate::login_throttle::LoginRefused;
+        use base64::Engine as _;
+        let scope = LoginScope::TenantBasic("t-prelock".into());
+        for _ in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
+            let a = crate::login_throttle::shared()
+                .begin(&scope, &ClientIp::default(), "locked-user")
+                .await
+                .unwrap();
+            a.failed().await;
+        }
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let creds = base64::engine::general_purpose::STANDARD.encode("locked-user:pw");
+        let (parts, ()) = axum::http::Request::builder()
+            .header("authorization", format!("Basic {creds}"))
+            .extension(super::super::TenantSlug("t-prelock".into()))
+            .body(())
+            .unwrap()
+            .into_parts();
+        let r = ModelBackend.authenticate(&parts, &pool).await;
+        assert!(
+            matches!(r, Err(AuthError::Refused(LoginRefused::Throttled { .. }))),
+            "{r:?}"
+        );
     }
 
     /// A token with no `jti` can't be revoked, so there is nothing to warn about.
