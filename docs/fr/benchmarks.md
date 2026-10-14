@@ -6,7 +6,7 @@ standard + `pgx`), **Rustango** sur axum et sur actix-web, **axum** et
 Hypercorn, **Laravel** sur php-fpm et sur Octane, et **WordPress**. Chaque
 application rend le même HTML à partir des mêmes données.
 
-Mesuré le **13 octobre 2026** : rustango 0.60.6 dans les tableaux principaux,
+Mesuré le **13 octobre 2026** : rustango release 0.60.6 dans les tableaux principaux,
 rustango 0.60.7 dans [son propre tableau](#rustango-0607). Un seul harnais, une
 seule machine, les mêmes règles pour chaque application.
 
@@ -97,7 +97,7 @@ Hôte : Apple M3 Pro, VM Docker avec 12 CPU et 16 Go.
 
 ### Débit : requêtes par seconde (plus haut est meilleur)
 
-Colonnes Rustango : 0.60.6.
+Colonnes Rustango : release 0.60.6.
 
 | Endpoint | Go | rustango · axum | rustango · actix | axum + sqlx | actix + sqlx |
 |---|--:|--:|--:|--:|--:|
@@ -133,10 +133,10 @@ binaire.
 
 ### Rustango 0.60.7
 
-Mesuré dans une exécution séparée, avec axum + sqlx et rustango 0.60.6 mesurés
+Mesuré dans une exécution séparée, avec axum + sqlx et rustango release 0.60.6 mesurés
 à nouveau à côté (req/s médianes) :
 
-| Endpoint | axum + sqlx | rustango 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
+| Endpoint | axum + sqlx | rustango release 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
 |---|--:|--:|--:|--:|
 | index, non caché | 10 750 | 8 596 | **11 143** | 104 % |
 | détail, non caché | 17 907 | 17 024 | 16 875 | 94 % |
@@ -234,7 +234,7 @@ indiqué.
 
 ## Profil CPU de Rustango
 
-Profil `perf` de rustango 0.60.6 sous charge sur l'index non caché, avec le
+Profil `perf` de rustango release 0.60.6 sous charge sur l'index non caché, avec le
 statut dans 0.60.7 :
 
 | Coût | Part du CPU | Ticket | Statut |

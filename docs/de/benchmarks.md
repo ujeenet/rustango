@@ -6,7 +6,7 @@ Derselbe Blog auf zehn Laufzeiten: **Go** (`net/http` der Standardbibliothek +
 Hypercorn, **Laravel** auf php-fpm und auf Octane, sowie **WordPress**. Jede
 Anwendung rendert dasselbe HTML aus denselben Daten.
 
-Gemessen am **13. Oktober 2026**: rustango 0.60.6 in den Haupttabellen, rustango
+Gemessen am **13. Oktober 2026**: rustango release 0.60.6 in den Haupttabellen, rustango
 0.60.7 in [einer eigenen Tabelle](#rustango-0607). Ein Harness, eine Maschine,
 dieselben Regeln für jede Anwendung.
 
@@ -132,10 +132,10 @@ plus das Binary.
 
 ### Rustango 0.60.7
 
-Gemessen in einem separaten Lauf, mit axum + sqlx und rustango 0.60.6
+Gemessen in einem separaten Lauf, mit axum + sqlx und rustango release 0.60.6
 daneben neu gemessen (Median Req/s):
 
-| Endpunkt | axum + sqlx | rustango 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
+| Endpunkt | axum + sqlx | rustango release 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
 |---|--:|--:|--:|--:|
 | Index, nicht gecacht | 10.750 | 8.596 | **11.143** | 104 % |
 | Detail, nicht gecacht | 17.907 | 17.024 | 16.875 | 94 % |
@@ -233,7 +233,7 @@ Nur gemessene Fakten; wo eine Ursache nicht profiliert wurde, steht das dabei.
 
 ## CPU-Profil von Rustango
 
-`perf`-Profil von rustango 0.60.6 unter Last beim nicht gecachten Index, mit dem
+`perf`-Profil von rustango release 0.60.6 unter Last beim nicht gecachten Index, mit dem
 Status in 0.60.7:
 
 | Kosten | CPU-Anteil | Ticket | Status |

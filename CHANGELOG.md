@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.7] — 2026-10-13
+
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)
 
 `key_hash` is `hmac-sha256$<hex>` keyed by the session secret, so a Bearer check needs no hashing slot. Old argon2 keys verify once and are rewritten. New `set_api_key_secret`.

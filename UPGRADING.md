@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.60.7
+
 ### API keys are keyed by the session secret (#2617)
 
 New and used API keys are HMACs under `RUSTANGO_SESSION_SECRET` (dev: `./var/.rustango_tenant_session.key`); rotating it invalidates them, and prod needs it set. Use `set_api_key_secret` for a separate key.
