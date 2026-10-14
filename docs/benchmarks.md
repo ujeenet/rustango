@@ -19,7 +19,7 @@ every app.
   index and 94–100% on detail, tag and compute.
 - **Cached pages.** Every Rust app serves 1.5–2.2× Go's requests, with a p99
   near 0.45 ms (Go: 2.0–2.4 ms).
-- **Interpreted runtimes** are 5–40× behind the compiled apps on uncached
+- **Interpreted runtimes** are 4–40× behind the compiled apps on uncached
   pages. On cached pages WordPress is the fastest of them (21k req/s).
 - **Python:** gunicorn (sync) is fastest; async views on ASGI servers do not
   beat it. Granian is the fastest ASGI server.

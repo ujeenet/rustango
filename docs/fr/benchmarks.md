@@ -20,7 +20,7 @@ les mêmes règles pour chaque application.
   et 94 à 100 % sur le détail, le tag et compute.
 - **Pages cachées.** Chaque application Rust sert 1,5 à 2,2× les requêtes de Go,
   avec un p99 proche de 0,45 ms (Go : 2,0 à 2,4 ms).
-- **Les runtimes interprétés** sont 5 à 40× derrière les applications compilées
+- **Les runtimes interprétés** sont 4 à 40× derrière les applications compilées
   sur les pages non cachées. Sur les pages cachées, WordPress est le plus rapide
   d'entre eux (21k req/s).
 - **Python :** gunicorn (synchrone) est le plus rapide ; les vues asynchrones

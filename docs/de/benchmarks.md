@@ -20,7 +20,7 @@ jede Anwendung.
   gecachten Index und 94–100 % bei Detail, Tag und compute.
 - **Gecachte Seiten.** Jede Rust-Anwendung liefert das 1,5- bis 2,2-Fache der
   Requests von Go, mit einem p99 um 0,45 ms (Go: 2,0–2,4 ms).
-- **Interpretierte Laufzeiten** liegen bei nicht gecachten Seiten 5- bis 40-fach
+- **Interpretierte Laufzeiten** liegen bei nicht gecachten Seiten 4- bis 40-fach
   hinter den kompilierten Anwendungen. Bei gecachten Seiten ist WordPress unter
   ihnen am schnellsten (21k Req/s).
 - **Python:** gunicorn (synchron) ist am schnellsten; asynchrone Views auf

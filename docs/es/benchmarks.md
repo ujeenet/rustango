@@ -21,7 +21,7 @@ las mismas reglas para cada app.
   caché y el 94–100 % en detalle, tag y compute.
 - **Páginas cacheadas.** Cada app de Rust sirve 1,5–2,2× las solicitudes de Go,
   con un p99 cercano a 0,45 ms (Go: 2,0–2,4 ms).
-- **Los runtimes interpretados** quedan 5–40× por detrás de las apps compiladas
+- **Los runtimes interpretados** quedan 4–40× por detrás de las apps compiladas
   en las páginas sin caché. En las páginas cacheadas, WordPress es el más rápido
   de ellos (21k req/s).
 - **Python:** gunicorn (síncrono) es el más rápido; las vistas asíncronas en
