@@ -8,6 +8,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The decoder is picked per result set from the column type and the model, not by trying ten types per cell, and reads each cell without sqlx's repeat type check. SMALLINT, REAL and TIME no longer read as `Null` on PG, MySQL TIME reads as `Time`, and SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`.
 
+**Breaking:** on MySQL and SQLite, SMALLINT reads as `I16`, INT as `I32` and REAL/FLOAT as `F32`, matching PostgreSQL; they used to read as `I64` / `F64`. See UPGRADING.
+
 ### Changed — `values()` / `annotate()` dicts read column names once per result set (#2661)
 
 Each row's map is sized up front. The owned key per cell stays: it is part of the public `HashMap<String, SqlValue>` type.
