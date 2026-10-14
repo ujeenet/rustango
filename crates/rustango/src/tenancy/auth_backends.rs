@@ -495,9 +495,7 @@ fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::Ten
             super::TenancyError::Validation(e.to_string())
         })?
     } else {
-        SessionSecret::from_env_or_disk(std::path::Path::new(
-            "./var/.rustango_tenant_session.key",
-        ))
+        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_tenant_session.key"))
     };
     Ok(API_KEY_SECRET.get_or_init(|| secret))
 }

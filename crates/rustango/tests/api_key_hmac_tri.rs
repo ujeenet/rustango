@@ -118,11 +118,18 @@ async fn a_legacy_argon2_key_is_upgraded_on_use(pool: &Pool) {
     let token = format!("{prefix}.{secret}");
 
     assert!(!ok(pool, &format!("{prefix}.wrong")).await);
-    assert_eq!(row(pool, &prefix).await.key_hash, argon, "a wrong secret upgraded");
+    assert_eq!(
+        row(pool, &prefix).await.key_hash,
+        argon,
+        "a wrong secret upgraded"
+    );
 
     assert!(ok(pool, &token).await, "the legacy key was refused");
     assert!(
-        row(pool, &prefix).await.key_hash.starts_with("hmac-sha256$"),
+        row(pool, &prefix)
+            .await
+            .key_hash
+            .starts_with("hmac-sha256$"),
         "the legacy key was not upgraded"
     );
     let held = rustango::passwords::hold_all_hash_slots().await;
