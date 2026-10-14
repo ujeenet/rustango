@@ -57,7 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use super::transport::{canonical_header_value, encode_key, encode_query, Http};
+use super::transport::{canonical_header_value, encode_key, encode_query, Http, MAX_PRESIGN_SECS};
 #[cfg(test)]
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
@@ -303,8 +303,7 @@ impl S3Storage {
         put: &PutConditions,
     ) -> Result<String, StorageError> {
         validate_key(key)?;
-        // AWS caps the lifetime at 7 days.
-        let expires = ttl_secs.min(604_800).max(1);
+        let expires = ttl_secs.clamp(1, MAX_PRESIGN_SECS);
         let path = self.key_path(key);
         let host = self.host();
         let now = SystemTime::now()
@@ -414,7 +413,8 @@ impl Storage for S3Storage {
             .bytes()
             .await
             .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
-        Ok(bytes.to_vec())
+        // Reuses the buffer when the body is uniquely owned.
+        Ok(Vec::from(bytes))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {

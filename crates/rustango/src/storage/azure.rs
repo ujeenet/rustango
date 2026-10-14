@@ -43,7 +43,9 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
-use super::transport::{canonical_header_value, encode_key, encode_query, split_endpoint, Http};
+use super::transport::{
+    canonical_header_value, encode_key, encode_query, split_endpoint, Http, MAX_PRESIGN_SECS,
+};
 use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
 use crate::crypto::hmac_sha256;
 
@@ -51,8 +53,6 @@ use crate::crypto::hmac_sha256;
 /// 2019-12-12 raised Put Blob to 5000 MiB; 2020-12-06 set the SAS
 /// string-to-sign layout used below.
 const API_VERSION: &str = "2021-08-06";
-/// The same ceiling S3 puts on a presign: 7 days.
-const MAX_SAS_SECS: u64 = 604_800;
 
 /// How to reach the container. Build it with [`AzureConfig::new`].
 #[derive(Clone)]
@@ -256,7 +256,7 @@ impl AzureBlobStorage {
         ttl: std::time::Duration,
     ) -> Result<String, StorageError> {
         validate_key(key)?;
-        let secs = ttl.as_secs().clamp(1, MAX_SAS_SECS);
+        let secs = ttl.as_secs().clamp(1, MAX_PRESIGN_SECS);
         let secs = i64::try_from(secs).unwrap_or(i64::MAX);
         let expiry = (chrono::Utc::now() + chrono::Duration::seconds(secs))
             .format("%Y-%m-%dT%H:%M:%SZ")
@@ -399,7 +399,8 @@ impl Storage for AzureBlobStorage {
             .bytes()
             .await
             .map_err(|e| StorageError::Io(format!("read body: {e}")))?;
-        Ok(bytes.to_vec())
+        // Reuses the buffer when the body is uniquely owned.
+        Ok(Vec::from(bytes))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {

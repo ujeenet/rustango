@@ -5,6 +5,9 @@ use std::fmt::Write as _;
 
 use super::StorageError;
 
+/// The longest a presigned URL lives: 7 days, S3's ceiling, used for Azure too.
+pub(super) const MAX_PRESIGN_SECS: u64 = 604_800;
+
 /// Default client timeouts; `with_http` on a backend replaces them.
 pub(super) const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Waiting for a reply or the next body chunk; a total cap would fail big objects.
