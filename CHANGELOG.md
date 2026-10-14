@@ -6,11 +6,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `values()` / `values_list()` / `annotate()` decode each column once, by its type (#2655, #2486)
 
-The decoder is picked per result set from the column type and the model, not by trying ten types per cell; the blog index's values reads cost ~18× less CPU. SMALLINT, REAL and TIME no longer read as `Null` on PG, MySQL TIME reads as `Time`, and SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`.
+The decoder is picked per result set from the column type and the model, not by trying ten types per cell, and reads each cell without sqlx's repeat type check. SMALLINT, REAL and TIME no longer read as `Null` on PG, MySQL TIME reads as `Time`, and SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`.
 
 ### Changed — `values()` / `annotate()` dicts read column names once per result set (#2661)
 
 Each row's map is sized up front. The owned key per cell stays: it is part of the public `HashMap<String, SqlValue>` type.
+
+### Changed — identifier quoting takes one allocation (#2662)
+
+`quote_ident` no longer builds an escaped copy first; every compiled query quotes each table and column.
 
 ## [0.60.6] — 2026-10-10
 
