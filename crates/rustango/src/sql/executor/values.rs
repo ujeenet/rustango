@@ -59,33 +59,46 @@ fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     cols
 }
 
-/// An aggregate's group columns. A joined `alias.col` comes back as
-/// `alias__col`, typed by the joined model (#2322).
+/// An aggregate's group columns, then its aggregates, as projected. A
+/// joined `alias.col` comes back as `alias__col`, typed by the joined
+/// model (#2322). MAX / MIN / ANY_VALUE take their column's type, as PG
+/// and MySQL report it (dialects-001); other aggregates stay untyped.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn aggregate_group_cols(query: &AggregateQuery) -> Vec<TypedCol> {
+fn aggregate_cols(query: &AggregateQuery) -> Vec<TypedCol> {
     let model = query.model;
-    query
-        .group_by
-        .iter()
-        .map(|&col| match col.split_once('.') {
-            None => (col.into(), model.field_by_column(col).map(|f| f.ty)),
-            Some((alias, c)) => {
-                let target = if alias == model.table {
-                    Some(model)
-                } else {
-                    let derived = query.source.iter().flat_map(|s| s.joins.iter());
-                    query
-                        .joins
-                        .iter()
-                        .chain(derived)
-                        .find(|j| j.alias == alias)
-                        .map(|j| j.target)
-                };
-                let ty = target.and_then(|m| m.field_by_column(c)).map(|f| f.ty);
-                (joined_label(alias, c).into(), ty)
-            }
-        })
-        .collect()
+    let ty = |col: &str| match col.split_once('.') {
+        None => model.field_by_column(col).map(|f| f.ty),
+        Some((alias, c)) => {
+            let target = if alias == model.table {
+                Some(model)
+            } else {
+                let derived = query.source.iter().flat_map(|s| s.joins.iter());
+                query
+                    .joins
+                    .iter()
+                    .chain(derived)
+                    .find(|j| j.alias == alias)
+                    .map(|j| j.target)
+            };
+            target.and_then(|m| m.field_by_column(c)).map(|f| f.ty)
+        }
+    };
+    let groups = query.group_by.iter().map(|&col| {
+        let label = match col.split_once('.') {
+            None => col.into(),
+            Some((alias, c)) => joined_label(alias, c).into(),
+        };
+        (label, ty(col))
+    });
+    let aggregates = query.aggregates.iter().map(|(alias, expr)| {
+        use crate::core::AggregateExpr;
+        let declared = match expr {
+            AggregateExpr::Max(c) | AggregateExpr::Min(c) | AggregateExpr::AnyValue(c) => ty(c),
+            _ => None,
+        };
+        (alias.clone(), declared)
+    });
+    groups.chain(aggregates).collect()
 }
 
 /// Run a [`SelectQuery`] with a projection and return each row as a
@@ -168,7 +181,7 @@ pub async fn fetch_aggregate_dict(
             let rows = q.fetch_all(my).await?;
             Ok(rows_to_dicts(
                 &rows,
-                &aggregate_group_cols(query),
+                &aggregate_cols(query),
                 usize::MAX,
             ))
         }
@@ -182,7 +195,7 @@ pub async fn fetch_aggregate_dict(
             let rows = q.fetch_all(sq).await?;
             Ok(rows_to_dicts(
                 &rows,
-                &aggregate_group_cols(query),
+                &aggregate_cols(query),
                 usize::MAX,
             ))
         }

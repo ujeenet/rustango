@@ -561,6 +561,7 @@ async fn aggregate_expression_keeps_column_type(pool: &Pool) {
         .annotate("s", AggregateExpr::Max("small_n"))
         .annotate("r", AggregateExpr::Max("real_n"))
         .annotate("c", AggregateExpr::Max("clock"))
+        .annotate("d", AggregateExpr::Min("day"))
         .fetch(pool)
         .await
         .expect("aggregate");
@@ -568,17 +569,15 @@ async fn aggregate_expression_keeps_column_type(pool: &Pool) {
         rows[0]["s"].clone(),
         rows[0]["r"].clone(),
         rows[0]["c"].clone(),
+        rows[0]["d"].clone(),
     ];
-    let typed = matches!(pool.dialect().name(), "postgres" | "mysql");
-    let expect = if typed {
-        [want[1].clone(), want[4].clone(), want[10].clone()]
-    } else {
-        [
-            SqlValue::I64(-7),
-            SqlValue::F64(1.5),
-            SqlValue::String("03:04:05.123456".into()),
-        ]
-    };
+    // MAX/MIN keep the field's type on every backend (dialects-001).
+    let expect = [
+        want[1].clone(),
+        want[4].clone(),
+        want[10].clone(),
+        want[9].clone(),
+    ];
     assert_eq!(got, expect, "{}", pool.dialect().name());
 }
 
