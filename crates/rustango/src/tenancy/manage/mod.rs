@@ -841,14 +841,17 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- migrate")?;
-    writeln!(w, "  cargo run -- create-operator admin --password letmein")?;
+    writeln!(
+        w,
+        "  cargo run -- create-operator admin   # prompts twice; RUSTANGO_PASSWORD off a TTY"
+    )?;
     writeln!(
         w,
         "  cargo run -- create-tenant acme --display-name 'ACME Corp'"
     )?;
     writeln!(
         w,
-        "  cargo run -- create-user acme alice --password hunter2 --superuser"
+        "  cargo run -- create-user acme alice --password-stdin --superuser"
     )?;
     writeln!(w, "  cargo run -- list-tenants")?;
     writeln!(w, "  cargo run -- audit-cleanup --days 90")?;

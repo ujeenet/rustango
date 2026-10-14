@@ -503,6 +503,7 @@ jobs:
       - run: cargo test --workspace --all-features
       # A `Decimal` model needs a build without `sqlite`.
       - run: cargo test -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
+      - run: cargo test -p rustango --no-default-features --features postgres,testkit --test values_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that
   # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link
@@ -780,6 +781,10 @@ jobs:
           # No row had it, so `signing` gated on it without its crypto
           # deps went unseen (#1678).
           - sqlite,storage-s3
+          # Shares `storage::transport` with S3; each must build alone.
+          - sqlite,storage-azure
+          # `StorageRegistry::from_settings` with no remote driver.
+          - sqlite,config,storage
           # Both enable `crypto` and did not compile alone.
           - sqlite,csrf
           - sqlite,totp
@@ -1088,6 +1093,8 @@ jobs:
           --features sqlite,tenancy,admin-sso,testkit
           --test sso_link_tenancy_sqlite_live --test sso_link_tri
           --test admin_create_users_tri --test logout_revokes_sessions_tri
+          --test basic_auth_cache_tri
+          --test api_key_hmac_tri
           --test system_chain_order_tri
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
@@ -1334,6 +1341,8 @@ jobs:
       - run: cargo test -p rustango --features mysql,admin,testkit --test i18n_admin_editor_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test admin_create_users_tri
       - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test logout_revokes_sessions_tri
+      - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test basic_auth_cache_tri
+      - run: cargo test -p rustango --features mysql,admin-sso,tenancy,testkit --test api_key_hmac_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,testkit --test system_chain_order_tri
       - run: cargo test -p rustango --features mysql,admin,totp,testkit --test admin_totp_replay_tri
       - run: cargo test -p rustango --features mysql,admin,tenancy,totp,passkey,testkit --test tenant_admin_tables_tri

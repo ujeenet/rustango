@@ -56,6 +56,11 @@ impl core::fmt::Display for SessionSecretError {
 
 impl std::error::Error for SessionSecretError {}
 
+/// The dev key file for tenant sessions; API keys are MACed with it too,
+/// so the CLI that mints one and the server that checks it agree.
+#[cfg(feature = "tenancy")]
+pub(crate) const TENANT_SESSION_KEY_PATH: &str = "./var/.rustango_tenant_session.key";
+
 /// Server-held signing key. It wraps the bytes so they cannot be
 /// printed by accident. It is `Clone` so several cookie layers can
 /// share one key, each with its own cookie name and payload.

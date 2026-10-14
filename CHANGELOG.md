@@ -4,6 +4,58 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.60.7] — 2026-10-13
+
+### Fixed — API keys are stored as an HMAC, not argon2 (#2617)
+
+`key_hash` is `hmac-sha256$<hex>` keyed by the session secret, so a Bearer check needs no hashing slot. Old argon2 keys verify once and are rewritten. New `set_api_key_secret`.
+
+### Fixed — CLI password verbs validate, confirm, and read off argv (#2589)
+
+`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the operator variants run the form validators, ask twice on a TTY (with a bypass prompt), and read `RUSTANGO_PASSWORD` or `--password-stdin`; `--password` warns. New `manage_interactive::{PASSWORD_ENV, PasswordInput, NewPasswordError, read_new_password}`.
+
+### Fixed — HTTP Basic skips argon2 for a credential verified in the last 30 s (#2617)
+
+The in-memory cache key includes the stored hash, so a password change misses; `active` is read on every request. A hit skips the login limits but not the account lock.
+
+### Fixed — login lock and per-IP limits reserve before the password check (#2378)
+
+`LoginThrottle::begin` counts the attempt up front and refunds it on success, so a parallel burst no longer passes a peek hundreds of times. Parallel right credentials wait for in-flight checks instead of getting `429`, and only failures lock. New `LoginThrottle::check`, `Lockout::reserve` (a `Reservation`) / `reserved_failed` / `reserved_succeeded` / `release`.
+
+### Fixed — `InMemoryJtiStore` prunes with an expiry heap (#2514)
+
+`mark_used` pops only expired entries instead of scanning the whole map under the lock on every refresh.
+
+### Fixed — `values()` / `values_list()` / `annotate()` decode each column once, by its type (#2655, #2486)
+
+The decoder is picked per result set from the column type and the model, not by trying ten types per cell, and reads each cell without sqlx's repeat type check. SMALLINT, REAL and TIME no longer read as `Null` on PG, MySQL TIME reads as `Time`, and SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`. `MAX` / `MIN` / `ANY_VALUE` of a column take its type on every backend.
+
+**Breaking:** on MySQL and SQLite, SMALLINT reads as `I16`, INT as `I32` and REAL/FLOAT as `F32`, matching PostgreSQL; they used to read as `I64` / `F64`. See UPGRADING.
+
+### Changed — `values()` / `annotate()` dicts read column names once per result set (#2661)
+
+Each row's map is sized up front. The owned key per cell stays: it is part of the public `HashMap<String, SqlValue>` type.
+
+### Changed — identifier quoting takes one allocation (#2662)
+
+`quote_ident` no longer builds an escaped copy first; every compiled query quotes each table and column.
+
+### Added — Azure Blob Storage backend (`storage-azure`)
+
+`storage::azure::AzureBlobStorage` signs requests with the account's Shared Key and presigns with service SAS; a create-only PUT gets `c` without `w`. In `batteries`. Works with Azurite through `endpoint`. Build the config with `AzureConfig::new(..).endpoint(..)`.
+
+### Added — storage disks from config
+
+`[storage]` declares named disks (`driver = "local" | "s3" | "azure"`), any number of each; `StorageRegistry::from_settings` builds them, with CDNs, a default disk and an optional `public_endpoint` for presigned links. Account keys and secrets come from `RUSTANGO__STORAGE__DISKS__<NAME>__…`, and `{:?}` redacts them.
+
+### Added — `Storage::presigned_put_headers`
+
+The headers a direct upload must send. Defaults to `PutConditions::headers`; Azure adds `x-ms-blob-type`. `MediaManager::begin_upload` uses it for `ticket.headers`.
+
+### Added — `Storage::presigned_put_enforces_conditions`
+
+`false` on Azure, whose SAS cannot hold the size and type; `MediaManager::begin_upload` refuses such a disk instead of issuing an unbounded upload URL. Wrappers must forward it.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)

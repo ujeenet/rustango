@@ -345,6 +345,8 @@ async fn save_bytes_hands_a_safe_mime_to_storage() {
 struct FakeBucket {
     files: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, Option<String>)>>,
     signed: std::sync::Mutex<Vec<rustango::storage::PutConditions>>,
+    /// Says its URLs do not enforce size and type, as Azure SAS.
+    lax: bool,
 }
 
 impl FakeBucket {
@@ -398,6 +400,9 @@ impl rustango::storage::Storage for FakeBucket {
         self.signed.lock().unwrap().push(put.clone());
         Some(format!("mem://{key}"))
     }
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        !self.lax
+    }
     async fn metadata(
         &self,
         key: &str,
@@ -410,6 +415,12 @@ impl rustango::storage::Storage for FakeBucket {
 }
 
 async fn bucket_manager() -> (MediaManager, Arc<FakeBucket>, sqlx::SqlitePool) {
+    bucket_manager_with(FakeBucket::default()).await
+}
+
+async fn bucket_manager_with(
+    disk: FakeBucket,
+) -> (MediaManager, Arc<FakeBucket>, sqlx::SqlitePool) {
     let sq = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -419,7 +430,7 @@ async fn bucket_manager() -> (MediaManager, Arc<FakeBucket>, sqlx::SqlitePool) {
     rustango::testkit::migrate_framework(&pool)
         .await
         .expect("migrate");
-    let disk = Arc::new(FakeBucket::default());
+    let disk = Arc::new(disk);
     let registry = StorageRegistry::new()
         .set("default", disk.clone())
         .with_default("default");
@@ -444,6 +455,27 @@ async fn begin_upload_signs_a_safe_type_and_the_declared_size() {
     );
     let neg = rustango::media::UploadIntent::new("default", "image/png", "x.png", -1);
     assert!(mgr.begin_upload(neg).await.is_err(), "negative size signed");
+}
+
+/// security-001: a disk whose URL cannot hold the size and type (Azure
+/// SAS) gets no direct-upload ticket, and no Pending row.
+#[tokio::test]
+async fn begin_upload_refuses_a_disk_that_cannot_enforce_the_put() {
+    let lax = FakeBucket {
+        lax: true,
+        ..FakeBucket::default()
+    };
+    let (mgr, disk, sq) = bucket_manager_with(lax).await;
+    let intent = rustango::media::UploadIntent::new("default", "image/png", "a.png", 10);
+    let err = mgr.begin_upload(intent).await.expect_err("ticket issued");
+    assert!(err.to_string().contains("save_bytes"), "{err}");
+    assert!(disk.signed.lock().unwrap().is_empty());
+    use rustango::sql::FetcherPool as _;
+    let rows = rustango::media::Media::objects()
+        .fetch(&Pool::Sqlite(sq))
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "a Pending row was left");
 }
 
 /// #1851: finalize checks the object, not the client's claim.

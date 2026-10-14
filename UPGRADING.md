@@ -150,6 +150,24 @@ untouched.
 
 ## Unreleased
 
+## 0.60.7
+
+### API keys are keyed by the session secret (#2617)
+
+New and used API keys are HMACs under `RUSTANGO_SESSION_SECRET` (dev: `./var/.rustango_tenant_session.key`); rotating it invalidates them, and prod needs it set. Use `set_api_key_secret` for a separate key.
+
+### CLI passwords are validated (#2589)
+
+The `manage` password verbs now refuse a password the forms refuse (under 8 characters). Scripts that set short passwords add `--skip-validation`; prefer `RUSTANGO_PASSWORD` or `--password-stdin` over `--password`.
+
+### Login attempts are reserved up front (#2378)
+
+Every login reserves its account-lock slot before the password check; HTTP Basic and API-key checks also hold a per-IP and per-tenant-scope token while they verify. When a limit is full only with checks still in flight, the next one waits (up to `hash_wait`, then `503`) instead of getting `429`. Only failures lock an account, and a locked account is refused before the user lookup, cached Basic credentials included.
+
+### `values()` cell types follow the column type (#2655, #2486)
+
+`values()`, `values_list()`, `annotate()` and their `fetch_on` read SMALLINT as `I16`, INT as `I32` and REAL/FLOAT as `F32` on every backend; MySQL and SQLite used to give `I64` / `F64`. SQLite model dates, times and decimals read as `DateTime` / `Date` / `Time` / `Decimal`, not `String` / `F64`. PG `fetch_aggregate_on` now reads NUMERIC, UUID, dates and times as well. Match the narrower variants too, or widen with `i64::from`.
+
 ## 0.60.6
 
 ### Strict Bool and null decoding (#2530)

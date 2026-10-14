@@ -51,6 +51,26 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Default lockout duration (15 minutes).
 pub const DEFAULT_LOCKOUT_DURATION_SECS: u64 = 900;
 
+/// What [`Lockout::reserve`] did with an attempt.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Reservation {
+    /// Counted; check the password, then report the slot.
+    Counted(ReservedSlot),
+    /// The account is locked.
+    Locked,
+    /// `max_attempts` attempts are already counted or in flight.
+    Full,
+}
+
+/// One counted attempt, tied to the window it was counted in.
+#[derive(Debug)]
+#[must_use = "report the attempt, or it holds a slot until its window ends"]
+pub struct ReservedSlot {
+    /// `None` when the cache could not count it.
+    window: Option<String>,
+}
+
 /// Per-account lockout tracker.
 pub struct Lockout {
     cache: Arc<dyn Cache>,
@@ -193,6 +213,122 @@ impl Lockout {
         next
     }
 
+    /// Count an attempt before its password is checked, so a parallel
+    /// burst cannot all pass [`Self::is_locked`] at once (#2378): at most
+    /// `max_attempts` are counted or in flight per window. Report a
+    /// counted one with [`Self::reserved_failed`],
+    /// [`Self::reserved_succeeded`] or [`Self::release`]. A cache error
+    /// admits the attempt, as in [`Self::record_failure`].
+    pub async fn reserve(&self, account: &str) -> Reservation {
+        if self.is_locked(account).await {
+            return Reservation::Locked;
+        }
+        let uncounted = |e: Option<CacheError>| {
+            tracing::warn!(account, error = ?e, "account-lockout reservation NOT counted");
+            Reservation::Counted(ReservedSlot { window: None })
+        };
+        let id = match self.window(account, true).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return uncounted(None),
+            Err(e) => return uncounted(Some(e)),
+        };
+        let key = self.window_counter_key(account, &id);
+        let n = match self.cache.incr(&key, 1, Some(self.window_left(&id))).await {
+            Ok(n) => n,
+            Err(e) => return uncounted(Some(e)),
+        };
+        if n > i64::from(self.max_attempts) {
+            self.decrement(&key, &id).await;
+            return Reservation::Full;
+        }
+        // A failure may have locked between the check and the count.
+        if self.is_locked(account).await {
+            self.decrement(&key, &id).await;
+            return Reservation::Locked;
+        }
+        Reservation::Counted(ReservedSlot { window: Some(id) })
+    }
+
+    /// A reserved attempt failed. Only failures lock: at `max_attempts`
+    /// failures in the window, however many attempts are in flight.
+    pub async fn reserved_failed(&self, account: &str, slot: ReservedSlot) {
+        let id = match slot.window {
+            Some(id) => id,
+            None => match self.window(account, true).await {
+                Ok(Some(id)) => id,
+                _ => return,
+            },
+        };
+        let key = self.window_failures_key(account, &id);
+        let failures = match self.cache.incr(&key, 1, Some(self.window_left(&id))).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(account, error = %e, "account-lockout failure NOT counted");
+                return;
+            }
+        };
+        if failures >= i64::from(self.max_attempts) {
+            let _ = self
+                .cache
+                .set(&self.lock_key(account), "1", Some(self.lockout_duration))
+                .await;
+            self.clear_window(account).await;
+        }
+    }
+
+    /// A reserved attempt passed: clear the window's failures, or just
+    /// give the slot back when there are none. Never lifts a lock.
+    pub async fn reserved_succeeded(&self, account: &str, slot: ReservedSlot) {
+        if self.failure_count(account).await > 0 {
+            self.clear_window(account).await;
+        } else {
+            self.release(account, slot).await;
+        }
+    }
+
+    /// Give back a reserved attempt that proved nothing. Only the window
+    /// it was counted in, and never below 0.
+    pub async fn release(&self, account: &str, slot: ReservedSlot) {
+        if let Some(id) = slot.window {
+            self.decrement(&self.window_counter_key(account, &id), &id)
+                .await;
+        }
+    }
+
+    /// Take one off `key`, never below 0: an evicted or cleared counter
+    /// would otherwise hand out an extra attempt.
+    async fn decrement(&self, key: &str, window_id: &str) {
+        let current = self.cache.get(key).await;
+        if !matches!(&current, Ok(Some(v)) if v.parse::<i64>().is_ok_and(|n| n > 0)) {
+            return;
+        }
+        let ttl = Some(self.window_left(window_id));
+        if let Ok(n) = self.cache.decr(key, 1, ttl).await {
+            if n < 0 {
+                let _ = self.cache.incr(key, 1, ttl).await;
+            }
+        }
+    }
+
+    /// Failures [`Self::reserved_failed`] counted in the current window.
+    async fn failure_count(&self, account: &str) -> u32 {
+        let Ok(Some(id)) = self.window(account, false).await else {
+            return 0;
+        };
+        self.read_count(&self.window_failures_key(account, &id))
+            .await
+    }
+
+    async fn read_count(&self, key: &str) -> u32 {
+        self.cache
+            .get(key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
     /// `Ok(None)` when no window could be opened. The counter expires with
     /// its window, even where `incr` resets the TTL on every call.
     async fn count_failure(&self, account: &str) -> Result<Option<i64>, CacheError> {
@@ -206,10 +342,17 @@ impl Lockout {
             .map(Some)
     }
 
-    /// Drop the current window and its counter.
+    /// Drop the current window and its counters.
     async fn clear_window(&self, account: &str) {
-        if let Ok(Some(key)) = self.counter_key(account, false).await {
-            let _ = self.cache.delete(&key).await;
+        if let Ok(Some(id)) = self.window(account, false).await {
+            let _ = self
+                .cache
+                .delete(&self.window_counter_key(account, &id))
+                .await;
+            let _ = self
+                .cache
+                .delete(&self.window_failures_key(account, &id))
+                .await;
         }
         let _ = self.cache.delete(&self.window_key(account)).await;
     }
@@ -221,18 +364,13 @@ impl Lockout {
         let _ = self.cache.delete(&self.lock_key(account)).await;
     }
 
-    /// Read the current failure count for an account. 0 when absent.
+    /// Attempts counted in the current window: failures, plus reserved
+    /// attempts not yet reported. 0 when absent.
     pub async fn attempt_count(&self, account: &str) -> u32 {
         let Ok(Some(key)) = self.counter_key(account, false).await else {
             return 0;
         };
-        self.cache
-            .get(&key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
+        self.read_count(&key).await
     }
 
     /// Force-lock an account (e.g. by an admin action).
@@ -313,6 +451,10 @@ impl Lockout {
 
     fn window_counter_key(&self, account: &str, window_id: &str) -> String {
         format!("{}attempts:{account}:{window_id}", self.key_prefix)
+    }
+
+    fn window_failures_key(&self, account: &str, window_id: &str) -> String {
+        format!("{}failures:{account}:{window_id}", self.key_prefix)
     }
 
     fn window_key(&self, account: &str) -> String {
@@ -426,6 +568,83 @@ mod tests {
         assert!(!l.is_locked("alice").await);
         l.record_failure("alice").await;
         assert!(l.is_locked("alice").await);
+    }
+
+    /// #2378 — reservations count before the verify, so a burst stops at
+    /// the limit and the last failure locks.
+    #[tokio::test]
+    async fn reserve_caps_a_burst_and_failures_lock() {
+        let l = lockout(3);
+        let mut slots = Vec::new();
+        for _ in 0..10 {
+            match l.reserve("bob").await {
+                Reservation::Counted(s) => slots.push(s),
+                r => assert!(matches!(r, Reservation::Full), "{r:?}"),
+            }
+        }
+        assert_eq!(slots.len(), 3);
+        for s in slots {
+            assert!(!l.is_locked("bob").await);
+            l.reserved_failed("bob", s).await;
+        }
+        assert!(l.is_locked("bob").await);
+        assert!(matches!(l.reserve("bob").await, Reservation::Locked));
+    }
+
+    fn counted(r: Reservation) -> ReservedSlot {
+        match r {
+            Reservation::Counted(s) => s,
+            r => panic!("not counted: {r:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_gives_the_reservation_back() {
+        let l = lockout(1);
+        for _ in 0..5 {
+            let s = counted(l.reserve("carol").await);
+            l.release("carol", s).await;
+        }
+        assert_eq!(l.attempt_count("carol").await, 0);
+    }
+
+    /// correctness-001 — a slot from a cleared window is not refunded
+    /// into the next one, so the count never drops below what it holds.
+    #[tokio::test]
+    async fn release_into_a_cleared_window_gives_nothing_extra() {
+        let l = lockout(2);
+        let old = counted(l.reserve("dave").await);
+        l.clear("dave").await;
+        let new = counted(l.reserve("dave").await);
+        l.release("dave", old).await;
+        l.release("dave", new).await;
+        let admitted = {
+            let mut n = 0;
+            for _ in 0..5 {
+                if let Reservation::Counted(_held) = l.reserve("dave").await {
+                    n += 1;
+                }
+            }
+            n
+        };
+        assert_eq!(admitted, 2);
+    }
+
+    /// security-002 — in-flight successes do not count toward the lock.
+    #[tokio::test]
+    async fn one_failure_among_reservations_does_not_lock() {
+        let l = lockout(3);
+        let slots: Vec<_> = (0..3).map(|_| l.reserve("erin")).collect();
+        let mut slots = futures_util::future::join_all(slots)
+            .await
+            .into_iter()
+            .map(counted);
+        l.reserved_failed("erin", slots.next().unwrap()).await;
+        assert!(!l.is_locked("erin").await);
+        for s in slots {
+            l.reserved_succeeded("erin", s).await;
+        }
+        assert_eq!(l.attempt_count("erin").await, 0);
     }
 
     #[tokio::test]

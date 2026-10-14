@@ -19,9 +19,35 @@ use crate::sql::{Auto, FetcherPool, UpdaterPool as _};
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::quote_ident;
-use crate::tenancy::manage::args::{parse, Spec};
+use crate::tenancy::manage::args::{parse, Parsed, Spec};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
+
+/// Switches every new-password verb takes (#2589).
+const PASSWORD_SWITCHES: [&str; 3] = ["--generate", "--password-stdin", "--skip-validation"];
+
+/// A generated password, or one read and validated like the forms (#2589).
+fn new_password(verb: &str, parsed: &Parsed, prompt: &str) -> Result<(String, bool), TenancyError> {
+    use manage_interactive::{NewPasswordError, PasswordInput};
+    let password = parsed.value("--password")?.map(str::to_owned);
+    let stdin = parsed.has("--password-stdin");
+    if parsed.has("--generate") {
+        if password.is_some() || stdin {
+            return Err(TenancyError::Validation(format!(
+                "{verb}: --generate and --password are mutually exclusive"
+            )));
+        }
+        return Ok((crate::tenancy::password::generate(20), true));
+    }
+    let err = |e: NewPasswordError| match e {
+        NewPasswordError::Io(e) => TenancyError::Io(e),
+        e => TenancyError::Validation(format!("{verb}: {e}")),
+    };
+    let input = PasswordInput::from_flags(password, stdin).map_err(err)?;
+    manage_interactive::read_new_password(input, parsed.has("--skip-validation"), prompt)
+        .map(|p| (p, false))
+        .map_err(err)
+}
 
 // ---------- create-operator (Slice 6) ----------
 
@@ -33,25 +59,18 @@ pub(super) async fn create_operator_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    const USAGE: &str = "create-operator <username> [--password <p> | --generate]";
+    const USAGE: &str = "create-operator <username> [--password <p> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "create-operator",
             usage: USAGE,
-            switches: &["--generate"],
+            switches: &PASSWORD_SWITCHES,
             valued: &["--password"],
             max_positionals: 1,
         },
     )?;
     let username_arg = parsed.positional(0).cloned();
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "create-operator: --generate and --password are mutually exclusive".into(),
-        ));
-    }
     // Prompt for missing values when stdin is a TTY; programmatic
     // callers that pass `None` on a non-interactive stream still get
     // the original Validation error.
@@ -65,20 +84,7 @@ where
                 )
             })?,
     };
-    let (plain, generated) = if generate {
-        let p = crate::tenancy::password::generate(20);
-        (p, true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("Password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation("create-operator requires --password".into())
-                })?,
-        };
-        (p, false)
-    };
+    let (plain, generated) = new_password("create-operator", &parsed, "Password: ")?;
 
     // Reject duplicate username up front.
     let registry = pools.registry_pool();
@@ -130,22 +136,15 @@ where
         args,
         &Spec {
             verb: "create-user",
-            usage: "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
-            switches: &["--generate", "--superuser"],
+            usage: "create-user <slug> <username> [--password <p> | --password-stdin | --generate] [--skip-validation] [--superuser]",
+            switches: &["--generate", "--password-stdin", "--skip-validation", "--superuser"],
             valued: &["--password"],
             max_positionals: 2,
         },
     )?;
     let slug_arg = parsed.positional(0).cloned();
     let username_arg = parsed.positional(1).cloned();
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
     let mut is_superuser = parsed.has("--superuser");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "create-user: --generate and --password are mutually exclusive".into(),
-        ));
-    }
     let slug = match slug_arg {
         Some(s) => s,
         None => manage_interactive::ask("Tenant slug: ")
@@ -166,19 +165,7 @@ where
                 )
             })?,
     };
-    let (plain, generated) = if generate {
-        (crate::tenancy::password::generate(20), true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("Password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation("create-user requires --password".into())
-                })?,
-        };
-        (p, false)
-    };
+    let (plain, generated) = new_password("create-user", &parsed, "Password: ")?;
 
     // Look up the tenant.
     let registry = pools.registry_pool();
@@ -343,39 +330,20 @@ pub(super) async fn reset_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    const USAGE: &str = "reset-password <slug> <username> [--password <s> | --generate]";
+    const USAGE: &str = "reset-password <slug> <username> [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "reset-password",
             usage: USAGE,
-            switches: &["--generate"],
+            switches: &PASSWORD_SWITCHES,
             valued: &["--password"],
             max_positionals: 2,
         },
     )?;
     let slug = parsed.required(0, USAGE)?;
     let username = parsed.required(1, USAGE)?;
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "reset-password: --generate and --password are mutually exclusive".into(),
-        ));
-    }
-    let (plain, generated) = if generate {
-        (crate::tenancy::password::generate(20), true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("New password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation("reset-password requires --password (or a TTY)".into())
-                })?,
-        };
-        (p, false)
-    };
+    let (plain, generated) = new_password("reset-password", &parsed, "New password: ")?;
     let hash = crate::tenancy::password::hash_async(&plain).await?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     use crate::tenancy::User;
@@ -414,40 +382,19 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    const USAGE: &str = "reset-operator-password <username> [--password <s> | --generate]";
+    const USAGE: &str = "reset-operator-password <username> [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "reset-operator-password",
             usage: USAGE,
-            switches: &["--generate"],
+            switches: &PASSWORD_SWITCHES,
             valued: &["--password"],
             max_positionals: 1,
         },
     )?;
     let username = parsed.required(0, USAGE)?;
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "reset-operator-password: --generate and --password are mutually exclusive".into(),
-        ));
-    }
-    let (plain, generated) = if generate {
-        (crate::tenancy::password::generate(20), true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("New password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "reset-operator-password requires --password (or a TTY)".into(),
-                    )
-                })?,
-        };
-        (p, false)
-    };
+    let (plain, generated) = new_password("reset-operator-password", &parsed, "New password: ")?;
     let hash = crate::tenancy::password::hash_async(&plain).await?;
     // Route the operator-password rotate through the ORM so the SQL
     // gets per-dialect placeholders + identifier quoting + `NOW()` is
@@ -504,13 +451,13 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     const USAGE: &str =
-        "change-password <slug> <username> [--current <s>] [--password <s> | --generate]";
+        "change-password <slug> <username> [--current <s>] [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "change-password",
             usage: USAGE,
-            switches: &["--generate"],
+            switches: &PASSWORD_SWITCHES,
             valued: &["--current", "--password"],
             max_positionals: 2,
         },
@@ -518,13 +465,6 @@ where
     let slug = parsed.required(0, USAGE)?;
     let username = parsed.required(1, USAGE)?;
     let current = parsed.value("--current")?.map(str::to_owned);
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "change-password: --generate and --password are mutually exclusive".into(),
-        ));
-    }
     let cur_plain = match current {
         Some(p) => p,
         None => manage_interactive::ask_password("Current password: ")
@@ -533,21 +473,7 @@ where
                 TenancyError::Validation("change-password requires --current (or a TTY)".into())
             })?,
     };
-    let (new_plain, generated) = if generate {
-        (crate::tenancy::password::generate(20), true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("New password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "change-password requires --password (or a TTY)".into(),
-                    )
-                })?,
-        };
-        (p, false)
-    };
+    let (new_plain, generated) = new_password("change-password", &parsed, "New password: ")?;
 
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     // v0.38 — read the existing user row via the tri-dialect ORM.
@@ -606,26 +532,19 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     const USAGE: &str =
-        "change-operator-password <username> [--current <s>] [--password <s> | --generate]";
+        "change-operator-password <username> [--current <s>] [--password <s> | --password-stdin | --generate] [--skip-validation]";
     let parsed = parse(
         args,
         &Spec {
             verb: "change-operator-password",
             usage: USAGE,
-            switches: &["--generate"],
+            switches: &PASSWORD_SWITCHES,
             valued: &["--current", "--password"],
             max_positionals: 1,
         },
     )?;
     let username = parsed.required(0, USAGE)?;
     let current = parsed.value("--current")?.map(str::to_owned);
-    let password = parsed.value("--password")?.map(str::to_owned);
-    let generate = parsed.has("--generate");
-    if generate && password.is_some() {
-        return Err(TenancyError::Validation(
-            "change-operator-password: --generate and --password are mutually exclusive".into(),
-        ));
-    }
     let cur_plain = match current {
         Some(p) => p,
         None => manage_interactive::ask_password("Current password: ")
@@ -636,21 +555,8 @@ where
                 )
             })?,
     };
-    let (new_plain, generated) = if generate {
-        (crate::tenancy::password::generate(20), true)
-    } else {
-        let p = match password {
-            Some(p) => p,
-            None => manage_interactive::ask_password("New password: ")
-                .map_err(TenancyError::Io)?
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "change-operator-password requires --password (or a TTY)".into(),
-                    )
-                })?,
-        };
-        (p, false)
-    };
+    let (new_plain, generated) =
+        new_password("change-operator-password", &parsed, "New password: ")?;
 
     // ORM lookup + save path so the change-password verb works on any
     // backend the registry runs on.

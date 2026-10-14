@@ -100,7 +100,13 @@ async fn create_operator_and_authenticate_round_trip() {
     run(
         &pools,
         &url,
-        &["create-operator", &username, "--password", "hunter2"],
+        &[
+            "create-operator",
+            &username,
+            "--skip-validation",
+            "--password",
+            "hunter2",
+        ],
     )
     .await
     .unwrap();
@@ -142,7 +148,13 @@ async fn create_operator_rejects_duplicate_username() {
     run(
         &pools,
         &url,
-        &["create-operator", &username, "--password", "x"],
+        &[
+            "create-operator",
+            &username,
+            "--skip-validation",
+            "--password",
+            "x",
+        ],
     )
     .await
     .unwrap();
@@ -150,7 +162,13 @@ async fn create_operator_rejects_duplicate_username() {
     let err = run(
         &pools,
         &url,
-        &["create-operator", &username, "--password", "x"],
+        &[
+            "create-operator",
+            &username,
+            "--skip-validation",
+            "--password",
+            "x",
+        ],
     )
     .await
     .unwrap_err();
@@ -204,6 +222,7 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
             "create-user",
             &slug,
             &user,
+            "--skip-validation",
             "--password",
             "hunter2",
             "--superuser",
@@ -273,7 +292,13 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     run(
         &pools,
         &url,
-        &["create-operator", &op_user, "--password", "secret"],
+        &[
+            "create-operator",
+            &op_user,
+            "--skip-validation",
+            "--password",
+            "secret",
+        ],
     )
     .await
     .unwrap();

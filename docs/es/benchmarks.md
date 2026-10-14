@@ -1,44 +1,35 @@
-# Benchmarks: Rustango vs Python vs Laravel vs Go
+# Benchmarks: Rustango vs Go vs Python vs Laravel vs WordPress
 
-¿Qué tan rápido es **Rustango**, de verdad? Esta página reporta un benchmark
-cara a cara contra dos stacks interpretados maduros — un framework de
-**Python** y **Laravel** (PHP) — y contra una línea base de **Go** (la `net/http` de la
-biblioteca estándar) que ancla lo que consigue un segundo runtime compilado y
-nativo sobre la misma carga de trabajo. Todos usan sitios de blog
-*funcionalmente idénticos*: mismos datos, mismo esquema, mismos endpoints, mismo
-presupuesto de hardware — la única variable es el runtime. La app de Python y Laravel se
-benchmarkean cada uno en **ambos** su despliegue de producción convencional *y*
-un runtime más robusto: **Python** sobre **gunicorn** (WSGI) y sobre
-**Hypercorn** (ASGI); **Laravel** sobre **php-fpm + nginx** y sobre **Octane**
-(Swoole). Rustango y Go son cada uno un único binario residente, así que hay uno
-de cada.
+El mismo blog servido por diez runtimes: **Go** (`net/http` de la biblioteca
+estándar + `pgx`), **Rustango** sobre axum y sobre actix-web, **axum** y
+**actix-web** puros con `sqlx` en crudo, un framework de **Python** sobre
+gunicorn y sobre Hypercorn, **Laravel** sobre php-fpm y sobre Octane, y
+**WordPress**. Cada app renderiza el mismo HTML a partir de los mismos datos.
 
-Cada número de abajo es **medido y reproducible**, de una ejecución consistente
-de un arnés de un solo comando (ver [Reproducir](#reproducir)). Nada aquí es
-palabrería.
+Medido el **13 de octubre de 2026**: rustango release 0.60.6 en las tablas principales,
+rustango 0.60.7 en [su propia tabla](#rustango-0607). Un solo arnés, una sola
+máquina, las mismas reglas para cada app.
 
-> **TL;DR.** Sobre hardware idéntico sirviendo páginas HTML renderizadas
-> idénticas, los dos runtimes **compilados y nativos** — **Rustango** y **Go** —
-> dejan a los frameworks interpretados **5–30× atrás** y se intercambian el
-> liderazgo entre ellos. En el índice sin caché **Go** lideró con **6.651 req/s**
-> y **Rustango** le siguió con **4.781** — **5,6×** Python (gunicorn) y **11,7×**
-> Laravel (php-fpm). La ventaja de Go es más amplia en la página de detalle sin
-> caché (**13.921 vs 6.538**, 2,1×). **Rustango** recupera el liderazgo donde
-> importa para el tráfico servido: las rutas **cacheadas en Redis** (**25.546**
-> vs 20.929 de Go en el índice; 35.781 vs 29.470 en detalle) y el **cómputo puro**
-> (14.341 vs 11.573). También mantuvo la **menor RAM bajo carga** (18,5 MiB, sin
-> GC) y — a diferencia de la app de la stdlib de Go — incluye un framework
-> completo con todo incluido. Incluso el resultado no compilado más rápido,
-> **Laravel sobre Octane**, va 4–7× por detrás de ambos binarios.
+## Resumen
 
-[![Solicitudes/s en el índice del blog sin caché a través de los seis runtimes — Go 6.651, Rustango 4.781, Laravel+Octane 1.238, Python+Hypercorn 910, Python+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
+- **Páginas sin caché, apps compiladas.** Rust puro (axum + sqlx) es un 34 % más
+  rápido que Go en el índice, Go es un 22 % más rápido en el detalle, la página
+  de tag es un empate.
+- **Rustango 0.60.7** sirve el 93–104 % de axum + sqlx puro en el índice sin
+  caché y el 94–100 % en detalle, tag y compute.
+- **Páginas cacheadas.** Cada app de Rust sirve 1,5–2,2× las solicitudes de Go,
+  con un p99 cercano a 0,45 ms (Go: 2,0–2,4 ms).
+- **Los runtimes interpretados** quedan 5–40× por detrás de las apps compiladas
+  en las páginas sin caché. En las páginas cacheadas, WordPress es el más rápido
+  de ellos (21k req/s).
+- **Memoria bajo carga:** apps de Rust 7–8 MiB, Go 17–21 MiB, runtimes
+  interpretados 89–296 MiB.
 
 ---
 
 ## La configuración
 
-Cuatro apps de blog — **autores, posts, tags (muchos-a-muchos) y comentarios** —
-renderizando páginas HTML:
+Un blog con **autores, posts, tags (muchos-a-muchos) y comentarios**:
 
 | Ruta | Renderiza | ¿Cacheada? |
 |---|---|---|
@@ -46,241 +37,242 @@ renderizando páginas HTML:
 | `GET /cached` | igual que `/` | Redis, 60 s |
 | `GET /post/{slug}` | cuerpo del post + autor + tags + todos los comentarios | no |
 | `GET /post/{slug}/cached` | igual que detalle | Redis, 60 s |
-| `GET /tag/{slug}` | posts que llevan un tag | no |
-| `GET /compute` | suma de todos los primos por debajo de 20.000 (ligado a CPU; sin BD, sin caché) | no |
+| `GET /tag/{slug}` | los últimos 20 posts que llevan un tag | no |
+| `GET /compute` | suma de todos los primos por debajo de 20.000 (solo CPU, sin BD) | no |
 
-Los primeros cinco están ligados a E/S + render; `/compute` es una carga de
-trabajo puramente de CPU — el idéntico algoritmo de división por tentativa en
-cada lenguaje — para aislar la velocidad bruta del runtime. Cada app carga sus
-relaciones de forma **eager** (sin N+1): **Rustango** agrupa las consultas
-explícitamente, la app de Python une las relaciones con JOIN y anota el número de
-comentarios, Laravel usa `with()` + `withCount()`, **Go** hace carga por
-lotes con consultas `= ANY($1)`. Las plantillas son deliberadamente diminutas y
-equivalentes (Tera, Blade, `html/template` de Go y el propio motor de la app de Python) para que
-midamos el *framework*, no el esfuerzo de la plantilla.
+La semilla es determinista: 10 autores, 30 tags, **1.000 posts**, 2.600 enlaces
+post-tag y **10.000 comentarios**. Las relaciones se cargan de forma eager
+(sin N+1). `/compute` ejecuta el mismo bucle de división por tanteo en cada
+lenguaje.
 
-### Qué lo convierte en una pelea justa
+### Las apps
 
-- **Datos idénticos.** Un esquema de PostgreSQL y una semilla determinista
-  compartida por las cuatro apps — leen las *mismas tablas*: 10 autores, 30 tags,
-  **1.000 posts**, 2.600 enlaces post-tag, **10.000 comentarios**. El índice
-  muestra los mismos 20 posts en el mismo orden en cada framework, y el HTML
-  renderizado es idéntico byte a byte (salvo el estilo de escape de entidades de
-  cada motor).
-- **Presupuesto de hardware idéntico.** Cada app corre en un contenedor limitado
-  a **4 CPUs / 2 GB de RAM**. PostgreSQL y Redis son compartidos e idénticos.
-- **Uno a la vez.** Las apps se prueban de carga secuencialmente para que nunca
-  compitan por el host (una máquina de 12 núcleos / 18 GB). Generador de carga:
-  [`oha`](https://github.com/hatoo/oha), 50 conexiones concurrentes, 10 s por
-  endpoint, keep-alive HTTP activado. Cada ejecución reportó **100 % de éxito**.
-- **Todo en modo producción.** Esto importa mucho (ver más abajo).
+| App | Servidor | Acceso a datos | Caché de página |
+|---|---|---|---|
+| **Go** | stdlib `net/http` | pool `pgx`, SQL en crudo | `go-redis` GET/SET |
+| **rustango · axum** | axum 0.8 | ORM de rustango | `CachePageLayer` |
+| **rustango · actix** | actix-web 4 | ORM de rustango | GET/SET de Redis escrito a mano |
+| **axum + sqlx** | axum 0.8 | `sqlx` en crudo, texto SQL de Go | GET/SET de Redis escrito a mano |
+| **actix + sqlx** | actix-web 4 | `sqlx` en crudo, texto SQL de Go | GET/SET de Redis escrito a mano |
+| **Python · gunicorn** | gunicorn, 4 × 8 gthread (WSGI) | el ORM del framework, pool de psycopg integrado | caché Redis del framework |
+| **Python · Hypercorn** | Hypercorn, 4 workers (ASGI, vistas síncronas) | igual | igual |
+| **Laravel · php-fpm** | nginx + php-fpm, 16 procesos hijos estáticos | Eloquent, `with()` + `withCount()` | `Cache::remember`, phpredis |
+| **Laravel · Octane** | Octane + Swoole, 4 workers | igual | igual |
+| **WordPress** | nginx + php-fpm, 16 procesos hijos estáticos | `WP_Query`, `get_the_tags`, `get_comments` sobre **MySQL 8.4** | drop-in `advanced-cache.php`, phpredis |
 
-### Configuración de producción
+Plantillas: Tera en las apps de Rust, `html/template` en Go, el motor propio del
+framework de Python, Blade en Laravel y un tema pequeño en WordPress.
 
-| | Runtime | Endurecimiento de producción |
-|---|---|---|
-| **Rustango** | un binario `--release` (axum + Tokio, async, todos los núcleos) | `opt-level=3` + LTO; caché de página en Redis vía `CachePageLayer` |
-| **Go** | un binario estático (stdlib `net/http`, goroutines, todos los núcleos) | pool `pgx` + caché de página `go-redis`; plantillas embebidas; se distribuye sobre `scratch` |
-| **Python** · gunicorn | workers gthread + keep-alive (WSGI) | debug desactivado; caché de página en Redis; conexiones de BD persistentes |
-| **Python** · Hypercorn | servidor ASGI, 4 workers, keep-alive | la misma app, servida sobre ASGI; las vistas síncronas corren en un threadpool |
-| **Laravel 13** · php-fpm | php-fpm + nginx, OPcache **activado**, 16 workers | `APP_ENV=production`; `composer install --no-dev --optimize-autoloader`; Blade cacheado; `Cache::remember` sobre Redis |
-| **Laravel 13** · Octane | Octane + **Swoole**, workers persistentes | la misma app sobre un runtime residente en memoria — sin arranque del framework por solicitud |
+### Reglas de la prueba
 
-> El modo producción no es una nota al pie. La primera ejecución (sin ajustar) de
-> Laravel apenas logró ~53 req/s; activar OPcache, el autoloader optimizado y un
-> pool de workers adecuado la llevó a ~408 req/s — un **cambio de 7,7×** solo por
-> configuración. Los números de abajo son todos de la configuración de producción.
+- **CPU y memoria.** Cada app recibe 4 CPUs (núcleos 0–3) y 2 GB de RAM. Go corre
+  con `GOMAXPROCS=4`, Tokio y actix-web con 4 workers.
+- **Pool de base de datos.** 16 conexiones de PostgreSQL por app (la app de
+  Python: 4 por proceso worker, 16 en total).
+- **Consultas.** Las apps compiladas ejecutan el mismo plan: 3 consultas para el
+  índice, 3 para el detalle, 4 para la página de tag. Rustango las construye con
+  el ORM; las apps de Rust puro usan el texto SQL de Go. Las apps interpretadas
+  usan la carga eager de su ORM. WordPress ejecuta 11–13 consultas por página.
+- **Salida.** Antes de cualquier carga, cada página de cada app se compara con el
+  HTML de Go; una diferencia detiene la ejecución. Sin compresión, así que cada
+  app envía la misma página de índice de ~6,4 KB.
+- **Ajustes de producción.** Debug desactivado. PHP: OPcache activado,
+  comprobación de marcas de tiempo desactivada, `php artisan optimize`. Python:
+  conexiones del pool.
+- **Otros servicios.** PostgreSQL 16, MySQL 8.4 y Redis 7 en los núcleos 4–7; el
+  generador de carga [`oha`](https://github.com/hatoo/oha) 1.16.0 en los núcleos
+  8–11, dentro de la red de Docker. 50 conexiones, keep-alive activado.
+- **Ejecuciones.** Por endpoint: 5 s de calentamiento y luego 3 × 20 s; cuenta la
+  mediana. Solo cuentan las respuestas HTTP 200.
+- **Builds.** rustc 1.99.0 (`opt-level=3`, fat LTO, `codegen-units=1`,
+  `panic=abort`), Go 1.25.14, PHP 8.3.35, Laravel 13.36.0, Swoole 6.2.3,
+  WordPress 6.9.10.
 
----
-
-## Resultados
-
-### Rendimiento (throughput) — solicitudes por segundo (más alto es mejor)
-
-Los dos binarios compilados, luego cada framework interpretado en su runtime
-convencional **y** su runtime robusto:
-
-| Endpoint | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
-|---|--:|--:|--:|--:|--:|--:|
-| índice, sin caché | 4 781 | **6 651** | 850 | 910 | 408 | 1 238 |
-| índice, **cacheado** | **25 546** | 20 929 | 4 841 | 1 537 | 1 224 | 5 777 |
-| detalle, sin caché | 6 538 | **13 921** | 1 983 | 916 | 464 | 1 790 |
-| detalle, **cacheado** | **35 781** | 29 470 | 4 843 | 1 320 | 793 | 5 811 |
-| tag, sin caché | 3 926 | **4 353** | 1 129 | 1 033 | 398 | 1 179 |
-| **compute** (ligado a CPU) | **14 341** | 11 573 | 452 | 400 | 716 | 1 504 |
-
-Saltan a la vista tres historias. Primero, **Go y Rustango se agrupan muy por
-encima de todos los demás** — la diferencia entre los dos binarios nativos
-(decenas de por ciento, con Go por delante en E/S sin caché y Rustango por
-delante en aciertos de caché + cómputo) es pequeña al lado del abismo de 5–30×
-hasta los runtimes interpretados. Segundo, **Laravel + Octane** (Swoole) es un
-**salto de 3–7×** sobre php-fpm — un worker residente que se salta el arranque
-del framework de Laravel por solicitud — y es el resultado no compilado más
-rápido en cada página. Tercero, **Python + Hypercorn** (ASGI) está más o menos
-**plano, y más lento en las rutas cacheadas**: las vistas del blog son
-*síncronas*, así que ASGI solo añade un salto de threadpool sin nada del beneficio
-de concurrencia que traerían las vistas *async*. Incluso lo mejor de ese campo
-(Octane, 1.238 req/s en el índice sin caché; 5.811 en el detalle cacheado) va por
-detrás de ambos binarios en 4–7×.
-
-### Latencia — p50 en milisegundos (más bajo es mejor)
-
-| Endpoint | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
-|---|--:|--:|--:|--:|--:|--:|
-| índice, sin caché | 10.2 | **7.2** | 56.9 | 43.2 | 114.7 | 39.9 |
-| índice, cacheado | **1.8** | 2.1 | 9.3 | 5.0 | 20.2 | 7.6 |
-| detalle, cacheado | **1.3** | 1.5 | 5.8 | 32.1 | 81.8 | 7.6 |
-| compute (ligado a CPU) | 3.5 | **2.5** | 70.8 | 130.0 | 87.4 | 32.9 |
-
-(Se muestran las medianas; el p50 / p95 / p99 completo para cada endpoint y
-runtime está en `bench/results/summary.tsv`.) Las medianas de **Rustango** y de
-**Go** en el índice sin caché (10,2 / 7,2 ms) están por debajo de las de cada
-competidor interpretado, y sus medianas cacheadas (1,3–2,1 ms) son un orden de
-magnitud menores que incluso el runtime de framework más rápido. Una salvedad a
-favor de Go *y* en su contra: su p50 de compute (2,5 ms) supera al de Rustango,
-pero su p99 de compute se dispara a ~47 ms en una pausa de GC — una cola que el
-binario de Rust sin GC no tiene.
-
-### Huella — tamaño de imagen, memoria, CPU
-
-| | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
-|---|--:|--:|--:|--:|--:|--:|
-| Imagen de contenedor (sin comprimir) | 164 MB | **18.5 MB** | 293 MB | 293 MB | 959 MB | 1.01 GB |
-| RAM, en reposo | 12.1 MiB | **5.2 MiB** | 128 MiB | 173 MiB | 92 MiB | 248 MiB |
-| RAM, bajo carga | **18.5 MiB** | 34.7 MiB | 218 MiB | 277 MiB | 133 MiB | 267 MiB |
-| CPU bajo carga (del tope de 400 %) | 295 % | 366 % | 356 % | 408 % | 406 % | 335 % |
-
-**Go** distribuye la imagen más pequeña — un binario estático sobre `scratch`,
-**18,5 MB** — y en reposo consume apenas **5,2 MiB**. Pero bajo carga su heap de
-GC crece hasta **34,7 MiB**, ~1,9× los **18,5 MiB** planos de **Rustango**: sin
-recolector de basura y sin asignación por solicitud, el binario de Rust a plena
-carga cabe en menos RAM que Go, y por debajo de lo que usa cualquier runtime
-interpretado en *reposo*. Los runtimes robustos cuestan *más* memoria, no menos:
-Octane mantiene un Laravel residente en cada worker; Hypercorn añade la pila ASGI
-encima de la app de Python.
-
-### Eficiencia — trabajo hecho por recurso (la verdadera historia)
-
-El throughput bruto es una cosa; el **throughput por unidad de recurso** es lo
-que tu factura de la nube realmente rastrea (índice sin caché):
-
-| Métrica | **Rustango** | **Go** | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane |
-|---|--:|--:|--:|--:|--:|--:|
-| Solicitudes/s **por MiB de RAM** | **258** | 192 | 3.9 | 3.3 | 3.1 | 4.6 |
-| Solicitudes/s **por % de CPU** | 16.2 | **18.2** | 2.4 | 2.2 | 1.0 | 3.7 |
-
-Por megabyte de memoria, **Rustango** hace el mayor trabajo de cualquier runtime
-aquí — ~35× el mejor resultado interpretado y ~1,3× el de Go, porque su huella se
-mantiene plana bajo carga. Por porcentaje de CPU, **Go** se adelanta (convierte
-los núcleos extra que arranca en un poco más de throughput). En cualquier caso,
-para igualar el throughput del índice de un binario compilado tendrías que
-ejecutar ~4 Laravel con Octane o ~6 apps de Python servidas con gunicorn — cada una
-cargando su propia huella de varios cientos de MB.
+Host: Apple M3 Pro, VM de Docker con 12 CPUs y 16 GB.
 
 ---
 
-## Qué cambia la caché
+## Runtimes compilados
 
-Cada runtime es más rápido cuando una caché de página en Redis le permite
-saltarse por completo la base de datos y el render — req/s del índice sin caché →
-**cacheado**:
+### Throughput: solicitudes por segundo (más alto es mejor)
 
-- **Rustango**: 4.781 → **25.546** (5,3× por el caché) — recupera el primer puesto.
-- **Go**: 6.651 → **20.929** (3,1×) — lidera sin caché, segundo cacheado.
-- **Laravel · Octane**: 1.238 → **5.777** (4,7×) — lo mejor del campo interpretado.
-- **Python · gunicorn**: 850 → **4.841** (5,7×).
-- **Python · Hypercorn**: 910 → **1.537** (1,7×) — la sobrecarga del threadpool
-  de ASGI limita la ganancia incluso en aciertos de caché.
-- **Laravel · php-fpm**: 408 → **1.224** (3,0×).
+Columnas de Rustango: release 0.60.6.
 
-El caché ayuda a todos, pero no borra la diferencia — y es donde los dos binarios
-compilados se separan: sin código de aplicación ejecutándose, la ruta
-HTTP-accept → lectura-de-caché → respuesta es todo lo que queda, y el
-`CachePageLayer` sin asignaciones de **Rustango** (25.546 req/s) se adelanta a la
-ruta `go-redis` de Go (20.929), con ambos ~4× el mejor runtime de framework.
+| Endpoint | Go | rustango · axum | rustango · actix | axum + sqlx | actix + sqlx |
+|---|--:|--:|--:|--:|--:|
+| índice, sin caché | 9.360 | 8.485 | 6.341 | **12.505** | 9.963 |
+| índice, cacheado | 96.214 | 164.942 | 200.167 | **214.097** | 197.252 |
+| detalle, sin caché | **22.675** | 17.634 | 13.883 | 18.578 | 14.697 |
+| detalle, cacheado | 143.795 | 194.939 | 214.662 | **233.669** | 211.293 |
+| tag, sin caché | **6.457** | 5.577 | 5.146 | 6.299 | 5.903 |
+| compute | **16.588** | 14.733 | 15.137 | 15.085 | 14.741 |
 
----
+### Latencia: p50 / p99 en ms (más bajo es mejor)
 
-## Cómputo puro: compilado vs interpretado (y compilado vs compilado)
+| Endpoint | Go | rustango · axum | rustango · actix | axum + sqlx | actix + sqlx |
+|---|--:|--:|--:|--:|--:|
+| índice, sin caché | 5,11 / 9,31 | 5,81 / 8,00 | 7,78 / 10,20 | **3,93 / 5,80** | 4,95 / 6,99 |
+| índice, cacheado | 0,36 / 2,40 | 0,30 / 0,53 | 0,24 / 0,47 | **0,23 / 0,42** | 0,24 / 0,46 |
+| detalle, sin caché | **1,91** / 4,97 | 2,78 / 4,32 | 3,54 / 5,19 | 2,64 / **4,12** | 3,34 / 4,88 |
+| detalle, cacheado | 0,24 / 2,01 | 0,25 / 0,47 | 0,22 / 0,46 | **0,21 / 0,40** | 0,22 / 0,47 |
+| tag, sin caché | **7,53** / 11,73 | 8,83 / 11,99 | 9,59 / 12,65 | 7,82 / **10,42** | 8,36 / 11,28 |
+| compute | **2,36** / 10,84 | 3,40 / 6,07 | 3,32 / **3,58** | 3,33 / 5,97 | 3,39 / 3,65 |
 
-Las cinco rutas de página están dominadas por la base de datos y el motor de
-plantillas. La ruta `/compute` las quita de en medio — suma todos los primos por
-debajo de 20.000 mediante división por tentativa, el algoritmo *idéntico* en
-Rust, Go, Python y PHP. Los cuatro devuelven la misma respuesta (`21171191`);
-solo difiere la velocidad:
+### Huella
 
-| | **Rustango** | **Go** | Python | Laravel |
+| | Go | rustango · axum | rustango · actix | axum + sqlx | actix + sqlx |
+|---|--:|--:|--:|--:|--:|
+| Imagen (sin comprimir) | **18,5 MB** | 147 MB | 146 MB | 143 MB | 143 MB |
+| RAM, en reposo | 5,1 MiB | 1,4 MiB | 1,7 MiB | **1,3 MiB** | 1,6 MiB |
+| RAM, índice bajo carga | 21,2 MiB | 7,5 MiB | 7,3 MiB | 7,3 MiB | **6,9 MiB** |
+| CPU, índice bajo carga (de 400 %) | 296 % | 393 % | 296 % | 328 % | 272 % |
+
+Go se distribuye sobre `scratch`; las imágenes de Rust son `debian:bookworm-slim`
+más el binario.
+
+### Rustango 0.60.7
+
+Medido en una ejecución aparte, con axum + sqlx y rustango release 0.60.6 medidos de
+nuevo al lado (mediana de req/s):
+
+| Endpoint | axum + sqlx | rustango release 0.60.6 | rustango 0.60.7 | 0.60.7 vs axum |
 |---|--:|--:|--:|--:|
-| Throughput | **14 341 req/s** | 11 573 | 452 | 716 |
-| latencia p50 | 3.5 ms | **2.5 ms** | 70.8 ms | 87.4 ms |
+| índice, sin caché | 10.750 | 8.596 | **11.143** | 104 % |
+| detalle, sin caché | 17.907 | 17.024 | 16.875 | 94 % |
+| tag, sin caché | 6.242 | 5.596 | 6.023 | 96 % |
+| compute | 15.091 | 14.736 | 15.084 | 100 % |
 
-Los dos binarios nativos corren el bucle **~26–32×** más rápido que la app de Python y
-**~16–20×** más rápido que Laravel — la diferencia entre código máquina compilado
-y un intérprete de bytecode. Entre Rust y Go, el bucle `--release` con LTO de Rust
-se lleva la corona del throughput mientras que la latencia mediana de Go es en
-realidad más baja; el GC de Go entonces aparece como latencia de cola (p99 ~47 ms)
-que el binario de Rust nunca paga. Curiosamente PHP 8.3 (con OPcache) supera en
-cómputo a CPython en este bucle entero apretado, así que Laravel *supera en
-cómputo* a la app de Python aquí aunque pierda en cada página ligada a E/S. Esta es la carga
-de trabajo donde domina el lenguaje, no el framework — y donde llevar la lógica
-caliente a **Rustango** rinde más.
+El índice sin caché varió entre ejecuciones; comparando la mejor ejecución de
+cada app, Rustango 0.60.7 llega al 93 % de axum + sqlx.
 
 ---
 
-## Salvedades honestas
+## Runtimes interpretados
 
-Un benchmark en el que no puedes encontrar fallos no vale la pena publicarlo. Así
-que:
+### Throughput: solicitudes por segundo (más alto es mejor)
 
-- Los números son de **un** host de 12 núcleos / 18 GB (macOS + Docker). Los
-  valores absolutos cambian en otro hardware; lo que se traslada es el panorama
-  **relativo**.
-- Esta es una carga de trabajo **intensiva en lecturas y renderizada en el
-  servidor** — la forma de blog más común. No mide escrituras, flujos de
-  autenticación, websockets ni lógica de negocio pesada.
-- **Go aquí es la biblioteca estándar, no un framework par.** Rustango, la app de
-  Python y Laravel son frameworks con todo incluido (ORM, admin, migraciones, enrutamiento,
-  plantillas, multi-tenancy); la app de Go es `net/http` + SQL en crudo escrita a
-  mano — la línea base más ligera y rápida que un servicio Go alcanza de forma
-  realista, y la representación más justa del lenguaje. Que empate o supere a
-  Rustango en throughput bruto sin caché es exactamente el punto: **Rustango
-  entrega rendimiento de clase Go con una experiencia de desarrollador con todo
-  incluido.** La ventaja de Go en los endpoints sin caché se paga
-  escribiendo tú mismo el SQL, el mapeo y el cableado.
-- Los runtimes son fundamentalmente distintos: Rustango y Go son cada uno un
-  binario que usa todos los núcleos con tareas baratas; las apps de Python y PHP usan
-  pools fijos de procesos/hilos worker. Esa diferencia *es* parte del resultado, y
-  los recuentos de workers se fijaron en valores sensatos por CPU, no ajustados
-  para favorecer a nadie.
-- La app de Python y Laravel se muestran cada una en **ambos** runtimes — convencional
-  (gunicorn, php-fpm) y robusto (Hypercorn, Octane). **Laravel sobre Octane es
-  3–7× más rápido** que php-fpm; **Python sobre Hypercorn** (vistas síncronas)
-  está más o menos plano. Ambos estrechan la diferencia con los binarios
-  compilados; ninguno la cierra.
+| Endpoint | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|--:|--:|
+| índice, sin caché | 683 | 601 | 518 | **1.098** | 599 |
+| índice, cacheado | 11.052 | 2.744 | 3.326 | 5.884 | **21.285** |
+| detalle, sin caché | **2.865** | 1.314 | 572 | 1.712 | 687 |
+| detalle, cacheado | 11.473 | 2.644 | 3.013 | 5.836 | **21.591** |
+| tag, sin caché | **1.337** | 786 | 490 | 1.102 | 647 |
+| compute | 410 | 353 | **1.611** | 1.521 | 732 |
 
-El punto no es que los frameworks interpretados sean lentos — mueven una porción enorme de la
-web. Es que **Rustango** te da esa misma experiencia de desarrollador con todo
-incluido con el rendimiento y la huella de Rust compilado — igualando un servicio
-Go ajustado a mano mientras te entrega el framework que Go te obliga a construir.
+### Latencia: p50 / p99 en ms (más bajo es mejor)
+
+| Endpoint | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|--:|--:|
+| índice, sin caché | 74,5 / 137,7 | 96,4 / 213,0 | 95,5 / 122,6 | **44,1** / 110,1 | 78,1 / **103,9** |
+| índice, cacheado | 4,4 / 12,5 | 18,7 / 40,4 | 14,6 / 22,4 | 7,4 / 57,7 | **2,3 / 3,5** |
+| detalle, sin caché | **14,2 / 43,0** | 35,3 / 76,2 | 86,5 / 113,4 | 27,9 / 96,2 | 70,5 / 99,0 |
+| detalle, cacheado | 4,1 / 11,4 | 19,0 / 48,2 | 16,4 / 21,6 | 7,4 / 58,2 | **2,3 / 3,6** |
+| tag, sin caché | **35,6 / 77,0** | 66,0 / 131,1 | 100,8 / 130,1 | 44,0 / 110,9 | 75,9 / 97,0 |
+| compute | 117,9 / 222,5 | 129,6 / 245,3 | **31,3 / 38,7** | 32,7 / 78,5 | 67,0 / 89,0 |
+
+### Huella
+
+| | Python · gunicorn | Python · Hypercorn | Laravel · php-fpm | Laravel · Octane | WordPress |
+|---|--:|--:|--:|--:|--:|
+| Imagen (sin comprimir) | **294 MB** | **294 MB** | 844 MB | 895 MB | 1,01 GB |
+| RAM, en reposo | 128 MiB | 172 MiB | **54 MiB** | 219 MiB | 61 MiB |
+| RAM, índice bajo carga | 224 MiB | 296 MiB | **89 MiB** | 241 MiB | 142 MiB |
+| CPU, índice bajo carga (de 400 %) | 260 % | 323 % | 380 % | 337 % | 405 % |
+
+Una de las tres ejecuciones de WordPress en el índice sin caché devolvió 14.253
+errores de "conexión a la base de datos" en 7 s; la mediana viene de una
+ejecución limpia.
+
+---
+
+## Por qué: qué es más rápido, y dónde
+
+Solo hechos medidos; donde una causa no se perfiló, se indica.
+
+- **Página de tag: decide la base de datos.** PostgreSQL usó 3,65 de sus 4
+  núcleos en esta ruta, así que todas las apps compiladas quedan a menos del
+  20 % entre sí.
+- **Índice sin caché: Rust puro supera a Go en un 34 %.** Las mismas tres
+  consultas, las mismas filas. No perfilado en el lado de Go.
+- **Detalle sin caché: Go supera a Rust puro en un 22 %.** La página renderiza un
+  post con todos sus comentarios. No perfilado.
+- **Páginas cacheadas: Rust 1,5–2,2× Go, p99 ~0,45 ms frente a 2,0–2,4 ms.** Un
+  acierto es una lectura de Redis y una respuesta; sin base de datos, sin
+  plantilla. La causa de la cola más ancha de Go no se perfiló.
+- **Compute: Go sirve un 10 % más de solicitudes, Rust tiene una cola más corta**
+  (p99 3,6–6,1 ms frente a 10,8 ms) con el mismo bucle de división por tanteo.
+- **Memoria: Rust 7–8 MiB, Go 17–21 MiB bajo carga.** El runtime de Go mantiene
+  un heap con recolección de basura; los binarios de Rust liberan la memoria
+  sobre la marcha.
+- **Rustango vs axum + sqlx puro.** En 0.60.6, el 46 % de la CPU de Rustango se
+  iba en decodificar los resultados de las consultas probando unos diez tipos por
+  valor. 0.60.7 decodifica cada columna una vez según su tipo (4,9 % de la CPU,
+  sqlx en crudo: 5,0 %), lo que lo lleva a la velocidad de sqlx puro. El resto de
+  la CPU es igual en ambas apps: el renderizado de Tera (~26 %) y la comprobación
+  de conexión del pool (~18 %).
+- **actix-web vs axum.** Con un pool de sqlx compartido, las apps de actix usan
+  solo el 272–296 % de 4 CPUs y van detrás de axum en las páginas sin caché.
+  Causa no encontrada ([#2660](https://github.com/ujeenet/rustango/issues/2660)).
+- **Páginas cacheadas, interpretadas.** WordPress responde desde Redis en
+  `advanced-cache.php`, antes de que WordPress mismo cargue (21k req/s). La app
+  de Python y Laravel ejecutan primero su framework y sus middlewares, y luego
+  leen la caché (11k y 3–6k).
+- **Laravel: Octane 2–3× php-fpm en las páginas sin caché.** php-fpm arranca el
+  framework en cada solicitud; Octane lo mantiene en memoria.
+- **Python: gunicorn 2–4× Hypercorn.** Las vistas son síncronas, así que bajo
+  ASGI cada solicitud pasa por un threadpool.
+- **Compute, interpretado.** PHP 8.3 con OPcache ejecuta el bucle de enteros unas
+  4× más rápido que CPython.
+- **WordPress sin caché** ejecuta 11–13 consultas por página sobre MySQL, frente
+  a 3–4 sobre PostgreSQL en las demás apps.
+
+---
+
+## Perfil de CPU de Rustango
+
+Perfil `perf` de rustango release 0.60.6 bajo carga en el índice sin caché, con el
+estado en 0.60.7:
+
+| Coste | Cuota de CPU | Ticket | Estado |
+|---|---|---|---|
+| Decodificar cada valor probando unos diez tipos | 46 % | [#2655](https://github.com/ujeenet/rustango/issues/2655) | **Corregido en 0.60.7** (ahora 4,9 %) |
+| `CachePageLayer` guarda las páginas como JSON + base64 | ~21 % de un acierto en caché | [#2656](https://github.com/ujeenet/rustango/issues/2656) | Abierto |
+| Un `HashMap` con claves propias para cada fila de `values()` | 6–7 % | [#2661](https://github.com/ujeenet/rustango/issues/2661) | **Corregido en 0.60.7** (los nombres se leen una vez) |
+| Querysets reconstruidos y compilados en cada solicitud | ~2 % | [#2662](https://github.com/ujeenet/rustango/issues/2662) | Corregido en parte en 0.60.7 |
+| `.only()` / `values_list` no pueden seleccionar una columna relacionada (`author__name`) | Falta en la API | [#2657](https://github.com/ujeenet/rustango/issues/2657) | Abierto |
+| Sin bind de array `= ANY($1)` para listas `IN` | menos del 0,5 % | [#2658](https://github.com/ujeenet/rustango/issues/2658) | Abierto |
+| Sin prefetch muchos-a-muchos por lotes | Falta en la API | [#2659](https://github.com/ujeenet/rustango/issues/2659) | Abierto |
+
+---
+
+## Límites
+
+- Una carga de trabajo **intensiva en lecturas y renderizada en el servidor**.
+  Sin escrituras, flujos de autenticación, websockets ni lógica de negocio
+  pesada.
+- Un solo host (portátil M3 Pro, 6 núcleos de rendimiento + 6 de eficiencia).
+  Los números absolutos serán distintos en otro hardware.
+- Go y las apps de Rust puro son servicios escritos a mano; Rustango, la app de
+  Python, Laravel y WordPress son frameworks.
+- WordPress corre sobre MySQL porque no soporta PostgreSQL.
 
 ---
 
 ## Reproducir
 
-El arnés completo — las cuatro apps, el esquema de PostgreSQL compartido + la
-semilla determinista, la configuración de Docker Compose y el runner — es un
-proyecto autocontenido (`rustango-bench`). Desde su directorio:
+El arnés es un proyecto autocontenido (`rustango-bench`). Desde su directorio:
 
 ```sh
-bench/vendor.sh                       # vendor the framework into the build
-docker compose build                  # build all six images
-DURATION=10s CONCURRENCY=50 bench/run.sh
+bench/vendor.sh                 # vendor rustango at origin/develop into the build
+docker compose --profile app build
+bench/run.sh                    # 5 compiled apps; APPS="..." to pick others
 ```
 
-Requisitos: Docker + Compose y Rust (para `cargo install oha`). Ajusta el tope de
-hardware en `.env` (`CAP_CPUS`, `CAP_MEM`) y la carga con `DURATION` /
-`CONCURRENCY`. La salida en crudo por ejecución aterriza en `bench/results/`.
-
+Ajusta la ejecución con `REPS`, `DURATION`, `WARMUP` y `CONCURRENCY`, y el reparto
+de CPU con `CAP_CPUS` y los valores `CAP_CPUSET_*` en `.env`. El JSON en crudo de
+`oha`, los archivos de paridad HTML y un `meta.txt` con cada versión aterrizan en
+`bench/results/`.
 
 ---
 

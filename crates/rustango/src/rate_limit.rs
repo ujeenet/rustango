@@ -483,14 +483,12 @@ mod tests {
 
     #[cfg(feature = "admin")]
     #[tokio::test]
-    async fn peek_spends_nothing_and_give_back_refunds() {
+    async fn give_back_refunds() {
         let l = RateLimitLayer::global(1, Duration::from_secs(60));
-        assert!(l.peek("k").await.is_ok());
         assert!(l.take("k").await.is_ok());
-        assert!(l.peek("k").await.is_err());
         l.give_back("k").await;
-        assert!(l.peek("k").await.is_ok());
         assert!(l.take("k").await.is_ok());
+        assert!(l.take("k").await.is_err());
     }
 
     #[tokio::test]

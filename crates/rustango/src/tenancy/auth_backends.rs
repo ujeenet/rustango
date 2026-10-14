@@ -98,19 +98,80 @@ async fn begin(
     scope: fn(String) -> LoginScope,
     username: &str,
 ) -> Result<LoginAttempt, AuthError> {
-    let Some(slug) = parts.extensions.get::<super::TenantSlug>() else {
-        tracing::error!("auth backend ran without a TenantSlug; use require_auth / optional_auth");
-        return Err(AuthError::InvalidToken);
-    };
-    let ip = parts
+    let slug = tenant_slug(parts)?;
+    crate::login_throttle::shared()
+        .begin(&scope(slug.to_owned()), &client_ip(parts), username)
+        .await
+        .map_err(AuthError::Refused)
+}
+
+fn client_ip(parts: &Parts) -> ClientIp {
+    parts
         .extensions
         .get::<ClientIp>()
         .cloned()
-        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers));
-    crate::login_throttle::shared()
-        .begin(&scope(slug.0.clone()), &ip, username)
-        .await
-        .map_err(AuthError::Refused)
+        .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers))
+}
+
+fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
+    match parts.extensions.get::<super::TenantSlug>() {
+        Some(slug) => Ok(&slug.0),
+        None => {
+            tracing::error!(
+                "auth backend ran without a TenantSlug; use require_auth / optional_auth"
+            );
+            Err(AuthError::InvalidToken)
+        }
+    }
+}
+
+/// How long a verified Basic credential skips argon2 (#2617).
+const BASIC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Entries the Basic cache holds before it evicts.
+const BASIC_CACHE_CAP: usize = 1024;
+
+type BasicCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
+
+fn basic_cache() -> &'static std::sync::Mutex<BasicCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BasicCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(BasicCache::new()))
+}
+
+/// SHA-256 over the tenant, the credential and the stored hash. A password
+/// change rewrites the hash, so it misses; `active` is read per request.
+fn basic_cache_key(slug: &str, username: &str, password: &str, stored_hash: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for part in [slug, username, password, stored_hash] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn basic_cache_hit(key: &[u8; 32], user_id: i64) -> bool {
+    let Ok(cache) = basic_cache().lock() else {
+        return false;
+    };
+    cache
+        .get(key)
+        .is_some_and(|(id, at)| *id == user_id && at.elapsed() < BASIC_CACHE_TTL)
+}
+
+fn basic_cache_put(key: [u8; 32], user_id: i64) {
+    let Ok(mut cache) = basic_cache().lock() else {
+        return;
+    };
+    if cache.len() >= BASIC_CACHE_CAP && !cache.contains_key(&key) {
+        cache.retain(|_, (_, at)| at.elapsed() < BASIC_CACHE_TTL);
+        if cache.len() >= BASIC_CACHE_CAP {
+            let oldest = cache.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+    }
+    cache.insert(key, (user_id, std::time::Instant::now()));
 }
 
 // ------------------------------------------------------------------ Trait
@@ -159,14 +220,53 @@ impl AuthBackend for ModelBackend {
         };
 
         // Own lock scope, apart from the login forms; only failures count.
-        let mut attempt = begin(parts, LoginScope::TenantBasic, &username).await?;
-
+        // A locked or spent caller is refused before the lookup.
+        let slug = tenant_slug(parts)?;
+        let scope = LoginScope::TenantBasic(slug.to_owned());
+        let ip = client_ip(parts);
+        let throttle = crate::login_throttle::shared();
+        let refused = AuthError::Refused;
+        throttle
+            .check(&scope, &ip, &username)
+            .await
+            .map_err(refused)?;
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
             .fetch(pool)
             .await?;
+        let user = users.into_iter().next();
 
-        let Some(user) = users.into_iter().next() else {
+        // A credential verified moments ago against this same stored hash
+        // skips argon2 and the limits: it is not a guess (#2617).
+        let cache_key = user
+            .as_ref()
+            .map(|u| basic_cache_key(slug, &username, &password, &u.password_hash));
+        let cached = |u: &super::auth::User| {
+            let uid = u.id.get().copied().unwrap_or(0);
+            let key = cache_key.as_ref()?;
+            (u.active && uid != 0 && basic_cache_hit(key, uid)).then(|| AuthUser {
+                id: uid,
+                username: u.username.clone(),
+                is_superuser: u.is_superuser,
+            })
+        };
+        if let Some(hit) = user.as_ref().and_then(cached) {
+            // The stored name's lock too, when the submitted one differs.
+            if hit.username != username {
+                throttle
+                    .check(&scope, &ip, &hit.username)
+                    .await
+                    .map_err(refused)?;
+            }
+            return Ok(Some(hit));
+        }
+
+        let mut attempt = throttle
+            .begin(&scope, &ip, &username)
+            .await
+            .map_err(refused)?;
+
+        let Some(user) = user else {
             // Audit H1/N4 — spend a verify's worth of work on the
             // unknown-user path so timing doesn't reveal whether the
             // username exists.
@@ -180,6 +280,11 @@ impl AuthBackend for ModelBackend {
             .resolve(&user.username)
             .await
             .map_err(AuthError::Refused)?;
+        // A parallel request may have verified it while this one waited.
+        if let Some(hit) = cached(&user) {
+            attempt.succeeded().await;
+            return Ok(Some(hit));
+        }
 
         // Verify before the active check so active vs inactive accounts
         // take the same time (audit H1/N4).
@@ -198,8 +303,12 @@ impl AuthBackend for ModelBackend {
         }
 
         attempt.succeeded().await;
+        let id = user.id.get().copied().unwrap_or(0);
+        if let (Some(key), true) = (cache_key, id != 0) {
+            basic_cache_put(key, id);
+        }
         Ok(Some(AuthUser {
-            id: user.id.get().copied().unwrap_or(0),
+            id,
             username: user.username,
             is_superuser: user.is_superuser,
         }))
@@ -236,8 +345,8 @@ pub struct ApiKey {
     /// 8-char hex prefix — public, used to look up the row. Stored in
     /// plaintext by design (it's the lookup index). Audit L4: this is an
     /// accepted, minor exposure — a DB leak reveals which prefixes exist
-    /// but NOT the secret (the secret half is argon2id-hashed in
-    /// `key_hash`), so a stolen prefix can't authenticate on its own.
+    /// but NOT the secret (only its keyed MAC is in `key_hash`), so a
+    /// stolen prefix can't authenticate on its own.
     ///
     /// Indexed: every Bearer request looks the row up by this column,
     /// so without one it is a sequential scan on the hit path — 5.9 ms
@@ -245,7 +354,8 @@ pub struct ApiKey {
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
     pub key_prefix: String,
-    /// argon2id hash of the 32-char secret. Never returned to callers.
+    /// `hmac-sha256$<hex>` keyed by the server secret (#2617); keys made
+    /// before that hold argon2id until first used. Never returned to callers.
     #[rustango(max_length = 255)]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
@@ -333,15 +443,29 @@ impl AuthBackend for ApiKeyBackend {
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         let attempt = begin(parts, LoginScope::TenantApiKey, "").await?;
+        let mac = api_key_mac(api_key_secret().map_err(AuthError::from_hash)?, secret);
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
             .fetch(pool)
             .await?;
-        // The prefix is random, not unique: try every row (#2250). An unknown
-        // prefix still spends a verify (audit N4).
-        let key = password::first_verified(keys, secret, |k| &k.key_hash)
-            .await
-            .map_err(AuthError::from_hash)?;
+        // The prefix is random, not unique: try every row (#2250).
+        let (macs, legacy): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .partition(|k| k.key_hash.starts_with(API_KEY_MAC_SCHEME));
+        let key = match macs.into_iter().find(|k| mac_eq(&k.key_hash, &mac)) {
+            Some(k) => Some(k),
+            None if legacy.is_empty() => None,
+            // Pre-#2617 argon2 rows: verify once, then store the MAC.
+            None => {
+                let key = password::first_verified(legacy, secret, |k| &k.key_hash)
+                    .await
+                    .map_err(AuthError::from_hash)?;
+                if let Some(k) = &key {
+                    upgrade_api_key(pool, k, &mac).await;
+                }
+                key
+            }
+        };
         let Some(key) = key else {
             attempt.failed().await;
             return Ok(None);
@@ -373,6 +497,73 @@ impl AuthBackend for ApiKeyBackend {
     }
 }
 
+/// `key_hash` prefix of a key stored as an HMAC; anything else is argon2.
+const API_KEY_MAC_SCHEME: &str = "hmac-sha256$";
+/// Domain tag, so a key MAC is never a valid MAC of anything else.
+const API_KEY_MAC_TAG: &[u8] = b"rustango-apikey-v1.";
+
+static API_KEY_SECRET: std::sync::OnceLock<crate::session::SessionSecret> =
+    std::sync::OnceLock::new();
+
+/// Set the key that MACs API keys. The first call wins; returns `false` after.
+/// Unset, it is `RUSTANGO_SESSION_SECRET`, or in dev the tenant session key file.
+pub fn set_api_key_secret(secret: crate::session::SessionSecret) -> bool {
+    API_KEY_SECRET.set(secret).is_ok()
+}
+
+/// The CLI that mints a key and the server that checks it must agree, so
+/// this reads the env or the dev key file, never a per-process random key.
+fn api_key_secret() -> Result<&'static crate::session::SessionSecret, super::TenancyError> {
+    use crate::session::{is_prod_tier, tier_from_env, SessionSecret};
+    if let Some(s) = API_KEY_SECRET.get() {
+        return Ok(s);
+    }
+    let secret = if is_prod_tier(&tier_from_env()) {
+        SessionSecret::require_from_env().map_err(|e| {
+            tracing::error!(error = %e, "API keys need RUSTANGO_SESSION_SECRET on the prod tier");
+            super::TenancyError::Validation(e.to_string())
+        })?
+    } else {
+        SessionSecret::from_env_or_disk(std::path::Path::new(
+            crate::session::TENANT_SESSION_KEY_PATH,
+        ))
+    };
+    Ok(API_KEY_SECRET.get_or_init(|| secret))
+}
+
+/// `hmac-sha256$<hex>` of the secret half; the prefix is only the lookup.
+fn api_key_mac(key: &crate::session::SessionSecret, secret: &str) -> String {
+    let msg = [API_KEY_MAC_TAG, secret.as_bytes()].concat();
+    format!(
+        "{API_KEY_MAC_SCHEME}{}",
+        to_hex(&crate::session::sign(key, &msg))
+    )
+}
+
+fn mac_eq(stored: &str, mac: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+    stored.len() == mac.len() && bool::from(stored.as_bytes().ct_eq(mac.as_bytes()))
+}
+
+/// Swap a verified argon2 hash for the MAC. A failure only costs one more
+/// argon2 next time, so it is logged, not raised.
+async fn upgrade_api_key(pool: &Pool, key: &ApiKey, mac: &str) {
+    use crate::core::Column as _;
+    use crate::sql::UpdaterPool as _;
+    let Some(id) = key.id.get().copied() else {
+        return;
+    };
+    if let Err(e) = ApiKey::objects()
+        .where_(ApiKey::id.eq(id))
+        .update()
+        .set("key_hash", mac.to_owned())
+        .execute_pool(pool)
+        .await
+    {
+        tracing::warn!(error = %e, key_id = id, "could not upgrade an argon2 API key");
+    }
+}
+
 /// Create an API key for `user_id`. Returns the full token (`prefix.secret`)
 /// — this is the only time the plaintext is available.
 ///
@@ -399,9 +590,7 @@ pub async fn create_api_key(
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
-    let hash = password::hash_async(&secret)
-        .await
-        .map_err(|e| crate::tenancy::error::TenancyError::Validation(e.to_string()))?;
+    let hash = api_key_mac(api_key_secret()?, &secret);
 
     let mut key = ApiKey {
         id: Auto::default(),
@@ -747,6 +936,21 @@ fn extract_bearer(parts: &Parts) -> Result<Option<&str>, AuthError> {
 mod tests {
     use super::*;
 
+    /// The MAC depends on the server key and the secret.
+    #[test]
+    fn api_key_mac_binds_key_and_secret() {
+        use crate::session::SessionSecret;
+        let (a, b) = (
+            SessionSecret::from_bytes(vec![1; 32]),
+            SessionSecret::from_bytes(vec![2; 32]),
+        );
+        let mac = api_key_mac(&a, "s3cret");
+        assert!(mac.starts_with(API_KEY_MAC_SCHEME) && mac.len() < 255);
+        assert!(mac_eq(&mac, &api_key_mac(&a, "s3cret")));
+        assert_ne!(mac, api_key_mac(&b, "s3cret"));
+        assert_ne!(mac, api_key_mac(&a, "s3creu"));
+    }
+
     /// Authenticate `token` twice on `backend`; count revocation warnings.
     async fn revocation_warnings(backend: &JwtBackend, token: &str) -> usize {
         let buf = crate::testkit::CaptureWriter::default();
@@ -775,6 +979,59 @@ mod tests {
             .access;
         let backend = JwtBackend::new(vec![7u8; 32]);
         assert_eq!(revocation_warnings(&backend, &token).await, 1);
+    }
+
+    /// #2617 — the Basic cache key changes with the stored hash and the
+    /// tenant, so a password change or another tenant never hits.
+    #[test]
+    fn basic_cache_key_binds_hash_and_tenant() {
+        let k = basic_cache_key("t", "alice", "pw", "$argon2id$a");
+        assert_eq!(k, basic_cache_key("t", "alice", "pw", "$argon2id$a"));
+        assert_ne!(k, basic_cache_key("t", "alice", "pw", "$argon2id$b"));
+        assert_ne!(k, basic_cache_key("u", "alice", "pw", "$argon2id$a"));
+        assert_ne!(k, basic_cache_key("t", "alice", "pw2", "$argon2id$a"));
+        assert_ne!(
+            basic_cache_key("t", "ab", "c", "h"),
+            basic_cache_key("t", "a", "bc", "h")
+        );
+    }
+
+    #[test]
+    fn basic_cache_hit_needs_the_same_user() {
+        let key = basic_cache_key("t-hit", "bob", "pw", "h");
+        assert!(!basic_cache_hit(&key, 7));
+        basic_cache_put(key, 7);
+        assert!(basic_cache_hit(&key, 7));
+        assert!(!basic_cache_hit(&key, 8));
+    }
+
+    /// performance-001 / security-003 — a locked Basic account is refused
+    /// before the user lookup: here there is no user table to look in.
+    #[tokio::test]
+    async fn a_locked_basic_account_is_refused_before_the_lookup() {
+        use crate::login_throttle::LoginRefused;
+        use base64::Engine as _;
+        let scope = LoginScope::TenantBasic("t-prelock".into());
+        for _ in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
+            let a = crate::login_throttle::shared()
+                .begin(&scope, &ClientIp::default(), "locked-user")
+                .await
+                .unwrap();
+            a.failed().await;
+        }
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let creds = base64::engine::general_purpose::STANDARD.encode("locked-user:pw");
+        let (parts, ()) = axum::http::Request::builder()
+            .header("authorization", format!("Basic {creds}"))
+            .extension(super::super::TenantSlug("t-prelock".into()))
+            .body(())
+            .unwrap()
+            .into_parts();
+        let r = ModelBackend.authenticate(&parts, &pool).await;
+        assert!(
+            matches!(r, Err(AuthError::Refused(LoginRefused::Throttled { .. }))),
+            "{r:?}"
+        );
     }
 
     /// A token with no `jti` can't be revoked, so there is nothing to warn about.
