@@ -46,6 +46,21 @@ pub(crate) fn is_uuid_expr(expr: &str) -> bool {
     expr.trim().eq_ignore_ascii_case("gen_random_uuid()")
 }
 
+/// `name` in `q` quotes with any `q` inside doubled, in one allocation.
+/// Every compiled query quotes each identifier, so this is hot (#2662).
+pub(crate) fn quote_with(name: &str, q: char) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push(q);
+    for part in name.split_inclusive(q) {
+        out.push_str(part);
+        if part.ends_with(q) {
+            out.push(q);
+        }
+    }
+    out.push(q);
+    out
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///
@@ -63,8 +78,7 @@ pub trait Dialect: Send + Sync {
     /// double-quotes, which suit PG and SQLite; MySQL uses backticks.
     /// A quote inside the name is doubled, so the result is safe.
     fn quote_ident(&self, name: &str) -> String {
-        let escaped = name.replace('"', "\"\"");
-        format!("\"{escaped}\"")
+        quote_with(name, '"')
     }
 
     /// Quote text as an inline string literal, for the few spots
@@ -975,6 +989,17 @@ pub trait Dialect: Send + Sync {
     /// [`SqlError::EmptyUpdateSet`] with no columns, or
     /// [`SqlError::MissingPrimaryKey`] when the model has no PK.
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
+}
+
+#[cfg(test)]
+mod quote_with_tests {
+    #[test]
+    fn doubles_every_embedded_quote() {
+        assert_eq!(super::quote_with("col", '"'), "\"col\"");
+        assert_eq!(super::quote_with("a\"b\"", '"'), "\"a\"\"b\"\"\"");
+        assert_eq!(super::quote_with("\"", '"'), "\"\"\"\"");
+        assert_eq!(super::quote_with("", '`'), "``");
+    }
 }
 
 #[cfg(test)]

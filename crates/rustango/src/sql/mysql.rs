@@ -79,8 +79,7 @@ impl Dialect for MySql {
     /// MySQL quotes with backticks, and an embedded backtick is
     /// doubled, so any name comes out valid.
     fn quote_ident(&self, name: &str) -> String {
-        let escaped = name.replace('`', "``");
-        format!("`{escaped}`")
+        super::dialect::quote_with(name, '`')
     }
 
     /// MySQL reads `\` as an escape inside a string literal under the

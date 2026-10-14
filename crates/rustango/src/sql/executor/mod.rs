@@ -974,54 +974,14 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     let stmt = Postgres.compile_aggregate(query)?;
-    let raw_rows = pg_on_query(&stmt.sql, stmt.params)
+    let rows = pg_on_query(&stmt.sql, stmt.params)
         .fetch_all(executor)
         .await?;
-
-    let mut out = Vec::with_capacity(raw_rows.len());
-    for row in &raw_rows {
-        use sqlx::{Column as _, Row as _};
-        let mut map = std::collections::HashMap::new();
-        for (i, col) in row.columns().iter().enumerate() {
-            let name = col.name().to_owned();
-            // Try each decoder in turn, falling back to Null. Order
-            // matters: scalars first, then jsonb and arrays, so an
-            // int8 or text column is not decoded as JSON.
-            let val: SqlValue = if let Ok(v) = row.try_get::<i64, _>(i) {
-                SqlValue::I64(v)
-            } else if let Ok(v) = row.try_get::<i32, _>(i) {
-                SqlValue::I32(v)
-            } else if let Ok(v) = row.try_get::<f64, _>(i) {
-                SqlValue::F64(v)
-            } else if let Ok(v) = row.try_get::<bool, _>(i) {
-                SqlValue::Bool(v)
-            } else if let Ok(v) = row.try_get::<String, _>(i) {
-                SqlValue::String(v)
-            } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
-                // jsonb / json, e.g. from jsonb_agg.
-                SqlValue::Json(v)
-            } else if let Ok(v) = row.try_get::<Vec<String>, _>(i) {
-                // text[] from array_agg. Wrapped as a JSON array —
-                // `SqlValue` has no Vec<T> variant.
-                SqlValue::Json(serde_json::Value::Array(
-                    v.into_iter().map(serde_json::Value::String).collect(),
-                ))
-            } else if let Ok(v) = row.try_get::<Vec<i64>, _>(i) {
-                // bigint[] from array_agg.
-                SqlValue::Json(serde_json::Value::Array(
-                    v.into_iter()
-                        .map(|n| serde_json::Value::Number(n.into()))
-                        .collect(),
-                ))
-            } else {
-                SqlValue::Null
-            };
-            map.insert(name, val);
-        }
-        out.push(map);
-    }
-    Ok(out)
+    Ok(decode::rows_to_dicts(&rows, &[], usize::MAX))
 }
+
+// Result cells to `SqlValue`, one plan per result set (#2655).
+mod decode;
 
 mod tx;
 pub(crate) use tx::write_transaction_pool;
