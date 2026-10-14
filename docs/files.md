@@ -223,7 +223,8 @@ let uploads = registry.default_disk().expect("default disk");
 ```
 
 Keys stay out of the file: `RUSTANGO__STORAGE__DISKS__UPLOADS__ACCOUNT_KEY`,
-`RUSTANGO__STORAGE__DISKS__ARCHIVE__SECRET_ACCESS_KEY`. A driver whose feature is
+`RUSTANGO__STORAGE__DISKS__ARCHIVE__SECRET_ACCESS_KEY`. Disk names are lowercase
+`[a-z0-9_]` so these overrides can reach them. A driver whose feature is
 not compiled in is an error naming the disk, not a silently missing disk.
 `public_endpoint` makes presigned URLs and `url()` point at the address browsers
 reach, while reads and writes keep using `endpoint`.

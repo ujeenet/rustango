@@ -171,8 +171,9 @@ impl StorageRegistry {
     ///
     /// # Errors
     /// [`StorageError::Io`] naming the disk when its driver is unknown or
-    /// not compiled in, a required key is missing, or `default` names no
-    /// disk.
+    /// not compiled in, a required key is missing, its name is not
+    /// `[a-z0-9_]` (env overrides arrive lowercased), or `default` names
+    /// no disk.
     pub fn from_settings(
         settings: &crate::config::StorageSettings,
     ) -> Result<Self, super::StorageError> {
@@ -181,6 +182,13 @@ impl StorageRegistry {
             let err = |e: super::StorageError| {
                 super::StorageError::Io(format!("storage disk `{name}`: {e}"))
             };
+            let env_safe = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+            if name.is_empty() || !name.chars().all(env_safe) {
+                return Err(err(super::StorageError::Io(
+                    "a disk name must be lowercase [a-z0-9_], so env overrides can reach it"
+                        .into(),
+                )));
+            }
             let store = build_disk(disk, disk.endpoint.as_deref()).map_err(err)?;
             let store = match &disk.public_endpoint {
                 Some(public) => Arc::new(PresignVia {
@@ -538,8 +546,8 @@ mod tests {
 
     /// Several S3 disks, and other drivers, side by side.
     #[cfg(all(feature = "config", feature = "storage-s3"))]
-    #[test]
-    fn from_settings_builds_every_disk() {
+    #[tokio::test]
+    async fn from_settings_builds_every_disk() {
         let r = StorageRegistry::from_settings(&settings(
             r#"
             default = "uploads"
@@ -570,6 +578,55 @@ mod tests {
             r.cdn_url("archive", "x").as_deref(),
             Some("https://cdn.example.com/arc/x")
         );
+        // Presigned links are signed for the public endpoint too (tests-005).
+        let up = r.disk("uploads").unwrap();
+        let ttl = std::time::Duration::from_secs(60);
+        let public = "https://files.example.com/up/a.csv?";
+        let get = up.presigned_get_url("a.csv", ttl).await.unwrap();
+        assert!(get.starts_with(public), "{get}");
+        let put = crate::storage::PutConditions::new();
+        let put = up.presigned_put_url("a.csv", ttl, &put).await.unwrap();
+        assert!(put.starts_with(public), "{put}");
+        assert!(up.presigned_put_enforces_conditions());
+    }
+
+    /// tests-005 — reads and writes go to `store`, links to `presign`.
+    #[cfg(all(feature = "config", feature = "storage-s3"))]
+    #[tokio::test]
+    async fn presign_via_stores_in_one_and_signs_with_the_other() {
+        use crate::storage::Storage as _;
+        let disk = settings(
+            r#"
+            [disks.up]
+            driver = "s3"
+            bucket = "up"
+            path_style = true
+            "#,
+        )
+        .disks
+        .remove("up")
+        .unwrap();
+        let via = PresignVia {
+            store: Arc::new(crate::storage::InMemoryStorage::new()),
+            presign: build_disk(&disk, Some("https://files.example.com")).unwrap(),
+        };
+        via.save("a.csv", b"abc").await.unwrap();
+        assert_eq!(via.load("a.csv").await.unwrap(), b"abc");
+        assert_eq!(via.metadata("a.csv").await.unwrap().unwrap().size, 3);
+        let ttl = std::time::Duration::from_secs(60);
+        let get = via.presigned_get_url("a.csv", ttl).await.unwrap();
+        assert!(get.starts_with("https://files.example.com/up/a.csv?"), "{get}");
+    }
+
+    /// correctness-002 — a name env overrides cannot reach is refused.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_refuses_a_name_env_cannot_reach() {
+        for name in ["Uploads", "user-media"] {
+            let toml = format!("[disks.\"{name}\"]\ndriver = \"local\"\nroot = \"/tmp/x\"\n");
+            let err = StorageRegistry::from_settings(&settings(&toml)).err().unwrap();
+            assert!(err.to_string().contains("lowercase"), "{err}");
+        }
     }
 
     #[cfg(all(feature = "config", feature = "storage-azure"))]
