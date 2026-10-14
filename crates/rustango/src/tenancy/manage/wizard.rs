@@ -45,6 +45,7 @@
 use std::io::Write;
 
 use crate::manage_interactive::LineSource;
+use crate::password_validators::check_builtin_form_password;
 use std::path::Path;
 
 use crate::tenancy::TenantPools;
@@ -118,6 +119,8 @@ where
         let password = prompt_value(reader, writer, "  Operator password", None)?;
         if username.is_empty() || password.is_empty() {
             writeln!(writer, "  (skipped — username and password required)")?;
+        } else if let Err(e) = check_builtin_form_password(&password) {
+            writeln!(writer, "  (skipped — {})", e.message)?;
         } else {
             create_operator_cmd(
                 pools,
@@ -156,6 +159,8 @@ where
                 let password = prompt_value(reader, writer, "    Superuser password", None)?;
                 if username.is_empty() || password.is_empty() {
                     writeln!(writer, "    (skipped — username and password required)")?;
+                } else if let Err(e) = check_builtin_form_password(&password) {
+                    writeln!(writer, "    (skipped — {})", e.message)?;
                 } else {
                     create_superuser_cmd(
                         pools,

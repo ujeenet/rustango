@@ -328,6 +328,7 @@ The ones it does not, opt in by name: `mysql`, `sqlite`, `tenancy`,
 | `media` | Media library with collections and tags. |
 | `storage` | File storage abstraction. |
 | `storage-s3` | S3-compatible backend. |
+| `storage-azure` | Azure Blob Storage backend. |
 | `uploads` | Multipart upload handling. |
 | `signed_url` | Expiring signed URLs. |
 

@@ -275,8 +275,8 @@ batteries = [
     "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
     "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
     "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
-    "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver",
-    "template_views",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "storage-azure", "media",
+    "runserver", "template_views",
 ]
 ```
 

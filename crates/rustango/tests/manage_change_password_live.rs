@@ -201,7 +201,14 @@ async fn generate_and_password_are_mutually_exclusive() {
         &pools,
         &url,
         &dir,
-        args(&["create-operator", "carol", "--password", "x", "--generate"]),
+        args(&[
+            "create-operator",
+            "carol",
+            "--skip-validation",
+            "--password",
+            "x",
+            "--generate",
+        ]),
         &mut buf,
     )
     .await

@@ -214,9 +214,16 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
         }
     };
     let user = format!("flush-{}", std::process::id());
-    run(&["create-user", "acme", &user, "--password", "pw"])
-        .await
-        .expect("create-user");
+    run(&[
+        "create-user",
+        "acme",
+        &user,
+        "--skip-validation",
+        "--password",
+        "pw",
+    ])
+    .await
+    .expect("create-user");
     let out = run(&["flush", "--tenant", "acme", "--yes"])
         .await
         .expect("flush --tenant acme");

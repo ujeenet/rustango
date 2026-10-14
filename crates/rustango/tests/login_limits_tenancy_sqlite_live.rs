@@ -346,10 +346,6 @@ fn is_429(r: &axum::response::Response) -> bool {
     r.status() == StatusCode::TOO_MANY_REQUESTS && r.headers().contains_key(header::RETRY_AFTER)
 }
 
-fn is_503(r: &axum::response::Response) -> bool {
-    r.status() == StatusCode::SERVICE_UNAVAILABLE && r.headers().contains_key(header::RETRY_AFTER)
-}
-
 /// Five failures lock the operator; the sixth attempt, even with the
 /// right password, gets 429.
 #[tokio::test]
@@ -928,7 +924,11 @@ async fn basic_counts_only_failures_per_ip() {
         let r = env.basic(&bad, &format!("ghost{n}"), "x").await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
-    assert!(is_429(&env.basic(&bad, &name, PASS).await));
+    // A credential not verified moments ago is refused; a cached one is
+    // no guess and skips the limits (#2617).
+    let fresh = unique("svc");
+    env.user(&fresh).await;
+    assert!(is_429(&env.basic(&bad, &fresh, PASS).await));
 }
 
 /// Failed form logins do not lock the same user's HTTP Basic access.
@@ -997,8 +997,8 @@ async fn api_keys_sharing_a_prefix_each_authenticate() {
     );
 }
 
-/// #1729 — an expired key is verified before it is refused, so a full
-/// hash queue answers it 503, the same as an unknown prefix.
+/// #1729 — an expired key costs the same as an unknown prefix; since
+/// #2617 neither needs a hashing slot, so a full queue answers both 401.
 #[cfg(feature = "testkit")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_expired_api_key_costs_a_verify_like_an_unknown_one() {
@@ -1017,12 +1017,8 @@ async fn an_expired_api_key_costs_a_verify_like_an_unknown_one() {
     let unknown = env.api_key(&next_ip(), "abcdef12.0000000000000000").await;
     let exp = env.api_key(&next_ip(), &expired).await;
     drop(held);
-    assert!(is_503(&unknown), "unknown prefix: {}", unknown.status());
-    assert!(
-        is_503(&exp),
-        "expired key skipped the verify: {}",
-        exp.status()
-    );
+    assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED, "unknown prefix");
+    assert_eq!(exp.status(), StatusCode::UNAUTHORIZED, "expired key");
 }
 
 /// A backend called without a tenant refuses instead of sharing one

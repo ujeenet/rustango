@@ -689,7 +689,7 @@ impl<DB: Database> Builder<DB> {
         let tier = crate::session::tier_from_env();
         let session_secret_for_tenant = crate::session::load_session_secret_for_tier(
             &tier,
-            std::path::Path::new("./var/.rustango_tenant_session.key"),
+            std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
         );
         let operator_secret = crate::session::load_session_secret_for_tier(
             &tier,

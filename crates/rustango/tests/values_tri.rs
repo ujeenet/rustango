@@ -384,9 +384,264 @@ async fn pluck_pairs_null_needs_an_option(pool: &Pool) {
     assert_eq!(scores, vec![Some(7), None, None, Some(9)]);
 }
 
+/// One nullable column per portable type, for the decode scenarios.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "values_tri_typed")]
+#[rustango(app = "values_tri")]
+#[allow(dead_code)]
+pub struct Typed {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub small_n: Option<i16>,
+    pub mid_n: Option<i32>,
+    pub big_n: Option<i64>,
+    pub real_n: Option<f32>,
+    pub double_n: Option<f64>,
+    pub flag: Option<bool>,
+    pub body: Option<String>,
+    #[rustango(max_length = 16)]
+    pub label: Option<String>,
+    pub day: Option<chrono::NaiveDate>,
+    pub clock: Option<chrono::NaiveTime>,
+    pub at_ts: Option<chrono::DateTime<chrono::Utc>>,
+    pub token: Option<uuid::Uuid>,
+    pub doc: Option<serde_json::Value>,
+    pub blob: Option<Vec<u8>>,
+}
+
+const TYPED_COLS: &[&str] = &[
+    "id", "small_n", "mid_n", "big_n", "real_n", "double_n", "flag", "body", "label", "day",
+    "clock", "at_ts", "token", "doc", "blob",
+];
+
+/// Row 1 holds a value in every column, row 2 NULL in every nullable one.
+async fn seed_typed(pool: &Pool) -> Vec<SqlValue> {
+    rustango::testkit::matrix::fresh_table::<Typed>(pool).await;
+    let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+    let clock = chrono::NaiveTime::from_hms_micro_opt(3, 4, 5, 123_456).unwrap();
+    let at = day.and_time(clock).and_utc();
+    let token = uuid::uuid!("6f1c2a4e-9b7d-4c3a-8e21-0d5f4b6a7c89");
+    let doc = serde_json::json!({ "k": [1, 2] });
+    let blob = vec![0_u8, 1, 2, 255];
+    Typed {
+        id: 1,
+        small_n: Some(-7),
+        mid_n: Some(70_000),
+        big_n: Some(1 << 40),
+        real_n: Some(1.5),
+        double_n: Some(2.25),
+        flag: Some(true),
+        body: Some("body".into()),
+        label: Some("label".into()),
+        day: Some(day),
+        clock: Some(clock),
+        at_ts: Some(at),
+        token: Some(token),
+        doc: Some(doc.clone()),
+        blob: Some(blob.clone()),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed typed");
+    Typed {
+        id: 2,
+        small_n: None,
+        mid_n: None,
+        big_n: None,
+        real_n: None,
+        double_n: None,
+        flag: None,
+        body: None,
+        label: None,
+        day: None,
+        clock: None,
+        at_ts: None,
+        token: None,
+        doc: None,
+        blob: None,
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed nulls");
+    vec![
+        SqlValue::I64(1),
+        SqlValue::I16(-7),
+        SqlValue::I32(70_000),
+        SqlValue::I64(1 << 40),
+        SqlValue::F32(1.5),
+        SqlValue::F64(2.25),
+        SqlValue::Bool(true),
+        SqlValue::String("body".into()),
+        SqlValue::String("label".into()),
+        SqlValue::Date(day),
+        SqlValue::Time(clock),
+        SqlValue::DateTime(at),
+        SqlValue::Uuid(token),
+        SqlValue::Json(doc),
+        SqlValue::Binary(blob),
+    ]
+}
+
+/// Every value read through `values_list`, `values_dict` and a grouped
+/// `values().annotate()` keeps its declared type, and NULL stays `Null`.
+/// PG lost SMALLINT/REAL/TIME, SQLite returned dates as text (#2486).
+async fn values_decode_every_type(pool: &Pool) {
+    let want = seed_typed(pool).await;
+    let mut nulls = vec![SqlValue::I64(2)];
+    nulls.resize(want.len(), SqlValue::Null);
+    let by_id = || Typed::objects().order_by(&[("id", false)]);
+
+    let list = by_id()
+        .values_list(TYPED_COLS)
+        .fetch(pool)
+        .await
+        .expect("list");
+    assert_eq!(list, vec![want.clone(), nulls.clone()], "values_list");
+
+    let as_row = |m: &HashMap<String, SqlValue>| -> Vec<SqlValue> {
+        TYPED_COLS.iter().map(|c| m[*c].clone()).collect()
+    };
+    let dict = by_id()
+        .values_dict(TYPED_COLS)
+        .fetch(pool)
+        .await
+        .expect("dict");
+    assert_eq!(
+        dict.iter().map(as_row).collect::<Vec<_>>(),
+        vec![want.clone(), nulls.clone()],
+        "values_dict"
+    );
+
+    let grouped = Typed::objects()
+        .values(TYPED_COLS)
+        .annotate("n", AggregateExpr::Count(None))
+        .fetch(pool)
+        .await
+        .expect("annotate");
+    let mut grouped: Vec<Vec<SqlValue>> = grouped.iter().map(as_row).collect();
+    grouped.sort_by_key(|r| format!("{:?}", r[0]));
+    assert_eq!(
+        grouped,
+        vec![want.clone(), nulls.clone()],
+        "values().annotate()"
+    );
+
+    // The `_on` reads decode through the same plan.
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres() {
+        let on = by_id()
+            .values_dict(TYPED_COLS)
+            .fetch_on(pg)
+            .await
+            .expect("fetch_on");
+        assert_eq!(
+            on.iter().map(as_row).collect::<Vec<_>>(),
+            vec![want.clone(), nulls.clone()],
+            "fetch_on"
+        );
+        let agg = Typed::objects()
+            .values(TYPED_COLS)
+            .annotate("n", AggregateExpr::Count(None))
+            .fetch_on(pg)
+            .await
+            .expect("aggregate fetch_on");
+        let mut agg: Vec<Vec<SqlValue>> = agg.iter().map(as_row).collect();
+        agg.sort_by_key(|r| format!("{:?}", r[0]));
+        assert_eq!(agg, vec![want, nulls], "aggregate fetch_on");
+    }
+}
+
+/// An aggregate over a typed column keeps the column's type where the
+/// backend reports it; SQLite reports none, so it reads the storage class.
+async fn aggregate_expression_keeps_column_type(pool: &Pool) {
+    let want = seed_typed(pool).await;
+    let rows = Typed::objects()
+        .where_(Typed::id.eq(1_i64))
+        .aggregate()
+        .annotate("s", AggregateExpr::Max("small_n"))
+        .annotate("r", AggregateExpr::Max("real_n"))
+        .annotate("c", AggregateExpr::Max("clock"))
+        .annotate("d", AggregateExpr::Min("day"))
+        .fetch(pool)
+        .await
+        .expect("aggregate");
+    let got = [
+        rows[0]["s"].clone(),
+        rows[0]["r"].clone(),
+        rows[0]["c"].clone(),
+        rows[0]["d"].clone(),
+    ];
+    // MAX/MIN keep the field's type on every backend (dialects-001).
+    let expect = [
+        want[1].clone(),
+        want[4].clone(),
+        want[10].clone(),
+        want[9].clone(),
+    ];
+    assert_eq!(got, expect, "{}", pool.dialect().name());
+}
+
+/// `NUMERIC` / `DECIMAL` reads as `Decimal`. A `Decimal` model does not
+/// build with the `sqlite` feature, so SQLite is covered in-crate.
+#[cfg(not(feature = "sqlite"))]
+mod decimal {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "values_tri_money")]
+    #[rustango(app = "values_tri")]
+    #[allow(dead_code)]
+    pub struct Money {
+        #[rustango(primary_key)]
+        pub id: i64,
+        pub amount: Option<Decimal>,
+    }
+
+    async fn values_decode_decimal(pool: &Pool) {
+        let v: Decimal = "12.34".parse().unwrap();
+        for (id, amount) in [(1, Some(v)), (2, None)] {
+            Money { id, amount }.insert_pool(pool).await.expect("seed");
+        }
+        let want = vec![
+            vec![SqlValue::I64(1), SqlValue::Decimal(v)],
+            vec![SqlValue::I64(2), SqlValue::Null],
+        ];
+        let qs = || Money::objects().order_by(&[("id", false)]);
+        let list = qs()
+            .values_list(&["id", "amount"])
+            .fetch(pool)
+            .await
+            .expect("list");
+        assert_eq!(list, want);
+        let dict = qs()
+            .values_dict(&["id", "amount"])
+            .fetch(pool)
+            .await
+            .expect("dict");
+        assert_eq!(dict[0]["amount"], SqlValue::Decimal(v));
+        assert_eq!(dict[1]["amount"], SqlValue::Null);
+        let sum = Money::objects()
+            .where_(Money::id.eq(1_i64))
+            .aggregate()
+            .annotate("s", AggregateExpr::Sum("amount"))
+            .fetch(pool)
+            .await
+            .expect("sum");
+        assert_eq!(sum[0]["s"], SqlValue::Decimal(v));
+    }
+
+    tri_dialect_test! {
+        model: Money,
+        scenarios: [values_decode_decimal],
+    }
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        values_decode_every_type,
+        aggregate_expression_keeps_column_type,
         values_dict_returns_a_map_per_row,
         values_list_uses_the_requested_column_order,
         values_list_flat_decodes_an_integer_column,

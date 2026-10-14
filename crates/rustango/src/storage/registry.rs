@@ -37,6 +37,10 @@
 //! let url = registry.cdn_url("avatars", "alice.png");
 //! //  -> "https://cdn.example.com/avatars/alice.png"
 //! ```
+//!
+//! Or declare the disks in `[storage]` and call
+//! [`StorageRegistry::from_settings`]; see
+//! [`StorageSettings`](crate::config::StorageSettings).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -157,6 +161,186 @@ impl StorageRegistry {
     #[must_use]
     pub fn cdn_base(&self, disk: &str) -> Option<&str> {
         self.inner.cdns.get(disk).map(String::as_str)
+    }
+}
+
+#[cfg(feature = "config")]
+impl StorageRegistry {
+    /// One disk per `[storage.disks.<name>]`, with its CDN, and
+    /// `[storage] default` as the default disk.
+    ///
+    /// # Errors
+    /// [`StorageError::Io`] naming the disk when its driver is unknown or
+    /// not compiled in, a required key is missing, its name is not
+    /// `[a-z0-9_]` (env overrides arrive lowercased), or `default` names
+    /// no disk.
+    pub fn from_settings(
+        settings: &crate::config::StorageSettings,
+    ) -> Result<Self, super::StorageError> {
+        let mut registry = Self::new();
+        for (name, disk) in &settings.disks {
+            let err = |e: super::StorageError| {
+                super::StorageError::Io(format!("storage disk `{name}`: {e}"))
+            };
+            let env_safe = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+            if name.is_empty() || !name.chars().all(env_safe) {
+                return Err(err(super::StorageError::Io(
+                    "a disk name must be lowercase [a-z0-9_], so env overrides can reach it".into(),
+                )));
+            }
+            let store = build_disk(disk, disk.endpoint.as_deref()).map_err(err)?;
+            let store = match &disk.public_endpoint {
+                Some(public) => Arc::new(PresignVia {
+                    presign: build_disk(disk, Some(public)).map_err(err)?,
+                    store,
+                }),
+                None => store,
+            };
+            registry = registry.set(name, store);
+            if let Some(cdn) = &disk.cdn {
+                registry = registry.cdn(name, cdn);
+            }
+        }
+        if let Some(default) = &settings.default {
+            if !registry.has(default) {
+                return Err(super::StorageError::Io(format!(
+                    "[storage] default `{default}` is not a disk"
+                )));
+            }
+            registry = registry.with_default(default);
+        }
+        Ok(registry)
+    }
+}
+
+/// The backend `disk.driver` names, reached at `endpoint`.
+#[cfg(feature = "config")]
+#[cfg_attr(
+    not(any(feature = "storage-s3", feature = "storage-azure")),
+    allow(unused_variables)
+)]
+fn build_disk(
+    disk: &crate::config::DiskSettings,
+    endpoint: Option<&str>,
+) -> Result<BoxedStorage, super::StorageError> {
+    use super::StorageError;
+    let need = |v: &Option<String>, key: &str| {
+        v.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| StorageError::Io(format!("driver `{}` needs `{key}`", disk.driver)))
+    };
+    #[cfg(not(all(feature = "storage-s3", feature = "storage-azure")))]
+    let missing = |feature: &str| {
+        StorageError::Io(format!(
+            "driver `{}` needs the `{feature}` cargo feature",
+            disk.driver
+        ))
+    };
+    match disk.driver.as_str() {
+        "local" => {
+            let mut s = super::LocalStorage::new(need(&disk.root, "root")?.into());
+            if let Some(base) = &disk.base_url {
+                s = s.with_base_url(base.clone());
+            }
+            Ok(Arc::new(s))
+        }
+        #[cfg(feature = "storage-s3")]
+        "s3" => Ok(Arc::new(super::s3::S3Storage::new(super::s3::S3Config {
+            bucket: need(&disk.bucket, "bucket")?,
+            region: disk.region.clone().unwrap_or_else(|| "us-east-1".into()),
+            endpoint: endpoint.map(str::to_owned),
+            access_key_id: disk.access_key_id.clone().unwrap_or_default(),
+            secret_access_key: disk.secret_access_key.clone().unwrap_or_default(),
+            path_style: disk.path_style.unwrap_or(false),
+        }))),
+        #[cfg(not(feature = "storage-s3"))]
+        "s3" => Err(missing("storage-s3")),
+        #[cfg(feature = "storage-azure")]
+        "azure" => Ok(Arc::new(super::azure::AzureBlobStorage::new(
+            super::azure::AzureConfig {
+                account: need(&disk.account, "account")?,
+                account_key: need(&disk.account_key, "account_key")?,
+                container: need(&disk.container, "container")?,
+                endpoint: endpoint.map(str::to_owned),
+            },
+        )?)),
+        #[cfg(not(feature = "storage-azure"))]
+        "azure" => Err(missing("storage-azure")),
+        other => Err(StorageError::Io(format!(
+            "unknown driver `{other}` (local, s3, azure)"
+        ))),
+    }
+}
+
+/// A disk whose links point at `public_endpoint`: reads and writes go to
+/// `store`, URLs come from `presign`, a copy built for the address
+/// browsers reach.
+#[cfg(feature = "config")]
+struct PresignVia {
+    store: BoxedStorage,
+    presign: BoxedStorage,
+}
+
+#[cfg(feature = "config")]
+#[async_trait::async_trait]
+impl super::Storage for PresignVia {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), super::StorageError> {
+        self.store.save(key, data).await
+    }
+
+    async fn save_with_content_type(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<(), super::StorageError> {
+        self.store
+            .save_with_content_type(key, data, content_type)
+            .await
+    }
+
+    async fn load(&self, key: &str) -> Result<Vec<u8>, super::StorageError> {
+        self.store.load(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), super::StorageError> {
+        self.store.delete(key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, super::StorageError> {
+        self.store.exists(key).await
+    }
+
+    fn url(&self, key: &str) -> Option<String> {
+        self.presign.url(key)
+    }
+
+    async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
+        self.presign.presigned_get_url(key, ttl).await
+    }
+
+    async fn presigned_put_url(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+        put: &super::PutConditions,
+    ) -> Option<String> {
+        self.presign.presigned_put_url(key, ttl, put).await
+    }
+
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        self.presign.presigned_put_enforces_conditions()
+    }
+
+    fn presigned_put_headers(
+        &self,
+        put: &super::PutConditions,
+    ) -> std::collections::BTreeMap<String, String> {
+        self.presign.presigned_put_headers(put)
+    }
+
+    async fn metadata(&self, key: &str) -> Result<Option<super::ObjectMeta>, super::StorageError> {
+        self.store.metadata(key).await
     }
 }
 
@@ -352,6 +536,144 @@ mod tests {
         assert!(s.contains("\"a\""));
         assert!(s.contains("\"b\""));
         assert!(s.contains("Some(\"a\")"));
+    }
+
+    #[cfg(feature = "config")]
+    fn settings(toml: &str) -> crate::config::StorageSettings {
+        toml::from_str(toml).unwrap()
+    }
+
+    /// Several S3 disks, and other drivers, side by side.
+    #[cfg(all(feature = "config", feature = "storage-s3"))]
+    #[tokio::test]
+    async fn from_settings_builds_every_disk() {
+        let r = StorageRegistry::from_settings(&settings(
+            r#"
+            default = "uploads"
+            [disks.uploads]
+            driver = "s3"
+            bucket = "up"
+            endpoint = "http://minio:9000"
+            public_endpoint = "https://files.example.com"
+            path_style = true
+            [disks.archive]
+            driver = "s3"
+            bucket = "arc"
+            cdn = "https://cdn.example.com/arc"
+            [disks.cache]
+            driver = "local"
+            root = "/tmp/cache"
+            "#,
+        ))
+        .unwrap();
+        assert_eq!(r.names(), ["archive", "cache", "uploads"]);
+        assert_eq!(r.default_name(), Some("uploads"));
+        // Links use the public endpoint, not the in-cluster one.
+        assert_eq!(
+            r.origin_url("uploads", "a.csv").as_deref(),
+            Some("https://files.example.com/up/a.csv")
+        );
+        assert_eq!(
+            r.cdn_url("archive", "x").as_deref(),
+            Some("https://cdn.example.com/arc/x")
+        );
+        // Presigned links are signed for the public endpoint too (tests-005).
+        let up = r.disk("uploads").unwrap();
+        let ttl = std::time::Duration::from_secs(60);
+        let public = "https://files.example.com/up/a.csv?";
+        let get = up.presigned_get_url("a.csv", ttl).await.unwrap();
+        assert!(get.starts_with(public), "{get}");
+        let put = crate::storage::PutConditions::new();
+        let put = up.presigned_put_url("a.csv", ttl, &put).await.unwrap();
+        assert!(put.starts_with(public), "{put}");
+        assert!(up.presigned_put_enforces_conditions());
+    }
+
+    /// tests-005 — reads and writes go to `store`, links to `presign`.
+    #[cfg(all(feature = "config", feature = "storage-s3"))]
+    #[tokio::test]
+    async fn presign_via_stores_in_one_and_signs_with_the_other() {
+        use crate::storage::Storage as _;
+        let disk = settings(
+            r#"
+            [disks.up]
+            driver = "s3"
+            bucket = "up"
+            path_style = true
+            "#,
+        )
+        .disks
+        .remove("up")
+        .unwrap();
+        let via = PresignVia {
+            store: Arc::new(crate::storage::InMemoryStorage::new()),
+            presign: build_disk(&disk, Some("https://files.example.com")).unwrap(),
+        };
+        via.save("a.csv", b"abc").await.unwrap();
+        assert_eq!(via.load("a.csv").await.unwrap(), b"abc");
+        assert_eq!(via.metadata("a.csv").await.unwrap().unwrap().size, 3);
+        let ttl = std::time::Duration::from_secs(60);
+        let get = via.presigned_get_url("a.csv", ttl).await.unwrap();
+        assert!(
+            get.starts_with("https://files.example.com/up/a.csv?"),
+            "{get}"
+        );
+    }
+
+    /// correctness-002 — a name env overrides cannot reach is refused.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_refuses_a_name_env_cannot_reach() {
+        for name in ["Uploads", "user-media"] {
+            let toml = format!("[disks.\"{name}\"]\ndriver = \"local\"\nroot = \"/tmp/x\"\n");
+            let err = StorageRegistry::from_settings(&settings(&toml))
+                .err()
+                .unwrap();
+            assert!(err.to_string().contains("lowercase"), "{err}");
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "storage-azure"))]
+    #[tokio::test]
+    async fn from_settings_builds_an_azure_disk() {
+        let r = StorageRegistry::from_settings(&settings(
+            r#"
+            [disks.blobs]
+            driver = "azure"
+            account = "acct"
+            account_key = "AAAA"
+            container = "media"
+            "#,
+        ))
+        .unwrap();
+        let disk = r.disk("blobs").unwrap();
+        assert_eq!(
+            disk.url("k").as_deref(),
+            Some("https://acct.blob.core.windows.net/media/k")
+        );
+        let put = crate::storage::PutConditions::new();
+        assert!(disk
+            .presigned_put_headers(&put)
+            .contains_key("x-ms-blob-type"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_names_the_disk_that_is_wrong() {
+        let err = |toml: &str| {
+            StorageRegistry::from_settings(&settings(toml))
+                .unwrap_err()
+                .to_string()
+        };
+        let e = err("[disks.x]\ndriver = \"ftp\"");
+        assert!(
+            e.contains("disk `x`") && e.contains("unknown driver"),
+            "{e}"
+        );
+        let e = err("[disks.x]\ndriver = \"local\"");
+        assert!(e.contains("needs `root`"), "{e}");
+        let e = err("default = \"nope\"");
+        assert!(e.contains("`nope` is not a disk"), "{e}");
     }
 
     #[test]

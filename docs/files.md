@@ -13,10 +13,10 @@ once against the trait; switch from local disk to S3 with a one-line change.
 > *presigned URL* — see the [glossary](glossary.md).
 
 > **Source:** `rustango::storage` (`Storage`, `LocalStorage`, `InMemoryStorage`,
-> `s3::S3Storage`, `BoxedStorage`), `rustango::uploads` (`save_uploads`,
+> `s3::S3Storage`, `azure::AzureBlobStorage`, `StorageRegistry`, `BoxedStorage`), `rustango::uploads` (`save_uploads`,
 > `UploadConfig`, `sanitize_filename`), and `rustango::media`
 > (`Media`, `MediaManager`) — behind the `storage` / `uploads` / `storage-s3` /
-> `media` features (all on by default).
+> `storage-azure` / `media` features (all on by default).
 >
 > **Runnable version:** the Storage + upload-guard snippets are copied from
 > [`files_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/files_doc.rs)
@@ -55,6 +55,7 @@ let storage: BoxedStorage = Arc::new(LocalStorage::new(PathBuf::from("./uploads"
 |---|---|---|
 | `LocalStorage` | `storage` | single-server deployments — files on local disk |
 | `S3Storage` | `storage-s3` | production — S3 / R2 / B2 / MinIO object storage |
+| `AzureBlobStorage` | `storage-azure` | production — Azure Blob Storage (Azurite in dev) |
 | `InMemoryStorage` | `storage` | tests — a `HashMap`, never touches disk |
 
 ---
@@ -163,6 +164,73 @@ Your handlers and models don't change; only the wiring at startup does.
 
 ---
 
+## Production: Azure Blob Storage
+
+`AzureBlobStorage` (behind `storage-azure`) signs server calls with the
+account's Shared Key and hands out service SAS URLs for presigned GET and PUT:
+
+```rust
+use rustango::storage::azure::{AzureBlobStorage, AzureConfig};
+
+let key = std::env::var("AZURE_STORAGE_KEY")?; // base64, from the portal
+let cfg = AzureConfig::new("myaccount", key, "uploads");
+// Azurite: cfg.endpoint("http://127.0.0.1:10000/devstoreaccount1")
+let storage: BoxedStorage = Arc::new(AzureBlobStorage::new(cfg)?);
+```
+
+Differences from S3 a direct upload has to respect:
+
+- The browser must send every header in `storage.presigned_put_headers(&put)`,
+  which adds `x-ms-blob-type: BlockBlob`. The account's CORS rule must allow it
+  along with `Content-Type` and `If-None-Match`.
+- A SAS cannot sign headers, so size and type are not enforced by the URL.
+  Confirm the upload with `metadata`. `MediaManager::begin_upload` refuses an
+  Azure disk; upload through the server with `save_bytes`. A create-only PUT is
+  granted `c` without `w`, so the URL still cannot replace a blob.
+- A single PUT holds up to 5000 MiB.
+
+---
+
+## Several disks from config
+
+One app can mix backends — two S3 buckets, an Azure container, a local cache —
+as named disks. Declare them in `[storage]` and build a `StorageRegistry`:
+
+```toml
+[storage]
+default = "uploads"
+
+[storage.disks.uploads]
+driver          = "azure"
+account         = "myaccount"
+container       = "uploads"
+public_endpoint = "https://files.example.com"   # optional: links browsers follow
+
+[storage.disks.archive]
+driver = "s3"
+bucket = "archive"
+region = "eu-west-1"
+cdn    = "https://cdn.example.com/archive"
+
+[storage.disks.cache]
+driver = "local"
+root   = "./var/cache"
+```
+
+```rust
+let registry = StorageRegistry::from_settings(&settings.storage)?;
+let uploads = registry.default_disk().expect("default disk");
+```
+
+Keys stay out of the file: `RUSTANGO__STORAGE__DISKS__UPLOADS__ACCOUNT_KEY`,
+`RUSTANGO__STORAGE__DISKS__ARCHIVE__SECRET_ACCESS_KEY`. Disk names are lowercase
+`[a-z0-9_]` so these overrides can reach them. A driver whose feature is
+not compiled in is an error naming the disk, not a silently missing disk.
+`public_endpoint` makes presigned URLs and `url()` point at the address browsers
+reach, while reads and writes keep using `endpoint`.
+
+---
+
 ## The media library
 
 When files are first-class records — tracked in the database, browsable in the
@@ -175,8 +243,8 @@ supports two upload flows:
 - **Direct-to-storage:** `manager.begin_upload(...)` returns a **presigned PUT**
   URL the browser uploads to directly (your server never proxies the bytes),
   then you confirm the row. The PUT must send every header in
-  `ticket.headers` (`Content-Type`, `If-None-Match: *`), so the bucket's CORS
-  rule must allow both. The URL can create the object once and never replace it.
+  `ticket.headers` (`Content-Type`, `If-None-Match: *`, and `x-ms-blob-type` on
+  Azure), so the bucket's CORS rule must allow them. The URL can create the object once and never replace it.
   Grant `s3:ListBucket` too: without it S3 answers a missing object with 403,
   and finalize returns 502 instead of marking the row `Failed`.
 
@@ -328,14 +396,14 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 
 **`Storage` trait:** `save(key, &bytes)` · `load(key)` · `delete(key)` ·
 `exists(key)` · `url(key) -> Option<String>`, plus defaulted `save_with_content_type`,
-`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)` and `metadata(key)`
+`presigned_get_url(key, ttl)`, `presigned_put_url(key, ttl, &put)`, `presigned_put_headers(&put)` and `metadata(key)`
 (a signing backend overrides the presign pair; the defaults return `None`).
 
 **`UploadConfig`:** `new(prefix)` · `.max_bytes(n)` · `.max_files(n)` · `.allowed_extensions(&[..])`
 (case-insensitive) · `.randomize_filename(bool)`. Used by
 `save_uploads(multipart, &cfg, &storage)`.
 
-**Backends:** `LocalStorage` (disk) · `S3Storage` (object storage, `storage-s3`)
+**Backends:** `LocalStorage` (disk) · `S3Storage` (object storage, `storage-s3`) · `AzureBlobStorage` (`storage-azure`)
 · `InMemoryStorage` (tests). All return a `BoxedStorage`.
 
 ---

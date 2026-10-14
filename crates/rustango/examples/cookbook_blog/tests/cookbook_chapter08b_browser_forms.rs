@@ -20,7 +20,9 @@ const APEX: &str = "localhost";
 const SESSION_SECRET: &str = "cookbook-chapter8b-test-32bytes-please!!!!";
 const DB_NAME: &str = "cookbook_ch8b_dev";
 
-fn url() -> Option<String> { std::env::var("DATABASE_URL").ok() }
+fn url() -> Option<String> {
+    std::env::var("DATABASE_URL").ok()
+}
 
 async fn db_url() -> Option<String> {
     let base = url()?;
@@ -31,7 +33,9 @@ async fn db_url() -> Option<String> {
 
 async fn reset_db() {
     let Some(base) = url() else { return };
-    let admin_pool = sqlx::PgPool::connect(&base).await.expect("connect to admin db");
+    let admin_pool = sqlx::PgPool::connect(&base)
+        .await
+        .expect("connect to admin db");
     // Terminate any lingering connections to the test DB before DROP,
     // otherwise Postgres rejects with 55006 ("being accessed by other
     // users"). Matches chapter06b's reset_db.
@@ -42,9 +46,13 @@ async fn reset_db() {
     .execute(&admin_pool)
     .await;
     sqlx::query(&format!("DROP DATABASE IF EXISTS {DB_NAME}"))
-        .execute(&admin_pool).await.unwrap();
+        .execute(&admin_pool)
+        .await
+        .unwrap();
     sqlx::query(&format!("CREATE DATABASE {DB_NAME}"))
-        .execute(&admin_pool).await.unwrap();
+        .execute(&admin_pool)
+        .await
+        .unwrap();
 }
 
 fn manage(verb: &str, args: &[&str], db: &str) -> std::process::Output {
@@ -98,23 +106,49 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
 
     // Bootstrap registry + tenants.
     let m = manage("migrate", &[], &db);
-    assert!(m.status.success(), "manage migrate: {}", String::from_utf8_lossy(&m.stderr));
-    let m = manage("create-operator", &["admin", "--password", "letmein"], &db);
-    assert!(m.status.success(), "create-operator: {}", String::from_utf8_lossy(&m.stderr));
+    assert!(
+        m.status.success(),
+        "manage migrate: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
+    let m = manage(
+        "create-operator",
+        &["admin", "--skip-validation", "--password", "letmein"],
+        &db,
+    );
+    assert!(
+        m.status.success(),
+        "create-operator: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
     for slug in ["acme", "globex"] {
         let m = manage(
             "create-tenant",
-            &[slug, "--display-name", slug, "--host-pattern", &format!("{slug}.{APEX}")],
+            &[
+                slug,
+                "--display-name",
+                slug,
+                "--host-pattern",
+                &format!("{slug}.{APEX}"),
+            ],
             &db,
         );
-        assert!(m.status.success(), "create-tenant {slug}: {}", String::from_utf8_lossy(&m.stderr));
+        assert!(
+            m.status.success(),
+            "create-tenant {slug}: {}",
+            String::from_utf8_lossy(&m.stderr)
+        );
     }
     let m = manage(
         "create-user",
         &["acme", "alice", "--password", "tenantpw", "--superuser"],
         &db,
     );
-    assert!(m.status.success(), "create-user: {}", String::from_utf8_lossy(&m.stderr));
+    assert!(
+        m.status.success(),
+        "create-user: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
 
     // Boot the server.
     let mut server = spawn_server(&db);
@@ -133,8 +167,12 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
         let html = client
             .get(format!("http://{BIND}/login"))
             .header("Host", "acme.localhost")
-            .send().await.unwrap()
-            .text().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
         html.split(r#"name="_csrf" value=""#)
             .nth(1)
             .and_then(|rest| rest.split('"').next())
@@ -150,25 +188,30 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
         .post(format!("http://{BIND}/login"))
         .header("Host", "acme.localhost")
         .form(&login_body)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert!(
         resp.status().is_redirection() || resp.status().is_success(),
-        "login status: {}", resp.status()
+        "login status: {}",
+        resp.status()
     );
 
     // 2. POST the admin create form for cookbook_author. It echoes the
     // same CSRF token: admin writes check it too (#1713).
     let create_body = [
-        ("name",  "ada lovelace"),
+        ("name", "ada lovelace"),
         ("email", "ada@example.com"),
-        ("bio",   "first programmer"),
+        ("bio", "first programmer"),
         ("_csrf", csrf.as_str()),
     ];
     let resp = client
         .post(format!("http://{BIND}/admin/cookbook_author"))
         .header("Host", "acme.localhost")
         .form(&create_body)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert!(
         resp.status().is_redirection() || resp.status().is_success(),
         "create POST status: {} body: {}",
@@ -180,10 +223,18 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
     let acme_list: serde_json::Value = client
         .get(format!("http://{BIND}/api/authors"))
         .header("Host", "acme.localhost")
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let arr = acme_list.as_array().expect("array");
-    assert_eq!(arr.len(), 1, "acme should have exactly the row we just created via the admin");
+    assert_eq!(
+        arr.len(),
+        1,
+        "acme should have exactly the row we just created via the admin"
+    );
     assert_eq!(arr[0]["name"], "ada lovelace");
     assert_eq!(arr[0]["email"], "ada@example.com");
 
@@ -191,18 +242,30 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
     let globex_list: serde_json::Value = client
         .get(format!("http://{BIND}/api/authors"))
         .header("Host", "globex.localhost")
-        .send().await.unwrap()
-        .json().await.unwrap();
-    assert_eq!(globex_list.as_array().unwrap().len(), 0,
-        "globex should not see acme's row");
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        globex_list.as_array().unwrap().len(),
+        0,
+        "globex should not see acme's row"
+    );
 
     // 5. Apex (no tenant subdomain) refuses tenant-scoped routes.
     let apex_resp = client
         .get(format!("http://{BIND}/api/authors"))
         .header("Host", "localhost")
-        .send().await.unwrap();
-    assert_eq!(apex_resp.status().as_u16(), 404,
-        "apex must not serve tenant-scoped routes");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        apex_resp.status().as_u16(),
+        404,
+        "apex must not serve tenant-scoped routes"
+    );
 
     let _ = server.kill();
     let _ = server.wait();
