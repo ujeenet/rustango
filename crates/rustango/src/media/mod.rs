@@ -436,6 +436,14 @@ impl MediaManager {
     /// URLs. `Other` for a negative size or one over the upload limit.
     pub async fn begin_upload(&self, intent: UploadIntent) -> Result<UploadTicket, MediaError> {
         let storage = self.resolve_disk(&intent.disk)?;
+        // The URL is the only check until finalize, which the client may skip.
+        if !storage.presigned_put_enforces_conditions() {
+            return Err(MediaError::Other(format!(
+                "disk `{}` cannot hold a direct upload to its size and type \
+                 (use save_bytes instead)",
+                intent.disk
+            )));
+        }
         let size = u64::try_from(intent.size_bytes).map_err(|_| {
             MediaError::Other(format!("negative size_bytes: {}", intent.size_bytes))
         })?;

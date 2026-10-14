@@ -134,6 +134,13 @@ pub trait Storage: Send + Sync + 'static {
         None
     }
 
+    /// `true` when a [`Self::presigned_put_url`] refuses a body of another
+    /// size or type than `put`. Azure SAS cannot, so media gives such a
+    /// disk no direct-upload ticket. A wrapper must forward it.
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        true
+    }
+
     /// The headers a client must send with a [`Self::presigned_put_url`]
     /// upload. The default is [`PutConditions::headers`]; Azure adds
     /// `x-ms-blob-type`.

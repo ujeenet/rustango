@@ -32,7 +32,8 @@
 //!
 //! - Sign headers into a SAS: Azure has no way to. The type and size in
 //!   [`PutConditions`] are not enforced by the URL, so confirm a direct
-//!   upload with [`Storage::metadata`], as `media` does.
+//!   upload with [`Storage::metadata`]. `media` gives no direct-upload
+//!   ticket on an Azure disk; use `save_bytes`.
 //! - Microsoft Entra ID (user delegation SAS), staged block uploads,
 //!   listing.
 
@@ -436,6 +437,11 @@ impl Storage for AzureBlobStorage {
         self.sas_url(key, permissions, ttl).ok()
     }
 
+    /// A SAS cannot sign headers, so the size and type are not held.
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        false
+    }
+
     fn presigned_put_headers(
         &self,
         put: &PutConditions,
@@ -685,6 +691,7 @@ mod tests {
         );
         assert_eq!(h.get("if-none-match").map(String::as_str), Some("*"));
         assert_eq!(h.get("content-type").map(String::as_str), Some("text/csv"));
+        assert!(!s.presigned_put_enforces_conditions());
     }
 
     /// Answer one request with `status`; yields the raw request head.

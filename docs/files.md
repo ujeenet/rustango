@@ -184,7 +184,8 @@ Differences from S3 a direct upload has to respect:
   which adds `x-ms-blob-type: BlockBlob`. The account's CORS rule must allow it
   along with `Content-Type` and `If-None-Match`.
 - A SAS cannot sign headers, so size and type are not enforced by the URL.
-  Confirm the upload with `metadata` (`MediaManager` does). A create-only PUT is
+  Confirm the upload with `metadata`. `MediaManager::begin_upload` refuses an
+  Azure disk; upload through the server with `save_bytes`. A create-only PUT is
   granted `c` without `w`, so the URL still cannot replace a blob.
 - A single PUT holds up to 5000 MiB.
 

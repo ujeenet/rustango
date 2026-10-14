@@ -321,6 +321,10 @@ impl super::Storage for PresignVia {
         self.presign.presigned_put_url(key, ttl, put).await
     }
 
+    fn presigned_put_enforces_conditions(&self) -> bool {
+        self.presign.presigned_put_enforces_conditions()
+    }
+
     fn presigned_put_headers(
         &self,
         put: &super::PutConditions,

@@ -52,6 +52,10 @@ Each row's map is sized up front. The owned key per cell stays: it is part of th
 
 The headers a direct upload must send. Defaults to `PutConditions::headers`; Azure adds `x-ms-blob-type`. `MediaManager::begin_upload` uses it for `ticket.headers`.
 
+### Added — `Storage::presigned_put_enforces_conditions`
+
+`false` on Azure, whose SAS cannot hold the size and type; `MediaManager::begin_upload` refuses such a disk instead of issuing an unbounded upload URL. Wrappers must forward it.
+
 ## [0.60.6] — 2026-10-10
 
 ### Fixed — `migrate` fits a 2 MiB stack again (#2305)
