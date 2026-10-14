@@ -355,14 +355,13 @@ impl LoginThrottle {
                 return Err(throttled(secs));
             }
         };
-        Ok(LoginAttempt {
+        Ok(LoginAttempt(Some(Held {
             buckets: Arc::clone(b),
             scope_key,
             ip: ip.0.clone(),
             spent: (ip_spent, global_spent),
             keys,
-            reported: false,
-        })
+        })))
     }
 
     /// Run a signed-in user's current-password check through the gate, so a
@@ -424,8 +423,14 @@ async fn release_locks(keys: &[String]) {
 }
 
 /// One admitted attempt. Report [`Self::failed`] or [`Self::succeeded`].
+/// `None` once reported; an unreported attempt (busy, DB error) is given
+/// back on drop, as it checked nothing.
 #[must_use = "report the outcome, or failures never lock the account"]
-pub struct LoginAttempt {
+pub struct LoginAttempt(Option<Held>);
+
+/// What an admitted attempt holds. No `Drop`, so a refund that never runs
+/// (runtime shutting down) cannot re-enter [`LoginAttempt`]'s.
+struct Held {
     buckets: Arc<Buckets>,
     scope_key: String,
     ip: Option<String>,
@@ -433,32 +438,24 @@ pub struct LoginAttempt {
     spent: (Spent, Spent),
     /// Account-lock keys: the submitted name, then the stored one.
     keys: Vec<String>,
-    /// `false` until an outcome is reported; an unreported attempt
-    /// (busy, DB error) is given back on drop, as it checked nothing.
-    reported: bool,
 }
 
 impl Drop for LoginAttempt {
     fn drop(&mut self) {
-        if self.reported {
+        let Some(held) = self.0.take() else {
             return;
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(held.release());
         }
-        let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let attempt = LoginAttempt {
-            buckets: Arc::clone(&self.buckets),
-            scope_key: std::mem::take(&mut self.scope_key),
-            ip: self.ip.take(),
-            spent: self.spent,
-            keys: std::mem::take(&mut self.keys),
-            reported: false,
-        };
-        rt.spawn(attempt.prompted());
     }
 }
 
 impl LoginAttempt {
+    fn held(&mut self) -> Held {
+        self.0.take().expect("a LoginAttempt is reported once")
+    }
+
     /// Call once the row is found, before the password check, with the
     /// username as stored. Every spelling that finds this row then shares
     /// its lock.
@@ -466,13 +463,16 @@ impl LoginAttempt {
     /// # Errors
     /// [`LoginRefused::Throttled`] while the stored username is locked.
     pub async fn resolve(&mut self, stored_username: &str) -> Result<(), LoginRefused> {
-        if self.keys.is_empty() {
+        let Some(held) = self.0.as_mut() else {
+            return Ok(());
+        };
+        if held.keys.is_empty() {
             return Ok(());
         }
-        let key = account_key(&self.scope_key, stored_username);
-        if !self.keys.contains(&key) {
+        let key = account_key(&held.scope_key, stored_username);
+        if !held.keys.contains(&key) {
             reserve_lock(&key).await?;
-            self.keys.push(key);
+            held.keys.push(key);
         }
         Ok(())
     }
@@ -480,29 +480,35 @@ impl LoginAttempt {
     /// Count a failure against the username, known or not. `begin`
     /// already counted it; this keeps the tokens and may lock the account.
     pub async fn failed(mut self) {
-        self.reported = true;
+        let held = self.held();
         let lockout = crate::account_lockout::shared();
-        for key in &self.keys {
+        for key in &held.keys {
             lockout.reserved_failed(key).await;
         }
     }
 
     /// Clear the username's failures and give back the limit tokens.
     pub async fn succeeded(mut self) {
-        self.reported = true;
+        let held = self.held();
         let lockout = crate::account_lockout::shared();
-        for key in &self.keys {
+        for key in &held.keys {
             if lockout.attempt_count(key).await > 0 {
                 lockout.clear(key).await;
             }
         }
-        self.give_back().await;
+        held.give_back().await;
     }
 
     /// The password was right and the form now asks for a second
     /// factor: give back the limit tokens, keep the username's failures.
     pub async fn prompted(mut self) {
-        self.reported = true;
+        self.held().release().await;
+    }
+}
+
+impl Held {
+    /// Give back everything `begin` reserved.
+    async fn release(self) {
         release_locks(&self.keys).await;
         self.give_back().await;
     }
@@ -803,6 +809,27 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }
+    }
+
+    /// tests-001 — an attempt dropped while its runtime shuts down must
+    /// not recurse through `Drop` (stack overflow).
+    #[test]
+    fn an_attempt_dropped_at_runtime_shutdown_does_not_recurse() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let t = LoginThrottle::new(LoginLimits::default());
+            let a = t.begin(&tenant("t-shutdown"), &ip("10.9.14.1"), "u").await;
+            let a = a.unwrap();
+            tokio::spawn(async move {
+                let _held = a;
+                std::future::pending::<()>().await;
+            });
+            tokio::task::yield_now().await;
+        });
+        drop(rt);
     }
 
     /// Succeeding attempts give the account reservation back.
