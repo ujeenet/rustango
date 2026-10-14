@@ -2,7 +2,6 @@
 //! while, but a password change or a deactivation is never masked.
 
 #![cfg(all(feature = "tenancy", feature = "admin", feature = "testkit"))]
-#![allow(irrefutable_let_patterns)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,6 +25,13 @@ fn unique(pool: &Pool, prefix: &str) -> String {
         std::process::id(),
         UNIQ.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+async fn setup(pool: &Pool) {
+    // Shared with other suites: create what is missing, never drop.
+    rustango::testkit::migrate_framework(pool)
+        .await
+        .expect("framework tables");
 }
 
 fn parts(user: &str, pass: &str) -> Parts {
@@ -108,7 +114,7 @@ async fn a_deactivation_is_not_masked(pool: &Pool) {
 }
 
 tri_dialect_test! {
-    model: User,
+    setup: setup,
     scenarios: [
         a_hit_skips_argon2_until_the_password_changes,
         a_deactivation_is_not_masked,
