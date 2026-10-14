@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The ping cost 8–16% of request CPU. New `[database].pool_test_before_acquire` / `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` turns it back on; the default is off on all three backends.
 
+### Performance — `CachePageLayer` stores pages as a binary frame (#2656)
+
+A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_bytes` default to base64 over `get`/`set`; `InMemoryCache`, `FileCache`, `RedisCache` and `ScopedCache` store raw bytes.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

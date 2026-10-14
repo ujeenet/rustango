@@ -26,8 +26,8 @@ use super::{Cache, CacheError};
 
 /// Async cache backed by Redis.
 ///
-/// Values are UTF-8 strings, either raw or JSON from
-/// [`super::set_json`]. A TTL becomes `SET PX`.
+/// Values are UTF-8 strings, or raw bytes through `set_bytes`.
+/// A TTL becomes `SET PX`.
 pub struct RedisCache {
     conn: redis::aio::ConnectionManager,
     default_ttl: Option<Duration>,
@@ -84,7 +84,25 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
+    async fn get_bytes(&self, key: &str) -> Result<Option<bytes::Bytes>, CacheError> {
+        let mut conn = self.conn.clone();
+        conn.get::<_, Option<Vec<u8>>>(key)
+            .await
+            .map(|v| v.map(Into::into))
+            .map_err(|e| CacheError::Connection(e.to_string()))
+    }
+
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        self.set_bytes(key, value.as_bytes(), ttl).await
+    }
+
+    /// Raw bytes: Redis strings are binary-safe.
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         match self.effective_ttl_ms(ttl) {
             Some(ms) => conn

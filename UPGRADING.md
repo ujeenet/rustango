@@ -154,6 +154,10 @@ untouched.
 
 `test_before_acquire` is now off: a connection the server dropped while idle fails one query, then sqlx discards it. sqlx's 10 min idle / 30 min lifetime bounds still recycle connections; set `pool_test_before_acquire = true` or `RUSTANGO_DB_TEST_BEFORE_ACQUIRE=true` to restore the ping. `PoolTuning` and `DatabaseSettings` gain a field, so struct literals need it or `..Default::default()`.
 
+### Page-cache entries change format (#2656)
+
+`CachePageLayer` writes a binary frame through the new `Cache::set_bytes`; entries in the old JSON format are a miss and get overwritten, so the first request per page after the deploy recomputes (during a rolling deploy, old and new replicas each see the other's entries as misses). `get` on a key written with `set_bytes` is an error when the bytes are not UTF-8. A custom `Cache` backend keeps compiling (the new methods have base64 defaults); override them to store raw bytes.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

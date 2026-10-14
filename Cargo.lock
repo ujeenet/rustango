@@ -2240,6 +2240,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "chacha20poly1305",
  "chrono",
  "ciborium",
