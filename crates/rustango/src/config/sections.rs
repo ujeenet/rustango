@@ -61,6 +61,11 @@ pub struct Settings {
     /// `[mcp]`: Model Context Protocol server. Does nothing unless
     /// the `mcp` feature is compiled in.
     pub mcp: McpSettings,
+
+    /// `[storage]`: named file storage disks. User-wired: only
+    /// `storage::StorageRegistry::from_settings` reads it.
+    pub storage: StorageSettings,
+
     /// `[sso]`: **has no effect yet** — nothing reads it (#1379).
     /// Configure admin SSO in the admin UI instead.
     pub sso: SsoSettings,
@@ -119,6 +124,7 @@ impl Settings {
         feat!("email");
         feat!("storage");
         feat!("storage-s3");
+        feat!("storage-azure");
         feat!("scheduler");
         feat!("secrets");
         feat!("totp");
@@ -509,6 +515,73 @@ pub struct MailSettings {
     pub file_email_dir: Option<std::path::PathBuf>,
 }
 
+/// Named storage disks, built into a registry by
+/// `storage::StorageRegistry::from_settings`.
+///
+/// ```toml
+/// [storage]
+/// default = "uploads"
+///
+/// [storage.disks.uploads]
+/// driver    = "azure"             # needs the `storage-azure` feature
+/// account   = "myaccount"
+/// container = "uploads"
+///
+/// [storage.disks.archive]
+/// driver = "s3"                   # needs the `storage-s3` feature
+/// bucket = "archive"
+/// region = "us-east-1"
+///
+/// [storage.disks.cache]
+/// driver = "local"
+/// root   = "./var/cache"
+/// ```
+///
+/// Keep keys out of the file: `RUSTANGO__STORAGE__DISKS__UPLOADS__ACCOUNT_KEY`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StorageSettings {
+    /// The disk `StorageRegistry::default_disk` returns.
+    pub default: Option<String>,
+    /// Disks by name.
+    pub disks: std::collections::BTreeMap<String, DiskSettings>,
+}
+
+/// One storage disk. `driver` picks which of the other keys apply.
+#[derive(Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DiskSettings {
+    /// `"local"`, `"s3"` or `"azure"`.
+    pub driver: String,
+    /// CDN base URL for `StorageRegistry::cdn_url`.
+    pub cdn: Option<String>,
+    /// local: directory files live under.
+    pub root: Option<String>,
+    /// local: public URL prefix.
+    pub base_url: Option<String>,
+    /// s3, azure: a non-default endpoint (`MinIO`, R2, Azurite, a sovereign cloud).
+    pub endpoint: Option<String>,
+    /// s3, azure: the endpoint browsers reach, when it is not `endpoint`.
+    /// Presigned URLs are built for it.
+    pub public_endpoint: Option<String>,
+    /// s3: bucket.
+    pub bucket: Option<String>,
+    /// s3: region. Default `us-east-1`.
+    pub region: Option<String>,
+    /// s3: access key id.
+    pub access_key_id: Option<String>,
+    /// s3: secret access key. Set it through an env var.
+    pub secret_access_key: Option<String>,
+    /// s3: bucket in the path instead of the host (`MinIO`, R2).
+    pub path_style: Option<bool>,
+    /// azure: storage account name.
+    pub account: Option<String>,
+    /// azure: base64 account key. Set it through an env var.
+    pub account_key: Option<String>,
+    /// azure: blob container.
+    pub container: Option<String>,
+}
+
 /// HTTP bind address and request timeout.
 ///
 /// `RUSTANGO_BIND` is still read when `bind` is unset. Set both while
@@ -897,6 +970,27 @@ impl std::fmt::Debug for MailSettings {
             .field("admins", &self.admins)
             .field("managers", &self.managers)
             .field("file_email_dir", &self.file_email_dir)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DiskSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiskSettings")
+            .field("driver", &self.driver)
+            .field("cdn", &self.cdn)
+            .field("root", &self.root)
+            .field("base_url", &self.base_url)
+            .field("endpoint", &self.endpoint)
+            .field("public_endpoint", &self.public_endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &redacted(&self.secret_access_key))
+            .field("path_style", &self.path_style)
+            .field("account", &self.account)
+            .field("account_key", &redacted(&self.account_key))
+            .field("container", &self.container)
             .finish()
     }
 }

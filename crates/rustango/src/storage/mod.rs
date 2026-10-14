@@ -27,17 +27,27 @@
 //! | [`LocalStorage`] | One server: files on local disk |
 //! | [`InMemoryStorage`] | Tests: files in a `HashMap`, never on disk |
 //! | [`s3::S3Storage`] | S3, R2, B2, MinIO, or any S3-compatible API. Behind the `storage-s3` feature. |
+//! | [`azure::AzureBlobStorage`] | Azure Blob Storage or Azurite. Behind the `storage-azure` feature. |
 //! | Anything else | Implement `Storage` over the SDK you want |
 //!
 //! They all share one trait, so you can pick a backend at startup
-//! without changing the code that uses it.
+//! without changing the code that uses it. Several can run side by side
+//! as named disks in a [`StorageRegistry`], built in code or from the
+//! `[storage]` config section.
 //!
 //! [`LocalStorage`]: crate::storage::LocalStorage
 //! [`InMemoryStorage`]: crate::storage::InMemoryStorage
 //! [`s3::S3Storage`]: crate::storage::s3::S3Storage
+//! [`azure::AzureBlobStorage`]: crate::storage::azure::AzureBlobStorage
 
 #[cfg(feature = "storage-s3")]
 pub mod s3;
+
+#[cfg(feature = "storage-azure")]
+pub mod azure;
+
+#[cfg(any(feature = "storage-s3", feature = "storage-azure"))]
+mod transport;
 
 pub mod registry;
 pub use registry::StorageRegistry;
@@ -109,10 +119,12 @@ pub trait Storage: Send + Sync + 'static {
     }
 
     /// A PUT URL that expires, so a browser can upload straight to
-    /// the backend. Everything in `put` is signed, so the browser must
-    /// send [`PutConditions::headers`] and a body of the signed length.
+    /// the backend. The browser must send every header in
+    /// [`Self::presigned_put_headers`].
     ///
-    /// `None` on a backend that cannot sign.
+    /// S3 signs everything in `put`, so it refuses another size or type.
+    /// Azure SAS cannot sign headers: there, confirm the upload with
+    /// [`Self::metadata`]. `None` on a backend that cannot sign.
     async fn presigned_put_url(
         &self,
         _key: &str,
@@ -120,6 +132,16 @@ pub trait Storage: Send + Sync + 'static {
         _put: &PutConditions,
     ) -> Option<String> {
         None
+    }
+
+    /// The headers a client must send with a [`Self::presigned_put_url`]
+    /// upload. The default is [`PutConditions::headers`]; Azure adds
+    /// `x-ms-blob-type`.
+    fn presigned_put_headers(
+        &self,
+        put: &PutConditions,
+    ) -> std::collections::BTreeMap<String, String> {
+        put.headers()
     }
 
     /// What the backend holds at `key`, or `None` when nothing is there.
