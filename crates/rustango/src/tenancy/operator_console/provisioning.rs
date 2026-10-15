@@ -619,6 +619,11 @@ pub(super) async fn provision_run_stream(
         let started = std::time::Instant::now();
 
         loop {
+            // A logout, deactivation or idle expiry ends the stream too (#1344).
+            if !matches!(super::active_session(&state, &headers).await, Ok(Some(_))) {
+                yield Item::Ok(Event::default().event("error").data("session ended; sign in again"));
+                return;
+            }
             match store::events_since(&registry, run_id, last).await {
                 Ok(events) => {
                     for event in events {

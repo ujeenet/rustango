@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — console sessions idle out; run streams end with the session (#1344)
+
+An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `SESSION_TTL_SECS` (now 12 h, was 7 days) after sign-in; each request re-issues the cookie. The provisioning SSE stream re-checks the session on every poll. New `session::SESSION_IDLE_SECS`, `SessionPayload::renewed`.
+
 ### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
 
 `tenancy::operators::set_active(false)` stamps `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.

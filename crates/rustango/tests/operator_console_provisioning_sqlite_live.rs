@@ -1301,3 +1301,57 @@ async fn a_failed_connection_check_withholds_the_driver_text() {
         assert!(!html.contains("unable to open"), "{page} leaked: {html}");
     }
 }
+
+/// #1344 — a run stream ends when its session does, not after 30 minutes.
+#[tokio::test]
+async fn the_stream_ends_when_the_session_does() {
+    let b = boot().await;
+    let registry = b.pools.registry_pool();
+    let run = rustango::tenancy::provision_store::open_run(
+        &registry,
+        &unique("unfinished"),
+        "database",
+        "sqlite",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("open run");
+    let id = run.id.get().copied().unwrap();
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/orgs/provision/{id}/stream"))
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let logout = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header("cookie", "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(logout.status().is_redirection(), "{}", logout.status());
+
+    let body = tokio::time::timeout(std::time::Duration::from_secs(10), body_of(resp))
+        .await
+        .expect("the stream must end with the session");
+    assert!(body.contains("session ended"), "{body}");
+}

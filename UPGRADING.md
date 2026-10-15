@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Operator console sessions are shorter (#1344)
+
+Console sessions now end after 30 minutes idle or 12 hours after sign-in (`tenancy::session::SESSION_TTL_SECS` was 7 days). `session::decode` refuses a cookie older than that cap whatever its `exp`, so cookies issued before the upgrade more than 12 hours ago need a fresh sign-in.
+
 ### Operator deactivation signs out; self-reset moved (#1342)
 
 Deactivating an operator (console or CLI) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
