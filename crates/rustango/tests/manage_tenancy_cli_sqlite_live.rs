@@ -267,6 +267,17 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
     }
 }
 
+/// Tenant-scoped files are marked from the tenant ledgers, not the
+/// registry's, where they never land (#1311).
+#[tokio::test]
+async fn showmigrations_reads_the_tenant_ledgers() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(out.contains("[X] 0001_reg"), "{out}");
+    assert!(out.contains("[X] 0002_ten (1/1 tenants)"), "{out}");
+}
+
 /// An unreachable tenant fails `prewarm-pools` and `audit-cleanup` (#1312).
 #[tokio::test]
 async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {

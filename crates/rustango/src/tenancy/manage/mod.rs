@@ -394,6 +394,7 @@ where
         )
         .await
         .map_err(TenancyError::Migrate),
+        "showmigrations" | "status" => migrations::showmigrations_cmd(pools, dir, writer).await,
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped

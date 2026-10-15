@@ -216,6 +216,28 @@ where
     Ok(out)
 }
 
+/// `showmigrations`: registry-scoped files from the registry ledger,
+/// tenant-scoped ones from every tenant's (#1311).
+pub(super) async fn showmigrations_cmd<W: Write, DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let ledgers = tenant_ledgers(pools).await.map_err(TenancyError::Migrate)?;
+    rustango::migrate::manage::showmigrations_with(
+        &pools.registry_pool(),
+        dir,
+        &rustango::migrate::manage::SystemView::registry(dir),
+        Some(&ledgers),
+        w,
+    )
+    .await
+    .map_err(TenancyError::Migrate)
+}
+
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
 pub(super) fn tenant_failures(failed: usize, total: usize) -> Result<(), TenancyError> {
     if failed == 0 {
@@ -415,7 +437,21 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use rustango::migrate::MigrationScope;
-    if let Some(target) = args.iter().find(|a| !a.starts_with('-')) {
+    let target = args.iter().find(|a| !a.starts_with('-'));
+    if target.is_none() && args.iter().any(|a| a == "--dry-run") {
+        // The registry's system chain is registry-scoped (#1311).
+        let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
+        let system = rustango::migrate::manage::SystemView::registry(dir);
+        return rustango::migrate::manage::migrate_dry_run_cmd(
+            &pools.registry_pool(),
+            scoped.path(dir),
+            &system,
+            w,
+        )
+        .await
+        .map_err(TenancyError::Migrate);
+    }
+    if let Some(target) = target {
         let all = rustango::migrate::file::list_dir(dir)?;
         if all
             .iter()

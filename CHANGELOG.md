@@ -16,6 +16,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 Each row carries its links as `"<relation>": [pk, ...]` in `fields`; `loaddata` inserts them after every row, so both ends exist.
 
+### Fixed — `showmigrations`, `migrate --dry-run` and `sqlmigrate` match `migrate` (#1311)
+
+They read the ledgers as `migrate` does: a file replaced by an applied squash counts as applied, a squash `migrate` would only record previews no DDL, and the framework's system chain is listed and previewed. `--dry-run` no longer creates the ledger. Under tenancy, `showmigrations` marks tenant-scoped files from the tenant ledgers. New `migrate_dry_run_pool_with_ledger` re-export.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

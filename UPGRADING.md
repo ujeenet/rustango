@@ -162,6 +162,10 @@ untouched.
 
 Rows of a model with an auto-created M2M relation get a `"<relation>": [pk, ...]` field. Older fixtures still load; a tool that reads fixtures should ignore the new keys.
 
+### `showmigrations` and `migrate --dry-run` output (#1311)
+
+Both also list the framework's system chain, and `--dry-run` labels its steps `(system, …)`. A file replaced by an applied squash shows `[X] … (replaced by a squash)`. Tenancy `showmigrations` shows tenant-scoped files as `[X]` / `[~]` / `[ ]` with a `(k/n tenants)` count.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

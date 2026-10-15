@@ -60,6 +60,7 @@ pub use rebuild::TableRebuild;
 pub(crate) use runner::migrate_locked;
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 pub(crate) use runner::migrate_pool_locked;
+pub use runner::migrate_dry_run_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;

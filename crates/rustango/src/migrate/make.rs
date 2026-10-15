@@ -316,13 +316,23 @@ impl SystemChain {
         dir: &Path,
         scopes: &[crate::core::ModelScope],
     ) -> Result<Self, MigrateError> {
-        // A bare dir not named `migrations` keeps `system/` inside it.
-        let root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
+        Self::prepare(Self::project_root(dir), scopes)
+    }
+
+    /// The project root for a `migrations/` dir. A bare dir not named
+    /// `migrations` keeps `system/` inside it.
+    fn project_root(dir: &Path) -> &Path {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
             dir.parent().unwrap_or(dir)
         } else {
             dir
-        };
-        Self::prepare(root, scopes)
+        }
+    }
+
+    /// The chain's dir for that project, as is: a preview reads it
+    /// without generating anything.
+    pub(crate) fn dir_for(dir: &Path) -> std::path::PathBuf {
+        Self::project_root(dir).join("system").join("migrations")
     }
 
     /// Generate the chain for `scopes` from today's models. A dir that was

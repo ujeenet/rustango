@@ -828,29 +828,7 @@ async fn migrate<W: Write>(
                 "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
-        let preview = runner::migrate_dry_run_pool(pool, dir).await?;
-        if preview.is_empty() {
-            writeln!(w, "nothing to migrate (already up to date)")?;
-        } else {
-            writeln!(
-                w,
-                "-- DRY RUN: {} pending migration(s); no SQL will be executed",
-                preview.len()
-            )?;
-            for p in &preview {
-                writeln!(w)?;
-                writeln!(
-                    w,
-                    "-- {} ({})",
-                    p.name,
-                    if p.atomic { "atomic" } else { "non-atomic" }
-                )?;
-                for stmt in &p.statements {
-                    writeln!(w, "{stmt};")?;
-                }
-            }
-        }
-        return Ok(());
+        return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
     }
 
     if let Some(target) = positional {
@@ -869,6 +847,88 @@ async fn migrate<W: Write>(
         runner::migrate_pool_locked(held, pool, dir, None)
     })
     .await
+}
+
+/// The framework chain `migrate` runs beside the project's, read from disk
+/// as is: a preview never generates it (#1311).
+pub(crate) struct SystemView {
+    dir: std::path::PathBuf,
+    scope: super::MigrationScope,
+}
+
+impl SystemView {
+    /// What a single-database `migrate` runs: the tenant-scope steps.
+    pub(crate) fn tenant(dir: &Path) -> Self {
+        Self {
+            dir: super::make::SystemChain::dir_for(dir),
+            scope: super::MigrationScope::Tenant,
+        }
+    }
+
+    /// What a tenancy registry runs.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn registry(dir: &Path) -> Self {
+        Self {
+            dir: super::make::SystemChain::dir_for(dir),
+            scope: super::MigrationScope::Registry,
+        }
+    }
+
+    /// The chain's files, or `None` before `migrate` first generates them.
+    fn files(&self) -> Result<Option<Vec<Migration>>, MigrateError> {
+        if !self.dir.is_dir() {
+            return Ok(None);
+        }
+        let all = file::list_dir(&self.dir)?;
+        Ok((!all.is_empty()).then_some(all))
+    }
+}
+
+const NOT_GENERATED: &str = "the framework's system migrations are not on disk yet; \
+                             `migrate` generates and applies them";
+
+/// `migrate --dry-run`: what `migrate` runs from `system`, then from `dir`.
+///
+/// # Errors
+/// As [`runner::preview_pending`].
+pub(crate) async fn migrate_dry_run_cmd<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    system: &SystemView,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let mut previews = Vec::new();
+    let system_files = system.files()?;
+    if let Some(all) = &system_files {
+        let ledger = runner::SYSTEM_LEDGER_TABLE;
+        let steps =
+            runner::preview_pending(pool, &system.dir, all, Some(system.scope), ledger, true)
+                .await?;
+        previews.extend(steps.into_iter().map(|p| (p, "system, ")));
+    }
+    let project = runner::migrate_dry_run_pool(pool, dir).await?;
+    previews.extend(project.into_iter().map(|p| (p, "")));
+    if system_files.is_none() {
+        writeln!(w, "-- {NOT_GENERATED}")?;
+    }
+    if previews.is_empty() {
+        writeln!(w, "nothing to migrate (already up to date)")?;
+        return Ok(());
+    }
+    writeln!(
+        w,
+        "-- DRY RUN: {} pending migration(s); no SQL will be executed",
+        previews.len()
+    )?;
+    for (p, chain) in &previews {
+        writeln!(w)?;
+        let atomic = if p.atomic { "atomic" } else { "non-atomic" };
+        writeln!(w, "-- {} ({chain}{atomic})", p.name)?;
+        for stmt in &p.statements {
+            writeln!(w, "{stmt};")?;
+        }
+    }
+    Ok(())
 }
 
 /// Everything a plain `migrate` does: the framework's system chain and the
@@ -1176,7 +1236,13 @@ fn sqlmigrate_cmd<W: Write>(
     }
     let name = positional
         .ok_or_else(|| MigrateError::Validation("sqlmigrate requires a migration name".into()))?;
-    let preview = runner::sqlmigrate_one(dir, name, pool.dialect())?;
+    // A framework migration lives in the system chain's dir (#1311).
+    let system = super::make::SystemChain::dir_for(dir);
+    let in_system = !file::list_dir(dir)?.iter().any(|m| m.name == name)
+        && system.is_dir()
+        && file::list_dir(&system)?.iter().any(|m| m.name == name);
+    let src = if in_system { system.as_path() } else { dir };
+    let preview = runner::sqlmigrate_one(src, name, pool.dialect())?;
     writeln!(
         w,
         "-- {} ({})",
@@ -1194,24 +1260,74 @@ fn sqlmigrate_cmd<W: Write>(
 }
 
 async fn showmigrations<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
-    runner::ensure_ledger_pool(pool).await?;
-    let all = file::list_dir(dir)?;
-    let applied = runner::applied_set_pool(pool).await?;
+    showmigrations_with(pool, dir, &SystemView::tenant(dir), None, w).await
+}
 
+/// Each tenant's slug and applied project migrations.
+pub(crate) type TenantLedgers = [(String, std::collections::HashSet<String>)];
+
+/// `showmigrations` as `migrate` reads the ledgers: squashed files count as
+/// applied, and `system`'s chain is listed too (#1311). With `tenants`,
+/// tenant-scoped files are marked from their ledgers, not `pool`'s.
+///
+/// # Errors
+/// File I/O or a ledger read.
+pub(crate) async fn showmigrations_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    system: &SystemView,
+    tenants: Option<&TenantLedgers>,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    use super::MigrationScope;
+    use runner::MigrationState as S;
+    let all = file::list_dir(dir)?;
+    let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
     if all.is_empty() {
         writeln!(w, "(no migrations in {})", dir.display())?;
-        return Ok(());
+    } else {
+        writeln!(w, "Migrations in {}:", dir.display())?;
     }
-    writeln!(w, "Migrations in {}:", dir.display())?;
-    for m in &all {
-        let mark = if applied.contains(&m.name) {
-            "[X]"
+    let per_tenant: Vec<Vec<S>> = tenants
+        .unwrap_or_default()
+        .iter()
+        .map(|(_, done)| runner::migration_states(&all, done).map(|(_, s)| s).collect())
+        .collect();
+    for (i, (m, state)) in runner::migration_states(&all, &applied).enumerate() {
+        if tenants.is_some() && m.scope == MigrationScope::Tenant {
+            let n = per_tenant.len();
+            let done = per_tenant.iter().filter(|t| t[i] != S::Pending).count();
+            let mark = match done {
+                0 => "[ ]",
+                d if d == n => "[X]",
+                _ => "[~]",
+            };
+            writeln!(w, "  {mark} {} ({done}/{n} tenants)", m.name)?;
         } else {
-            "[ ]"
-        };
-        writeln!(w, "  {mark} {}", m.name)?;
+            writeln!(w, "  {}", state_line(m, state))?;
+        }
+    }
+
+    let Some(files) = system.files()? else {
+        writeln!(w, "System migrations: {NOT_GENERATED}")?;
+        return Ok(());
+    };
+    let applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
+    writeln!(w, "System migrations in {}:", system.dir.display())?;
+    for (m, state) in runner::migration_states(&files, &applied) {
+        if m.scope == system.scope {
+            writeln!(w, "  {}", state_line(m, state))?;
+        }
     }
     Ok(())
+}
+
+fn state_line(m: &Migration, state: runner::MigrationState) -> String {
+    match state {
+        runner::MigrationState::Applied => format!("[X] {}", m.name),
+        runner::MigrationState::Replaced => format!("[X] {} (replaced by a squash)", m.name),
+        runner::MigrationState::Pending => format!("[ ] {}", m.name),
+    }
 }
 
 /// `manage forget-pending <name>` — delete a migration JSON that
@@ -7067,6 +7183,97 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         .await
         .expect_err("--deplyo must fail");
         assert!(err.to_string().contains("--deplyo"), "{err}");
+    }
+
+    /// A file that creates `table`.
+    #[cfg(feature = "sqlite")]
+    fn create_mig(name: &str, prev: Option<&str>, table: &str) -> Migration {
+        Migration {
+            name: name.to_owned(),
+            created_at: "2026-10-14T00:00:00Z".into(),
+            prev: prev.map(str::to_owned),
+            atomic: true,
+            scope: super::super::MigrationScope::Tenant,
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot: serde_json::from_value(serde_json::json!({
+                "tables": [{"name": table, "model": "T",
+                    "fields": [{"name": "id", "column": "id", "ty": "i64",
+                                "nullable": false, "primary_key": true}]}]
+            }))
+            .unwrap(),
+            forward: vec![Operation::Schema(
+                super::super::SchemaChange::CreateTable(table.into()),
+            )],
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn manage_out(pool: &Pool, dir: &Path, args: &[&str]) -> Result<String, MigrateError> {
+        let mut buf: Vec<u8> = Vec::new();
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        run_with_writer(pool, dir, args, &mut buf).await?;
+        Ok(String::from_utf8(buf).unwrap())
+    }
+
+    /// #1311 — dry-run, showmigrations and sqlmigrate see the system chain
+    /// `migrate` runs.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn previews_cover_the_system_chain() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(out.contains("not on disk yet"), "{out}");
+
+        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
+        let step = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.scope == super::super::MigrationScope::Tenant)
+            .expect("a system step");
+        crate::sql::raw_execute_pool(
+            &pool,
+            "DELETE FROM __rustango_system_migrations__ WHERE name = ?",
+            vec![crate::core::SqlValue::String(step.name.clone())],
+        )
+        .await
+        .unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(out.contains(&format!("-- {} (system,", step.name)), "{out}");
+        let out = manage_out(&pool, &dir, &["showmigrations"]).await;
+        let out = out.unwrap();
+        assert!(out.contains(&format!("[ ] {}", step.name)), "{out}");
+        let out = manage_out(&pool, &dir, &["sqlmigrate", &step.name]).await;
+        assert!(out.expect("sqlmigrate").contains(&step.name));
+    }
+
+    /// #1311 — once a squash is applied, the file it replaced is not pending.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_squashed_file_is_not_pending() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = create_mig("0001_a", None, "sq1311_a");
+        file::write(&dir.join("0001_a.json"), &first).unwrap();
+        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
+        let mut squash = create_mig("0002_sq", Some("0001_a"), "sq1311_a");
+        squash.replaces = vec!["0001_a".into()];
+        file::write(&dir.join("0002_sq.json"), &squash).unwrap();
+        manage_out(&pool, &dir, &["migrate"]).await.expect("squash");
+
+        let out = manage_out(&pool, &dir, &["showmigrations"]).await;
+        let out = out.unwrap();
+        assert!(out.contains("[X] 0001_a"), "{out}");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(!out.contains("0001_a"), "{out}");
     }
 
     #[test]

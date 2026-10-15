@@ -2117,6 +2117,42 @@ async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, wh
     );
 }
 
+// ---------------------------------------------------------------- #1311
+
+/// `--dry-run` previews what `migrate` does with a squash: recorded, not
+/// re-run, while its history is applied; and nothing for the file it replaced.
+async fn dry_run_follows_a_squash(pool: &Pool) {
+    use rustango::migrate::migrate_dry_run_pool_with_ledger as dry_run;
+    let a = "mad_1311_a";
+    let chain = Chain::new(pool, "1311", &[a]).await;
+    let first = chain
+        .step(pool, json!({"tables": [table(a, vec![id()])]}))
+        .await
+        .expect("history");
+    let mut squash = chain.head();
+    squash.name = "0002_squash".into();
+    squash.prev = Some(first.clone());
+    squash.replaces = vec![first];
+    chain.write(&squash);
+
+    let plan = dry_run(pool, chain.dir.path(), &chain.ledger)
+        .await
+        .expect("dry-run");
+    let names: Vec<&str> = plan.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["0002_squash"]);
+    let sql = &plan[0].statements;
+    assert!(
+        !sql.iter().any(|s| s.contains("CREATE TABLE")),
+        "migrate fakes this squash, the preview re-creates `{a}`: {sql:?}"
+    );
+
+    chain.migrate(pool).await.expect("the squash reconciles");
+    let plan = dry_run(pool, chain.dir.path(), &chain.ledger)
+        .await
+        .expect("dry-run");
+    assert!(plan.is_empty(), "a replaced file previewed as pending: {plan:?}");
+}
+
 // ---------------------------------------------------------------- #1676
 
 /// A squash whose tables exist under another ledger still runs its change
@@ -3617,5 +3653,6 @@ tri_dialect_test!(
         edited_m2m_is_replaced,
         edited_exclude_is_replaced,
         not_null_with_default_backfills,
+        dry_run_follows_a_squash,
     ]
 );
