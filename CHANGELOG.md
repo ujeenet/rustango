@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column don't count.
 
+### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes (#1358)
+
+A statement with `GROUP_CONCAT` carries a `SET_VAR(group_concat_max_len = …)` hint, so no pool or session setup is needed.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

@@ -48,6 +48,8 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
+    /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
+    pub group_concat: bool,
 }
 
 /// How a bare column of the current scope is written.
@@ -81,6 +83,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            group_concat: false,
         }
     }
 
@@ -95,6 +98,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            group_concat: false,
         }
     }
 
@@ -165,7 +169,20 @@ impl<'d> Sql<'d> {
         self.push_param_typed(value, None);
     }
 
-    pub(super) fn finish(self) -> CompiledStatement {
+    pub(super) fn finish(mut self) -> CompiledStatement {
+        if self.group_concat {
+            // A statement-level hint: it covers the GROUP_CONCAT in any block.
+            let start = self.sql.len() - self.sql.trim_start_matches('(').len();
+            let kw = ["SELECT", "INSERT", "UPDATE", "DELETE"]
+                .into_iter()
+                .find(|kw| self.sql[start..].starts_with(kw));
+            if let Some(kw) = kw {
+                self.sql.insert_str(
+                    start + kw.len(),
+                    " /*+ SET_VAR(group_concat_max_len = 4294967295) */",
+                );
+            }
+        }
         CompiledStatement {
             sql: self.sql,
             params: self.params,
@@ -1283,6 +1300,7 @@ fn write_aggregate_expr(
                     // `SEPARATOR` takes no bound parameter, so the
                     // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
+                    b.group_concat = true;
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
                         b.sql.push_str("DISTINCT ");

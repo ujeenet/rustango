@@ -812,10 +812,35 @@ async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
     assert_eq!((bob[0].email.as_str(), bob[0].note.as_str()), ("b@x", ""));
 }
 
+/// #1358: MySQL cut `GROUP_CONCAT` at 1024 bytes.
+async fn string_agg_is_not_capped(pool: &Pool) {
+    let title = "t".repeat(60);
+    for i in 0..30 {
+        let mut p = post(&format!("s{i:02}"), None);
+        p.title = title.clone();
+        p.insert_pool(pool).await.expect("seed");
+    }
+    let rows = Post::objects()
+        .aggregate()
+        .values(&[])
+        .annotate(
+            "t",
+            AggregateExpr::string_agg_ordered("title", ",", &[("title", false)]),
+        )
+        .fetch(pool)
+        .await
+        .expect("string_agg");
+    let SqlValue::String(s) = &rows[0]["t"] else {
+        panic!("not a string: {:?}", rows[0]["t"]);
+    };
+    assert_eq!(s.len(), 30 * 60 + 29);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         upsert_never_updates_a_row_of_another_unique_key,
+        string_agg_is_not_capped,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,
