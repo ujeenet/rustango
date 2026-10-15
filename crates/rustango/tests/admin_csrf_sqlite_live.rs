@@ -380,28 +380,41 @@ fn form_csrf_token(html: &str) -> Option<String> {
     Some(rest[..rest.find('"')?].to_owned())
 }
 
-/// #1260 — a non-superuser can sign out from the 403 page: the form
-/// carries the token, and posting it as rendered logs out.
-#[tokio::test]
-async fn the_forbidden_page_sign_out_form_works() {
-    let (app, cookie, _) = signed_in_as(false).await;
+/// GET `uri` as a browser would: returns the status, the cookie header
+/// with any CSRF cookie the page set, and the form's `_csrf` value.
+async fn get_form(app: &axum::Router, cookie: &str, uri: &str) -> (StatusCode, String, String) {
     let page = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/csrf_post")
-                .header(header::COOKIE, cookie.clone())
+                .uri(uri)
+                .header(header::COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(page.status(), StatusCode::FORBIDDEN);
+    let status = page.status();
+    // `signed_in`'s cookie is `rustango_csrf=…; <session>`.
+    let cookie = match csrf_cookies(&page).pop() {
+        Some(t) => format!("rustango_csrf={t}; {}", cookie.split_once("; ").unwrap().1),
+        None => cookie.to_owned(),
+    };
     let html = axum::body::to_bytes(page.into_body(), usize::MAX)
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&html);
     let token = form_csrf_token(&html).unwrap_or_else(|| panic!("no _csrf in form: {html}"));
+    (status, cookie, token)
+}
+
+/// #1260 — a non-superuser can sign out from the 403 page: the form
+/// carries the token, and posting it as rendered logs out.
+#[tokio::test]
+async fn the_forbidden_page_sign_out_form_works() {
+    let (app, cookie, _) = signed_in_as(false).await;
+    let (status, cookie, token) = get_form(&app, &cookie, "/csrf_post").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let resp = app
         .oneshot(
             Request::builder()
@@ -422,26 +435,15 @@ async fn the_forbidden_page_sign_out_form_works() {
 #[tokio::test]
 async fn the_translation_editor_saves_with_its_rendered_token() {
     let (app, cookie, _) = signed_in().await;
-    let get = || {
-        Request::builder()
-            .uri("/rustango_translations/editor")
-            .header(header::COOKIE, cookie.clone())
-            .body(Body::empty())
-            .unwrap()
-    };
-    let page = app.clone().oneshot(get()).await.unwrap();
-    assert_eq!(page.status(), StatusCode::OK);
-    let html = axum::body::to_bytes(page.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&html);
-    let token = form_csrf_token(&html).unwrap_or_else(|| panic!("no _csrf in form: {html}"));
+    let editor = "/rustango_translations/editor";
+    let (status, cookie, token) = get_form(&app, &cookie, editor).await;
+    assert_eq!(status, StatusCode::OK);
     let save = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/rustango_translations/editor")
+                .uri(editor)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, cookie.clone())
                 .body(Body::from(format!(
@@ -452,7 +454,16 @@ async fn the_translation_editor_saves_with_its_rendered_token() {
         .await
         .unwrap();
     assert_eq!(save.status(), StatusCode::SEE_OTHER, "saved");
-    let after = app.oneshot(get()).await.unwrap();
+    let after = app
+        .oneshot(
+            Request::builder()
+                .uri(editor)
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let html = axum::body::to_bytes(after.into_body(), usize::MAX)
         .await
         .unwrap();
