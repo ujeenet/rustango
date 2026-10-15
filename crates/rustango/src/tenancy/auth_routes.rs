@@ -82,7 +82,8 @@ pub struct Config {
     /// a Redis- or database-backed store for a real deployment.
     pub jti_store: Option<Arc<dyn crate::jti_store::JtiStore>>,
     /// Extra claims baked into both tokens at login, on top of the
-    /// `tenant` claim the router always sets (#1190).
+    /// `tenant` claim the router always sets (#1190). Every refresh runs
+    /// it again on the user's current row (#1150).
     ///
     /// Returning a reserved name (`sub`, `exp`, `jti`, `typ`) fails the
     /// login with a 500 rather than silently dropping it, and so does
@@ -496,6 +497,26 @@ fn issue_login_pair(
     slug: &str,
 ) -> Result<crate::tenancy::jwt_lifecycle::JwtTokenPair, crate::tenancy::jwt_lifecycle::JwtIssueError>
 {
+    let custom = session_claims(
+        auth,
+        user,
+        user_id,
+        slug,
+        &RefreshSession::start(auth, user),
+    )?;
+    auth.lifecycle().issue_pair_with(user_id, custom)
+}
+
+/// Claims for a pair of `session`, from `user`'s current row: login and
+/// every refresh run the hook, so a demotion reaches the next refresh (#1150).
+fn session_claims(
+    auth: &JwtAuth,
+    user: &crate::tenancy::auth::User,
+    user_id: i64,
+    slug: &str,
+    session: &RefreshSession,
+) -> Result<serde_json::Map<String, serde_json::Value>, crate::tenancy::jwt_lifecycle::JwtIssueError>
+{
     let mut custom = login_claims(
         auth.0.extra_claims.as_ref(),
         &ClaimsContext {
@@ -512,8 +533,10 @@ fn issue_login_pair(
             kind.to_owned(),
         ));
     }
-    RefreshSession::start(auth, user).write(&mut custom);
-    auth.lifecycle().issue_pair_with(user_id, custom)
+    // Before a refresh redeems the old token, not after.
+    crate::tenancy::jwt_lifecycle::check_reserved(&custom)?;
+    session.write(&mut custom);
+    Ok(custom)
 }
 
 // ---------------------------------------------------------------- Handlers
@@ -726,7 +749,7 @@ async fn refresh_in(
     // Audit P2 — re-check the account is still active (and exists) before
     // minting a fresh pair; #1854 — and that its session is still live.
     // Same uniform 401 as other refresh failures.
-    {
+    let user = {
         use crate::core::Column as _;
         use crate::sql::FetcherPool as _;
         use crate::tenancy::auth::User;
@@ -741,10 +764,17 @@ async fn refresh_in(
         if !session.admits(&auth.session_check(), &user).await {
             return Err(refused());
         }
-    }
+        user
+    };
+    let custom = session_claims(&auth, &user, claims.sub, &t.org.slug, &session)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let grace = auth.0.reuse_grace_secs;
     jwt.note_refresh_attempt(&claims.jti, grace).await;
-    let Some(pair) = jwt.refresh(&body.refresh).await else {
+    let rotated = jwt
+        .refresh_with(&body.refresh, custom)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let Some(pair) = rotated else {
         // Already redeemed. A retry just after rotation only gets the 401;
         // a later reuse is a stolen token, so end the chain.
         if !jwt.recently_attempted(&claims.jti, grace).await {
@@ -1549,6 +1579,52 @@ mod tests {
             ..crate::testkit::user()
         };
         assert!(issue_login_pair(&auth, &user, 1, "acme").is_err());
+    }
+
+    /// #1150 — a refresh re-runs the hook on the current row, so a demoted
+    /// user's new pair drops the old role.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_refresh_reruns_the_claims_hook() {
+        let hook: ClaimsHook = Arc::new(|c: &ClaimsContext<'_>| {
+            let mut m = serde_json::Map::new();
+            let role = if c.is_superuser { "admin" } else { "member" };
+            m.insert("role".into(), role.into());
+            m
+        });
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::tenancy::auth::User {
+            is_superuser: true,
+            ..crate::testkit::user()
+        };
+        user.insert_pool(&pool).await.unwrap();
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            extra_claims: Some(hook),
+            ..Config::default()
+        });
+        let first = login(&auth, &user);
+
+        user.is_superuser = false;
+        user.save_pool(&pool).await.unwrap();
+        let scope = TenantScope::for_test(crate::testkit::org(), pool.clone());
+        let Json(pair) = refresh_in(auth.clone(), scope, RefreshInput { refresh: first })
+            .await
+            .expect("rotates");
+
+        let jwt = auth.lifecycle();
+        let access = jwt.verify_access(&pair.access).await.unwrap();
+        for claims in [access, jwt.decode_refresh(&pair.refresh).unwrap()] {
+            assert_eq!(claims.custom_value("role"), Some(&"member".into()));
+            assert!(
+                RefreshSession::read(&claims.custom).is_some(),
+                "session kept"
+            );
+        }
+        assert!(rotate(&auth, &pool, &pair.refresh).await.is_some());
     }
 
     #[test]

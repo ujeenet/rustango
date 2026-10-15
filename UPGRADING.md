@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### The JWT claims hook runs on refresh too (#1150)
+
+`Config::extra_claims` is now called on `/refresh` as well as `/login`, with the user's current row. A hook with side effects runs once per refresh.
+
 ### CSRF exempt prefixes match by segment (#1128)
 
 `CsrfConfig::exempt_prefix("/beacon")` no longer exempts `/beacon-admin`. A prefix meant to cover sibling paths must list each one.
