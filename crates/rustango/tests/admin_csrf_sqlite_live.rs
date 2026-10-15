@@ -297,6 +297,11 @@ async fn a_first_visit_sets_one_csrf_cookie_that_logs_in() {
 
 /// An app with `alice` signed in: `(app, "csrf=…; session=…" cookie, csrf token)`.
 async fn signed_in() -> (axum::Router, String, String) {
+    signed_in_as(true).await
+}
+
+/// As [`signed_in`], with `alice` a superuser or not.
+async fn signed_in_as(superuser: bool) -> (axum::Router, String, String) {
     use rustango::admin::AdminUser;
     let pool: Pool = rustango::sql::sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -318,7 +323,7 @@ async fn signed_in() -> (axum::Router, String, String) {
     )
     .await
     .unwrap();
-    let mut u = AdminUser::new_with_password("alice", "correct-horse", true).unwrap();
+    let mut u = AdminUser::new_with_password("alice", "correct-horse", superuser).unwrap();
     u.insert_pool(&pool).await.unwrap();
     let app = app_with_session_auth(pool);
     let token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
@@ -364,6 +369,51 @@ async fn a_signed_in_admin_passes_the_session_gate() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The `_csrf` value of the first POST form in `html`, if it has one.
+fn form_csrf_token(html: &str) -> Option<String> {
+    let form = &html[html.find("<form")?..];
+    let form = &form[..form.find("</form>")?];
+    let rest = &form[form.find(r#"name="_csrf" value=""#)? + r#"name="_csrf" value=""#.len()..];
+    Some(rest[..rest.find('"')?].to_owned())
+}
+
+/// #1260 — a non-superuser can sign out from the 403 page: the form
+/// carries the token, and posting it as rendered logs out.
+#[tokio::test]
+async fn the_forbidden_page_sign_out_form_works() {
+    let (app, cookie, _) = signed_in_as(false).await;
+    let page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csrf_post")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::FORBIDDEN);
+    let html = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    let token = form_csrf_token(&html).unwrap_or_else(|| panic!("no _csrf in form: {html}"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/logout")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(format!("_csrf={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "signed out");
 }
 
 /// #1694 — logout reads the session cookie, so the signal names the user.

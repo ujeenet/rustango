@@ -991,6 +991,8 @@ fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
     let username = crate::text::html_escape(&session.username);
     let logout_path = crate::text::html_escape(logout_path);
     let nonce = crate::csp_nonce::nonce_attr();
+    // `/logout` sits behind the CSRF layer (#1260).
+    let csrf_input = super::helpers::current_csrf_input();
     let body = format!(
         "<!doctype html>\
          <html><head><title>Forbidden</title>\
@@ -1004,7 +1006,7 @@ fn forbidden_page(session: &AdminSession, logout_path: &str) -> Response {
          <p class=\"meta\">Ask your administrator to grant superuser \
          status, or sign out below if this isn't the account you \
          intended to use.</p>\
-         <form method=\"post\" action=\"{logout_path}\">\
+         <form method=\"post\" action=\"{logout_path}\">{csrf_input}\
            <button type=\"submit\">Sign out</button>\
          </form>\
          </body></html>"

@@ -75,7 +75,6 @@ pub(crate) fn csrf_input_for(csrf_token: &str) -> String {
 }
 
 /// The hidden CSRF field for the current request.
-#[cfg(feature = "totp")]
 pub(crate) fn current_csrf_input() -> String {
     csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
 }
