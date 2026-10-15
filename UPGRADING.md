@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `dbshell` hands `psql` the URL (#1310)
+
+`psql` now runs as `psql --dbname <url>` with the password in `PGPASSWORD`, so libpq reads every URL option; an option libpq does not know (a sqlx-only one) now fails the shell. `command_for` is unchanged.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
