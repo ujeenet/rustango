@@ -20,6 +20,10 @@ They emit `NOW(6)`, `DATETIME(6)` and `TIME(6)`, as PG and SQLite already kept t
 
 A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `x * 2 > Decimal` no longer compares a number with text. New provided method `Dialect::write_decimal_param`.
 
+### Fixed — SQLite `json_path` comparisons match PG and MySQL (#1346)
+
+An as-text path compared with a number compares as a number, as on MySQL, and a JSON path equals a `SqlValue::Json` scalar (`"foo"`, `5`, `true`).
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

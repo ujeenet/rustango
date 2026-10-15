@@ -3990,8 +3990,7 @@ fn write_expr_compare(
     if let Some(kw) = binary_op_str {
         write_expr(b, lhs, None)?;
         b.sql.push_str(kw);
-        write_expr(b, rhs, None)?;
-        return Ok(());
+        return write_compare_rhs(b, lhs, rhs);
     }
     // Lookups that span a relation, such as `author__name__contains`,
     // land here. The lhs is typed so Postgres can cast a non-text column.
@@ -4111,6 +4110,37 @@ fn write_expr_compare(
             dialect: b.d.name(),
         }),
     }
+}
+
+/// The right side of `<lhs> <op> <rhs>`. SQLite's `json_extract` gives an
+/// SQL value, so a JSON literal is unwrapped the same way; its as-text path
+/// has no affinity, so a number gets NUMERIC to compare as one (#1346).
+fn write_compare_rhs(
+    b: &mut Sql<'_>,
+    lhs: &crate::core::Expr,
+    rhs: &crate::core::Expr,
+) -> Result<(), SqlError> {
+    use crate::core::Expr;
+    let (Expr::JsonPath { as_text, .. }, Expr::Literal(v)) = (lhs, rhs) else {
+        return write_expr(b, rhs, None);
+    };
+    let (open, close) = match (as_text, v) {
+        _ if b.d.name() != "sqlite" => return write_expr(b, rhs, None),
+        (false, SqlValue::Json(_)) => ("json_extract(", ", '$')"),
+        (
+            true,
+            SqlValue::I16(_)
+            | SqlValue::I32(_)
+            | SqlValue::I64(_)
+            | SqlValue::F32(_)
+            | SqlValue::F64(_),
+        ) => ("CAST(", " AS NUMERIC)"),
+        _ => return write_expr(b, rhs, None),
+    };
+    b.sql.push_str(open);
+    b.push_param(v.clone());
+    b.sql.push_str(close);
+    Ok(())
 }
 
 /// Write `<col> <op> <rhs>` for a [`crate::core::ColumnFilter`].
