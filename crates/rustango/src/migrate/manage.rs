@@ -1781,6 +1781,12 @@ pub(crate) async fn check_cmd_with<W: Write>(
     w: &mut W,
     extra: impl std::future::Future<Output = DeployAuditFindings>,
 ) -> Result<(), MigrateError> {
+    // `--deplyo` once ran the plain check and reported all clear (#1312).
+    if let Some(other) = args.iter().find(|a| *a != "--deploy") {
+        return Err(MigrateError::Validation(format!(
+            "check: unknown argument `{other}` (usage: check [--deploy])"
+        )));
+    }
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -3427,6 +3433,18 @@ async fn dumpdata_cmd<W: Write>(
     }
     let model_filters = &parsed.model_filters;
     let indent = parsed.indent;
+    // A typo would otherwise dump `[]` and exit 0 (#1312).
+    for name in model_filters.iter().chain(&parsed.excludes) {
+        let known = inventory::iter::<crate::core::ModelEntry>().any(|e| {
+            let app = e.resolved_app_label().unwrap_or("");
+            name == e.schema.name || *name == format!("{app}.{}", e.schema.name)
+        });
+        if !known {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: unknown model `{name}` (use `app.Model` or `Model`)"
+            )));
+        }
+    }
 
     // Walk every registered model, fetching rows from each.
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -6918,6 +6936,23 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         .await;
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("[info]    account lockout"), "{s}");
+    }
+
+    /// #1312 — a misspelt flag fails instead of running the plain check.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn check_refuses_an_unknown_argument() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deplyo".into()],
+            &mut buf,
+        )
+        .await
+        .expect_err("--deplyo must fail");
+        assert!(err.to_string().contains("--deplyo"), "{err}");
     }
 
     #[test]

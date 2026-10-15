@@ -267,6 +267,43 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
     }
 }
 
+/// An unreachable tenant fails `prewarm-pools` and `audit-cleanup` (#1312).
+#[tokio::test]
+async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {
+    use rustango::sql::Auto;
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    // The parent dir does not exist, so SQLite cannot open the file.
+    let gone = b._tmp.path().join("no-such-dir").join("gone.db");
+    let mut org = rustango::tenancy::Org {
+        id: Auto::default(),
+        slug: "gone".into(),
+        display_name: "gone".into(),
+        storage_mode: "database".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!("sqlite://{}?mode=rwc", gone.display())),
+        schema_name: None,
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        active: true,
+        created_at: chrono::Utc::now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
+    };
+    org.insert_pool(&b.pools.registry_pool())
+        .await
+        .expect("seed org");
+    for args in [&["prewarm-pools"][..], &["audit-cleanup", "--days", "30"]] {
+        let err = b.run(args).await.expect_err(&args.join(" "));
+        assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
+    }
+}
+
 /// Trailing arguments and stray flags once ran the bare verb (#1952).
 #[tokio::test]
 async fn role_and_operator_verbs_refuse_extra_arguments() {

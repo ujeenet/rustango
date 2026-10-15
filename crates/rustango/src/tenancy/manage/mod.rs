@@ -230,7 +230,7 @@ where
                 "prewarm: {} active tenants — warmed {}, failed {}, skipped (cap) {}",
                 report.total_active, report.warmed, report.failed, report.skipped_cap
             )?;
-            Ok(())
+            migrations::tenant_failures(report.failed, report.total_active)
         }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await

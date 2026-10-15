@@ -154,6 +154,10 @@ untouched.
 
 `psql` now runs as `psql --dbname <url>` with the password in `PGPASSWORD`, so libpq reads every URL option; an option libpq does not know (a sqlx-only one) now fails the shell. `command_for` is unchanged.
 
+### CLI verbs that used to pass now fail (#1312)
+
+`prewarm-pools` and `audit-cleanup` exit non-zero when any tenant fails; `check` with any argument but `--deploy`, and `dumpdata --model` / `--exclude` with a name no model has, are errors.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

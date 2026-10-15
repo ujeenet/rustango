@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `sqlite3` gets the path without its `?query` and percent-decoded, so `sqlite://./app.db?mode=rwc` no longer opens a new empty `app.db?mode=rwc`. `psql` gets the URL, so `sslmode` and friends survive; `mysql` credentials and database names are percent-decoded.
 
+### Fixed — `prewarm-pools`, `audit-cleanup`, `check` and `dumpdata` fail loudly (#1312)
+
+`prewarm-pools` and `audit-cleanup` exit non-zero when a tenant fails. `check` refuses an unknown argument (`--deplyo`), and `dumpdata --model` / `--exclude` refuse an unknown model name instead of dumping `[]`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

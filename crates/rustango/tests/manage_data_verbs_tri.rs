@@ -606,6 +606,16 @@ async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
     assert_eq!(out.trim(), "[]");
 }
 
+/// A misspelt `--model` / `--exclude` fails rather than dumping `[]` (#1312).
+async fn dumpdata_refuses_an_unknown_model_name(pool: &Pool) {
+    for flag in ["--model", "--exclude"] {
+        let err = manage(pool, &["dumpdata", flag, "cli1911.Psot"])
+            .await
+            .expect_err(flag);
+        assert!(err.contains("cli1911.Psot"), "{flag}: {err}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -619,5 +629,6 @@ tri_dialect_test! {
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
         fail_fast_still_resets_sequences,
+        dumpdata_refuses_an_unknown_model_name,
     ],
 }
