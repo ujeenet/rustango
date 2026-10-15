@@ -341,6 +341,15 @@ pub(super) async fn operator_reset_password(
     Path(id): Path<i64>,
     Form(form): Form<ResetForm>,
 ) -> Response<Body> {
+    // Your own password needs the current one, and the login throttle (#1342).
+    if id == id_of(&op) {
+        return back_err(
+            &state,
+            &op,
+            "Use /change-password for your own password; it asks for the current one.",
+        )
+        .await;
+    }
     let target = match one_operator(&state, &op, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return back_err(&state, &op, "No such operator.").await,

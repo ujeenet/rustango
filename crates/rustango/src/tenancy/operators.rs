@@ -102,6 +102,7 @@ pub async fn active_count(registry: &Pool, except: Option<i64>) -> Result<i64, O
 }
 
 /// Activate or deactivate `target`, enforcing both lockout rules.
+/// Deactivating also ends the operator's sessions.
 ///
 /// `actor` is the operator performing the change, when there is one — the
 /// console has a session, a shell does not.
@@ -145,6 +146,11 @@ pub async fn set_active(
         .execute_pool(registry)
         .await?;
     target.active = active;
+    if !active {
+        // So a later reactivation does not revive today's cookies (#1342).
+        crate::session::revoke_sessions::<Operator>(registry, id, target.sessions_revoked_at, 0)
+            .await?;
+    }
     Ok(Outcome::Changed)
 }
 

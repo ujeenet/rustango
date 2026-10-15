@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Operator deactivation signs out; self-reset moved (#1342)
+
+Deactivating an operator (console or CLI) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
+
 ### The JWT claims hook runs on refresh too (#1150)
 
 `Config::extra_claims` is now called on `/refresh` as well as `/login`, with the user's current row. A hook with side effects runs once per refresh.

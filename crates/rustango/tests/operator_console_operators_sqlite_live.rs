@@ -158,6 +158,38 @@ impl Booted {
             .unwrap()
     }
 
+    /// Sign `name` in; the `name=value` session cookie.
+    async fn login_as(&self, name: &str, password: &str) -> String {
+        let resp = self
+            .post("/login", &format!("username={name}&password={password}"))
+            .await;
+        resp.headers()
+            .get("set-cookie")
+            .expect("session cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// `GET /orgs` status with `cookie`.
+    async fn status_with(&self, cookie: &str) -> StatusCode {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
     async fn operators(&self) -> Vec<Operator> {
         Operator::objects().fetch(&self.registry).await.unwrap()
     }
@@ -283,6 +315,57 @@ async fn you_cannot_deactivate_yourself() {
 
     let me = b.find(&b.me).await.expect("still there");
     assert!(me.active, "and must still be active");
+}
+
+/// #1342 — a reset of your own password goes through change-password,
+/// which asks for the current one.
+#[tokio::test]
+async fn you_cannot_reset_your_own_password_here() {
+    let b = boot().await;
+    let before = b.find(&b.me).await.unwrap().password_hash;
+    let out = outcome(
+        b.post(
+            &format!("/operators/{}/reset-password", b.my_id),
+            "password=taken-over-pw&confirm_password=taken-over-pw",
+        )
+        .await,
+    )
+    .await;
+    assert!(out.starts_with("error:"), "should be refused, got {out}");
+    assert!(out.contains("change-password"), "should say where: {out}");
+    assert_eq!(b.find(&b.me).await.unwrap().password_hash, before);
+}
+
+/// #1342 — a deactivation ends the sessions for good: reactivating the
+/// operator does not revive a cookie from before.
+#[tokio::test]
+async fn reactivating_does_not_revive_old_sessions() {
+    let b = boot().await;
+    let name = unique("back");
+    b.post(
+        "/operators",
+        &format!("username={name}&password=hunter2hunter2&confirm_password=hunter2hunter2"),
+    )
+    .await;
+    let their_cookie = b.login_as(&name, "hunter2hunter2").await;
+    assert_eq!(b.status_with(&their_cookie).await, StatusCode::OK);
+
+    let id = b.find(&name).await.unwrap().id.get().copied().unwrap();
+    b.post(&format!("/operators/{id}/active"), "").await;
+    b.post(&format!("/operators/{id}/active"), "active=on")
+        .await;
+    assert!(b.find(&name).await.unwrap().active, "reactivated");
+
+    assert!(
+        b.status_with(&their_cookie).await.is_redirection(),
+        "a cookie from before the deactivation must stay dead"
+    );
+    let fresh = b.login_as(&name, "hunter2hunter2").await;
+    assert_eq!(
+        b.status_with(&fresh).await,
+        StatusCode::OK,
+        "a new login works"
+    );
 }
 
 /// The other lock: with one operator left, deactivating them would

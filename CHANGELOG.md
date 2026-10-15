@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
+
+`tenancy::operators::set_active(false)` stamps `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
+
 ### Fixed — JWT `/refresh` re-runs the claims hook (#1150)
 
 `auth_routes::Config::extra_claims` runs on every refresh against the user's current row, so a demoted user's next pair drops the old role claims.
