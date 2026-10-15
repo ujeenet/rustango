@@ -1253,6 +1253,16 @@ jobs:
           docker logs minio >&2 || true
           exit 1
       - run: cargo test -p rustango --features postgres --test s3_live_presign
+      # Again with STS temporary keys, so the session token is signed and sent.
+      - name: s3_live_presign with STS keys
+        run: |
+          X=$(curl -sf --aws-sigv4 "aws:amz:us-east-1:sts" -u "$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET" \
+            -X POST -d "Action=AssumeRole&Version=2011-06-15&DurationSeconds=3600" "$RUSTANGO_S3_TEST_ENDPOINT/")
+          export RUSTANGO_S3_TEST_KEY=$(echo "$X" | sed -n 's:.*<AccessKeyId>\(.*\)</AccessKeyId>.*:\1:p')
+          export RUSTANGO_S3_TEST_SECRET=$(echo "$X" | sed -n 's:.*<SecretAccessKey>\(.*\)</SecretAccessKey>.*:\1:p')
+          export RUSTANGO_S3_TEST_SESSION_TOKEN=$(echo "$X" | sed -n 's:.*<SessionToken>\(.*\)</SessionToken>.*:\1:p')
+          test -n "$RUSTANGO_S3_TEST_SESSION_TOKEN"
+          cargo test -p rustango --features postgres --test s3_live_presign
       # These 22 were the ones that exposed #1450 the first time they ran
       # against a real database. `--test-threads=1`: the setup helper
       # truncates the shared media tables, so they must not overlap.

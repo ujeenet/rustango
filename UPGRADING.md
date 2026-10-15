@@ -206,6 +206,18 @@ With a provisioning console, **Purge** opens a recorded run and redirects to its
 
 `passkey::verify::cose_es256_key` returns a `p256` 0.14 `VerifyingKey`. If you use that key with your own `p256`, move it to 0.14 too (`to_encoded_point` is now `to_sec1_point`).
 
+### `S3Storage::new` takes the config and the keys apart
+
+`S3Config` lost `access_key_id` / `secret_access_key` and is `#[non_exhaustive]`:
+
+```rust
+// before: S3Storage::new(S3Config { bucket, region, endpoint, access_key_id, secret_access_key, path_style })
+S3Storage::new(
+    S3Config::new(bucket, region).with_endpoint(ep).with_path_style(true),
+    S3Credentials::new(key, secret), // .with_session_token(t) for STS keys
+)
+```
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

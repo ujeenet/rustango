@@ -11,12 +11,12 @@
 //! use rustango::storage::{
 //!     LocalStorage, BoxedStorage,
 //!     registry::StorageRegistry,
-//!     s3::{S3Storage, S3Config},
+//!     s3::{S3Storage, S3Config, S3Credentials},
 //! };
 //! use std::sync::Arc;
 //!
-//! let avatars: BoxedStorage = Arc::new(S3Storage::new(S3Config { /* ... */ }));
-//! let docs:    BoxedStorage = Arc::new(S3Storage::new(S3Config { /* ... */ }));
+//! let avatars: BoxedStorage = Arc::new(S3Storage::new(S3Config::new("avatars", "us-east-1"), creds.clone()));
+//! let docs:    BoxedStorage = Arc::new(S3Storage::new(S3Config::new("docs", "us-east-1"), creds));
 //! let cache:   BoxedStorage = Arc::new(LocalStorage::new("./cache".into()));
 //!
 //! let registry = StorageRegistry::new()
@@ -245,14 +245,20 @@ fn build_disk(
             Ok(Arc::new(s))
         }
         #[cfg(feature = "storage-s3")]
-        "s3" => Ok(Arc::new(super::s3::S3Storage::new(super::s3::S3Config {
-            bucket: need(&disk.bucket, "bucket")?,
-            region: disk.region.clone().unwrap_or_else(|| "us-east-1".into()),
-            endpoint: endpoint.map(str::to_owned),
-            access_key_id: disk.access_key_id.clone().unwrap_or_default(),
-            secret_access_key: disk.secret_access_key.clone().unwrap_or_default(),
-            path_style: disk.path_style.unwrap_or(false),
-        }))),
+        "s3" => {
+            use super::s3::{S3Config, S3Credentials, S3Storage};
+            let mut cfg = S3Config::new(
+                need(&disk.bucket, "bucket")?,
+                disk.region.clone().unwrap_or_else(|| "us-east-1".into()),
+            )
+            .with_path_style(disk.path_style.unwrap_or(false));
+            cfg.endpoint = endpoint.map(str::to_owned);
+            let creds = S3Credentials::new(
+                disk.access_key_id.clone().unwrap_or_default(),
+                disk.secret_access_key.clone().unwrap_or_default(),
+            );
+            Ok(Arc::new(S3Storage::new(cfg, creds)))
+        }
         #[cfg(not(feature = "storage-s3"))]
         "s3" => Err(missing("storage-s3")),
         #[cfg(feature = "storage-azure")]

@@ -9,31 +9,55 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::storage::s3::{S3Storage, S3Config};
+//! use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
 //! use std::sync::Arc;
 //!
-//! // AWS S3
-//! let s3 = S3Storage::new(S3Config {
-//!     bucket: "my-bucket".into(),
-//!     region: "us-east-1".into(),
-//!     endpoint: None,                 // None -> https://s3.<region>.amazonaws.com
-//!     access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap(),
-//!     secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap(),
-//!     path_style: false,              // virtual-hosted (default for AWS)
-//! });
+//! // AWS S3, virtual-hosted URLs at https://s3.<region>.amazonaws.com
+//! let s3 = S3Storage::new(
+//!     S3Config::new("my-bucket", "us-east-1"),
+//!     S3Credentials::new(
+//!         std::env::var("AWS_ACCESS_KEY_ID")?,
+//!         std::env::var("AWS_SECRET_ACCESS_KEY")?,
+//!     ),
+//! );
 //!
 //! // Cloudflare R2
-//! let r2 = S3Storage::new(S3Config {
-//!     bucket: "my-bucket".into(),
-//!     region: "auto".into(),
-//!     endpoint: Some("https://<account>.r2.cloudflarestorage.com".into()),
-//!     access_key_id: std::env::var("R2_KEY").unwrap(),
-//!     secret_access_key: std::env::var("R2_SECRET").unwrap(),
-//!     path_style: true,
-//! });
+//! let r2 = S3Storage::new(
+//!     S3Config::new("my-bucket", "auto")
+//!         .with_endpoint("https://<account>.r2.cloudflarestorage.com")
+//!         .with_path_style(true),
+//!     S3Credentials::new(std::env::var("R2_KEY")?, std::env::var("R2_SECRET")?),
+//! );
 //!
 //! let storage: rustango::storage::BoxedStorage = Arc::new(s3);
 //! storage.save("avatars/alice.png", &png_bytes).await?;
+//! ```
+//!
+//! ## IAM roles and temporary credentials
+//!
+//! Temporary keys carry a session token:
+//! `S3Credentials::new(key, secret).with_session_token(token)`. They
+//! expire, so for an IAM role (IRSA, instance profile, ECS task role)
+//! pass an [`S3CredentialProvider`] that refreshes them. It is asked
+//! once per request, so it should cache. For example, over `aws-config`:
+//!
+//! ```ignore
+//! use aws_credential_types::provider::ProvideCredentials;
+//!
+//! struct AwsChain(aws_config::default_provider::credentials::DefaultCredentialsChain);
+//!
+//! #[async_trait::async_trait]
+//! impl S3CredentialProvider for AwsChain {
+//!     async fn credentials(&self) -> Result<S3Credentials, StorageError> {
+//!         let c = self.0.provide_credentials().await
+//!             .map_err(|e| StorageError::Io(format!("credentials: {e}")))?;
+//!         let creds = S3Credentials::new(c.access_key_id(), c.secret_access_key());
+//!         Ok(match c.session_token() {
+//!             Some(t) => creds.with_session_token(t),
+//!             None => creds,
+//!         })
+//!     }
+//! }
 //! ```
 //!
 //! ## What it does
@@ -62,16 +86,16 @@ use super::transport::{canonical_header_value, encode_key, encode_query, Http, M
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 use super::{validate_key, ObjectMeta, PutConditions, Storage, StorageError};
 
-/// How to reach the bucket.
+/// How to reach the bucket. Build it with [`S3Config::new`]; the keys
+/// are passed apart, as [`S3Credentials`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
     /// `None` means AWS S3 at `https://s3.<region>.amazonaws.com`.
     /// Set it for any other provider.
     pub endpoint: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
     /// `false` puts the bucket in the host:
     /// `https://<bucket>.s3.<region>.amazonaws.com/<key>`, or
     /// `https://<bucket>.<endpoint-host>/<key>` with an `endpoint`. `true`
@@ -80,13 +104,109 @@ pub struct S3Config {
     pub path_style: bool,
 }
 
+impl S3Config {
+    /// AWS S3 in `region`, virtual-hosted URLs.
+    #[must_use]
+    pub fn new(bucket: impl Into<String>, region: impl Into<String>) -> Self {
+        Self {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: None,
+            path_style: false,
+        }
+    }
+
+    /// A non-AWS endpoint, such as R2 or MinIO.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Put the bucket in the path instead of the host.
+    #[must_use]
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+}
+
+/// One set of access keys; temporary ones (STS, IAM roles) carry a
+/// session token. `Debug` hides the secret and the token.
+#[derive(Clone)]
+pub struct S3Credentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+impl S3Credentials {
+    #[must_use]
+    pub fn new(access_key_id: impl Into<String>, secret_access_key: impl Into<String>) -> Self {
+        Self {
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            session_token: None,
+        }
+    }
+
+    /// Signed and sent as `X-Amz-Security-Token` on every request and
+    /// presigned URL.
+    #[must_use]
+    pub fn with_session_token(mut self, token: impl Into<String>) -> Self {
+        self.session_token = Some(token.into());
+        self
+    }
+
+    #[must_use]
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+}
+
+impl std::fmt::Debug for S3Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Credentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// Where [`S3Storage`] gets its keys, asked once per request.
+/// Implement it to refresh temporary credentials from an IAM role.
+#[async_trait]
+pub trait S3CredentialProvider: Send + Sync + 'static {
+    async fn credentials(&self) -> Result<S3Credentials, StorageError>;
+}
+
+/// Fixed keys.
+#[async_trait]
+impl S3CredentialProvider for S3Credentials {
+    async fn credentials(&self) -> Result<S3Credentials, StorageError> {
+        Ok(self.clone())
+    }
+}
+
+/// A cached SigV4 key and what it was derived from.
+struct SigningKey {
+    date: String,
+    secret: String,
+    key: Arc<[u8]>,
+}
+
 /// Storage backed by an S3-compatible bucket.
 pub struct S3Storage {
     cfg: S3Config,
+    creds: Arc<dyn S3CredentialProvider>,
     http: Http,
-    /// The SigV4 key for one date stamp. It depends only on the secret,
-    /// date, region and service, so a page of presigns derives it once (#1570).
-    signing_key: std::sync::Mutex<Option<(String, Arc<[u8]>)>>,
+    /// The SigV4 key for one date stamp and secret, so a page of
+    /// presigns derives it once and rotated keys derive anew.
+    signing_key: std::sync::Mutex<Option<SigningKey>>,
     #[cfg(test)]
     derivations: std::sync::atomic::AtomicUsize,
 }
@@ -100,10 +220,13 @@ fn strip_scheme(endpoint: &str) -> &str {
 }
 
 impl S3Storage {
+    /// `creds` is an [`S3Credentials`] for fixed keys, or any
+    /// [`S3CredentialProvider`] for ones that refresh.
     #[must_use]
-    pub fn new(cfg: S3Config) -> Self {
+    pub fn new(cfg: S3Config, creds: impl S3CredentialProvider) -> Self {
         Self {
             cfg,
+            creds: Arc::new(creds),
             http: Http::defaults(),
             signing_key: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -111,28 +234,26 @@ impl S3Storage {
         }
     }
 
-    /// The signing key for `date_stamp`, derived once per date.
-    fn signing_key(&self, date_stamp: &str) -> Arc<[u8]> {
+    /// The signing key for `date_stamp` and `secret`, derived once per pair.
+    fn signing_key(&self, date_stamp: &str, secret: &str) -> Arc<[u8]> {
         let mut slot = self
             .signing_key
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((date, key)) = slot.as_ref() {
-            if date == date_stamp {
-                return key.clone();
+        if let Some(k) = slot.as_ref() {
+            if k.date == date_stamp && k.secret == secret {
+                return k.key.clone();
             }
         }
         #[cfg(test)]
         self.derivations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key: Arc<[u8]> = derive_signing_key(
-            &self.cfg.secret_access_key,
-            date_stamp,
-            &self.cfg.region,
-            "s3",
-        )
-        .into();
-        *slot = Some((date_stamp.to_owned(), key.clone()));
+        let key: Arc<[u8]> = derive_signing_key(secret, date_stamp, &self.cfg.region, "s3").into();
+        *slot = Some(SigningKey {
+            date: date_stamp.to_owned(),
+            secret: secret.to_owned(),
+            key: key.clone(),
+        });
         key
     }
 
@@ -225,30 +346,27 @@ impl S3Storage {
         content_type: Option<&str>,
     ) -> Result<reqwest::Response, StorageError> {
         validate_key(key)?;
+        let creds = self.creds.credentials().await?;
         let url = self.full_url(key);
         let path = self.key_path(key);
-        let host = self.host();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| StorageError::Io(format!("clock: {e}")))?
-            .as_secs();
-        let amz_date = format_amz_date(now);
+        let amz_date = format_amz_date(unix_now()?);
         let date_stamp = &amz_date[..8];
         let payload_hash = sha256_hex(body);
 
         // Canonical headers: lowercase, sorted by name. A content type
         // is signed too, so S3 stores the one we sent (#1904).
-        let content_type = canonical_header_value(content_type)?;
-        let content_type = content_type.as_deref();
-        let ct_line = content_type.map_or(String::new(), |c| format!("content-type:{c}\n"));
-        let canonical_headers = format!(
-            "{ct_line}host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
-        );
-        let signed_headers = if content_type.is_some() {
-            "content-type;host;x-amz-content-sha256;x-amz-date"
-        } else {
-            "host;x-amz-content-sha256;x-amz-date"
-        };
+        let mut headers: Vec<(&str, String)> = Vec::with_capacity(6);
+        if let Some(ct) = canonical_header_value(content_type)? {
+            headers.push(("content-type", ct));
+        }
+        headers.push(("host", self.host()));
+        headers.push(("x-amz-content-sha256", payload_hash.clone()));
+        headers.push(("x-amz-date", amz_date.clone()));
+        if let Some(token) = &creds.session_token {
+            headers.push(("x-amz-security-token", token.clone()));
+        }
+        let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+        let signed_headers = headers.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
 
         let canonical_request =
             format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
@@ -257,29 +375,24 @@ impl S3Storage {
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
         let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
 
-        let signing_key = self.signing_key(date_stamp);
+        let signing_key = self.signing_key(date_stamp, &creds.secret_access_key);
         let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
         let auth = format!(
             "AWS4-HMAC-SHA256 Credential={key_id}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
-            key_id = self.cfg.access_key_id,
+            key_id = creds.access_key_id,
         );
 
-        let mut req = self
-            .http
-            .request(
-                reqwest::Method::from_bytes(method.as_bytes())
-                    .map_err(|e| StorageError::Io(format!("method: {e}")))?,
-                &url,
-                body.len(),
-            )
-            .header("host", &host)
-            .header("x-amz-content-sha256", &payload_hash)
-            .header("x-amz-date", &amz_date)
-            .header("authorization", auth);
-        if let Some(ct) = content_type {
-            req = req.header("content-type", ct);
+        let mut req = self.http.request(
+            reqwest::Method::from_bytes(method.as_bytes())
+                .map_err(|e| StorageError::Io(format!("method: {e}")))?,
+            &url,
+            body.len(),
+        );
+        for (name, value) in headers {
+            req = req.header(name, value);
         }
+        req = req.header("authorization", auth);
         if !body.is_empty() {
             req = req.body(body.to_vec());
         }
@@ -295,7 +408,7 @@ impl S3Storage {
     /// URL exists before the body does. For a PUT with a content
     /// type, that header is signed too, so the browser has to send a
     /// matching value.
-    fn build_presigned_url(
+    async fn build_presigned_url(
         &self,
         method: &str,
         key: &str,
@@ -303,17 +416,14 @@ impl S3Storage {
         put: &PutConditions,
     ) -> Result<String, StorageError> {
         validate_key(key)?;
+        let creds = self.creds.credentials().await?;
         let expires = ttl_secs.clamp(1, MAX_PRESIGN_SECS);
         let path = self.key_path(key);
         let host = self.host();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| StorageError::Io(format!("clock: {e}")))?
-            .as_secs();
-        let amz_date = format_amz_date(now);
+        let amz_date = format_amz_date(unix_now()?);
         let date_stamp = &amz_date[..8];
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
-        let credential = format!("{}/{scope}", self.cfg.access_key_id);
+        let credential = format!("{}/{scope}", creds.access_key_id);
         let content_type = canonical_header_value(put.content_type.as_deref())?;
 
         // Always sign `host`. A PUT signs its content type and length
@@ -343,6 +453,10 @@ impl S3Storage {
             ("X-Amz-Expires".into(), expires.to_string()),
             ("X-Amz-SignedHeaders".into(), signed_headers.clone()),
         ];
+        // S3 signs the token as part of the canonical query string.
+        if let Some(token) = &creds.session_token {
+            query.push(("X-Amz-Security-Token".into(), token.clone()));
+        }
         // Sort, then render. Values follow the same escaping rules as
         // `encode_key`, except that slashes are escaped too.
         query.sort_by(|a, b| a.0.cmp(&b.0));
@@ -362,7 +476,7 @@ impl S3Storage {
         let cr_hash = sha256_hex(canonical_request.as_bytes());
         let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
 
-        let signing_key = self.signing_key(date_stamp);
+        let signing_key = self.signing_key(date_stamp, &creds.secret_access_key);
         let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
         Ok(format!(
@@ -372,6 +486,13 @@ impl S3Storage {
             path,
         ))
     }
+}
+
+fn unix_now() -> Result<u64, StorageError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| StorageError::Io(format!("clock: {e}")))?
+        .as_secs())
 }
 
 #[async_trait]
@@ -450,6 +571,7 @@ impl Storage for S3Storage {
 
     async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
         self.build_presigned_url("GET", key, ttl.as_secs(), &PutConditions::default())
+            .await
             .ok()
     }
 
@@ -460,6 +582,7 @@ impl Storage for S3Storage {
         put: &PutConditions,
     ) -> Option<String> {
         self.build_presigned_url("PUT", key, ttl.as_secs(), put)
+            .await
             .ok()
     }
 
@@ -519,14 +642,18 @@ mod tests {
     use super::*;
 
     fn cfg() -> S3Config {
-        S3Config {
-            bucket: "examplebucket".into(),
-            region: "us-east-1".into(),
-            endpoint: None,
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
-            path_style: false,
-        }
+        S3Config::new("examplebucket", "us-east-1")
+    }
+
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const TOKEN: &str = "FwoGZXIvYXdzEXAMPLE/token+with=chars";
+
+    fn creds() -> S3Credentials {
+        S3Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET)
+    }
+
+    fn store(c: S3Config) -> S3Storage {
+        S3Storage::new(c, creds())
     }
 
     // The known-good values below come from the AWS docs page
@@ -580,7 +707,7 @@ mod tests {
 
     #[test]
     fn host_aws_virtual_hosted_default() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         assert_eq!(s.host(), "examplebucket.s3.us-east-1.amazonaws.com");
     }
 
@@ -588,7 +715,7 @@ mod tests {
     fn host_aws_path_style_uses_regional_endpoint() {
         let mut c = cfg();
         c.path_style = true;
-        let s = S3Storage::new(c);
+        let s = store(c);
         assert_eq!(s.host(), "s3.us-east-1.amazonaws.com");
     }
 
@@ -597,7 +724,7 @@ mod tests {
         let mut c = cfg();
         c.path_style = true;
         c.endpoint = Some("https://abc.r2.cloudflarestorage.com/".into());
-        let s = S3Storage::new(c);
+        let s = store(c);
         assert_eq!(s.host(), "abc.r2.cloudflarestorage.com");
     }
 
@@ -606,14 +733,14 @@ mod tests {
         let mut c = cfg();
         c.path_style = true;
         c.endpoint = Some("http://localhost:9000".into());
-        let s = S3Storage::new(c);
+        let s = store(c);
         assert_eq!(s.host(), "localhost:9000");
         assert_eq!(s.scheme(), "http");
     }
 
     #[test]
     fn full_url_aws_virtual_hosted() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         assert_eq!(
             s.full_url("avatars/alice.png"),
             "https://examplebucket.s3.us-east-1.amazonaws.com/avatars/alice.png"
@@ -625,7 +752,7 @@ mod tests {
         let mut c = cfg();
         c.path_style = true;
         c.endpoint = Some("https://minio.example.com".into());
-        let s = S3Storage::new(c);
+        let s = store(c);
         assert_eq!(
             s.full_url("avatars/alice.png"),
             "https://minio.example.com/examplebucket/avatars/alice.png"
@@ -634,7 +761,7 @@ mod tests {
 
     #[test]
     fn url_returns_stable_public_link() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         assert!(s
             .url("foo.txt")
             .unwrap()
@@ -657,16 +784,21 @@ mod tests {
             );
             return;
         };
-        let s = S3Storage::new(S3Config {
-            bucket,
-            region,
-            endpoint: endpoint.clone(),
-            access_key_id: access,
-            secret_access_key: secret,
-            // A custom endpoint usually means R2 or MinIO, which
-            // want path style.
-            path_style: endpoint.is_some(),
-        });
+        let mut creds = S3Credentials::new(access, secret);
+        if let Ok(token) = std::env::var("RUSTANGO_S3_TEST_SESSION_TOKEN") {
+            creds = creds.with_session_token(token);
+        }
+        let s = S3Storage::new(
+            S3Config {
+                bucket,
+                region,
+                endpoint: endpoint.clone(),
+                // A custom endpoint usually means R2 or MinIO, which
+                // want path style.
+                path_style: endpoint.is_some(),
+            },
+            creds,
+        );
         let key = format!("rustango-test/{}.txt", uuid::Uuid::new_v4());
         let payload = b"hello from rustango integration test";
         s.save(&key, payload).await.expect("save");
@@ -689,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn presigned_get_url_carries_required_query_params() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let url = s
             .presigned_get_url("avatars/alice.png", std::time::Duration::from_secs(60))
             .await
@@ -711,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn presigned_put_url_with_content_type_signs_it() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let url = s
             .presigned_put_url(
                 "uploads/x.png",
@@ -731,7 +863,7 @@ mod tests {
     /// #1851: the declared size is signed, so S3 refuses any other body.
     #[tokio::test]
     async fn presigned_put_url_signs_the_content_length() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let url = s
             .presigned_put_url(
                 "u/x.png",
@@ -751,7 +883,7 @@ mod tests {
     /// A create-only PUT signs `if-none-match`, so the URL cannot overwrite.
     #[tokio::test]
     async fn presigned_put_url_create_only_signs_if_none_match() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let put = PutConditions::new().content_length(3).create_only();
         let url = s
             .presigned_put_url("u/x", std::time::Duration::from_secs(60), &put)
@@ -765,7 +897,7 @@ mod tests {
 
     #[tokio::test]
     async fn presigned_put_url_without_content_type_only_signs_host() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let url = s
             .presigned_put_url(
                 "uploads/x.bin",
@@ -781,7 +913,7 @@ mod tests {
     /// #1570: a page of presigns derives the SigV4 key once, not per row.
     #[tokio::test]
     async fn presigning_a_page_derives_the_signing_key_once() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         for i in 0..50 {
             let key = format!("k/{i}");
             s.presigned_get_url(&key, std::time::Duration::from_secs(60))
@@ -794,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn presigned_url_clamps_expiry_at_7_days() {
-        let s = S3Storage::new(cfg());
+        let s = store(cfg());
         let url = s
             .presigned_get_url(
                 "k",
@@ -811,7 +943,7 @@ mod tests {
         let mut c = cfg();
         c.path_style = true;
         c.endpoint = Some("https://minio.example.com".into());
-        let s = S3Storage::new(c);
+        let s = store(c);
         let url = s
             .presigned_get_url("uploads/x.png", std::time::Duration::from_secs(60))
             .await
@@ -855,13 +987,13 @@ mod tests {
         // This value becomes the `Host` header and the signed
         // `host:` header. A path in it is an invalid Host, which a
         // proxy rejects with 400 before S3 sees the request.
-        let s = S3Storage::new(supabase_cfg());
+        let s = store(supabase_cfg());
         assert_eq!(s.host(), "abc123.storage.supabase.co");
     }
 
     #[test]
     fn endpoint_path_prefix_is_kept_in_the_request_path() {
-        let s = S3Storage::new(supabase_cfg());
+        let s = store(supabase_cfg());
         assert_eq!(s.endpoint_prefix(), "/storage/v1/s3");
         assert_eq!(s.key_path("a/b.png"), "/storage/v1/s3/media/a/b.png");
         assert_eq!(
@@ -873,7 +1005,7 @@ mod tests {
     #[test]
     fn bare_host_endpoints_are_unaffected() {
         // MinIO and R2 have no path prefix, so nothing changes.
-        let s = S3Storage::new(S3Config {
+        let s = store(S3Config {
             endpoint: Some("http://127.0.0.1:9000".into()),
             bucket: "media".into(),
             path_style: true,
@@ -889,12 +1021,12 @@ mod tests {
     fn aws_endpoints_are_unaffected() {
         // With no custom endpoint the bucket sits in the host,
         // unless path style is asked for.
-        let virt = S3Storage::new(cfg());
+        let virt = store(cfg());
         assert_eq!(virt.host(), "examplebucket.s3.us-east-1.amazonaws.com");
         assert_eq!(virt.endpoint_prefix(), "");
         assert_eq!(virt.key_path("a.png"), "/a.png");
 
-        let path = S3Storage::new(S3Config {
+        let path = store(S3Config {
             path_style: true,
             ..cfg()
         });
@@ -907,7 +1039,7 @@ mod tests {
         // The signature covers `key_path`. If the URL carried the
         // endpoint prefix and the signed path did not, every request
         // would fail with SignatureDoesNotMatch.
-        let s = S3Storage::new(supabase_cfg());
+        let s = store(supabase_cfg());
         let url = s.full_url("a/b.png");
         let signed_path = s.key_path("a/b.png");
         assert!(
@@ -968,7 +1100,7 @@ mod tests {
     }
 
     fn mock_storage(endpoint: String) -> S3Storage {
-        S3Storage::new(S3Config {
+        store(S3Config {
             endpoint: Some(endpoint),
             path_style: true,
             ..cfg()
@@ -1012,7 +1144,7 @@ mod tests {
             "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
             sha256_hex(cr.as_bytes())
         );
-        let key = derive_signing_key(&cfg().secret_access_key, &amz_date[..8], "us-east-1", "s3");
+        let key = derive_signing_key(SECRET, &amz_date[..8], "us-east-1", "s3");
         let want = hex_encode(&hmac_sha256(&key, sts.as_bytes()));
         assert_eq!(
             field("Signature="),
@@ -1040,6 +1172,80 @@ mod tests {
             "{head}"
         );
         verify_sigv4(&head);
+    }
+
+    /// Temporary keys send their session token, and sign it.
+    #[tokio::test]
+    async fn session_token_is_sent_and_signed() {
+        let (ep, req) = mock(200).await;
+        let mut c = cfg();
+        c.endpoint = Some(ep);
+        c.path_style = true;
+        S3Storage::new(c, creds().with_session_token(TOKEN))
+            .save("a.txt", b"txt")
+            .await
+            .unwrap();
+        let head = req.await.unwrap();
+        let lower = head.to_ascii_lowercase();
+        assert!(
+            head.contains(&format!("x-amz-security-token: {TOKEN}")),
+            "{head}"
+        );
+        assert!(
+            lower.contains("signedheaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"),
+            "{head}"
+        );
+        verify_sigv4(&head);
+    }
+
+    /// A presigned URL carries the token inside the signed query.
+    #[tokio::test]
+    async fn presigned_url_carries_the_session_token() {
+        let s = S3Storage::new(cfg(), creds().with_session_token(TOKEN));
+        let url = s
+            .presigned_get_url("a.png", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let (_, query) = url.split_once('?').unwrap();
+        let (signed, _) = query.split_once("&X-Amz-Signature=").unwrap();
+        assert!(
+            signed.contains("X-Amz-Security-Token=FwoGZXIvYXdzEXAMPLE%2Ftoken%2Bwith%3Dchars"),
+            "{url}"
+        );
+    }
+
+    /// Keys that rotate mid-day are signed with the new secret.
+    #[tokio::test]
+    async fn refreshed_credentials_are_used_on_the_next_request() {
+        struct Rotating(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl S3CredentialProvider for Rotating {
+            async fn credentials(&self) -> Result<S3Credentials, StorageError> {
+                let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(S3Credentials::new(format!("KEY{n}"), format!("secret{n}")))
+            }
+        }
+        let s = S3Storage::new(cfg(), Rotating(0.into()));
+        let a = s
+            .presigned_get_url("a", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let b = s
+            .presigned_get_url("a", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(a.contains("X-Amz-Credential=KEY0%2F"), "{a}");
+        assert!(b.contains("X-Amz-Credential=KEY1%2F"), "{b}");
+        assert_eq!(s.derivations.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn credentials_debug_hides_the_secret_and_token() {
+        let s = format!("{:?}", creds().with_session_token(TOKEN));
+        assert!(s.contains("AKIAIOSFODNN7EXAMPLE"), "{s}");
+        assert!(!s.contains(SECRET) && !s.contains(TOKEN), "{s}");
+        let s = format!("{:?}", cfg());
+        assert!(!s.contains(SECRET), "{s}");
     }
 
     #[tokio::test]
@@ -1180,7 +1386,7 @@ mod tests {
 
     #[test]
     fn virtual_hosted_custom_endpoint_puts_the_bucket_in_the_host() {
-        let s = S3Storage::new(S3Config {
+        let s = store(S3Config {
             endpoint: Some("https://abc.r2.cloudflarestorage.com".into()),
             ..cfg()
         });
@@ -1189,7 +1395,7 @@ mod tests {
             "https://examplebucket.abc.r2.cloudflarestorage.com/a.png"
         );
         // An endpoint that already names the bucket is left alone.
-        let s = S3Storage::new(S3Config {
+        let s = store(S3Config {
             endpoint: Some("https://examplebucket.s3.us-east-1.amazonaws.com".into()),
             ..cfg()
         });

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustango::media::{MediaManager, SaveOpts, UploadIntent};
-use rustango::storage::s3::{S3Config, S3Storage};
+use rustango::storage::s3::{S3Config, S3Credentials, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
 
@@ -35,14 +35,9 @@ async fn seed_media_rows_for_inspection() {
         .await
         .expect("migrate framework media tables");
 
-    let storage: BoxedStorage = Arc::new(S3Storage::new(S3Config {
-        bucket,
-        region,
-        endpoint: endpoint.clone(),
-        access_key_id: key,
-        secret_access_key: secret,
-        path_style: endpoint.is_some(),
-    }));
+    let mut cfg = S3Config::new(bucket, region).with_path_style(endpoint.is_some());
+    cfg.endpoint = endpoint;
+    let storage: BoxedStorage = Arc::new(S3Storage::new(cfg, S3Credentials::new(key, secret)));
     let registry = StorageRegistry::new()
         .set("avatars", storage.clone())
         .cdn("avatars", "https://cdn.example.com/avatars")
