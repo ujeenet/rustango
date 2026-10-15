@@ -222,6 +222,10 @@ S3Storage::new(
 
 When the storage delete fails, the pending row is left soft-deleted, so `get` no longer returns it and `finalize_upload` reports it missing; the next `purge_pending` or `purge_orphans` retries it.
 
+### `Debug` output hides secrets
+
+Code that read a token, password or `database_url` out of `{:?}` output (e.g. in a test) must read the field instead.
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

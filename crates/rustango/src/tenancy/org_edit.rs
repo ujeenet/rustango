@@ -28,7 +28,7 @@ use crate::tenancy::{Org, SecretsResolver as _, TenantSecrets};
 
 /// Which fields an edit touches. `None` means "leave alone" — distinct
 /// from `Some("")`, which clears an optional column.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct OrgPatch {
     pub display_name: Option<String>,
     pub host_pattern: Option<String>,
@@ -36,6 +36,23 @@ pub struct OrgPatch {
     pub port: Option<String>,
     pub active: Option<bool>,
     pub database_url: Option<String>,
+}
+
+/// The password in `database_url` is masked.
+impl std::fmt::Debug for OrgPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrgPatch")
+            .field("display_name", &self.display_name)
+            .field("host_pattern", &self.host_pattern)
+            .field("path_prefix", &self.path_prefix)
+            .field("port", &self.port)
+            .field("active", &self.active)
+            .field(
+                "database_url",
+                &super::org::redacted_url(self.database_url.as_deref()),
+            )
+            .finish()
+    }
 }
 
 impl OrgPatch {
@@ -348,6 +365,16 @@ mod tests {
             .await
             .unwrap();
         assert!(fresh.is_some());
+    }
+
+    #[test]
+    fn patch_debug_masks_the_database_password() {
+        let p = OrgPatch {
+            database_url: Some("postgres://u:db-pw-123@h/acme".into()),
+            ..OrgPatch::default()
+        };
+        let s = format!("{p:?}");
+        assert!(s.contains("database_url") && !s.contains("db-pw-123"), "{s}");
     }
 
     #[test]

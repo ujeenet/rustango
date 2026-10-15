@@ -45,11 +45,20 @@ use subtle::ConstantTimeEq;
 
 use crate::jti_store::{InMemoryJtiStore, JtiStore};
 
-/// One issued access+refresh pair.
-#[derive(Debug, Clone)]
+/// One issued access+refresh pair. `Debug` hides both.
+#[derive(Clone)]
 pub struct JwtTokenPair {
     pub access: String,
     pub refresh: String,
+}
+
+impl std::fmt::Debug for JwtTokenPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtTokenPair")
+            .field("access", &"<redacted>")
+            .field("refresh", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Claims extracted from a verified token.
@@ -652,6 +661,16 @@ mod tests {
     /// key it should never have accepted.
     fn jwt() -> JwtLifecycle {
         JwtLifecycle::new(b"test-secret-at-least-32-bytes-ok!".to_vec())
+    }
+
+    #[test]
+    fn token_pair_debug_hides_the_tokens() {
+        let pair = jwt().issue_pair(42);
+        let s = format!("{pair:?}");
+        assert!(
+            !s.contains(&pair.access) && !s.contains(&pair.refresh),
+            "{s}"
+        );
     }
 
     #[tokio::test]

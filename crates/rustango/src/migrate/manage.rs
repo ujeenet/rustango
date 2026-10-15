@@ -6072,8 +6072,8 @@ use crate::sql::connect_diagnosis::redact as redact_url;
 /// Snapshot of the env vars `manage check --deploy` cares about.
 /// Lifted out so the audit logic is pure (testable without
 /// `unsafe { env::set_var }` race conditions across `cargo test`'s
-/// parallel runners).
-#[derive(Debug, Default, Clone)]
+/// parallel runners). No `Debug`: it holds the session secret.
+#[derive(Default, Clone)]
 pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,

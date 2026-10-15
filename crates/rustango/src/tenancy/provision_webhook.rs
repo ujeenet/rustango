@@ -193,7 +193,7 @@ pub struct WebhookState {
 }
 
 /// The payload a caller signs and sends.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct ProvisionPayload {
     /// Idempotency key. Every provider retries; this is what makes two
     /// deliveries of one event produce one tenant.
@@ -217,6 +217,23 @@ pub struct ProvisionPayload {
     /// Defaults to `admin_email`.
     #[serde(default)]
     pub admin_username: Option<String>,
+}
+
+/// The password in `database_url` is masked.
+impl std::fmt::Debug for ProvisionPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionPayload")
+            .field("event_id", &self.event_id)
+            .field("timestamp", &self.timestamp)
+            .field("slug", &self.slug)
+            .field("display_name", &self.display_name)
+            .field("host_pattern", &self.host_pattern)
+            .field(
+                "database_url",
+                &super::org::redacted_url(self.database_url.as_deref()),
+            )
+            .finish()
+    }
 }
 
 /// What the caller gets back.
@@ -588,6 +605,12 @@ mod tests {
             admin_email: None,
             admin_username: None,
         }
+    }
+
+    #[test]
+    fn payload_debug_masks_the_database_password() {
+        let s = format!("{:?}", payload("acme", Some("postgres://u:db-pw-123@h/a")));
+        assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
     }
 
     fn config(policy: UrlPolicy) -> WebhookConfig {

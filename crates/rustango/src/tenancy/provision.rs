@@ -76,7 +76,7 @@ use super::secrets::{SecretsResolver, TenantSecrets};
 /// The CLI's `--no-migrate` flag is
 /// [`run_migrations`](Self::run_migrations) here: a negative flag reads
 /// well on a command line and badly on a field.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProvisionRequest {
     /// Globally unique. Also the default schema name, display name, and
     /// subdomain label.
@@ -142,6 +142,28 @@ impl TenantStorage {
             Self::Schema(_) => StorageMode::Schema,
             Self::Database(_) => StorageMode::Database,
         }
+    }
+}
+
+/// The password in `database_url` is masked.
+impl std::fmt::Debug for ProvisionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionRequest")
+            .field("slug", &self.slug)
+            .field("mode", &self.mode)
+            .field("backend", &self.backend)
+            .field("display_name", &self.display_name)
+            .field(
+                "database_url",
+                &super::org::redacted_url(self.database_url.as_deref()),
+            )
+            .field("schema_name", &self.schema_name)
+            .field("host_pattern", &self.host_pattern)
+            .field("port", &self.port)
+            .field("path_prefix", &self.path_prefix)
+            .field("run_migrations", &self.run_migrations)
+            .field("preflight", &self.preflight)
+            .finish()
     }
 }
 
@@ -2891,6 +2913,13 @@ where
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+
+    #[test]
+    fn request_debug_masks_the_database_password() {
+        let r = ProvisionRequest::database("acme", "postgres://u:db-pw-123@h/acme");
+        let s = format!("{r:?}");
+        assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
+    }
 
     /// The exact input that created a live, unreachable tenant during
     /// QA: a space in the slug, accepted by the console, producing
