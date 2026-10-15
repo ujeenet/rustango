@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — self-referential relation subqueries correlate to the outer row (#1287)
+
+A subquery over its enclosing query's table reads it as `__rustango_self`, so `where_has`, `annotate_count` and the M2M aggregates on a self FK or self M2M no longer compare a row with itself.
+
 ### Fixed — `assert_num_queries` counts values, pluck and aggregate reads (#1303)
 
 `values()`, `values_list()`, `pluck`, `pks`, `value`, `pluck_pairs` and `aggregate()` / `annotate()` each count one query; they counted none.

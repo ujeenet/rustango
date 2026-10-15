@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Self-table subqueries are aliased (#1287)
+
+A subquery over the same table as its outer query now reads `FROM "t" AS "__rustango_self"`. Raw SQL snapshots of such queries change; results of self `where_has` / `annotate_*` are now correct.
+
 ### `assert_num_queries` counts values and aggregate reads (#1303)
 
 `values()`, `pluck`, `value`, `pluck_pairs` and `aggregate()` reads now count one each. Raise the expected count in tests that run them inside the block.
