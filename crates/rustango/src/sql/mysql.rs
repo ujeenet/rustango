@@ -122,7 +122,8 @@ impl Dialect for MySql {
 
     /// MySQL's CAST targets differ from the ANSI names: integers
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
-    /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME`.
+    /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME(6)`
+    /// (bare `DATETIME` / `TIME` drop the microseconds, #1359).
     ///
     /// UUID has no CAST target, so it returns `None`; cast a
     /// string-shaped value to `CHAR` yourself.
@@ -133,9 +134,9 @@ impl Dialect for MySql {
             FieldType::F64 => "DOUBLE",
             FieldType::Bool => "UNSIGNED",
             FieldType::String => "CHAR",
-            FieldType::DateTime => "DATETIME",
+            FieldType::DateTime => "DATETIME(6)",
             FieldType::Date => "DATE",
-            FieldType::Time => "TIME",
+            FieldType::Time => "TIME(6)",
             FieldType::Decimal => "DECIMAL(65, 28)",
             FieldType::Binary => "BINARY",
             FieldType::Json => "JSON",

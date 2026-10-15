@@ -2420,7 +2420,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // PG and MySQL have `NOW()`.
+            // PG has `NOW()`; MySQL needs `NOW(6)` to keep microseconds (#1359).
             //
             // SQLite must use the same format as every other write
             // path. Its datetime columns are TEXT compared as text,
@@ -2433,6 +2433,8 @@ fn write_function(
                     "strftime('{}','now')",
                     crate::sql::SQLITE_DATETIME_FORMAT
                 );
+            } else if b.d.name() == "mysql" {
+                b.sql.push_str("NOW(6)");
             } else {
                 b.sql.push_str("NOW()");
             }

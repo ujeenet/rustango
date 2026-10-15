@@ -47,7 +47,7 @@ fn now_emits_now_on_pg_mysql_current_timestamp_on_sqlite() {
     assert!(pg.sql.contains("= NOW()"), "PG: {}", pg.sql);
 
     let my = MySql.compile_update(&q).unwrap();
-    assert!(my.sql.contains("= NOW()"), "MySQL: {}", my.sql);
+    assert!(my.sql.contains("= NOW(6)"), "MySQL: {}", my.sql);
 
     // SQLite must NOT emit bare `CURRENT_TIMESTAMP`. It did until
     // #1464: a SQLite datetime column is TEXT compared

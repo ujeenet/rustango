@@ -836,11 +836,59 @@ async fn string_agg_is_not_capped(pool: &Pool) {
     assert_eq!(s.len(), 30 * 60 + 29);
 }
 
+/// #1359: MySQL's `NOW()` and `CAST(.. AS DATETIME/TIME)` dropped the fraction.
+async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
+    use chrono::Timelike as _;
+    use rustango::core::{funcs::now, Expr, FieldType};
+    seed_meas(pool, 0, "2024-01-01T10:00:00.5Z").await;
+    let same = WhereExpr::ExprCompare {
+        lhs: Expr::Cast {
+            expr: Box::new(Expr::Column("at")),
+            ty: FieldType::DateTime,
+        },
+        op: Op::Eq,
+        rhs: Expr::Column("at"),
+    };
+    let n = Meas::objects().where_raw(same).count(pool).await;
+    assert_eq!(n.expect("count"), 1, "CAST to DateTime keeps the fraction");
+    // SQLite has no TIME type; its cast is to TEXT.
+    if pool.dialect().name() != "sqlite" {
+        let t = chrono::NaiveTime::from_hms_micro_opt(10, 0, 0, 250_000).unwrap();
+        let time = WhereExpr::ExprCompare {
+            lhs: Expr::Cast {
+                expr: Box::new(Expr::Literal(SqlValue::from("10:00:00.250000"))),
+                ty: FieldType::Time,
+            },
+            op: Op::Eq,
+            rhs: Expr::Literal(SqlValue::Time(t)),
+        };
+        let n = Meas::objects().where_raw(time).count(pool).await;
+        assert_eq!(n.expect("count"), 1, "CAST to Time keeps the fraction");
+    }
+    // A whole-second NOW() three times in a row means the fraction is gone.
+    let mut fractions = Vec::new();
+    for _ in 0..3 {
+        Meas::objects()
+            .update()
+            .set_expr("at", now())
+            .execute_pool(pool)
+            .await
+            .expect("set now()");
+        let rows: Vec<Meas> = Meas::objects().fetch(pool).await.expect("fetch");
+        fractions.push(rows[0].at.nanosecond());
+    }
+    assert!(
+        fractions.iter().any(|f| *f != 0),
+        "NOW() fraction: {fractions:?}"
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         upsert_never_updates_a_row_of_another_unique_key,
         string_agg_is_not_capped,
+        now_and_casts_keep_fractional_seconds,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,
