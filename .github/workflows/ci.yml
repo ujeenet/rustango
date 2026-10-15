@@ -1428,6 +1428,8 @@ jobs:
           --test media_tags_mysql_live -- --test-threads=1
       # #1573 — collection delete/create under concurrent row locks.
       - run: cargo test -p rustango --features mysql,media,testkit --test media_collection_race_tri
+      # purge_pending holds no lock across the storage call.
+      - run: cargo test -p rustango --features mysql,media,testkit --test media_purge_tri
       # #1570 — media listings return a page; tagging is batched.
       - run: cargo test -p rustango --features mysql,media,testkit,admin --test media_listing_bounds_tri
       # #1403 — bulk create must roll back on a constraint violation.

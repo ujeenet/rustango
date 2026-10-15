@@ -218,6 +218,10 @@ S3Storage::new(
 )
 ```
 
+### `purge_pending` soft-deletes before it deletes the object
+
+When the storage delete fails, the pending row is left soft-deleted, so `get` no longer returns it and `finalize_upload` reports it missing; the next `purge_pending` or `purge_orphans` retries it.
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts
