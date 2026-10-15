@@ -113,6 +113,7 @@ pub async fn fetch_values_dict(
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
     let width = values_width(query);
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -161,6 +162,7 @@ pub async fn fetch_aggregate_dict(
     query: &AggregateQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_aggregate(query)?;
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -206,6 +208,7 @@ pub async fn fetch_values_list(
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
     let width = values_width(query);
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -580,6 +583,7 @@ async fn fetch_flat_raw<U: FlatScalar>(
     sql: &str,
     params: Vec<SqlValue>,
 ) -> Result<Vec<U>, ExecError> {
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -628,6 +632,7 @@ where
     V: FlatScalar,
 {
     let stmt = pool.dialect().compile_select(query)?;
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {

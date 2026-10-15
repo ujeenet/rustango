@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `assert_num_queries` counts values and aggregate reads (#1303)
+
+`values()`, `pluck`, `value`, `pluck_pairs` and `aggregate()` reads now count one each. Raise the expected count in tests that run them inside the block.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

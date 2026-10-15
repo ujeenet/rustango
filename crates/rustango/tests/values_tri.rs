@@ -384,6 +384,34 @@ async fn pluck_pairs_null_needs_an_option(pool: &Pool) {
     assert_eq!(scores, vec![Some(7), None, None, Some(9)]);
 }
 
+/// Each values-family read is one counted query (#1303).
+async fn values_reads_are_counted(pool: &Pool) {
+    use rustango::test_assertions::QueryCounter;
+    QueryCounter::scope(async {
+        let qs = || Post::objects().order_by(&[("id", false)]);
+        qs().values_dict(&["id"]).fetch(pool).await.expect("dict");
+        assert_eq!(QueryCounter::take(), 1, "values_dict");
+        qs().values_list(&["id"]).fetch(pool).await.expect("list");
+        assert_eq!(QueryCounter::take(), 1, "values_list");
+        qs().pluck::<i64>("id", pool).await.expect("pluck");
+        assert_eq!(QueryCounter::take(), 1, "pluck");
+        qs().value::<i64>("id", pool).await.expect("value");
+        assert_eq!(QueryCounter::take(), 1, "value");
+        qs().pluck_pairs::<i64, String>("id", "title", pool)
+            .await
+            .expect("pairs");
+        assert_eq!(QueryCounter::take(), 1, "pluck_pairs");
+        Post::objects()
+            .aggregate()
+            .annotate("n", AggregateExpr::Count(None))
+            .fetch(pool)
+            .await
+            .expect("aggregate");
+        assert_eq!(QueryCounter::take(), 1, "aggregate");
+    })
+    .await;
+}
+
 /// One nullable column per portable type, for the decode scenarios.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "values_tri_typed")]
@@ -629,6 +657,7 @@ mod decimal {
             .await
             .expect("sum");
         assert_eq!(sum[0]["s"], SqlValue::Decimal(v));
+
     }
 
     tri_dialect_test! {
@@ -649,6 +678,7 @@ tri_dialect_test! {
         values_list_flat_decodes_a_boolean_column,
         values_list_flat_null_needs_an_option,
         pluck_pairs_null_needs_an_option,
+        values_reads_are_counted,
         values_keep_bool_and_json_types,
         aggregate_alias_does_not_take_the_column_type,
         joined_group_bool_keeps_its_type,

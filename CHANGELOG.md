@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `assert_num_queries` counts values, pluck and aggregate reads (#1303)
+
+`values()`, `values_list()`, `pluck`, `pks`, `value`, `pluck_pairs` and `aggregate()` / `annotate()` each count one query; they counted none.
+
 ### Fixed — docs no longer say saving sends model signals (#1323)
 
 No ORM write sends `pre_save` / `post_save` / `pre_delete` / `post_delete`; the ORM and caching guides now say to call `send_*` after the write.
