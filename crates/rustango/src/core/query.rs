@@ -1339,8 +1339,8 @@ impl BulkInsertQuery {
     ///
     /// The writer emits:
     /// * Postgres / SQLite (3.24+): `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
-    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)` — no
-    ///   target, because MySQL matches every UNIQUE index by itself.
+    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)`. It matches
+    ///   every UNIQUE index, so a target that is not the only one is refused.
     #[must_use]
     pub fn on_conflict_do_update(
         mut self,

@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### MySQL upsert checks its target (#1357)
+
+On MySQL, `ConflictClause::DoUpdate` / `bulk_upsert_pool` now return `SqlError::ConflictNotSupportedInDialect` when the model has another unique key (PK, `unique`, unique index) without an `Auto` column. Upsert on that key, or split the write.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

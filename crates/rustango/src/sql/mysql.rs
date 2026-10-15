@@ -630,8 +630,8 @@ impl Dialect for MySql {
     }
 
     /// MySQL's `ON DUPLICATE KEY UPDATE` takes no target column
-    /// list; it fires on any unique violation, so a `DoUpdate` target
-    /// is ignored:
+    /// list; it fires on any unique violation, so a `DoUpdate` is
+    /// refused unless its target is the only unique key a row can hit:
     ///
     /// ```sql
     /// INSERT INTO `t` (a, b) VALUES (?, ?)
@@ -661,12 +661,16 @@ impl Dialect for MySql {
                 target,
                 update_columns,
             } => {
-                // MySQL has no conflict target; the clause matches
-                // every unique index. A target is accepted and
-                // ignored, so one call site works on every backend.
-                let _ = target;
                 if update_columns.is_empty() {
                     return Err(SqlError::EmptyUpdateSet);
+                }
+                // The clause fires on every unique key, so another key
+                // that can clash would update the wrong row (#1357).
+                if !my_target_is_only_unique_key(model, target) {
+                    return Err(SqlError::ConflictNotSupportedInDialect {
+                        shape: "DO UPDATE on a target that is not the only unique key",
+                        dialect: "mysql",
+                    });
                 }
                 sql.push_str(" ON DUPLICATE KEY UPDATE ");
                 // The id rides inside the first assignment: assigning the
@@ -785,6 +789,34 @@ fn write_my_ident(sql: &mut String, name: &str) {
         }
     }
     sql.push('`');
+}
+
+/// True when every unique key a new row can clash on is `target`. A key
+/// with an `Auto` column holds a generated value, so it never clashes.
+fn my_target_is_only_unique_key(model: &ModelSchema, target: &[&str]) -> bool {
+    let fits = |cols: &[&str]| {
+        let generated = cols
+            .iter()
+            .any(|c| model.field_by_column(c).is_some_and(|f| f.auto));
+        generated || (cols.len() == target.len() && cols.iter().all(|c| target.contains(c)))
+    };
+    let pk: Vec<&str> = model
+        .fields
+        .iter()
+        .filter(|f| f.primary_key)
+        .map(|f| f.column)
+        .collect();
+    (pk.is_empty() || fits(&pk))
+        && model
+            .fields
+            .iter()
+            .filter(|f| f.unique && !f.primary_key)
+            .all(|f| fits(&[f.column]))
+        && model
+            .indexes
+            .iter()
+            .filter(|i| i.unique)
+            .all(|i| fits(i.columns))
 }
 
 /// `<col> = IF(LAST_INSERT_ID(<id>), <col>, <col>)`: a no-op write that
@@ -1142,8 +1174,7 @@ mod tests {
 
     #[test]
     fn conflict_do_update_with_target_silently_ignores_target() {
-        // The conflict target is ignored: MySQL matches on every
-        // unique index anyway.
+        // No other unique key can clash, so the target needs no clause.
         let model = empty_model_with("t", &[("id", FieldType::I64), ("a", FieldType::String)]);
         let mut sql = String::new();
         MySql
@@ -1155,7 +1186,7 @@ mod tests {
                     update_columns: vec!["a"],
                 },
             )
-            .expect("MySQL should accept target and silently ignore it");
+            .expect("no other unique key, so the target is accepted");
         assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
     }
 

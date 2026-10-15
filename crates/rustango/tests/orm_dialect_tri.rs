@@ -79,6 +79,21 @@ pub struct Noted {
     pub n: i64,
 }
 
+/// Two unique keys besides the PK.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_account")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Account {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64, unique)]
+    pub email: String,
+    #[rustango(max_length = 64, unique)]
+    pub username: String,
+    #[rustango(max_length = 64)]
+    pub note: String,
+}
+
 /// Seed one `Meas` row at the RFC 3339 instant `at`, plus a `Reading`
 /// of it.
 async fn seed_meas(pool: &Pool, n: i64, at: &str) {
@@ -116,6 +131,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Meas>(pool).await;
     fresh_table::<Reading>(pool).await;
     fresh_table::<Noted>(pool).await;
+    fresh_table::<Account>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -759,9 +775,47 @@ async fn relation_date_lookup(pool: &Pool) {
     }
 }
 
+/// #1357: MySQL's upsert fired on any unique key, so a username clash
+/// updated another row.
+async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
+    for (email, username) in [("a@x", "alice"), ("b@x", "bob")] {
+        Account {
+            id: Auto::default(),
+            email: email.into(),
+            username: username.into(),
+            note: String::new(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed account");
+    }
+    let q = InsertQuery::new(
+        Account::SCHEMA,
+        vec!["email", "username", "note"],
+        vec![
+            SqlValue::from("new@x"),
+            SqlValue::from("bob"),
+            SqlValue::from("changed"),
+        ],
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["email"],
+        update_columns: vec!["note"],
+    });
+    let r = rustango::sql::insert_pool(pool, &q).await;
+    assert!(r.is_err(), "a username clash is not an email conflict");
+    let bob: Vec<Account> = Account::objects()
+        .filter("username", "bob")
+        .fetch(pool)
+        .await
+        .expect("fetch bob");
+    assert_eq!((bob[0].email.as_str(), bob[0].note.as_str()), ("b@x", ""));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        upsert_never_updates_a_row_of_another_unique_key,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,

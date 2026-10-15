@@ -840,8 +840,9 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Append this dialect's `ON CONFLICT` clause. `model` is the insert's
-    /// table: MySQL names its PK in the clause. MySQL ignores a `DoUpdate`
-    /// target, since `ON DUPLICATE KEY UPDATE` fires on any unique key.
+    /// table: MySQL names its PK in the clause. MySQL refuses a `DoUpdate`
+    /// target that is not the only unique key, since `ON DUPLICATE KEY
+    /// UPDATE` fires on any unique key.
     ///
     /// # Errors
     /// [`SqlError::ConflictNotSupportedInDialect`] when the dialect
