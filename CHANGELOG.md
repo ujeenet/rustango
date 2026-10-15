@@ -12,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 `prewarm-pools` and `audit-cleanup` exit non-zero when a tenant fails. `check` refuses an unknown argument (`--deplyo`), and `dumpdata --model` / `--exclude` refuse an unknown model name instead of dumping `[]`.
 
+### Fixed — `dumpdata` / `loaddata` keep auto-created M2M links (#1226)
+
+Each row carries its links as `"<relation>": [pk, ...]` in `fields`; `loaddata` inserts them after every row, so both ends exist.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

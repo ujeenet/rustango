@@ -3500,6 +3500,7 @@ async fn dumpdata_cmd<W: Write>(
                     schema.table
                 ))
             })?;
+        let links = m2m_links(pool, schema).await?;
 
         for mut row in rows {
             // Pop the PK column off `fields` into the outer fixture
@@ -3512,6 +3513,12 @@ async fn dumpdata_cmd<W: Write>(
                     .unwrap_or(serde_json::Value::Null),
                 None => serde_json::Value::Null,
             };
+            if let Some(map) = row.as_object_mut() {
+                for (name, by_src) in &links {
+                    let dsts = by_src.get(&pk_value.to_string()).cloned();
+                    map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+                }
+            }
             out.push(serde_json::json!({
                 "model": dotted_name,
                 "pk": pk_value,
@@ -3527,6 +3534,79 @@ async fn dumpdata_cmd<W: Write>(
     }
     .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
     writeln!(w, "{rendered}")?;
+    Ok(())
+}
+
+/// Target pks keyed by source pk (its JSON text).
+type LinksBySource = std::collections::HashMap<String, Vec<serde_json::Value>>;
+
+/// `rel`'s auto-created junction as the emitters see it, and its two ends.
+type Junction = (
+    &'static crate::core::ModelSchema,
+    [&'static crate::core::FieldSchema; 2],
+);
+
+fn junction_of(rel: &crate::core::M2MRelation) -> Result<Junction, MigrateError> {
+    let junction = crate::sql::m2m::junction(rel.through, &[rel.src_col, rel.dst_col]);
+    let end = |col: &str| {
+        junction.field_by_column(col).ok_or_else(|| {
+            MigrateError::Validation(format!("junction `{}` has no `{col}` column", rel.through))
+        })
+    };
+    Ok((junction, [end(rel.src_col)?, end(rel.dst_col)?]))
+}
+
+/// Each auto-created M2M relation of `schema` and its links. Those
+/// junctions are no model, so the links ride on the source rows (#1226).
+async fn m2m_links(
+    pool: &Pool,
+    schema: &'static crate::core::ModelSchema,
+) -> Result<Vec<(&'static str, LinksBySource)>, MigrateError> {
+    let mut out = Vec::new();
+    for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+        let (junction, [src, dst]) = junction_of(rel)?;
+        let query = crate::core::SelectQuery::new(junction);
+        let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "dumpdata: select from `{}` failed: {e}",
+                    rel.through
+                ))
+            })?;
+        let mut by_src = LinksBySource::new();
+        for row in rows {
+            if let (Some(s), Some(d)) = (row.get(src.name), row.get(dst.name)) {
+                by_src.entry(s.to_string()).or_default().push(d.clone());
+            }
+        }
+        for dsts in by_src.values_mut() {
+            dsts.sort_by_key(serde_json::Value::as_i64);
+        }
+        out.push((rel.name, by_src));
+    }
+    Ok(out)
+}
+
+/// Insert the `src` → `dsts` links of `rel`; a link already there is kept.
+async fn load_links(
+    pool: &Pool,
+    rel: &crate::core::M2MRelation,
+    src: &serde_json::Value,
+    dsts: &[serde_json::Value],
+) -> Result<(), String> {
+    let (junction, [s, d]) = junction_of(rel).map_err(|e| e.to_string())?;
+    let src = json_to_sql_value(src, s)?;
+    for dst in dsts {
+        let query = crate::core::InsertQuery::new(
+            junction,
+            vec![rel.src_col, rel.dst_col],
+            vec![src.clone(), json_to_sql_value(dst, d)?],
+        );
+        crate::sql::insert_or_ignore(pool, &query)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -3658,6 +3738,8 @@ async fn loaddata_cmd<W: Write>(
     // `--fail-fast` stops here, but the rows already in still need their
     // sequences moved, so the error is raised after the reset.
     let mut abort: Option<String> = None;
+    // M2M links load after every row, so both ends exist (#1226).
+    let mut links = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3710,6 +3792,21 @@ async fn loaddata_cmd<W: Write>(
                 }
             }
         }
+        let mut row_links = Vec::new();
+        for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+            match fields_obj.get(rel.name) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::Array(dsts)) if !dsts.is_empty() => {
+                    row_links.push((rel, dsts.clone()));
+                }
+                Some(serde_json::Value::Array(_)) => {}
+                Some(_) => row_err = Some(format!("field `{}`: expected a list of pks", rel.name)),
+            }
+        }
+        let src_pk = entry.get("pk").cloned().unwrap_or_default();
+        if !row_links.is_empty() && src_pk.is_null() {
+            row_err = Some("M2M links need the row's `pk`".to_owned());
+        }
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
             if parsed.fail_fast {
@@ -3734,9 +3831,26 @@ async fn loaddata_cmd<W: Write>(
                 if !touched.iter().any(|t| t.table == schema.table) {
                     touched.push(schema);
                 }
+                for (rel, dsts) in row_links {
+                    links.push((line, model_name.to_owned(), rel, src_pk.clone(), dsts));
+                }
             }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
+                if parsed.fail_fast {
+                    abort = Some(msg);
+                    break;
+                }
+                tracing::warn!("{msg}");
+                skipped += 1;
+            }
+        }
+    }
+
+    if abort.is_none() {
+        for (line, model_name, rel, src, dsts) in links {
+            if let Err(e) = load_links(pool, rel, &src, &dsts).await {
+                let msg = format!("loaddata: entry #{line} (`{model_name}`) `{}`: {e}", rel.name);
                 if parsed.fail_fast {
                     abort = Some(msg);
                     break;

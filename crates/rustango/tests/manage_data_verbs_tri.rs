@@ -483,8 +483,8 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
     assert_eq!(left, [0, 0], "rows left behind");
 }
 
-/// An auto-created M2M junction with rows does not block the flush; it clears too.
-async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+/// Empty post and tag tables, joined by the junction migrations build.
+async fn fresh_m2m(pool: &Pool) {
     use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli2317_post_tags").await;
@@ -505,6 +505,12 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
             .await
             .expect("junction ddl");
     }
+}
+
+/// An auto-created M2M junction with rows does not block the flush; it clears too.
+async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    fresh_m2m(pool).await;
     let mut post = M2mPost {
         id: Auto::default(),
         n: 1,
@@ -528,6 +534,52 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     let out = out.expect("flush --app cli2317");
     assert!(out.contains("cleared 3 table(s)"), "{out}");
     assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
+}
+
+/// dumpdata → loaddata keeps auto-created M2M links (#1226).
+async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
+    fresh_m2m(pool).await;
+    let mut post = M2mPost {
+        id: Auto::default(),
+        n: 1,
+    };
+    post.insert_pool(pool).await.expect("post");
+    let mut want = Vec::new();
+    for n in [1, 2] {
+        let mut tag = M2mTag {
+            id: Auto::default(),
+            n,
+        };
+        tag.insert_pool(pool).await.expect("tag");
+        let id = tag.id.get().copied().expect("pk");
+        post.tags_m2m().add(id, pool).await.expect("link");
+        want.push(id);
+    }
+    let dumped = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli2317.M2mPost",
+            "--model",
+            "cli2317.M2mTag",
+            "--indent",
+            "0",
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("m2m.json");
+    std::fs::write(&fixture, dumped.trim()).unwrap();
+
+    fresh_m2m(pool).await;
+    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    let mut links = post.tags_m2m().all(pool).await.expect("links");
+    rustango::testkit::matrix::drop_table(pool, "cli2317_post_tags").await;
+    out.expect("loaddata");
+    links.sort_unstable();
+    assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
 async fn dump(pool: &Pool) -> serde_json::Value {
@@ -630,5 +682,6 @@ tri_dialect_test! {
         self_fk_child_before_parent_loads,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
+        dump_and_load_keeps_m2m_links,
     ],
 }

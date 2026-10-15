@@ -158,6 +158,10 @@ untouched.
 
 `prewarm-pools` and `audit-cleanup` exit non-zero when any tenant fails; `check` with any argument but `--deploy`, and `dumpdata --model` / `--exclude` with a name no model has, are errors.
 
+### `dumpdata` fixtures carry M2M links (#1226)
+
+Rows of a model with an auto-created M2M relation get a `"<relation>": [pk, ...]` field. Older fixtures still load; a tool that reads fixtures should ignore the new keys.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
