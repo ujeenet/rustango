@@ -658,6 +658,28 @@ mod decimal {
             .expect("sum");
         assert_eq!(sum[0]["s"], SqlValue::Decimal(v));
 
+        // The executor path decodes NUMERIC too (#1215).
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = pool.as_postgres() {
+            let on = Money::objects()
+                .values(&["amount"])
+                .annotate("s", AggregateExpr::Sum("amount"))
+                .fetch_on(pg)
+                .await
+                .expect("fetch_on");
+            let mut got: Vec<_> = on
+                .iter()
+                .map(|r| (r["amount"].clone(), r["s"].clone()))
+                .collect();
+            got.sort_by_key(|r| format!("{r:?}"));
+            assert_eq!(
+                got,
+                vec![
+                    (SqlValue::Decimal(v), SqlValue::Decimal(v)),
+                    (SqlValue::Null, SqlValue::Null),
+                ]
+            );
+        }
     }
 
     tri_dialect_test! {
