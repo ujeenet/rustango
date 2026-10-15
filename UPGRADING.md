@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### CSRF exempt prefixes match by segment (#1128)
+
+`CsrfConfig::exempt_prefix("/beacon")` no longer exempts `/beacon-admin`. A prefix meant to cover sibling paths must list each one.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
