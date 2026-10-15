@@ -519,14 +519,18 @@ L'utilitaire place l'administration derrière une connexion. Le `admin_prefix` d
 
 ```rust
 use rustango::admin;
-use rustango::session::SessionSecret;
+use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
+    let secret = load_session_secret_for_tier(
+        &tier_from_env(),
+        std::path::Path::new("./var/.rustango_session.key"),
+    );
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
-        .with_session_auth(SessionSecret::from_env_or_random())
+        .with_session_auth(secret)
         .build()
 }
 ```

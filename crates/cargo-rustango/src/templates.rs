@@ -849,7 +849,7 @@ pub fn api() -> Router<()> {
 use axum::routing::get;
 use axum::Router;
 use rustango::admin;
-use rustango::session::SessionSecret;
+use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
 use crate::views;
@@ -862,10 +862,17 @@ pub fn api() -> Router<()> {
 
 /// The auto-admin, behind a login. Create the first account with
 /// `cargo run -- create-admin <username>`.
+///
+/// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
+/// prod tier) from `./var/`, so a restart keeps you signed in.
 pub fn admin_router(pool: Pool) -> Router {
+    let secret = load_session_secret_for_tier(
+        &tier_from_env(),
+        std::path::Path::new(\"./var/.rustango_session.key\"),
+    );
     admin::Builder::new(pool)
         .admin_prefix(\"/admin\") // must match the `.nest_with(\"/admin\", …)` in main.rs
-        .with_session_auth(SessionSecret::from_env_or_random())
+        .with_session_auth(secret)
         .build()
 }
 "

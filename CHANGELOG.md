@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the fullstack template's admin keeps its session key across restarts (#1335)
+
+`admin_router` loads the key with `load_session_secret_for_tier`: `./var/` in dev, and a refused boot on prod without `RUSTANGO_SESSION_SECRET`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

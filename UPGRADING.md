@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Fullstack admin session key (#1335)
+
+Projects generated with `--template fullstack` signed admin cookies with a new random key per process. Copy the new `admin_router` from `docs/getting-started.md`; on `RUSTANGO_ENV=prod` it refuses to start without `RUSTANGO_SESSION_SECRET`.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
