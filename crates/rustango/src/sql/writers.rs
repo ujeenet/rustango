@@ -150,16 +150,20 @@ impl<'d> Sql<'d> {
     }
 
     /// Add `value` to the bind list and return its placeholder, which
-    /// a JSON value gets wrapped in by the dialect.
+    /// a JSON or Decimal value gets wrapped in by the dialect.
     pub(super) fn bind(&mut self, value: SqlValue) -> String {
-        let is_json = matches!(value, SqlValue::Json(_));
+        let wrap: Option<fn(&dyn Dialect, &mut String, &str)> = match value {
+            SqlValue::Json(_) => Some(|d, s, p| d.write_json_param(s, p)),
+            SqlValue::Decimal(_) => Some(|d, s, p| d.write_decimal_param(s, p)),
+            _ => None,
+        };
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
-        if !is_json {
+        let Some(wrap) = wrap else {
             return p;
-        }
+        };
         let mut wrapped = String::new();
-        self.d.write_json_param(&mut wrapped, &p);
+        wrap(self.d, &mut wrapped, &p);
         wrapped
     }
 

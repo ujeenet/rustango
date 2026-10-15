@@ -790,6 +790,12 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
+    /// Write the placeholder of a bound Decimal. SQLite wraps it, since
+    /// sqlx binds it as text there.
+    fn write_decimal_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str(placeholder);
+    }
+
     /// JSON containment: `<col> @> <p>::jsonb` (Postgres) /
     /// `JSON_CONTAINS(<col>, <p>)` (MySQL).
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {

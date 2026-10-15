@@ -16,6 +16,10 @@ A statement with `GROUP_CONCAT` carries a `SET_VAR(group_concat_max_len = …)` 
 
 They emit `NOW(6)`, `DATETIME(6)` and `TIME(6)`, as PG and SQLite already kept the fraction.
 
+### Fixed — SQLite compares a Decimal with an expression as a number (#1217)
+
+A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `x * 2 > Decimal` no longer compares a number with text. New provided method `Dialect::write_decimal_param`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

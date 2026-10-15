@@ -883,12 +883,41 @@ async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     );
 }
 
+/// #1217: SQLite bound a Decimal as text, which no number ever exceeds.
+async fn decimal_compares_with_expressions(pool: &Pool) {
+    use rust_decimal::Decimal;
+    use rustango::core::{BinOp, Expr};
+    seed_meas(pool, 100, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 105, "2024-01-01T00:00:00Z").await;
+    let rows = Meas::objects()
+        .aggregate()
+        .group_by("taken_on")
+        .annotate("total", rustango::core::aggregates::sum("n").into())
+        .filter("total", Op::Gt, Decimal::from(200))
+        .fetch(pool)
+        .await
+        .expect("having sum > decimal");
+    assert_eq!(rows.len(), 1, "SUM(n) = 205 > 200");
+    let doubled = WhereExpr::ExprCompare {
+        lhs: Expr::BinOp {
+            left: Box::new(Expr::Column("n")),
+            op: BinOp::Mul,
+            right: Box::new(Expr::Literal(SqlValue::I64(2))),
+        },
+        op: Op::Gt,
+        rhs: Expr::Literal(SqlValue::Decimal(Decimal::new(2015, 1))),
+    };
+    let n = Meas::objects().where_raw(doubled).count(pool).await;
+    assert_eq!(n.expect("count"), 1, "n * 2 > 201.5");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         upsert_never_updates_a_row_of_another_unique_key,
         string_agg_is_not_capped,
         now_and_casts_keep_fractional_seconds,
+        decimal_compares_with_expressions,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,

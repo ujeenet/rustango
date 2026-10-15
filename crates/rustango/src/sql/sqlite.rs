@@ -267,6 +267,14 @@ impl Dialect for Sqlite {
         String::new()
     }
 
+    /// A Decimal binds as text, and text sorts above every number in an
+    /// expression with no affinity such as `SUM(x)` or `x * 2` (#1217).
+    fn write_decimal_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str("CAST(");
+        sql.push_str(placeholder);
+        sql.push_str(" AS NUMERIC)");
+    }
+
     /// A SQLite CAST target is an affinity name: `INTEGER`, `REAL`,
     /// `TEXT`, `NUMERIC` or `BLOB`. Datetimes, UUIDs and JSON are
     /// stored as TEXT, so they cast through TEXT.
