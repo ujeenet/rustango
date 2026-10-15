@@ -323,6 +323,7 @@ async fn signed_in_as(superuser: bool) -> (axum::Router, String, String) {
     )
     .await
     .unwrap();
+    rustango::i18n::db::ensure_table_pool(&pool).await.unwrap();
     let mut u = AdminUser::new_with_password("alice", "correct-horse", superuser).unwrap();
     u.insert_pool(&pool).await.unwrap();
     let app = app_with_session_auth(pool);
@@ -414,6 +415,48 @@ async fn the_forbidden_page_sign_out_form_works() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER, "signed out");
+}
+
+/// #1259 — the translation editor form carries the token, so a save
+/// posted as rendered is stored, not refused.
+#[tokio::test]
+async fn the_translation_editor_saves_with_its_rendered_token() {
+    let (app, cookie, _) = signed_in().await;
+    let get = || {
+        Request::builder()
+            .uri("/rustango_translations/editor")
+            .header(header::COOKIE, cookie.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+    let page = app.clone().oneshot(get()).await.unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    let token = form_csrf_token(&html).unwrap_or_else(|| panic!("no _csrf in form: {html}"));
+    let save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/rustango_translations/editor")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::from(format!(
+                    "_csrf={token}&newkey=greeting&newval%3Aen=Hello"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(save.status(), StatusCode::SEE_OTHER, "saved");
+    let after = app.oneshot(get()).await.unwrap();
+    let html = axum::body::to_bytes(after.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&html).contains(r#"name="tr:en:greeting" value="Hello""#));
 }
 
 /// #1694 — logout reads the session cookie, so the signal names the user.

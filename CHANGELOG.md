@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the translation editor form carries a CSRF token (#1259)
+
+Every Save, add and delete was refused with 403 under session auth.
+
 ### Fixed — the admin 403 page's Sign-out form carries a CSRF token (#1260)
 
 A non-superuser could not sign out from it: `/logout` refused the tokenless POST.
