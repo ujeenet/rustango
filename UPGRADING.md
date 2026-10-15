@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin treats credential columns as secret (#1158)
+
+Columns named `password_hash`, `password` or `database_url` now behave like a `password` widget in the admin: shown only as set/unset, rendered empty on edit (empty keeps the stored value), and not searchable or filterable.
+
 ### Operator console sessions are shorter (#1344)
 
 Console sessions now end after 30 minutes idle or 12 hours after sign-in (`tenancy::session::SESSION_TTL_SECS` was 7 days). `session::decode` refuses a cookie older than that cap whatever its `exp`, so cookies issued before the upgrade more than 12 hours ago need a fresh sign-in.

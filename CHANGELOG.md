@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — the admin never shows password hashes or database URLs (#1158)
+
+`password_hash`, `password` and `database_url` columns are secret in the admin whatever the model's widgets: not shown in list, detail, search or filters, and audited as `[changed]`. The registry admin hashes an operator password typed into it.
+
 ### Fixed — console sessions idle out; run streams end with the session (#1344)
 
 An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `SESSION_TTL_SECS` (now 12 h, was 7 days) after sign-in; each request re-issues the cookie. The provisioning SSE stream re-checks the session on every poll. New `session::SESSION_IDLE_SECS`, `SessionPayload::renewed`.
