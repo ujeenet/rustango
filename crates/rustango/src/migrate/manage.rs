@@ -3850,8 +3850,9 @@ async fn is_sole_pk(pool: &Pool, table: &str, column: &str) -> Result<bool, Migr
 }
 
 /// Writes a fixture array an entry at a time, as `serde_json` would whole.
+/// Buffered: stdout flushes on every newline, twice per pretty entry.
 struct FixtureWriter<'w, W: Write> {
-    w: &'w mut W,
+    w: std::io::BufWriter<&'w mut W>,
     pretty: bool,
     started: bool,
 }
@@ -3859,7 +3860,7 @@ struct FixtureWriter<'w, W: Write> {
 impl<'w, W: Write> FixtureWriter<'w, W> {
     fn new(w: &'w mut W, indent: usize) -> Self {
         Self {
-            w,
+            w: std::io::BufWriter::new(w),
             pretty: indent != 0,
             started: false,
         }
@@ -3881,18 +3882,19 @@ impl<'w, W: Write> FixtureWriter<'w, W> {
             let lines: Vec<String> = text.lines().map(|l| format!("  {l}")).collect();
             self.w.write_all(lines.join("\n").as_bytes())?;
         } else {
-            serde_json::to_writer(&mut *self.w, v).map_err(json)?;
+            serde_json::to_writer(&mut self.w, v).map_err(json)?;
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<(), MigrateError> {
+    fn finish(mut self) -> Result<(), MigrateError> {
         let end = match (self.started, self.pretty) {
             (false, _) => "[]",
             (true, false) => "]",
             (true, true) => "\n]",
         };
         writeln!(self.w, "{end}")?;
+        self.w.flush()?;
         Ok(())
     }
 }
@@ -7743,6 +7745,31 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .unwrap();
         let adds = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\"");
         assert!(out.contains(&adds), "{adds} missing from:\n{out}");
+    }
+
+    /// A dump reaches the caller's writer in large chunks, not per entry (rel-0609 performance-001).
+    #[test]
+    fn fixture_writer_buffers() {
+        struct Counting(usize, Vec<u8>);
+        impl Write for Counting {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                self.1.extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = Counting(0, Vec::new());
+        let mut out = FixtureWriter::new(&mut sink, 2);
+        for pk in 0..100 {
+            out.entry(&serde_json::json!({"pk": pk})).unwrap();
+        }
+        out.finish().unwrap();
+        let text = String::from_utf8(sink.1).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()[99]["pk"], 99);
+        assert!(sink.0 < 10, "{} writes for 100 entries", sink.0);
     }
 
     #[allow(dead_code)]
