@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — a terminated PG backend aborts the `atomic` block at once (#1403)
+
+A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.
+
 ### Fixed — the last Postgres-only `_on` query methods run on every backend (#1395)
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.

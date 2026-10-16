@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### PG FATAL errors end an `atomic` block (#1403)
+
+After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_timeout`) later statements in the block return `ExecError::AtomicAborted`, not a driver I/O error.
+
 ### More `_on` methods work on every backend (#1395)
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only.
