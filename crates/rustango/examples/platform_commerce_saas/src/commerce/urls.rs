@@ -126,6 +126,9 @@ fn gift_cards() -> Router<AppState> {
         .with_state(())
 }
 
+/// The only columns the promotion form renders and writes.
+const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
+
 /// Server-rendered promotion pages. They apply the global scope like
 /// the API (#1746), and every POST needs the CSRF token (#1669).
 fn promotion_pages() -> Router<AppState> {
@@ -138,13 +141,13 @@ fn promotion_pages() -> Router<AppState> {
                 .tenant_router("/promos", tera.clone()),
         )
         .merge(
-            CreateView::for_model(s)
+            CreateView::for_model(s, PROMO_FIELDS)
                 .success_url("/promos")
                 .tenant_router("/promos", tera.clone()),
         )
         .merge(DetailView::for_model(s).tenant_router("/promos", tera.clone()))
         .merge(
-            UpdateView::for_model(s)
+            UpdateView::for_model(s, PROMO_FIELDS)
                 .success_url("/promos")
                 .tenant_router("/promos", tera.clone()),
         )

@@ -119,7 +119,7 @@ async fn app() -> axum::Router {
         )
         .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
         .merge(
-            CreateView::for_model(Post::SCHEMA)
+            CreateView::for_model(Post::SCHEMA, &["title", "body", "status", "author_id"])
                 .success_url("/posts")
                 .router("/posts", tera, pool),
         )

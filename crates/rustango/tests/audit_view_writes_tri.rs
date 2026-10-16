@@ -155,7 +155,7 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let pks = seed(pool).await;
     let tera = Arc::new(tera::Tera::default());
 
-    let app = UpdateView::for_model(Doc::SCHEMA).router("/docs", tera.clone(), pool.clone());
+    let app = UpdateView::for_model(Doc::SCHEMA, &["title"]).router("/docs", tera.clone(), pool.clone());
     let uri = format!("/docs/{}/edit", pks[0]);
     let status = send(app, Method::POST, &uri, "title=x".into(), true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -185,7 +185,7 @@ async fn template_create_and_model_form_are_audited(pool: &Pool) {
     use rustango::template_views::CreateView;
     let tera = Arc::new(tera::Tera::default());
     for url in ["/docs", "/docs/{pk}"] {
-        let app = CreateView::for_model(Doc::SCHEMA).success_url(url).router(
+        let app = CreateView::for_model(Doc::SCHEMA, &["title"]).success_url(url).router(
             "/docs",
             tera.clone(),
             pool.clone(),

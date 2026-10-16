@@ -226,6 +226,19 @@ When the storage delete fails, the pending row is left soft-deleted, so `get` no
 
 Code that read a token, password or `database_url` out of `{:?}` output (e.g. in a test) must read the field instead.
 
+### `CreateView` / `UpdateView` need a field list
+
+`for_model` takes the write allow-list and `.fields()` is gone from both. Other posted keys are ignored; on update an unsent listed field keeps its value, except a `bool`, which is `false` (unticked checkbox).
+
+```rust
+// before
+CreateView::for_model(Post::SCHEMA).fields(&["title", "body"])
+UpdateView::for_model(Post::SCHEMA)
+// after
+CreateView::for_model(Post::SCHEMA, &["title", "body"])
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
+```
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

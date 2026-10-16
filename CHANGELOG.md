@@ -74,6 +74,17 @@ It soft-deletes the row, deletes the object, then the row, each on its own; a sl
 
 `ResolvedSso`, `TokenResponse`, `OAuth2Flow`, `JwtTokenPair`, `Credentials` and `LoginInput` redact their secrets; `Org`, `ProvisionRequest`, `OrgPatch` and `ProvisionPayload` mask the password in `database_url`.
 
+### Fixed — `CreateView` / `UpdateView` write only an explicit field list
+
+`for_model(schema, &fields)` now requires the allow-list, so a POST can no longer set any column (`owner_id=…`). An update keeps a listed field the form did not send, instead of wiping it; an unsent `bool` is `false`. Breaking: `.fields()` is removed from both.
+
+```rust
+// before: every input column was writable
+UpdateView::for_model(Post::SCHEMA)
+// after
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
+```
+
 ## [0.60.12] — 2026-10-23
 
 **Breaking:** `makemigrations --merge` refuses conflicting branches; `migrate --squash` refuses data ops, callbacks and renames; `migrate <target>` applies earlier-sorting pending files and unapplies later-sorting siblings; upserts with no update columns return `SqlError::EmptyUpdateSet` on PostgreSQL and SQLite; derived index names over 63 bytes get a hash suffix, so their indexes are recreated once; the migrate lock opens its own connection and SQLite locks a file; `ForeignKey<T>` references `T`'s PK column; `set_null` on a non-`Option` `fk` / `o2o` field is a compile error; M2M `set` locks the source row; admin login and the session gate return 503 on a database error; MCP audit redacts more argument keys; a trailing-dot `Host` matches the host without it; ViewSet writes skip superuser-only fields unless a superuser is signed in; inactive users hold no permissions; `require_auth` answers 403 when an outer layer bound another tenant; `__week` is the ISO week on MySQL and SQLite; a `.join()` alias that differs from the one a relation lookup needs returns `QueryError::DuplicateJoinAlias`; `OAuthError::BadStatus` keeps only the provider's error code; FK `get` follows a shared `on` column. See UPGRADING.

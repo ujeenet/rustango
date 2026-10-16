@@ -177,10 +177,15 @@ fügt die Zeile ein und `303`t zu `success_url`:
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA)
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
+
+Die Feldliste ist Pflicht. Sie ist die Schreib-Allowlist: Das Formular zeigt nur
+diese Felder, jeder andere gesendete Schlüssel (etwa `author_id=1`) wird ignoriert.
+Bei UpdateView behält ein gelistetes, aber nicht gesendetes Feld seinen Wert; nur
+ein `bool` wird `false`, weil eine nicht angehakte Checkbox nichts sendet.
 
 Das Formular-Template (`posts_form.html`) wird mit UpdateView geteilt. `is_update`
 unterscheidet die beiden, und **`form`** trägt sowohl die Felder als auch etwaige
@@ -217,7 +222,7 @@ mit den Meldungen und einem `422`-Status neu gerendert statt gespeichert:
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA)
+CreateView::for_model(Post::SCHEMA, &["title", "body"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -238,7 +243,7 @@ Zeile (`object` ist befüllt, `is_update` ist `true`); `POST` aktualisiert und `
 ```rust
 use rustango::template_views::UpdateView;
 
-UpdateView::for_model(Post::SCHEMA)
+UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
     .router("/posts", Arc::new(tera), pool);
 ```
@@ -260,8 +265,8 @@ Hänge alle fünf am selben Präfix ein und du hast vollständiges HTML-CRUD:
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```
 

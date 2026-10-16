@@ -187,7 +187,7 @@ mod class_based_views {
         assert_eq!(get(list, "/posts").await, "v=test-build p=/posts");
         let detail = DetailView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool.clone());
         assert_eq!(get(detail, "/posts/1").await, "v=test-build p=/posts/1");
-        let create = CreateView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool);
+        let create = CreateView::for_model(CpPost::SCHEMA, &["title"]).router("/posts", tera(), pool);
         assert_eq!(get(create, "/posts/new").await, "v=test-build p=/posts/new");
     }
 
@@ -263,7 +263,7 @@ mod class_based_views {
             "Hello|extra|test-build"
         );
         let update = || {
-            with_extra(UpdateView::for_model(CpPost::SCHEMA).router(
+            with_extra(UpdateView::for_model(CpPost::SCHEMA, &["title"]).router(
                 "/posts",
                 precedence_tera(),
                 pool.clone(),

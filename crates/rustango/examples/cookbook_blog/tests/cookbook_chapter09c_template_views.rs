@@ -109,13 +109,13 @@ fn router(pool: sqlx::PgPool, tera: Arc<Tera>) -> axum::Router {
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            CreateView::for_model(Author::SCHEMA)
+            CreateView::for_model(Author::SCHEMA, &["name", "email", "bio"])
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
                 .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
-            UpdateView::for_model(Author::SCHEMA)
+            UpdateView::for_model(Author::SCHEMA, &["name", "email", "bio"])
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
                 .router("/authors", tera.clone(), pool.clone().into()),

@@ -263,7 +263,7 @@ fn template_views_router() -> axum::Router {
     t.add_raw_template("form.html", "form {{ form.errors | json_encode() | safe }}")
         .unwrap();
     let t = Arc::new(t);
-    CreateView::for_model(Code::SCHEMA)
+    CreateView::for_model(Code::SCHEMA, &["code"])
         .template("form.html")
         .success_url("/codes")
         .tenant_router("/codes", t.clone())
@@ -272,7 +272,7 @@ fn template_views_router() -> axum::Router {
                 .template("page.html")
                 .tenant_router("/tv", t.clone())
                 .merge(
-                    UpdateView::for_model(Widget::SCHEMA)
+                    UpdateView::for_model(Widget::SCHEMA, &["label"])
                         .template("page.html")
                         .success_url("/tv")
                         .tenant_router("/tv", t.clone()),

@@ -180,7 +180,7 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
                 .tenant_router("/notes", t.clone()),
         )
         .merge(
-            UpdateView::for_model(Note::SCHEMA)
+            UpdateView::for_model(Note::SCHEMA, &["tag", "visible"])
                 .template("form.html")
                 .success_url("/notes")
                 .tenant_router("/notes", t.clone()),
@@ -203,7 +203,7 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
                 .tenant_router("/memos", t.clone()),
         )
         .merge(
-            UpdateView::for_model(Memo::SCHEMA)
+            UpdateView::for_model(Memo::SCHEMA, &["tag", "deleted_at"])
                 .template("form.html")
                 .success_url("/memos")
                 .tenant_router("/memos", t.clone()),

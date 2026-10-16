@@ -83,13 +83,13 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/authors", t.clone(), pool.clone()),
         )
         .merge(
-            CreateView::for_model(Post::SCHEMA)
+            CreateView::for_model(Post::SCHEMA, &["author_id", "title"])
                 .template("form.html")
                 .success_url("/posts")
                 .router("/posts", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Post::SCHEMA)
+            UpdateView::for_model(Post::SCHEMA, &["author_id", "title"])
                 .template("form.html")
                 .success_url("/posts")
                 .router("/posts", t, pool.clone()),

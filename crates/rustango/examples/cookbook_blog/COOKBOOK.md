@@ -2224,16 +2224,19 @@ let app = axum::Router::new()
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA)
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
         .success_url("/posts/{pk}/{slug}")  // any column from the new row
         .router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA)
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
         .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA)
         .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()));
 ```
+
+The field list on `CreateView` / `UpdateView` is the write allow-list: a POST
+sets only those columns.
 
 Tera context (consistent across views so templates port cleanly):
 
@@ -2394,7 +2397,7 @@ cross-field checks) hooks in via two builder methods on
 
 ```rust,ignore
 // Closure shape — no new types, just `data: &HashMap<String,String>`.
-CreateView::for_model(Post::SCHEMA)
+CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
     .validator(|data| {
         let mut errs = rustango::forms::FormErrors::default();
         if data.get("title").map_or(true, |s| s.len() < 5) {
@@ -2410,7 +2413,7 @@ pub struct PostForm {
     #[form(min_length = 5)] title: String,
     #[form(min_length = 1)] body: String,
 }
-CreateView::for_model(Post::SCHEMA)
+CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
     .form::<PostForm>()
     .router("/posts", tera, pool)
 ```
@@ -2436,10 +2439,10 @@ let app = axum::Router::new()
         .tenant_router("/posts", tera.clone()))    // no pool!
     .merge(DetailView::for_model(Post::SCHEMA)
         .tenant_router("/posts", tera.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA)
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
         .success_url("/posts")
         .tenant_router("/posts", tera.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA)
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "slug", "body", "published"])
         .success_url("/posts")
         .tenant_router("/posts", tera.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA)

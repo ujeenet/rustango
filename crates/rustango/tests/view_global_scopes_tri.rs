@@ -221,7 +221,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Memo::SCHEMA)
+            UpdateView::for_model(Memo::SCHEMA, &["tag", "deleted_at"])
                 .template("form.html")
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
@@ -239,7 +239,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/notes", t.clone(), pool.clone()),
         )
         .merge(
-            UpdateView::for_model(Note::SCHEMA)
+            UpdateView::for_model(Note::SCHEMA, &["tag", "visible"])
                 .template("form.html")
                 .success_url("/notes")
                 .router("/notes", t.clone(), pool.clone()),
