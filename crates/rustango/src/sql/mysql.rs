@@ -651,7 +651,7 @@ impl Dialect for MySql {
         &self,
         sql: &mut String,
         model: &ModelSchema,
-        columns: &[&str],
+        caller_set: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -668,7 +668,7 @@ impl Dialect for MySql {
                 }
                 // The clause fires on every unique key, so another key
                 // that can clash would update the wrong row (#1357).
-                if !my_target_is_only_unique_key(model, columns, target) {
+                if !my_target_is_only_unique_key(model, caller_set, target) {
                     return Err(SqlError::ConflictNotSupportedInDialect {
                         shape: "DO UPDATE on a target that is not the only unique key",
                         dialect: "mysql",
@@ -794,15 +794,14 @@ fn write_my_ident(sql: &mut String, name: &str) {
 }
 
 /// True when every unique key a new row can clash on is `target`. A key
-/// with an `Auto` column the insert leaves out holds a generated value,
-/// so it never clashes; a bound one can (rel-0608 correctness-003), unless
-/// it is a `default_uuid_v7` column: bound on every insert, fresh unless set.
-fn my_target_is_only_unique_key(model: &ModelSchema, bound: &[&str], target: &[&str]) -> bool {
+/// with an `Auto` column the caller did not set holds a generated value,
+/// so it never clashes; a caller-set one can (rel-0608 correctness-003, #1407).
+fn my_target_is_only_unique_key(model: &ModelSchema, caller_set: &[&str], target: &[&str]) -> bool {
     let fits = |cols: &[&str]| {
         let generated = cols.iter().any(|c| {
             model
                 .field_by_column(c)
-                .is_some_and(|f| f.is_rust_side_uuid() || (f.auto && !bound.contains(c)))
+                .is_some_and(|f| f.auto && !caller_set.contains(c))
         });
         generated || (cols.len() == target.len() && cols.iter().all(|c| target.contains(c)))
     };
@@ -1240,9 +1239,9 @@ mod tests {
         );
     }
 
-    /// A `default_uuid_v7` PK is always bound, but with a fresh value.
+    /// A bound uuid PK clashes unless the writer marks it generated (#1407).
     #[test]
-    fn conflict_do_update_accepts_a_rust_side_uuid_pk() {
+    fn conflict_do_update_trusts_only_a_generated_uuid_pk() {
         use crate::core::{InsertQuery, SqlValue};
         let base = with_pk(
             empty_model_with(
@@ -1273,7 +1272,14 @@ mod tests {
             target: vec!["name"],
             update_columns: vec!["name"],
         });
-        MySql.compile_insert(&q).expect("a Rust-filled uuid PK never clashes");
+        let set = MySql.compile_insert(&q);
+        assert!(
+            matches!(set, Err(SqlError::ConflictNotSupportedInDialect { .. })),
+            "{set:?}"
+        );
+        MySql
+            .compile_insert(&q.generated(vec!["id"]))
+            .expect("a generated uuid PK never clashes");
     }
 
     #[test]
@@ -1677,6 +1683,7 @@ mod tests {
             values: vec![SqlValue::String("alice".into())],
             returning: vec!["id"],
             on_conflict: None,
+            generated: vec![],
         };
         let err = MySql.compile_insert(&q).unwrap_err();
         assert!(matches!(

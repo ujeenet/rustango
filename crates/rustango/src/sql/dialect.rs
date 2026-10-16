@@ -846,7 +846,8 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Append this dialect's `ON CONFLICT` clause. `model` is the insert's
-    /// table and `columns` the ones it binds: MySQL names its PK in the
+    /// table and `caller_set` the bound columns whose value the caller
+    /// chose (a fresh generated id is left out): MySQL names its PK in the
     /// clause, and refuses a `DoUpdate` target that is not the only
     /// unique key a row can hit, since `ON DUPLICATE KEY UPDATE` fires on
     /// any unique key.
@@ -858,10 +859,10 @@ pub trait Dialect: Send + Sync {
         &self,
         sql: &mut String,
         model: &ModelSchema,
-        columns: &[&str],
+        caller_set: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
-        let _ = (sql, model, columns);
+        let _ = (sql, model, caller_set);
         let shape = match conflict {
             ConflictClause::DoNothing => "DO NOTHING",
             ConflictClause::DoUpdate { .. } => "DO UPDATE",

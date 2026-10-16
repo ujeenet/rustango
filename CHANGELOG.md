@@ -38,7 +38,7 @@ An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `
 
 ### Fixed — MySQL upsert no longer updates a row of another unique key (#1357)
 
-`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column don't count.
+`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column the caller left unset don't count; a set id, `default_uuid_v7` included, does (#1407). `Dialect::write_conflict_clause` takes the caller-set columns; new `InsertQuery::generated` / `BulkInsertQuery::generated`.
 
 ### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes (#1358)
 

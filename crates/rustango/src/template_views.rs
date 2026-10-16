@@ -1972,6 +1972,7 @@ async fn create_insert(
         values,
         returning,
         on_conflict: None,
+        generated: Vec::new(),
     };
     let result = if let Some(pk) = audited_pk {
         crate::audit::insert_returning(pool, &insert_q, pk)

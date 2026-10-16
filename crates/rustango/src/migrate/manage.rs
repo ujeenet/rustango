@@ -4006,6 +4006,7 @@ async fn loaddata_cmd<W: Write>(
             values,
             returning: vec![],
             on_conflict: None,
+            generated: vec![],
         };
         match crate::sql::insert_pool(pool, &query).await {
             Ok(()) => {

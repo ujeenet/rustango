@@ -1640,9 +1640,19 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
+        let set = caller_set(&query.columns, &query.generated);
+        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
     }
     Ok(())
+}
+
+/// The bound columns whose value the caller chose, not the writer (#1407).
+fn caller_set(columns: &[&'static str], generated: &[&str]) -> Vec<&'static str> {
+    columns
+        .iter()
+        .copied()
+        .filter(|c| !generated.contains(c))
+        .collect()
 }
 
 // ---- BULK INSERT ----
@@ -1722,7 +1732,8 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
+        let set = caller_set(&query.columns, &query.generated);
+        b.d.write_conflict_clause(&mut b.sql, query.model, &set, conflict)?;
     }
 
     write_returning(b, &query.returning)?;

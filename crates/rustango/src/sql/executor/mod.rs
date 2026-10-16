@@ -1302,6 +1302,7 @@ pub(crate) fn compile_bulk_insert_batches(
                     rows: chunk.to_vec(),
                     returning: query.returning.clone(),
                     on_conflict: query.on_conflict.clone(),
+                    generated: query.generated.clone(),
                 })
                 .map_err(ExecError::from)
         })

@@ -2120,6 +2120,9 @@ struct CollectedFields {
     bulk_fill_in_place: Vec<TokenStream2>,
     /// Rust-filled `Auto` fields (`default_uuid_v7`, `auto_now(_add)`), reset when `insert_or_ignore` skips (#1937).
     rust_filled_idents: Vec<syn::Ident>,
+    /// `default_uuid_v7` fields: an `Unset` one gets a fresh id, so the
+    /// upsert marks it `generated` for the MySQL key guard (#1407).
+    uuid_v7_fields: Vec<(syn::Ident, String)>,
     /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
     /// + the loop that asserts every row matches. One pair per Auto
     /// field. Empty when `has_auto == false`.
@@ -2208,6 +2211,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         bulk_columns_all: Vec::with_capacity(cap),
         bulk_fill_in_place: Vec::new(),
         rust_filled_idents: Vec::new(),
+        uuid_v7_fields: Vec::new(),
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
@@ -2394,6 +2398,9 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // `default_uuid_v7` likewise: its column has no DB default (#1934).
             if info.default_uuid_v7 || info.auto_now_add || info.auto_now {
                 out.rust_filled_idents.push(ident.clone());
+            }
+            if info.default_uuid_v7 {
+                out.uuid_v7_fields.push((ident.clone(), info.column.clone()));
             }
             let rust_fill = if info.default_uuid_v7 {
                 Some(quote!(#root::__uuid::Uuid::now_v7()))
@@ -6614,6 +6621,8 @@ fn inherent_impl_tokens(
         let assignments = &fields.update_assignments;
         let upsert_cols = &fields.upsert_update_columns;
         let upsert_pushes = &fields.insert_pushes;
+        // Read before the pushes, which fill each unset id.
+        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) = fields.uuid_v7_fields.iter().cloned().unzip();
         let upsert_returning = &fields.returning_cols;
         let upsert_auto_assigns = &fields.auto_assigns;
         // Conflict target: prefer the first declared `unique_together`
@@ -6792,6 +6801,13 @@ fn inherent_impl_tokens(
                     ::std::vec::Vec::new();
                 let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
+                #[allow(unused_mut)]
+                let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                #(
+                    if matches!(&self.#gen_idents, #root::sql::Auto::Unset) {
+                        _generated.push(#gen_cols);
+                    }
+                )*
                 #( #upsert_pushes )*
                 let query = #root::core::InsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
@@ -6799,7 +6815,8 @@ fn inherent_impl_tokens(
                     _values,
                 )
                 .returning(::std::vec![ #( #upsert_returning ),* ])
-                .on_conflict(#conflict_clause);
+                .on_conflict(#conflict_clause)
+                .generated(_generated);
                 #upsert_run
                 let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
@@ -7484,6 +7501,7 @@ fn inherent_impl_tokens(
         },
     };
     let bulk_upsert_pool_method = {
+        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) = fields.uuid_v7_fields.iter().cloned().unzip();
         // Pick the "no Auto" columns when the model has Auto fields,
         // else every column.
         let (upsert_cols, upsert_pushes): (Vec<_>, Vec<_>) = if fields.has_auto {
@@ -7543,12 +7561,20 @@ fn inherent_impl_tokens(
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
+                #[allow(unused_mut)]
+                let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                #(
+                    if rows.iter().all(|_r| matches!(&_r.#gen_idents, #root::sql::Auto::Unset)) {
+                        _generated.push(#gen_cols);
+                    }
+                )*
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #upsert_cols ),* ],
                     _all_rows,
                 )
-                .on_conflict_do_update(target, update_cols);
+                .on_conflict_do_update(target, update_cols)
+                .generated(_generated);
                 #run_conflict_bulk_insert
             }
 

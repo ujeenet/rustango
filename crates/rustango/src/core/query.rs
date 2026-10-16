@@ -1215,6 +1215,9 @@ pub struct InsertQuery {
     /// Optional `ON CONFLICT` clause. `None` = a plain INSERT that
     /// fails on a constraint violation.
     pub on_conflict: Option<ConflictClause>,
+    /// Bound `Auto` columns whose value the writer just generated
+    /// (a fresh `default_uuid_v7`), so they cannot clash (#1407).
+    pub generated: Vec<&'static str>,
 }
 
 impl InsertQuery {
@@ -1231,7 +1234,15 @@ impl InsertQuery {
             values,
             returning: Vec::new(),
             on_conflict: None,
+            generated: Vec::new(),
         }
+    }
+
+    /// Mark `columns` as holding values the writer generated. See [`Self::generated`].
+    #[must_use]
+    pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
+        self.generated = columns;
+        self
     }
 
     /// Read `columns` back from the inserted row.
@@ -1301,6 +1312,8 @@ pub struct BulkInsertQuery {
     pub returning: Vec<&'static str>,
     /// Optional `ON CONFLICT` clause applied to every row in the batch.
     pub on_conflict: Option<ConflictClause>,
+    /// As [`InsertQuery::generated`]: only columns generated on every row.
+    pub generated: Vec<&'static str>,
 }
 
 impl BulkInsertQuery {
@@ -1317,7 +1330,15 @@ impl BulkInsertQuery {
             rows,
             returning: Vec::new(),
             on_conflict: None,
+            generated: Vec::new(),
         }
+    }
+
+    /// Mark `columns` as generated on every row. See [`Self::generated`].
+    #[must_use]
+    pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
+        self.generated = columns;
+        self
     }
 
     /// Read `columns` back from every inserted row.

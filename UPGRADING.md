@@ -188,7 +188,7 @@ On MySQL, `ConflictClause::DoUpdate` / `bulk_upsert_pool` now return `SqlError::
 
 ### `Dialect::write_conflict_clause` takes the insert's columns (rel-0608)
 
-A custom `Dialect` adds a `columns: &[&str]` argument after `model`. On MySQL, a `DoUpdate` insert that binds an `Auto` PK now counts the PK as a key that can clash, so a target other than the PK is refused. A `default_uuid_v7` PK is exempt.
+A custom `Dialect` adds a `caller_set: &[&str]` argument after `model`: the bound columns minus `InsertQuery::generated`. On MySQL, a `DoUpdate` insert whose caller set an `Auto` PK (a `default_uuid_v7` one too) counts the PK as a key that can clash, so a target other than the PK is refused (#1407). A hand-built query with a fresh id marks it with `.generated(vec!["id"])`.
 
 ### Self-table subqueries are aliased (#1287)
 

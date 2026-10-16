@@ -741,6 +741,7 @@ pub async fn grant_role_perm_pool(
         values: vec![SqlValue::from(role_id), SqlValue::from(codename.to_owned())],
         returning: vec![],
         on_conflict: Some(ConflictClause::DoNothing),
+        generated: vec![],
     };
     crate::sql::insert_pool(pool, &query).await?;
     Ok(())
@@ -809,6 +810,7 @@ pub async fn assign_role_pool(
         values: vec![SqlValue::from(user_id), SqlValue::from(role_id)],
         returning: vec![],
         on_conflict: Some(ConflictClause::DoNothing),
+        generated: vec![],
     };
     crate::sql::insert_pool(pool, &query).await?;
     Ok(())
@@ -895,6 +897,7 @@ pub async fn set_user_perm_pool(
             target: vec!["user_id", "codename"],
             update_columns: vec!["granted"],
         }),
+        generated: vec![],
     };
     crate::sql::insert_pool(pool, &query).await?;
     Ok(())
