@@ -235,7 +235,7 @@ pub(super) struct ColumnRow {
     not(any(feature = "postgres", feature = "mysql")),
     allow(unused_variables)
 )]
-async fn list_tables(
+pub(super) async fn list_tables(
     pool: &Pool,
     schema: &str,
     only: Option<&str>,

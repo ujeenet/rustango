@@ -5,7 +5,7 @@ use std::io::Write;
 
 use sqlx::Database;
 
-use crate::core::ModelScope;
+use crate::migrate::manage::DataScope;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::pools::TenantPools;
 
@@ -36,18 +36,26 @@ where
             _ => rest.push(arg.clone()),
         }
     }
-    let (pool, scope) = match slug {
-        Some(slug) => {
-            let org = super::api::find_org(pools, &slug)
+    let org = match slug {
+        Some(slug) => Some(
+            super::api::find_org(pools, &slug)
                 .await?
-                .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-            (pools.scoped_pool_dyn(&org).await?, ModelScope::Tenant)
-        }
-        None => (pools.registry_pool(), ModelScope::Registry),
+                .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?,
+        ),
+        None => None,
+    };
+    let (pool, scope) = match &org {
+        Some(org) => (
+            pools.scoped_pool_dyn(org).await?,
+            DataScope::Tenant {
+                schema: org.own_schema(),
+            },
+        ),
+        None => (pools.registry_pool(), DataScope::Registry),
     };
     let run = match verb {
-        Verb::Dump => crate::migrate::manage::dumpdata_cmd(&pool, &rest, Some(scope), w).await,
-        Verb::Load => crate::migrate::manage::loaddata_cmd(&pool, &rest, Some(scope), w).await,
+        Verb::Dump => crate::migrate::manage::dumpdata_cmd(&pool, &rest, scope, w).await,
+        Verb::Load => crate::migrate::manage::loaddata_cmd(&pool, &rest, scope, w).await,
     };
     if rest.iter().any(|a| a == "--help" || a == "-h") {
         writeln!(

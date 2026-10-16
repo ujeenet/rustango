@@ -148,6 +148,12 @@ impl Org {
     pub(crate) fn effective_schema(&self) -> &str {
         effective_schema(self.schema_name.as_deref(), &self.slug)
     }
+
+    /// [`Self::effective_schema`] for a schema-mode tenant; `None` otherwise.
+    pub(crate) fn own_schema(&self) -> Option<&str> {
+        matches!(StorageMode::parse(&self.storage_mode), Ok(StorageMode::Schema))
+            .then(|| self.effective_schema())
+    }
 }
 
 /// The one home of the "`schema_name`, else the slug" rule.

@@ -164,8 +164,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..]),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
-        "dumpdata" => dumpdata_cmd(pool, &args[1..], None, writer).await,
-        "loaddata" => loaddata_cmd(pool, &args[1..], None, writer).await,
+        "dumpdata" => dumpdata_cmd(pool, &args[1..], DataScope::All, writer).await,
+        "loaddata" => loaddata_cmd(pool, &args[1..], DataScope::All, writer).await,
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
         // #253 slice B — bootstrap an AdminUser row for projects
@@ -3678,7 +3678,7 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
 pub(crate) async fn dumpdata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
-    scope: Option<crate::core::ModelScope>,
+    scope: DataScope<'_>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
@@ -3739,24 +3739,25 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         }
     }
 
-    // Walk every registered model, writing its rows a page at a time.
-    let mut out = FixtureWriter::new(w, indent);
-    for entry in inventory::iter::<crate::core::ModelEntry>() {
-        let schema = entry.schema;
-        if !in_scope(schema, scope) {
-            continue;
-        }
-        let dotted_name = dotted_model_name(entry);
-        let matches = |f: &String| model_matches(f, &dotted_name, schema);
+    // Filter: if the user specified --model, only emit models
+    // whose `app.Model` or bare `Model` matches.
+    let selected: Vec<&crate::core::ModelEntry> = inventory::iter::<crate::core::ModelEntry>()
+        .filter(|e| in_scope(e.schema, scope))
+        .filter(|e| {
+            let dotted = dotted_model_name(e);
+            let matches = |f: &String| model_matches(f, &dotted, e.schema);
+            (model_filters.is_empty() || model_filters.iter().any(matches))
+                && !parsed.excludes.iter().any(matches)
+        })
+        .collect();
+    let schemas: Vec<_> = selected.iter().map(|e| e.schema).collect();
+    require_tenant_tables(pool, scope, &schemas, "dumpdata").await?;
 
-        // Filter: if the user specified --model, only emit models
-        // whose `app.Model` or bare `Model` matches.
-        if !model_filters.is_empty() && !model_filters.iter().any(matches) {
-            continue;
-        }
-        if parsed.excludes.iter().any(matches) {
-            continue;
-        }
+    // Walk every selected model, writing its rows a page at a time.
+    let mut out = FixtureWriter::new(w, indent);
+    for entry in selected {
+        let schema = entry.schema;
+        let dotted_name = dotted_model_name(entry);
 
         // These decode as `null`, so a reload would wipe them (#1911).
         if let Some(f) = schema.scalar_fields().find(|f| !dumpable(f.ty)) {
@@ -3858,9 +3859,57 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
 /// Rows per dumpdata page.
 const DUMP_PAGE: i64 = 500;
 
-/// Whether a data verb run for `scope` covers `s`; `None` is every model.
-fn in_scope(s: &crate::core::ModelSchema, scope: Option<crate::core::ModelScope>) -> bool {
-    scope.is_none_or(|sc| s.scope == sc)
+/// Which models `dumpdata` / `loaddata` cover (#1424).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DataScope<'a> {
+    /// Every model: single-tenant `manage`.
+    All,
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Registry,
+    /// Tenant models. `schema` names a schema-mode tenant, whose tables must
+    /// be there: `search_path` would fall through to `public`.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    Tenant { schema: Option<&'a str> },
+}
+
+/// Whether a data verb run for `scope` covers `s`.
+fn in_scope(s: &crate::core::ModelSchema, scope: DataScope<'_>) -> bool {
+    match scope {
+        DataScope::All => true,
+        DataScope::Registry => s.scope == crate::core::ModelScope::Registry,
+        DataScope::Tenant { .. } => s.scope == crate::core::ModelScope::Tenant,
+    }
+}
+
+/// Refuse when one of `models`' tables (or junctions) is missing from a
+/// schema-mode tenant's schema, before anything is read or written.
+async fn require_tenant_tables(
+    pool: &Pool,
+    scope: DataScope<'_>,
+    models: &[&'static crate::core::ModelSchema],
+    verb: &str,
+) -> Result<(), MigrateError> {
+    let DataScope::Tenant {
+        schema: Some(schema),
+    } = scope
+    else {
+        return Ok(());
+    };
+    // Unmanaged tables and views may live elsewhere on purpose.
+    let tables = models.iter().filter(|s| s.managed && !s.is_view).flat_map(|s| {
+        std::iter::once(s.table).chain(s.m2m.iter().filter(|r| r.auto_create).map(|r| r.through))
+    });
+    for table in tables {
+        if super::inspectdb::list_tables(pool, schema, Some(table))
+            .await?
+            .is_empty()
+        {
+            return Err(MigrateError::Validation(format!(
+                "{verb}: table `{table}` is not in tenant schema `{schema}`; migrate the tenant first"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The refusal for a model that lives on the other side of the registry.
@@ -4145,7 +4194,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
-    scope: Option<crate::core::ModelScope>,
+    scope: DataScope<'_>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_loaddata_args(args)?;
@@ -4199,6 +4248,16 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     // Parents first: fixtures come in registration order, and a child
     // inserted before its parent fails its FK (#1911).
     let entries = in_fk_order(entries, &schemas);
+    let mut named: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    for s in entries
+        .iter()
+        .filter_map(|e| schemas.get(e.get("model").and_then(|v| v.as_str()).unwrap_or("")))
+    {
+        if !named.iter().any(|n| n.table == s.table) {
+            named.push(s);
+        }
+    }
+    require_tenant_tables(pool, scope, &named, "loaddata").await?;
 
     let mut loaded = 0_usize;
     let mut skipped = 0_usize;

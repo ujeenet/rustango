@@ -14,7 +14,7 @@ The preview now includes the system step `migrate` would generate from changed f
 
 ### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
 
-With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry.
+With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry. On a PostgreSQL schema-mode tenant, a table missing from the tenant's schema is refused instead of read from or written to `public`.
 
 ### Performance — `dumpdata` streams rows and M2M links by page (#1399)
 
