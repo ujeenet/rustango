@@ -8777,25 +8777,22 @@ mod db_cmd_tests {
             eprintln!("DATABASE_URL not set — skipping");
             return;
         };
-        // `psql` on PATH, else the Docker shim; CI must have one (#1413).
+        // `$RUSTANGO_TEST_PSQL`, else `psql` on PATH; CI must have one (#1413).
         let runs = |p: &str| {
             std::process::Command::new(p)
                 .arg("--version")
                 .output()
                 .is_ok_and(|o| o.status.success())
         };
-        let shim = std::env::var("HOME").map(|h| format!("{h}/.local/docker-shims/psql"));
-        let Some(psql) = std::iter::once("psql".to_owned())
-            .chain(shim)
-            .find(|p| runs(p))
-        else {
+        let psql = std::env::var("RUSTANGO_TEST_PSQL").unwrap_or_else(|_| "psql".to_owned());
+        if !runs(&psql) {
             assert!(
                 std::env::var_os("CI").is_none(),
                 "db:restore needs `psql` on PATH in CI"
             );
-            eprintln!("SKIPPED: no `psql` on PATH and no ~/.local/docker-shims/psql; db:restore is unproven here");
+            eprintln!("SKIPPED: `{psql}` does not run (set RUSTANGO_TEST_PSQL); db:restore is unproven here");
             return;
-        };
+        }
         let db = format!("rustango_restore_{}", std::process::id());
         let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
         let private = format!("{base}/{db}");
