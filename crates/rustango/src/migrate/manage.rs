@@ -3585,10 +3585,8 @@ async fn dumpdata_cmd<W: Write>(
     let indent = parsed.indent;
     // A typo would otherwise dump `[]` and exit 0 (#1312).
     for name in model_filters.iter().chain(&parsed.excludes) {
-        let known = inventory::iter::<crate::core::ModelEntry>().any(|e| {
-            let app = e.resolved_app_label().unwrap_or("");
-            name == e.schema.name || *name == format!("{app}.{}", e.schema.name)
-        });
+        let known = inventory::iter::<crate::core::ModelEntry>()
+            .any(|e| model_matches(name, &dotted_model_name(e), e.schema));
         if !known {
             return Err(MigrateError::Validation(format!(
                 "dumpdata: unknown model `{name}` (use `app.Model` or `Model`)"
@@ -3600,27 +3598,15 @@ async fn dumpdata_cmd<W: Write>(
     let mut out: Vec<serde_json::Value> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
-        let app_label = entry.resolved_app_label().unwrap_or("");
-        let dotted_name = if app_label.is_empty() {
-            schema.name.to_owned()
-        } else {
-            format!("{app_label}.{}", schema.name)
-        };
+        let dotted_name = dotted_model_name(entry);
+        let matches = |f: &String| model_matches(f, &dotted_name, schema);
 
         // Filter: if the user specified --model, only emit models
         // whose `app.Model` or bare `Model` matches.
-        if !model_filters.is_empty()
-            && !model_filters
-                .iter()
-                .any(|f| f == &dotted_name || f == schema.name)
-        {
+        if !model_filters.is_empty() && !model_filters.iter().any(matches) {
             continue;
         }
-        if parsed
-            .excludes
-            .iter()
-            .any(|f| f == &dotted_name || f == schema.name)
-        {
+        if parsed.excludes.iter().any(matches) {
             continue;
         }
 
@@ -3685,6 +3671,19 @@ async fn dumpdata_cmd<W: Write>(
     .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
     writeln!(w, "{rendered}")?;
     Ok(())
+}
+
+/// `app.Model`, or the bare name for a model with no app.
+fn dotted_model_name(entry: &crate::core::ModelEntry) -> String {
+    match entry.resolved_app_label() {
+        Some(app) if !app.is_empty() => format!("{app}.{}", entry.schema.name),
+        _ => entry.schema.name.to_owned(),
+    }
+}
+
+/// The one rule `--model`, `--exclude` and the unknown-name check share.
+fn model_matches(filter: &str, dotted: &str, schema: &crate::core::ModelSchema) -> bool {
+    filter == dotted || filter == schema.name
 }
 
 /// Target pks keyed by source pk (its JSON text).
