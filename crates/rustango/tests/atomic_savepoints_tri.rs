@@ -809,7 +809,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         assert!(refused);
         let count = Note::objects().count_on(&mut *guard).await;
         assert!(matches!(count, Err(ExecError::AtomicAborted)), "got {count:?}");
-        let values = Note::objects().values(&["id"]).fetch_on(&mut *guard).await;
+        let values = Note::objects().values_list(&["id"]).fetch_on(&mut *guard).await;
         assert!(matches!(values, Err(ExecError::AtomicAborted)), "got {values:?}");
         Ok(())
     }))
