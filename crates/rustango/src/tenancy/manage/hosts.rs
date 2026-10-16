@@ -73,13 +73,12 @@ pub(super) fn set_direction(
 /// A closed set, case-insensitively. Anything else is refused rather than
 /// read as `false`, which is how `--enabled TRUE` used to park a host.
 fn parse_bool(raw: &str) -> Result<bool, TenancyError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(TenancyError::Validation(format!(
-            "`{other}` is not a yes/no value — use --on or --off"
-        ))),
-    }
+    crate::env::parse_flag(raw).ok_or_else(|| {
+        TenancyError::Validation(format!(
+            "`{}` is not a yes/no value — use --on or --off",
+            raw.trim().to_ascii_lowercase()
+        ))
+    })
 }
 
 /// `<slug> <hostname>` plus no flags — the shape of add- and remove-host.

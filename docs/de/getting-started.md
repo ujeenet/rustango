@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.60.7`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.60.8`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -495,7 +495,7 @@ Was hier geschieht, in einfachen Worten:
 - `main` gibt ein `Result` zurück, Rusts Erfolg-oder-Fehler-Typ, weshalb `?` und das abschließende `Ok(())` funktionieren.
 - Um eine Zeile zu speichern, rufe `.save_pool(&pool)` darauf auf. Um Zeilen zu lesen, baue eine Abfrage mit `Post::objects()` und führe sie mit `.fetch(&pool)` aus — ohne Filter liefert das jede Zeile der Tabelle.
 - `.fetch(…)` stammt aus dem `FetcherPool`-Trait, weshalb die Imports es hereinholen. Ohne diese Zeile existiert die Methode nicht, und der Compiler sagt dir das, ohne zu erklären, warum.
-- Das sind die Multi-Backend-Aufrufe, und alles oben kompiliert unverändert auf allen drei Datenbanken. Es gibt außerdem `.save(&pool)` und `.fetch_on(&pool)`, die einen treiberspezifischen `sqlx::PgPool` nehmen und nur existieren, wenn das `postgres`-Feature aktiviert ist. Bevorzuge das Multi-Backend-Paar, sofern du dich nicht bewusst auf eine einzelne Datenbank festlegen willst. Siehe den [ORM-Leitfaden](orm.md).
+- Das sind die Multi-Backend-Aufrufe, und alles oben kompiliert unverändert auf allen drei Datenbanken. Es gibt außerdem `.save(&pool)`, das einen treiberspezifischen `sqlx::PgPool` nimmt und nur existiert, wenn das `postgres`-Feature aktiviert ist. Bevorzuge das Multi-Backend-Paar, sofern du dich nicht bewusst auf eine einzelne Datenbank festlegen willst. Siehe den [ORM-Leitfaden](orm.md).
 
 Führe es aus:
 
@@ -515,14 +515,18 @@ Der Helfer stellt den Admin hinter ein Login. Das `admin_prefix` muss zu dem Pfa
 
 ```rust
 use rustango::admin;
-use rustango::session::SessionSecret;
+use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
+    let secret = load_session_secret_for_tier(
+        &tier_from_env(),
+        std::path::Path::new("./var/.rustango_session.key"),
+    );
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
-        .with_session_auth(SessionSecret::from_env_or_random())
+        .with_session_auth(secret)
         .build()
 }
 ```

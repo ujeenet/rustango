@@ -439,7 +439,8 @@ impl MoveCtx<'_> {
         // Streams pg_dump stdout into psql stdin so we never buffer the
         // full snapshot in memory.
         writeln!(writer, "  starting pg_dump → psql pipe…")?;
-        let (source, target) = (Conn::new(self.source_url), Conn::new(self.target_url));
+        let conn = |url| Conn::new(url).map_err(TenancyError::Validation);
+        let (source, target) = (conn(self.source_url)?, conn(self.target_url)?);
         match restore {
             Restore::IntoSchema(plan) => {
                 run_into_schema(self.pools.registry(), &source, &target, plan).await?;

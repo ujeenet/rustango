@@ -43,7 +43,7 @@
 //!   on MySQL. Same answer for ASCII, different for other text.
 //! - **`round(x, n)`** wants a numeric on PG; a float needs a cast.
 //!   MySQL and SQLite cast for you.
-//! - **`now()`** emits `NOW()` on PG / MySQL and an RFC3339
+//! - **`now()`** emits `NOW()` on PG, `NOW(6)` on MySQL and an RFC3339
 //!   `strftime(…, 'now')` on SQLite, so the value matches what every
 //!   other write path stores in a SQLite datetime column.
 //! - **`extract_*`** always return an integer.

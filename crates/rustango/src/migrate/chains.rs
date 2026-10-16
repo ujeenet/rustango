@@ -117,12 +117,16 @@ impl ProjectTables {
     async fn read(held: LockHeld, pool: &Pool, dir: &Path) -> Result<Self, MigrateError> {
         let migs = file::list_dir(dir)?;
         let applied = runner::ledger_names(held, pool, runner::LEDGER_TABLE).await?;
+        Ok(Self::of(&migs, &applied))
+    }
+
+    fn of(migs: &[Migration], applied: &std::collections::HashSet<String>) -> Self {
         let mut out = Self {
             owned: BTreeSet::new(),
             claimed: BTreeSet::new(),
             pending: BTreeSet::new(),
         };
-        for m in &migs {
+        for m in migs {
             let is_pending = !applied.contains(&m.name);
             for c in schema_ops(m) {
                 match c {
@@ -149,8 +153,18 @@ impl ProjectTables {
                 }
             }
         }
-        Ok(out)
+        out
     }
+}
+
+/// Tables the project chain in `dir` ends with, which the system chain
+/// never creates: what a `--dry-run` must leave out of its system steps.
+///
+/// # Errors
+/// An unreadable migrations directory.
+pub(crate) fn project_owned(dir: &Path) -> Result<Vec<String>, MigrateError> {
+    let owned = ProjectTables::of(&file::list_dir(dir)?, &Default::default()).owned;
+    Ok(owned.into_iter().collect())
 }
 
 fn schema_ops(m: &Migration) -> impl Iterator<Item = &SchemaChange> {

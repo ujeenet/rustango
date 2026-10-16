@@ -702,6 +702,27 @@ async fn a_console_logout_that_cannot_read_fails(pool: &Pool) {
     );
 }
 
+/// #1342 — a deactivation stamps the cut-off, so reactivating the
+/// operator does not revive a cookie from before it.
+async fn deactivating_an_operator_ends_their_console_sessions(pool: &Pool) {
+    use rustango::tenancy::operators::set_active;
+    let env = tenancy(pool).await;
+    let _keeper = env.operator().await;
+    let op = env.operator().await;
+    let cookie = env.console_login(&op).await;
+    assert_eq!(env.console_status(&cookie).await, StatusCode::OK);
+
+    let mut row = env.op_row(&op).await;
+    set_active(&env.db, &mut row, false, None).await.unwrap();
+    set_active(&env.db, &mut row, true, None).await.unwrap();
+    let cut = env.op_row(&op).await.sessions_revoked_at.expect("stamped");
+    assert!(env.console_iat(&cookie) <= cut.timestamp());
+    assert_eq!(env.console_status(&cookie).await, StatusCode::SEE_OTHER);
+
+    let fresh = env.console_login(&op).await;
+    assert_eq!(env.console_status(&fresh).await, StatusCode::OK);
+}
+
 // ---- member -------------------------------------------------------------
 
 /// The tenant user's cut-off: stored whole-second, never moved back, and
@@ -773,6 +794,7 @@ tri_dialect_test! {
         a_console_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_console_cookie_cannot_revoke,
         a_console_logout_that_cannot_read_fails,
+        deactivating_an_operator_ends_their_console_sessions,
         a_member_logout_cutoff_round_trips,
     ],
 }

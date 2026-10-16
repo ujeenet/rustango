@@ -201,17 +201,25 @@ async fn naming_a_tenant_leaves_the_registry_alone() {
 
 /// A sweep that aborts on the first bad tenant leaves every later one
 /// untrimmed — which defeats retention exactly when it matters. The
-/// loop collects outcomes instead.
+/// loop collects outcomes instead, and then exits non-zero (#1312).
 #[tokio::test]
 async fn one_broken_tenant_does_not_stop_the_sweep() {
     let b = boot().await;
     b.seed("ancient", 120).await;
     let broken = b.unmigrated_tenant().await;
 
-    let out = b
-        .run(&["audit-cleanup", "--days", "30"])
-        .await
-        .expect("the sweep should finish despite a broken tenant");
+    let mut buf: Vec<u8> = Vec::new();
+    let res = rustango::tenancy::manage::run_with_writer(
+        b.pools.as_ref(),
+        &b.url,
+        b.migrations.path(),
+        vec!["audit-cleanup".into(), "--days".into(), "30".into()],
+        &mut buf,
+    )
+    .await;
+    let out = String::from_utf8_lossy(&buf).into_owned();
+    let err = res.expect_err("a failed tenant fails the verb").to_string();
+    assert!(err.contains("1 of 1 tenant(s) failed"), "{err}");
 
     assert!(
         out.contains(&format!("tenant={broken} FAILED")),

@@ -99,6 +99,36 @@ pub trait Cache: Send + Sync + 'static {
         self.set(key, value, None).await
     }
 
+    /// Retrieve a value written by [`Self::set_bytes`]. Pair the two:
+    /// a backend may store bytes and text differently.
+    ///
+    /// The default base64-decodes [`Self::get`], so a text-only backend
+    /// keeps working; a value that is not base64 is an error. The
+    /// built-in backends except `DatabaseCache` store raw bytes.
+    async fn get_bytes(&self, key: &str) -> Result<Option<bytes::Bytes>, CacheError> {
+        use base64::Engine as _;
+        let Some(text) = self.get(key).await? else {
+            return Ok(None);
+        };
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map(|v| Some(v.into()))
+            .map_err(|e| CacheError::Serialization(e.to_string()))
+    }
+
+    /// Store raw bytes under `key`; read them back with [`Self::get_bytes`].
+    /// The default stores them base64-encoded through [`Self::set`].
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        use base64::Engine as _;
+        let text = base64::engine::general_purpose::STANDARD.encode(value);
+        self.set(key, &text, ttl).await
+    }
+
     /// Remove `key` from the cache. No-op if absent.
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
 
@@ -537,7 +567,8 @@ impl Cache for NullCache {
 // ------------------------------------------------------------------ InMemoryCache
 
 struct CacheEntry {
-    value: String,
+    /// Raw bytes, so `get_bytes` is a refcount bump, not a copy.
+    value: bytes::Bytes,
     expires_at: Option<Instant>,
     /// Access tick for approximate LRU, bumped on every read and
     /// write. Atomic so a read, which holds only the read lock, can
@@ -550,7 +581,7 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new(value: String, expires_at: Option<Instant>, tick: u64, size: usize) -> Self {
+    fn new(value: bytes::Bytes, expires_at: Option<Instant>, tick: u64, size: usize) -> Self {
         Self {
             value,
             expires_at,
@@ -758,9 +789,10 @@ impl InMemoryCache {
     }
 
     /// Store `value` expiring at `expires_at` (`None` = never).
-    async fn insert(&self, key: &str, value: &str, expires_at: Option<Instant>, pinned: bool) {
+    async fn insert(&self, key: &str, value: &[u8], expires_at: Option<Instant>, pinned: bool) {
         let size = key.len() + value.len();
-        let mut entry = CacheEntry::new(value.to_owned(), expires_at, self.next_tick(), size);
+        let value = bytes::Bytes::copy_from_slice(value);
+        let mut entry = CacheEntry::new(value, expires_at, self.next_tick(), size);
         let mut store = self.inner.write().await;
         if pinned {
             entry.pinned =
@@ -836,7 +868,17 @@ impl Cache for InMemoryCache {
         true
     }
 
+    /// A value stored as bytes that is not UTF-8 is an error, as on Redis.
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
+        self.get_bytes(key)
+            .await?
+            .map(|b| {
+                String::from_utf8(b.into()).map_err(|e| CacheError::Serialization(e.to_string()))
+            })
+            .transpose()
+    }
+
+    async fn get_bytes(&self, key: &str) -> Result<Option<bytes::Bytes>, CacheError> {
         let store = self.inner.read().await;
         Ok(store.map.get(key).and_then(|e| {
             if e.is_expired() {
@@ -850,13 +892,24 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        self.insert(key, value.as_bytes(), self.resolve_ttl(ttl), false)
+            .await;
+        Ok(())
+    }
+
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         self.insert(key, value, self.resolve_ttl(ttl), false).await;
         Ok(())
     }
 
     /// Pinned: no TTL, outside both budgets, never evicted while within the pinned caps (#2009).
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
-        self.insert(key, value, None, true).await;
+        self.insert(key, value.as_bytes(), None, true).await;
         Ok(())
     }
 
@@ -872,10 +925,10 @@ impl Cache for InMemoryCache {
             .map
             .get(key)
             .filter(|e| !e.is_expired())
-            .and_then(|e| e.value.parse::<i64>().ok())
+            .and_then(|e| std::str::from_utf8(&e.value).ok()?.parse::<i64>().ok())
             .unwrap_or(0);
         let new = current.saturating_add(by);
-        let value = new.to_string();
+        let value = bytes::Bytes::from(new.to_string());
         let size = key.len() + value.len();
         // Keep the existing expiry when the key is live and no TTL is
         // passed. That is the fixed-window behaviour counters need. A
@@ -902,7 +955,8 @@ impl Cache for InMemoryCache {
             return Ok(false);
         }
         let size = key.len() + value.len();
-        let entry = CacheEntry::new(value.to_owned(), self.resolve_ttl(ttl), tick, size);
+        let value = bytes::Bytes::copy_from_slice(value.as_bytes());
+        let entry = CacheEntry::new(value, self.resolve_ttl(ttl), tick, size);
         store.put(key.to_owned(), entry);
         self.evict_locked(&mut store);
         Ok(true)
@@ -1043,7 +1097,7 @@ impl FileCache {
     /// Timestamps are in milliseconds. At second granularity a `set`
     /// at `T.999` stamps `T + 1` and expires a millisecond later, and
     /// any sub-second TTL rounds to zero and is born expired.
-    fn encode(key: &str, value: &str, ttl: Option<Duration>) -> Vec<u8> {
+    fn encode(key: &str, value: &[u8], ttl: Option<Duration>) -> Vec<u8> {
         let expires_at = ttl
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .map(|ms| Self::now_unix_millis().saturating_add(ms))
@@ -1052,14 +1106,14 @@ impl FileCache {
     }
 
     /// [`Self::encode`] with an absolute expiry (`0` = none).
-    fn encode_at(key: &str, value: &str, expires_at: i64) -> Vec<u8> {
+    fn encode_at(key: &str, value: &[u8], expires_at: i64) -> Vec<u8> {
         let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
         let mut out = Vec::with_capacity(Self::MAGIC.len() + 12 + key.len() + value.len());
         out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(&expires_at.to_be_bytes());
         out.extend_from_slice(&key_len.to_be_bytes());
         out.extend_from_slice(key.as_bytes());
-        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(value);
         out
     }
 
@@ -1071,7 +1125,7 @@ impl FileCache {
     ///
     /// Expiry uses `>`, not `>=`, so an entry stays live for the whole
     /// duration it was given.
-    fn decode(buf: &[u8]) -> Option<(String, String, bool /* expired */, i64)> {
+    fn decode(buf: &[u8]) -> Option<(String, Vec<u8>, bool /* expired */, i64)> {
         let rest = buf.strip_prefix(Self::MAGIC)?;
         if rest.len() < 12 {
             return None;
@@ -1086,7 +1140,7 @@ impl FileCache {
 
         let body = rest.get(12..)?;
         let key = std::str::from_utf8(body.get(..key_len)?).ok()?.to_owned();
-        let value = std::str::from_utf8(body.get(key_len..)?).ok()?.to_owned();
+        let value = body.get(key_len..)?.to_vec();
 
         let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
         Some((key, value, expired, expires_at))
@@ -1216,7 +1270,7 @@ impl FileCache {
 
     /// Remove `path` if it is still expired or undecodable once locked,
     /// and return its value if a racer replaced it with a live one.
-    fn clear_dead(&self, path: &std::path::Path) -> Result<Option<String>, CacheError> {
+    fn clear_dead(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>, CacheError> {
         let _lock = self.lock_entry(path)?;
         match Self::read_entry(path)? {
             Entry::Live(v, _) => Ok(Some(v)),
@@ -1248,7 +1302,7 @@ impl FileCache {
         })
     }
 
-    fn get_entry(&self, key: &str) -> Result<Option<String>, CacheError> {
+    fn get_entry(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
         let path = self.key_path(key);
         match Self::read_entry(&path)? {
             Entry::Missing => Ok(None),
@@ -1257,7 +1311,7 @@ impl FileCache {
         }
     }
 
-    fn set_entry(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+    fn set_entry(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
         let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
         let _lock = self.lock_for(&tmp, &path)?;
@@ -1268,13 +1322,19 @@ impl FileCache {
         let path = self.key_path(key);
         let _lock = self.lock_entry(&path)?;
         let (cur, kept) = match Self::read_entry(&path)? {
-            Entry::Live(v, at) => (v.parse::<i64>().unwrap_or(0), Some(at)),
+            Entry::Live(v, at) => (
+                std::str::from_utf8(&v)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0),
+                Some(at),
+            ),
             Entry::Dead | Entry::Missing => (0, None),
         };
         let new = cur.saturating_add(by);
         let bytes = match (ttl, kept) {
-            (None, Some(at)) => Self::encode_at(key, &new.to_string(), at),
-            _ => Self::encode(key, &new.to_string(), ttl),
+            (None, Some(at)) => Self::encode_at(key, new.to_string().as_bytes(), at),
+            _ => Self::encode(key, new.to_string().as_bytes(), ttl),
         };
         let tmp = self.write_tmp(&bytes)?;
         Self::put(&tmp, &path)?;
@@ -1306,7 +1366,12 @@ impl FileCache {
         }
     }
 
-    fn add_entry(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+    fn add_entry(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
         let _lock = self.lock_for(&tmp, &path)?;
@@ -1375,7 +1440,7 @@ impl FileCache {
 enum Entry {
     Missing,
     Dead,
-    Live(String, i64),
+    Live(Vec<u8>, i64),
 }
 
 /// Held stripe lock, released on drop. `None` where the filesystem has no locks.
@@ -1396,13 +1461,34 @@ impl Cache for FileCache {
         true
     }
 
+    /// A value stored as bytes that is not UTF-8 is an error, as on Redis.
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let key = key.to_owned();
-        self.blocking(move |c| c.get_entry(&key)).await
+        self.blocking(move |c| c.get_entry(&key))
+            .await?
+            .map(|v| String::from_utf8(v).map_err(|e| CacheError::Serialization(e.to_string())))
+            .transpose()
+    }
+
+    async fn get_bytes(&self, key: &str) -> Result<Option<bytes::Bytes>, CacheError> {
+        let key = key.to_owned();
+        Ok(self
+            .blocking(move |c| c.get_entry(&key))
+            .await?
+            .map(Into::into))
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
-        let (key, value) = (key.to_owned(), value.to_owned());
+        self.set_bytes(key, value.as_bytes(), ttl).await
+    }
+
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        let (key, value) = (key.to_owned(), value.to_vec());
         self.blocking(move |c| c.set_entry(&key, &value, ttl)).await
     }
 
@@ -1426,13 +1512,13 @@ impl Cache for FileCache {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CacheError> {
-        Ok(self.get(key).await?.is_some())
+        Ok(self.get_bytes(key).await?.is_some())
     }
 
     /// Atomic across processes on the host: the check and the rename
     /// happen under the entry's stripe lock.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
-        let (key, value) = (key.to_owned(), value.to_owned());
+        let (key, value) = (key.to_owned(), value.as_bytes().to_vec());
         self.blocking(move |c| c.add_entry(&key, &value, ttl)).await
     }
 
@@ -1616,7 +1702,7 @@ mod file_cache_tests {
         key: &str,
         after: Duration,
     ) -> std::thread::JoinHandle<()> {
-        let bytes = FileCache::encode(key, "v", None);
+        let bytes = FileCache::encode(key, b"v", None);
         std::thread::spawn(move || {
             std::thread::sleep(after);
             std::fs::write(&path, bytes).unwrap();
@@ -2011,5 +2097,98 @@ mod bound_tests {
             .await
             .unwrap());
         assert_eq!(cache.get("old").await.unwrap(), None);
+    }
+}
+
+/// #2656: the bytes API, native on the built-in backends.
+#[cfg(test)]
+mod bytes_tests {
+    use super::*;
+
+    const RAW: &[u8] = b"\xff\x00page\xfe";
+
+    /// A text-only backend, so the trait defaults are what runs.
+    #[derive(Default)]
+    struct TextOnly(std::sync::Mutex<HashMap<String, String>>);
+
+    #[async_trait]
+    impl Cache for TextOnly {
+        async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn set(&self, key: &str, value: &str, _: Option<Duration>) -> Result<(), CacheError> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<(), CacheError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn exists(&self, key: &str) -> Result<bool, CacheError> {
+            Ok(self.0.lock().unwrap().contains_key(key))
+        }
+        async fn clear(&self) -> Result<(), CacheError> {
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_round_trips_bytes_through_text() {
+        let c = TextOnly::default();
+        c.set_bytes("k", RAW, None).await.unwrap();
+        assert_eq!(c.get_bytes("k").await.unwrap().as_deref(), Some(RAW));
+        assert_eq!(c.get_bytes("none").await.unwrap(), None);
+        c.set("plain", "{not base64}", None).await.unwrap();
+        assert!(c.get_bytes("plain").await.is_err());
+    }
+
+    /// Native: the bytes are stored as given, so `get` sees them raw.
+    async fn stores_raw_bytes(c: &dyn Cache) {
+        c.set_bytes("k", RAW, Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+        assert_eq!(c.get_bytes("k").await.unwrap().as_deref(), Some(RAW));
+        assert!(c.get("k").await.is_err(), "non-UTF-8 is not a String");
+        assert!(c.exists("k").await.unwrap());
+        c.set_bytes("t", b"text", None).await.unwrap();
+        assert_eq!(c.get("t").await.unwrap().as_deref(), Some("text"));
+        c.set("s", "abc", None).await.unwrap();
+        assert_eq!(
+            c.get_bytes("s").await.unwrap().as_deref(),
+            Some(&b"abc"[..])
+        );
+        c.set_bytes("gone", RAW, Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(c.get_bytes("gone").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn in_memory_stores_raw_bytes() {
+        stores_raw_bytes(&InMemoryCache::new()).await;
+    }
+
+    #[tokio::test]
+    async fn file_cache_stores_raw_bytes() {
+        let dir = std::env::temp_dir().join(format!("rustango-fc-bytes-{}", uuid::Uuid::new_v4()));
+        stores_raw_bytes(&FileCache::new(&dir)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scope forwards the bytes calls, so the inner backend stays native.
+    #[tokio::test]
+    async fn a_scope_forwards_bytes() {
+        let inner: BoxedCache = Arc::new(InMemoryCache::new());
+        let scoped = ScopedCache::for_tenant(inner.clone(), "acme");
+        stores_raw_bytes(&scoped).await;
+        scoped.set_bytes("p", b"plain", None).await.unwrap();
+        let raw = inner.get(&format!("{}p", scoped.prefix())).await.unwrap();
+        assert_eq!(
+            raw.as_deref(),
+            Some("plain"),
+            "inner must hold raw bytes, not base64"
+        );
     }
 }

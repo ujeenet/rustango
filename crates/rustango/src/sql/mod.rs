@@ -74,8 +74,8 @@ pub use executor::{
     update_tx, AtomicTx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
     FetcherTx, FkPkAccess, FlatScalar, HasPkValue, InsertReturningPool, LoadRelated,
     MaybeMyFromRow, MaybeMyLoadRelated, MaybeMyScalar, MaybePgFromRow, MaybePgScalar,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolTx, TxGuard,
-    UpdaterPool,
+    MaybeSqliteFromRow, MaybeSqliteLoadRelated, MaybeSqliteScalar, Page, PoolConn, PoolTx,
+    SqlExecutor, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, fetch_in_chunks, fetch_select_in_chunks, inserted_pk,
@@ -165,6 +165,8 @@ pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
 pub(crate) use pool::PoolId;
+#[cfg(feature = "tenancy")]
+pub(crate) use pool::{checkout_check, tuning as pool_tuning};
 pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
 /// The canonical `SQLite` timestamp encoder. Gated because its only

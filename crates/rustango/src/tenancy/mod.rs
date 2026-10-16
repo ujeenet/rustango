@@ -192,6 +192,10 @@ pub use org_host::{
     add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, OrgHost,
     TenantHost,
 };
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) use pools::build_database_pool;
+#[cfg(all(test, feature = "postgres"))]
+pub(crate) use pools::scoped_pool_options;
 pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,

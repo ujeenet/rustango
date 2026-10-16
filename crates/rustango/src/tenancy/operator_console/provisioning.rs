@@ -619,6 +619,26 @@ pub(super) async fn provision_run_stream(
         let started = std::time::Instant::now();
 
         loop {
+            if started.elapsed() > STREAM_MAX {
+                yield Item::Ok(Event::default()
+                    .event("error")
+                    .data("stream timed out; the run is still unfinished"));
+                return;
+            }
+            // A logout, deactivation or idle expiry ends the stream too (#1344).
+            match super::active_session(&state, &headers).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    yield Item::Ok(Event::default().event("error").data("session ended; sign in again"));
+                    return;
+                }
+                // A failed lookup is no logout: try again next poll.
+                Err(e) => {
+                    tracing::warn!(target: "rustango::tenancy::operator_console", run_id, error = %e, "stream session check failed");
+                    tokio::time::sleep(POLL_EVERY).await;
+                    continue;
+                }
+            }
             match store::events_since(&registry, run_id, last).await {
                 Ok(events) => {
                     for event in events {
@@ -658,12 +678,6 @@ pub(super) async fn provision_run_stream(
             );
             if finished {
                 yield Item::Ok(Event::default().event("done").data(last.to_string()));
-                return;
-            }
-            if started.elapsed() > STREAM_MAX {
-                yield Item::Ok(Event::default()
-                    .event("error")
-                    .data("stream timed out; the run is still unfinished"));
                 return;
             }
             tokio::time::sleep(POLL_EVERY).await;

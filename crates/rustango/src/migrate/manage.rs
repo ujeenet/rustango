@@ -828,29 +828,7 @@ async fn migrate<W: Write>(
                 "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
-        let preview = runner::migrate_dry_run_pool(pool, dir).await?;
-        if preview.is_empty() {
-            writeln!(w, "nothing to migrate (already up to date)")?;
-        } else {
-            writeln!(
-                w,
-                "-- DRY RUN: {} pending migration(s); no SQL will be executed",
-                preview.len()
-            )?;
-            for p in &preview {
-                writeln!(w)?;
-                writeln!(
-                    w,
-                    "-- {} ({})",
-                    p.name,
-                    if p.atomic { "atomic" } else { "non-atomic" }
-                )?;
-                for stmt in &p.statements {
-                    writeln!(w, "{stmt};")?;
-                }
-            }
-        }
-        return Ok(());
+        return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
     }
 
     if let Some(target) = positional {
@@ -869,6 +847,96 @@ async fn migrate<W: Write>(
         runner::migrate_pool_locked(held, pool, dir, None)
     })
     .await
+}
+
+/// The framework chain `migrate` runs beside the project's, read from disk
+/// as is: a preview never generates it (#1311).
+pub(crate) struct SystemView {
+    dir: std::path::PathBuf,
+    scope: super::MigrationScope,
+}
+
+impl SystemView {
+    /// What a single-database `migrate` runs: the tenant-scope steps.
+    pub(crate) fn tenant(dir: &Path) -> Self {
+        Self {
+            dir: super::make::SystemChain::dir_for(dir),
+            scope: super::MigrationScope::Tenant,
+        }
+    }
+
+    /// What a tenancy registry runs.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn registry(dir: &Path) -> Self {
+        Self {
+            dir: super::make::SystemChain::dir_for(dir),
+            scope: super::MigrationScope::Registry,
+        }
+    }
+
+    /// The chain's files, or `None` before `migrate` first generates them.
+    fn files(&self) -> Result<Option<Vec<Migration>>, MigrateError> {
+        if !self.dir.is_dir() {
+            return Ok(None);
+        }
+        let all = file::list_dir(&self.dir)?;
+        Ok((!all.is_empty()).then_some(all))
+    }
+}
+
+const NOT_GENERATED: &str = "the framework's system migrations are not on disk yet; \
+                             `migrate` generates and applies them";
+
+/// `migrate --dry-run`: what `migrate` runs from `system`, then from `dir`.
+///
+/// # Errors
+/// As [`runner::preview_pending`].
+pub(crate) async fn migrate_dry_run_cmd<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    system: &SystemView,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let mut previews = Vec::new();
+    let system_files = system.files()?;
+    if let Some(all) = &system_files {
+        let ledger = runner::SYSTEM_LEDGER_TABLE;
+        let owned = super::chains::project_owned(dir)?;
+        let steps = runner::preview_pending(
+            pool,
+            &system.dir,
+            all,
+            Some(system.scope),
+            ledger,
+            true,
+            &owned,
+        )
+        .await?;
+        previews.extend(steps.into_iter().map(|p| (p, "system, ")));
+    }
+    let project = runner::migrate_dry_run_pool(pool, dir).await?;
+    previews.extend(project.into_iter().map(|p| (p, "")));
+    if system_files.is_none() {
+        writeln!(w, "-- {NOT_GENERATED}")?;
+    }
+    if previews.is_empty() {
+        writeln!(w, "nothing to migrate (already up to date)")?;
+        return Ok(());
+    }
+    writeln!(
+        w,
+        "-- DRY RUN: {} pending migration(s); no SQL will be executed",
+        previews.len()
+    )?;
+    for (p, chain) in &previews {
+        writeln!(w)?;
+        let atomic = if p.atomic { "atomic" } else { "non-atomic" };
+        writeln!(w, "-- {} ({chain}{atomic})", p.name)?;
+        for stmt in &p.statements {
+            writeln!(w, "{stmt};")?;
+        }
+    }
+    Ok(())
 }
 
 /// Everything a plain `migrate` does: the framework's system chain and the
@@ -1176,7 +1244,13 @@ fn sqlmigrate_cmd<W: Write>(
     }
     let name = positional
         .ok_or_else(|| MigrateError::Validation("sqlmigrate requires a migration name".into()))?;
-    let preview = runner::sqlmigrate_one(dir, name, pool.dialect())?;
+    // A framework migration lives in the system chain's dir (#1311).
+    let system = super::make::SystemChain::dir_for(dir);
+    let in_system = !file::list_dir(dir)?.iter().any(|m| m.name == name)
+        && system.is_dir()
+        && file::list_dir(&system)?.iter().any(|m| m.name == name);
+    let src = if in_system { system.as_path() } else { dir };
+    let preview = runner::sqlmigrate_one(src, name, pool.dialect())?;
     writeln!(
         w,
         "-- {} ({})",
@@ -1194,24 +1268,104 @@ fn sqlmigrate_cmd<W: Write>(
 }
 
 async fn showmigrations<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
-    runner::ensure_ledger_pool(pool).await?;
-    let all = file::list_dir(dir)?;
-    let applied = runner::applied_set_pool(pool).await?;
+    showmigrations_with(pool, dir, &SystemView::tenant(dir), None, w).await
+}
 
+/// Each tenant's slug and the names one of its ledgers records.
+pub(crate) type TenantLedgers = [(String, std::collections::HashSet<String>)];
+
+/// Every tenant's project and system ledgers.
+pub(crate) struct TenantChains<'a> {
+    pub(crate) project: &'a TenantLedgers,
+    pub(crate) system: &'a TenantLedgers,
+}
+
+/// `showmigrations` as `migrate` reads the ledgers: squashed files count as
+/// applied, and `system`'s chain is listed too (#1311). With `tenants`,
+/// tenant-scoped files of both chains are marked from their ledgers.
+///
+/// # Errors
+/// File I/O or a ledger read.
+pub(crate) async fn showmigrations_with<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    system: &SystemView,
+    tenants: Option<&TenantChains<'_>>,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    use super::MigrationScope;
+    let all = file::list_dir(dir)?;
+    let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
     if all.is_empty() {
         writeln!(w, "(no migrations in {})", dir.display())?;
-        return Ok(());
+    } else {
+        writeln!(w, "Migrations in {}:", dir.display())?;
     }
-    writeln!(w, "Migrations in {}:", dir.display())?;
-    for m in &all {
-        let mark = if applied.contains(&m.name) {
-            "[X]"
+    chain_lines(w, &all, &applied, tenants.map(|t| t.project), |_| true)?;
+
+    let Some(files) = system.files()? else {
+        writeln!(w, "System migrations: {NOT_GENERATED}")?;
+        return Ok(());
+    };
+    let applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
+    writeln!(w, "System migrations in {}:", system.dir.display())?;
+    // A tenancy registry lists the tenant steps from the tenants' ledgers.
+    let tenant_steps = tenants.is_some();
+    chain_lines(w, &files, &applied, tenants.map(|t| t.system), |m| {
+        m.scope == system.scope || (tenant_steps && m.scope == MigrationScope::Tenant)
+    })
+}
+
+/// One chain's `shown` files: tenant-scoped ones from `tenants` when given,
+/// the rest from `applied`.
+fn chain_lines<W: Write>(
+    w: &mut W,
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    tenants: Option<&TenantLedgers>,
+    shown: impl Fn(&Migration) -> bool,
+) -> Result<(), MigrateError> {
+    use runner::MigrationState as S;
+    let per_tenant: Vec<Vec<S>> = tenants
+        .unwrap_or_default()
+        .iter()
+        .map(|(_, done)| {
+            runner::migration_states(all, done)
+                .map(|(_, s)| s)
+                .collect()
+        })
+        .collect();
+    for (i, (m, state)) in runner::migration_states(all, applied).enumerate() {
+        if !shown(m) {
+            continue;
+        }
+        if tenants.is_some() && m.scope == super::MigrationScope::Tenant {
+            let n = per_tenant.len();
+            if n == 0 {
+                // Nothing is owed with no tenant to apply it to.
+                writeln!(w, "  [-] {} (no tenants)", m.name)?;
+                continue;
+            }
+            let done = per_tenant.iter().filter(|t| t[i] != S::Pending).count();
+            let mark = match done {
+                0 => "[ ]",
+                d if d == n => "[X]",
+                _ => "[~]",
+            };
+            writeln!(w, "  {mark} {} ({done}/{n} tenants)", m.name)?;
         } else {
-            "[ ]"
-        };
-        writeln!(w, "  {mark} {}", m.name)?;
+            writeln!(w, "  {}", state_line(m, state))?;
+        }
     }
     Ok(())
+}
+
+fn state_line(m: &Migration, state: runner::MigrationState) -> String {
+    match state {
+        runner::MigrationState::Applied => format!("[X] {}", m.name),
+        runner::MigrationState::Replaced => format!("[X] {} (replaced by a squash)", m.name),
+        runner::MigrationState::Pending => format!("[ ] {}", m.name),
+    }
 }
 
 /// `manage forget-pending <name>` — delete a migration JSON that
@@ -1781,6 +1935,12 @@ pub(crate) async fn check_cmd_with<W: Write>(
     w: &mut W,
     extra: impl std::future::Future<Output = DeployAuditFindings>,
 ) -> Result<(), MigrateError> {
+    // `--deplyo` once ran the plain check and reported all clear (#1312).
+    if let Some(other) = args.iter().find(|a| *a != "--deploy") {
+        return Err(MigrateError::Validation(format!(
+            "check: unknown argument `{other}` (usage: check [--deploy])"
+        )));
+    }
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -3025,10 +3185,12 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
 }
 
 /// `pg_dump` for `url`; the password goes in its env, not argv (#2324).
-fn pg_dump_command(parsed: &DbDumpArgs, url: &str) -> std::process::Command {
-    let mut cmd = crate::dbshell::LibpqConn::new(url).command("pg_dump");
+fn pg_dump_command(parsed: &DbDumpArgs, url: &str) -> Result<std::process::Command, MigrateError> {
+    let mut cmd = crate::dbshell::LibpqConn::new(url)
+        .map_err(MigrateError::Validation)?
+        .command("pg_dump");
     cmd.args(build_pg_dump_argv(parsed));
-    cmd
+    Ok(cmd)
 }
 
 /// pg_dump's flags, after `--dbname`.
@@ -3065,7 +3227,7 @@ fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
                 .into(),
         )
     })?;
-    let mut cmd = pg_dump_command(&parsed, &url);
+    let mut cmd = pg_dump_command(&parsed, &url)?;
     eprintln!("running: pg_dump {}", shown_args(&cmd));
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run pg_dump (is it on PATH?): {e}"))
@@ -3181,10 +3343,15 @@ fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
 }
 
 /// `psql` for `url`; the password goes in its env, not argv (#2324).
-fn psql_restore_command(parsed: &RestorePlan, url: &str) -> std::process::Command {
-    let mut cmd = crate::dbshell::LibpqConn::new(url).command("psql");
+fn psql_restore_command(
+    parsed: &RestorePlan,
+    url: &str,
+) -> Result<std::process::Command, MigrateError> {
+    let mut cmd = crate::dbshell::LibpqConn::new(url)
+        .map_err(MigrateError::Validation)?
+        .command("psql");
     cmd.args(build_psql_argv(parsed));
-    cmd
+    Ok(cmd)
 }
 
 /// psql's flags, after `--dbname`.
@@ -3223,7 +3390,7 @@ fn run_psql_restore<W: Write>(
     url: &str,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    let mut cmd = psql_restore_command(parsed, url);
+    let mut cmd = psql_restore_command(parsed, url)?;
     writeln!(w, "running: psql {}", shown_args(&cmd))?;
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
@@ -3427,32 +3594,30 @@ async fn dumpdata_cmd<W: Write>(
     }
     let model_filters = &parsed.model_filters;
     let indent = parsed.indent;
+    // A typo would otherwise dump `[]` and exit 0 (#1312).
+    for name in model_filters.iter().chain(&parsed.excludes) {
+        let known = inventory::iter::<crate::core::ModelEntry>()
+            .any(|e| model_matches(name, &dotted_model_name(e), e.schema));
+        if !known {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: unknown model `{name}` (use `app.Model` or `Model`)"
+            )));
+        }
+    }
 
     // Walk every registered model, fetching rows from each.
     let mut out: Vec<serde_json::Value> = Vec::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
-        let app_label = entry.resolved_app_label().unwrap_or("");
-        let dotted_name = if app_label.is_empty() {
-            schema.name.to_owned()
-        } else {
-            format!("{app_label}.{}", schema.name)
-        };
+        let dotted_name = dotted_model_name(entry);
+        let matches = |f: &String| model_matches(f, &dotted_name, schema);
 
         // Filter: if the user specified --model, only emit models
         // whose `app.Model` or bare `Model` matches.
-        if !model_filters.is_empty()
-            && !model_filters
-                .iter()
-                .any(|f| f == &dotted_name || f == schema.name)
-        {
+        if !model_filters.is_empty() && !model_filters.iter().any(matches) {
             continue;
         }
-        if parsed
-            .excludes
-            .iter()
-            .any(|f| f == &dotted_name || f == schema.name)
-        {
+        if parsed.excludes.iter().any(matches) {
             continue;
         }
 
@@ -3482,6 +3647,7 @@ async fn dumpdata_cmd<W: Write>(
                     schema.table
                 ))
             })?;
+        let links = m2m_links(pool, schema).await?;
 
         for mut row in rows {
             // Pop the PK column off `fields` into the outer fixture
@@ -3494,6 +3660,12 @@ async fn dumpdata_cmd<W: Write>(
                     .unwrap_or(serde_json::Value::Null),
                 None => serde_json::Value::Null,
             };
+            if let Some(map) = row.as_object_mut() {
+                for (name, by_src) in &links {
+                    let dsts = by_src.get(&pk_value.to_string()).cloned();
+                    map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+                }
+            }
             out.push(serde_json::json!({
                 "model": dotted_name,
                 "pk": pk_value,
@@ -3510,6 +3682,144 @@ async fn dumpdata_cmd<W: Write>(
     .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
     writeln!(w, "{rendered}")?;
     Ok(())
+}
+
+/// `app.Model`, or the bare name for a model with no app.
+fn dotted_model_name(entry: &crate::core::ModelEntry) -> String {
+    match entry.resolved_app_label() {
+        Some(app) if !app.is_empty() => format!("{app}.{}", entry.schema.name),
+        _ => entry.schema.name.to_owned(),
+    }
+}
+
+/// The one rule `--model`, `--exclude` and the unknown-name check share.
+fn model_matches(filter: &str, dotted: &str, schema: &crate::core::ModelSchema) -> bool {
+    filter == dotted || filter == schema.name
+}
+
+/// Target pks keyed by source pk (its JSON text).
+type LinksBySource = std::collections::HashMap<String, Vec<serde_json::Value>>;
+
+/// `rel`'s auto-created junction as the emitters see it, and its two ends.
+type Junction = (
+    &'static crate::core::ModelSchema,
+    [&'static crate::core::FieldSchema; 2],
+);
+
+/// Both ends take their model's pk type, so a text or UUID key decodes.
+fn junction_of(
+    src: &'static crate::core::ModelSchema,
+    rel: &crate::core::M2MRelation,
+) -> Result<Junction, MigrateError> {
+    let pk_ty = |schema: Option<&'static crate::core::ModelSchema>, table: &str| {
+        schema
+            .and_then(crate::core::ModelSchema::primary_key)
+            .map(|pk| pk.ty)
+            .ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "M2M `{}`: `{table}` has no registered primary key",
+                    rel.name
+                ))
+            })
+    };
+    let dst = crate::core::ModelEntry::for_table(rel.to).map(|e| e.schema);
+    let junction = crate::sql::m2m::typed_junction(
+        rel.through,
+        &[
+            (rel.src_col, pk_ty(Some(src), src.table)?),
+            (rel.dst_col, pk_ty(dst, rel.to)?),
+        ],
+    );
+    let end = |col: &str| {
+        junction.field_by_column(col).ok_or_else(|| {
+            MigrateError::Validation(format!("junction `{}` has no `{col}` column", rel.through))
+        })
+    };
+    Ok((junction, [end(rel.src_col)?, end(rel.dst_col)?]))
+}
+
+/// Each auto-created M2M relation of `schema` and its links. Those
+/// junctions are no model, so the links ride on the source rows (#1226).
+async fn m2m_links(
+    pool: &Pool,
+    schema: &'static crate::core::ModelSchema,
+) -> Result<Vec<(&'static str, LinksBySource)>, MigrateError> {
+    let mut out = Vec::new();
+    for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+        let (junction, [src, dst]) = junction_of(schema, rel)?;
+        let query = crate::core::SelectQuery::new(junction);
+        let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "dumpdata: select from `{}` failed: {e}",
+                    rel.through
+                ))
+            })?;
+        let mut by_src = LinksBySource::new();
+        for row in rows {
+            if let (Some(s), Some(d)) = (row.get(src.name), row.get(dst.name)) {
+                by_src.entry(s.to_string()).or_default().push(d.clone());
+            }
+        }
+        for dsts in by_src.values_mut() {
+            dsts.sort_by(|a, b| (a.as_i64(), a.as_str()).cmp(&(b.as_i64(), b.as_str())));
+        }
+        out.push((rel.name, by_src));
+    }
+    Ok(out)
+}
+
+/// One fixture row's links of one relation: its entry line, pk and targets.
+type RowLinks = (usize, serde_json::Value, Vec<serde_json::Value>);
+
+/// Insert every row's links of `rel` in bind-sized batches; a link already
+/// there is kept.
+async fn load_links(
+    pool: &Pool,
+    schema: &'static crate::core::ModelSchema,
+    rel: &crate::core::M2MRelation,
+    rows: &[RowLinks],
+    fail_fast: bool,
+) -> Result<Vec<String>, String> {
+    let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
+    let insert = |values| async move {
+        let query =
+            crate::core::BulkInsertQuery::new(junction, vec![rel.src_col, rel.dst_col], values)
+                .on_conflict(crate::core::ConflictClause::DoNothing);
+        crate::sql::bulk_insert_pool(pool, &query).await
+    };
+    // Each failed row's message; a bad row skips only its own links.
+    let mut failed = Vec::new();
+    let mut converted = Vec::new();
+    for (line, src, dsts) in rows {
+        let row: Result<Vec<_>, String> = json_to_sql_value(src, s).and_then(|src| {
+            dsts.iter()
+                .map(|dst| Ok(vec![src.clone(), json_to_sql_value(dst, d)?]))
+                .collect()
+        });
+        match row {
+            Ok(values) => converted.push((line, values)),
+            Err(e) => failed.push(format!("entry #{line}: {e}")),
+        }
+        if fail_fast && !failed.is_empty() {
+            return Ok(failed);
+        }
+    }
+    let batch: Vec<_> = converted.iter().flat_map(|(_, v)| v.clone()).collect();
+    if batch.is_empty() || insert(batch).await.is_ok() {
+        return Ok(failed);
+    }
+    // The batch failed: find the rows that did, one at a time.
+    for (line, values) in converted {
+        if let Err(e) = insert(values).await {
+            failed.push(format!("entry #{line}: {e}"));
+            if fail_fast {
+                break;
+            }
+        }
+    }
+    Ok(failed)
 }
 
 #[derive(Debug, PartialEq)]
@@ -3640,6 +3950,14 @@ async fn loaddata_cmd<W: Write>(
     // `--fail-fast` stops here, but the rows already in still need their
     // sequences moved, so the error is raised after the reset.
     let mut abort: Option<String> = None;
+    // M2M links load after every row, so both ends exist (#1226), one
+    // batched insert per relation.
+    let mut links: Vec<(
+        &'static crate::core::ModelSchema,
+        &'static crate::core::M2MRelation,
+        String,
+        Vec<RowLinks>,
+    )> = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -3692,6 +4010,21 @@ async fn loaddata_cmd<W: Write>(
                 }
             }
         }
+        let mut row_links = Vec::new();
+        for rel in schema.m2m.iter().filter(|r| r.auto_create) {
+            match fields_obj.get(rel.name) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::Array(dsts)) if !dsts.is_empty() => {
+                    row_links.push((rel, dsts.clone()));
+                }
+                Some(serde_json::Value::Array(_)) => {}
+                Some(_) => row_err = Some(format!("field `{}`: expected a list of pks", rel.name)),
+            }
+        }
+        let src_pk = entry.get("pk").cloned().unwrap_or_default();
+        if !row_links.is_empty() && src_pk.is_null() {
+            row_err = Some("M2M links need the row's `pk`".to_owned());
+        }
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
             if parsed.fail_fast {
@@ -3709,12 +4042,23 @@ async fn loaddata_cmd<W: Write>(
             values,
             returning: vec![],
             on_conflict: None,
+            generated: vec![],
         };
         match crate::sql::insert_pool(pool, &query).await {
             Ok(()) => {
                 loaded += 1;
                 if !touched.iter().any(|t| t.table == schema.table) {
                     touched.push(schema);
+                }
+                for (rel, dsts) in row_links {
+                    let row = (line, src_pk.clone(), dsts);
+                    match links
+                        .iter_mut()
+                        .find(|(s, r, _, _)| s.table == schema.table && r.name == rel.name)
+                    {
+                        Some((_, _, _, rows)) => rows.push(row),
+                        None => links.push((schema, rel, model_name.to_owned(), vec![row])),
+                    }
                 }
             }
             Err(e) => {
@@ -3726,6 +4070,29 @@ async fn loaddata_cmd<W: Write>(
                 tracing::warn!("{msg}");
                 skipped += 1;
             }
+        }
+    }
+
+    if abort.is_none() {
+        'rels: for (schema, rel, model_name, rows) in links {
+            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
+            {
+                Ok(failed) => {
+                    let n = failed.len();
+                    (failed, n)
+                }
+                // No junction to write: every row's links are lost.
+                Err(e) => (vec![e], rows.len()),
+            };
+            for e in failed {
+                let msg = format!("loaddata: `{model_name}` `{}`: {e}", rel.name);
+                if parsed.fail_fast {
+                    abort = Some(msg);
+                    break 'rels;
+                }
+                tracing::warn!("{msg}");
+            }
+            skipped += lost;
         }
     }
 
@@ -6920,6 +7287,160 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(s.contains("[info]    account lockout"), "{s}");
     }
 
+    /// #1312 — a misspelt flag fails instead of running the plain check.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn check_refuses_an_unknown_argument() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = check_cmd(
+            &pool,
+            Path::new("/nonexistent"),
+            &["--deplyo".into()],
+            &mut buf,
+        )
+        .await
+        .expect_err("--deplyo must fail");
+        assert!(err.to_string().contains("--deplyo"), "{err}");
+    }
+
+    /// A file that creates `table`.
+    #[cfg(feature = "sqlite")]
+    fn create_mig(name: &str, prev: Option<&str>, table: &str) -> Migration {
+        Migration {
+            name: name.to_owned(),
+            created_at: "2026-10-14T00:00:00Z".into(),
+            prev: prev.map(str::to_owned),
+            atomic: true,
+            scope: super::super::MigrationScope::Tenant,
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot: serde_json::from_value(serde_json::json!({
+                "tables": [{"name": table, "model": "T",
+                    "fields": [{"name": "id", "column": "id", "ty": "i64",
+                                "nullable": false, "primary_key": true}]}]
+            }))
+            .unwrap(),
+            forward: vec![Operation::Schema(super::super::SchemaChange::CreateTable(
+                table.into(),
+            ))],
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn manage_out(pool: &Pool, dir: &Path, args: &[&str]) -> Result<String, MigrateError> {
+        let mut buf: Vec<u8> = Vec::new();
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        run_with_writer(pool, dir, args, &mut buf).await?;
+        Ok(String::from_utf8(buf).unwrap())
+    }
+
+    /// #1311 — dry-run, showmigrations and sqlmigrate see the system chain
+    /// `migrate` runs.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn previews_cover_the_system_chain() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(out.contains("not on disk yet"), "{out}");
+
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let step = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.scope == super::super::MigrationScope::Tenant)
+            .expect("a system step");
+        crate::sql::raw_execute_pool(
+            &pool,
+            "DELETE FROM __rustango_system_migrations__ WHERE name = ?",
+            vec![crate::core::SqlValue::String(step.name.clone())],
+        )
+        .await
+        .unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(out.contains(&format!("-- {} (system,", step.name)), "{out}");
+        let out = manage_out(&pool, &dir, &["showmigrations"]).await;
+        let out = out.unwrap();
+        assert!(out.contains(&format!("[ ] {}", step.name)), "{out}");
+        let out = manage_out(&pool, &dir, &["sqlmigrate", &step.name]).await;
+        assert!(out.expect("sqlmigrate").contains(&step.name));
+    }
+
+    /// rel-0608 — a system table the project chain creates is previewed
+    /// once, under the project, as `migrate` creates it.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_leaves_project_owned_tables_to_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Pool::connect("sqlite::memory:").await.unwrap();
+        manage_out(&scratch, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let table = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope == super::super::MigrationScope::Tenant)
+            .find_map(|m| {
+                m.forward.iter().find_map(|op| match op {
+                    Operation::Schema(super::super::SchemaChange::CreateTable(t)) => {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("a system table");
+        file::write(
+            &dir.join("0001_own.json"),
+            &create_mig("0001_own", None, &table),
+        )
+        .unwrap();
+
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        let creates = out
+            .lines()
+            .filter(|l| l.starts_with("CREATE TABLE") && l.contains(&format!("\"{table}\"")))
+            .count();
+        assert_eq!(creates, 1, "{out}");
+        assert!(out.contains("(system,"), "{out}");
+    }
+
+    /// #1311 — once a squash is applied, the file it replaced is not pending.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_squashed_file_is_not_pending() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = create_mig("0001_a", None, "sq1311_a");
+        file::write(&dir.join("0001_a.json"), &first).unwrap();
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let mut squash = create_mig("0002_sq", Some("0001_a"), "sq1311_a");
+        squash.replaces = vec!["0001_a".into()];
+        file::write(&dir.join("0002_sq.json"), &squash).unwrap();
+        manage_out(&pool, &dir, &["migrate"]).await.expect("squash");
+
+        let out = manage_out(&pool, &dir, &["showmigrations"]).await;
+        let out = out.unwrap();
+        assert!(out.contains("[X] 0001_a"), "{out}");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        assert!(!out.contains("0001_a"), "{out}");
+    }
+
     #[test]
     fn ci_and_bin_collations_warn() {
         assert!(collation_warning("utf8mb4_0900_ai_ci").is_some());
@@ -7638,7 +8159,7 @@ mod db_cmd_tests {
             schema_only: false,
             no_owner: false,
         };
-        let cmd = pg_dump_command(&parsed, "postgres://u:s3cret@h/db");
+        let cmd = pg_dump_command(&parsed, "postgres://u:s3cret@h/db").unwrap();
         let argv: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
         assert_eq!(argv[..2], ["--dbname", "postgres://u@h/db"]);
     }
@@ -7658,8 +8179,8 @@ mod db_cmd_tests {
             clean: false,
         };
         for cmd in [
-            pg_dump_command(&dump, url),
-            psql_restore_command(&plan, url),
+            pg_dump_command(&dump, url).unwrap(),
+            psql_restore_command(&plan, url).unwrap(),
         ] {
             assert!(
                 !cmd.get_args()
