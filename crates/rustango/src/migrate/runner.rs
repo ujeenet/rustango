@@ -2436,6 +2436,7 @@ pub(crate) async fn applied_or_empty(
 
 /// The SQL `migrate` would run for `all`'s `scope` files under `ledger`:
 /// its pending set and reconcile verdicts, read without writing (#1311).
+/// `owned` tables are left out, as the system chain leaves the project's.
 ///
 /// # Errors
 /// As the ledger read, a reconcile `migrate` would refuse, or a render.
@@ -2446,6 +2447,7 @@ pub(crate) async fn preview_pending(
     scope: Option<super::MigrationScope>,
     ledger: &str,
     fake_initial: bool,
+    owned: &[String],
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
     let applied = applied_or_empty(pool, ledger).await?;
     let mut out = Vec::new();
@@ -2454,6 +2456,7 @@ pub(crate) async fn preview_pending(
             continue;
         }
         let before = prev_snapshot(all, &mig, dir)?;
+        let mig = without_tables(&mig, owned);
         let effective = match reconcile(pool, &mig, &applied, fake_initial).await? {
             ReconcileAction::Fake => {
                 out.push(faked_preview(&mig, ledger));
@@ -4224,7 +4227,7 @@ pub async fn migrate_dry_run_pool_with_ledger(
     ledger: &str,
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
     let all = file::list_dir(dir)?;
-    preview_pending(pool, dir, &all, None, ledger, false).await
+    preview_pending(pool, dir, &all, None, ledger, false, &[]).await
 }
 
 // ---- internal helpers ----

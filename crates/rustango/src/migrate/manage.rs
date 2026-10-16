@@ -901,9 +901,17 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let system_files = system.files()?;
     if let Some(all) = &system_files {
         let ledger = runner::SYSTEM_LEDGER_TABLE;
-        let steps =
-            runner::preview_pending(pool, &system.dir, all, Some(system.scope), ledger, true)
-                .await?;
+        let owned = super::chains::project_owned(dir)?;
+        let steps = runner::preview_pending(
+            pool,
+            &system.dir,
+            all,
+            Some(system.scope),
+            ledger,
+            true,
+            &owned,
+        )
+        .await?;
         previews.extend(steps.into_iter().map(|p| (p, "system, ")));
     }
     let project = runner::migrate_dry_run_pool(pool, dir).await?;
@@ -7273,6 +7281,42 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.contains(&format!("[ ] {}", step.name)), "{out}");
         let out = manage_out(&pool, &dir, &["sqlmigrate", &step.name]).await;
         assert!(out.expect("sqlmigrate").contains(&step.name));
+    }
+
+    /// rel-0608 — a system table the project chain creates is previewed
+    /// once, under the project, as `migrate` creates it.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_leaves_project_owned_tables_to_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Pool::connect("sqlite::memory:").await.unwrap();
+        manage_out(&scratch, &dir, &["migrate"]).await.expect("migrate");
+        let table = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope == super::super::MigrationScope::Tenant)
+            .find_map(|m| {
+                m.forward.iter().find_map(|op| match op {
+                    Operation::Schema(super::super::SchemaChange::CreateTable(t)) => {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("a system table");
+        file::write(&dir.join("0001_own.json"), &create_mig("0001_own", None, &table)).unwrap();
+
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
+        let out = out.unwrap();
+        let creates = out
+            .lines()
+            .filter(|l| l.starts_with("CREATE TABLE") && l.contains(&format!("\"{table}\"")))
+            .count();
+        assert_eq!(creates, 1, "{out}");
+        assert!(out.contains("(system,"), "{out}");
     }
 
     /// #1311 — once a squash is applied, the file it replaced is not pending.
