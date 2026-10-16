@@ -196,7 +196,7 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(crate) use pools::build_database_pool;
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) use pools::scoped_pool_options;
