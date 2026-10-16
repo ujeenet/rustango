@@ -3709,8 +3709,7 @@ fn junction_of(
 ) -> Result<Junction, MigrateError> {
     let pk_ty = |schema: Option<&'static crate::core::ModelSchema>, table: &str| {
         schema
-            .and_then(crate::core::ModelSchema::primary_key)
-            .map(|pk| pk.ty)
+            .and_then(crate::sql::m2m::end_type)
             .ok_or_else(|| {
                 MigrateError::Validation(format!(
                     "M2M `{}`: `{table}` has no registered primary key",
