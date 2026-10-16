@@ -48,6 +48,14 @@ async fn default_pool_skips_the_acquire_ping(pool: &Pool) {
 /// With the ping off, a connection the server dropped while idle is
 /// still checked once it sat idle past the threshold (rel-0608 performance-002).
 async fn a_connection_dropped_while_idle_is_replaced(pool: &Pool) {
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    drop_idle_then_query(pool).await;
+    #[cfg(not(any(feature = "postgres", feature = "mysql")))]
+    let _ = pool;
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn drop_idle_then_query(pool: &Pool) {
     use rustango::sql::{raw_execute_pool, sqlx, sqlx::Executor as _};
     use rustango::testkit::matrix::Backend;
 
@@ -83,6 +91,7 @@ async fn a_connection_dropped_while_idle_is_replaced(pool: &Pool) {
                 .unwrap();
             p.execute(sqlx::raw_sql(&format!("KILL {id}"))).await.map(drop)
         }
+        #[allow(unreachable_patterns)]
         _ => unreachable!("same backend"),
     };
     kill.expect("drop the idle connection server-side");
