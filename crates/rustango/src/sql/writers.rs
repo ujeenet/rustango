@@ -50,8 +50,10 @@ pub(super) struct Sql<'d> {
     pub total: Option<CountQuery>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
     pub group_concat: bool,
-    /// Writing an UPDATE/DELETE: MySQL needs every `IN (subquery)` derived (#1361).
-    pub in_dml: bool,
+    /// The UPDATE/DELETE target being written, if any (#1361).
+    pub dml_target: Option<&'static str>,
+    /// A FROM or JOIN item named [`Self::dml_target`] since the flag was last cleared.
+    pub read_dml_target: bool,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -79,7 +81,7 @@ impl Scope {
 
     /// `<table>` or `<table> AS <alias>`, as a FROM item.
     fn write_from(self, b: &mut Sql<'_>) {
-        b.write_ident(self.model.table);
+        b.write_table(self.model.table);
         if self.name != self.model.table {
             b.sql.push_str(" AS ");
             b.write_ident(self.name);
@@ -129,7 +131,8 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
-            in_dml: false,
+            dml_target: None,
+            read_dml_target: false,
         }
     }
 
@@ -145,7 +148,8 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
-            in_dml: false,
+            dml_target: None,
+            read_dml_target: false,
         }
     }
 
@@ -200,6 +204,13 @@ impl<'d> Sql<'d> {
     /// Append a quoted identifier using the dialect's quoting rules.
     pub(super) fn write_ident(&mut self, name: &str) {
         self.sql.push_str(&self.d.quote_ident(name));
+    }
+
+    /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
+    /// item goes through here, so MySQL knows which subqueries hit 1093.
+    fn write_table(&mut self, name: &str) {
+        self.read_dml_target |= self.dml_target == Some(name);
+        self.write_ident(name);
     }
 
     /// Add `value` to the bind list and write its placeholder.
@@ -1015,7 +1026,7 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push(' ');
         b.sql.push_str(kind_kw);
         b.sql.push(' ');
-        b.write_ident(join.target.table);
+        b.write_table(join.target.table);
         b.sql.push_str(" AS ");
         b.write_ident(join.alias);
         b.sql.push_str(" ON ");
@@ -1754,7 +1765,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
         return Err(SqlError::EmptyUpdateSet);
     }
     b.scope_stack.push(Scope::plain(query.model));
-    b.in_dml = true;
+    b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("UPDATE ");
         b.write_ident(query.model.table);
@@ -3743,7 +3754,7 @@ fn write_call_unary(
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
     b.scope_stack.push(Scope::plain(query.model));
-    b.in_dml = true;
+    b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("DELETE FROM ");
         b.write_ident(query.model.table);
@@ -4027,12 +4038,15 @@ pub(super) fn write_where_expr(
                 || subquery.offset.is_some()
                 || subquery.compound_limit.is_some()
                 || subquery.compound_offset.is_some();
-            let wrap = (limited || b.in_dml) && b.d.in_subquery_limit_needs_derived_table();
-            if wrap {
-                b.sql.push_str("SELECT * FROM (");
-            }
+            // Only a subquery reading the write's target needs it (1093): a
+            // correlated derived table re-runs per outer row.
+            let outer_read = std::mem::take(&mut b.read_dml_target);
+            let start = b.sql.len();
             write_select(b, subquery)?;
-            if wrap {
+            let reads_target = b.read_dml_target;
+            b.read_dml_target |= outer_read;
+            if (limited || reads_target) && b.d.in_subquery_limit_needs_derived_table() {
+                b.sql.insert_str(start, "SELECT * FROM (");
                 b.sql.push_str(") AS ");
                 b.write_ident("_rustango_in");
             }
@@ -4075,7 +4089,7 @@ fn write_rel_correlation(
             })
         }
     };
-    b.write_ident(table);
+    b.write_table(table);
     // A self relation must not hide the outer row (#1287).
     let table = if table == outer_table {
         b.sql.push_str(" AS ");
@@ -4108,7 +4122,7 @@ fn write_rel_correlation(
                 b.sql.push_str(" = (SELECT ");
                 b.write_ident(ct.ct_pk);
                 b.sql.push_str(" FROM ");
-                b.write_ident(ct.ct_table);
+                b.write_table(ct.ct_table);
                 b.sql.push_str(" WHERE ");
                 b.write_ident(ct.ct_table_col);
                 b.sql.push_str(" = ");
@@ -4132,7 +4146,7 @@ fn write_rel_correlation(
             b.sql.push_str(" IN (SELECT ");
             b.write_ident(dst_col);
             b.sql.push_str(" FROM ");
-            b.write_ident(through);
+            b.write_table(through);
             b.sql.push_str(" WHERE ");
             b.write_ident(through);
             b.sql.push('.');

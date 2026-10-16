@@ -313,7 +313,7 @@ pub trait Dialect: Send + Sync {
 
     /// `true` if `IN (<subquery>)` rejects a `LIMIT`/`OFFSET` inside
     /// (MySQL 1235), so the writer wraps it in a derived table. Inside an
-    /// UPDATE/DELETE it wraps every one, so it may read the target (1093).
+    /// UPDATE/DELETE it also wraps one that reads the target (1093).
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
         false
     }
