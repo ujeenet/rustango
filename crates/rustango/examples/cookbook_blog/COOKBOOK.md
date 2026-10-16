@@ -2521,7 +2521,8 @@ request.
 request via the `Tenant` extractor:
 
 ```rust,ignore
-let posts_router = ViewSet::for_model(Post::SCHEMA)
+// The field list is required: the only fields the API renders and writes.
+let posts_router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body", "published_at"])
     .filter_fields(&["author_id"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])

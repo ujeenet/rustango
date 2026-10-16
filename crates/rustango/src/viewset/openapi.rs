@@ -8,7 +8,7 @@
 //! use rustango::serializer::ModelSerializer;
 //! use rustango::viewset::ViewSet;
 //!
-//! let posts_vs = ViewSet::for_model(Post::SCHEMA)
+//! let posts_vs = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
 //!     .filter_fields(&["author_id"])
 //!     .search_fields(&["title", "body"]);
 //!
@@ -643,7 +643,7 @@ mod tests {
     }
 
     fn vs() -> ViewSet {
-        ViewSet::for_model(schema())
+        ViewSet::for_model(schema(), &["id", "title", "author_id"])
             .filter_fields(&["author_id"])
             .search_fields(&["title"])
             .ordering(&[("id", true)])
@@ -829,7 +829,7 @@ mod tests {
             soft_delete_column: Some("deleted_at"),
             ..schema().clone()
         });
-        let paths = ViewSet::for_model(ms).openapi_paths("/p", "P");
+        let paths = ViewSet::for_model(ms, &["title", "deleted_at"]).openapi_paths("/p", "P");
         let item = &paths.iter().find(|(p, _)| p == "/p/{pk}").unwrap().1;
         let body = body_schema(item.patch.as_ref());
         assert!(body["properties"]["title"].is_object());

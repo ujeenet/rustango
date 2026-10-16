@@ -46,7 +46,9 @@ pub struct Event {
     pub score: f64,
 }
 
-const DDL: &str = "CREATE TABLE cursor_ts_event (
+const FIELDS: &[&str] = &["id", "label", "occurred_at", "score"];
+
+const DDL: &str ="CREATE TABLE cursor_ts_event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     label       TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
@@ -73,7 +75,7 @@ async fn seeded_pool() -> Pool {
 }
 
 async fn get(pool: &Pool, uri: &str) -> (StatusCode, serde_json::Value) {
-    let app = ViewSet::for_model(Event::SCHEMA)
+    let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
         .cursor_pagination("occurred_at")
         .page_size(3)
         .router_pool("/events", pool.clone());
@@ -152,7 +154,7 @@ async fn the_timestamp_cursor_actually_walks_the_table() {
 /// Projecting the cursor column away must be loud, not silent — and
 /// now it is loud at **build** time.
 ///
-/// `.fields([..])` can omit the cursor column. The row then carries no
+/// The field list can omit the cursor column. The row then carries no
 /// value to encode, and answering `next: null` while `has_more` is true
 /// stops pagination at page one with nothing reporting an error: a
 /// caller iterating `next` sees three rows and concludes that is the
@@ -165,38 +167,24 @@ async fn the_timestamp_cursor_actually_walks_the_table() {
 #[test]
 #[should_panic(expected = "projected away")]
 fn projecting_the_cursor_column_away_is_refused_at_build_time() {
-    let _ = ViewSet::for_model(Event::SCHEMA)
-        .cursor_pagination("occurred_at")
-        .fields(&["id", "label"]); // occurred_at deliberately absent
-}
-
-/// And in the other order: the projection can be narrowed after the
-/// cursor is chosen. Without the check on both builder methods, one
-/// ordering would be caught and the other would not.
-#[test]
-#[should_panic(expected = "projected away")]
-fn the_check_does_not_depend_on_builder_order() {
-    let _ = ViewSet::for_model(Event::SCHEMA)
-        .fields(&["id", "label"])
-        .cursor_pagination("occurred_at");
+    // occurred_at deliberately absent
+    let _ = ViewSet::for_model(Event::SCHEMA, &["id", "label"]).cursor_pagination("occurred_at");
 }
 
 /// The primary key is required too — it breaks ties.
 #[test]
 #[should_panic(expected = "primary key")]
 fn projecting_the_primary_key_away_is_refused() {
-    let _ = ViewSet::for_model(Event::SCHEMA)
-        .cursor_pagination("occurred_at")
-        .fields(&["label", "occurred_at"]); // no `id`
+    let _ = ViewSet::for_model(Event::SCHEMA, &["label", "occurred_at"]) // no `id`
+        .cursor_pagination("occurred_at");
 }
 
 /// A projection that keeps both is fine.
 #[tokio::test]
 async fn a_projection_containing_the_cursor_and_pk_still_serves() {
     let pool = seeded_pool().await;
-    let app = ViewSet::for_model(Event::SCHEMA)
+    let app = ViewSet::for_model(Event::SCHEMA, &["id", "label", "occurred_at"])
         .cursor_pagination("occurred_at")
-        .fields(&["id", "label", "occurred_at"])
         .page_size(3)
         .router_pool("/events", pool.clone());
 
@@ -235,13 +223,13 @@ async fn a_malformed_cursor_is_a_client_error() {
 #[test]
 #[should_panic(expected = "cannot be a cursor")]
 fn a_float_column_is_refused_at_build_time() {
-    let _ = ViewSet::for_model(Event::SCHEMA).cursor_pagination("score");
+    let _ = ViewSet::for_model(Event::SCHEMA, FIELDS).cursor_pagination("score");
 }
 
 #[test]
 #[should_panic(expected = "has no field")]
 fn an_unknown_column_is_refused_at_build_time() {
-    let _ = ViewSet::for_model(Event::SCHEMA).cursor_pagination("no_such_column");
+    let _ = ViewSet::for_model(Event::SCHEMA, FIELDS).cursor_pagination("no_such_column");
 }
 
 // ---------------------------------------------------------------------
@@ -303,7 +291,7 @@ async fn paging_through_tied_timestamps_visits_every_row() {
     let page = |uri: String| {
         let pool = pool.clone();
         async move {
-            let app = ViewSet::for_model(Event::SCHEMA)
+            let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
                 .cursor_pagination("occurred_at")
                 .page_size(2)
                 .router_pool("/events", pool);
@@ -371,7 +359,7 @@ async fn paging_descending_through_ties_visits_every_row() {
     let mut uri = "/events".to_string();
 
     for _ in 0..20 {
-        let app = ViewSet::for_model(Event::SCHEMA)
+        let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
             .cursor_pagination_desc("occurred_at")
             .page_size(2)
             .router_pool("/events", pool.clone());
@@ -479,7 +467,7 @@ async fn walk_all_labels(pool: &Pool) -> Vec<String> {
     let mut uri = "/events".to_string();
     let mut exhausted = false;
     for _ in 0..MAX_PAGES {
-        let app = ViewSet::for_model(Event::SCHEMA)
+        let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
             .cursor_pagination("occurred_at")
             .page_size(2)
             .router_pool("/events", pool.clone());

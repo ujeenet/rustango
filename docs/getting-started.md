@@ -669,12 +669,13 @@ Once a serializer is attached, **its fields are the whole write surface**: anyth
 
 Each serializer field's type mirrors the matching model field, so `id` and `published_at` keep their `Auto<…>` wrapper from the model (an `Auto<i64>` still serializes to a plain JSON integer). Then register the module by adding `mod post_serializer;` alongside the other `mod` declarations in `src/main.rs`.
 
-Wire the serializer into the ViewSet with the `serializer` attribute — list, retrieve, and create responses are then rendered through it (the field-level `fields` projection is bypassed in favor of the serializer's shape):
+Wire the serializer into the ViewSet with the `serializer` attribute — list, retrieve, and create responses are then rendered through it. `fields` stays required: a body can write only fields both it and the serializer list:
 
 ```rust
 #[derive(ViewSet)]
 #[viewset(
     model = Post,
+    fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
 )]

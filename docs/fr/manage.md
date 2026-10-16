@@ -482,8 +482,8 @@ Montez-le avec : `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Modèle tenant — **pas un derive**. Il émet un `pub fn router() -> Router<()>`
 construit à partir de
-`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, avec toute la
-chaîne du builder (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, avec le reste de la
+chaîne du builder (`filter_fields` / `search_fields` / `ordering` /
 `page_size` / `permissions_for_model` / `read_only`) ébauchée en lignes
 commentées. La connexion est résolue par requête via l'extracteur `Tenant` au
 lieu d'être capturée une fois au montage, donc un seul `router()` sert tous les

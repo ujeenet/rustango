@@ -178,12 +178,12 @@ fn tera() -> Arc<Tera> {
 
 fn app(pool: &Pool) -> axum::Router {
     let t = tera();
-    ViewSet::for_model(Note::SCHEMA)
+    ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
         .filter_fields(&["tag"])
         .search_fields(&["tag"])
         .router_pool("/api/notes", pool.clone())
         .merge(
-            ViewSet::for_model(Note::SCHEMA)
+            ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
                 .cursor_pagination("id")
                 .router_pool("/api/cursor", pool.clone()),
         )
@@ -204,11 +204,11 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/pets", t.clone(), pool.clone()),
         )
         .merge(
-            ViewSet::for_model(Owner::SCHEMA)
+            ViewSet::for_model(Owner::SCHEMA, &["id", "name", "visible"])
                 .search_fields(&["name"])
                 .router_pool("/api/owners", pool.clone()),
         )
-        .merge(ViewSet::for_model(Memo::SCHEMA).router_pool("/api/memos", pool.clone()))
+        .merge(ViewSet::for_model(Memo::SCHEMA, &["id", "tag", "deleted_at"]).router_pool("/api/memos", pool.clone()))
         .merge(
             ListView::for_model(Memo::SCHEMA)
                 .template("list.html")
@@ -232,7 +232,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .success_url("/memos")
                 .router("/memos", t.clone(), pool.clone()),
         )
-        .merge(ViewSet::for_model(Ranked::SCHEMA).router_pool("/api/ranked", pool.clone()))
+        .merge(ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"]).router_pool("/api/ranked", pool.clone()))
         .merge(
             DetailView::for_model(Note::SCHEMA)
                 .template("detail.html")

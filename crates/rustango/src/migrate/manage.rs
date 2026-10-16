@@ -2700,6 +2700,7 @@ use {model_path};
 #[derive(ViewSet)]
 #[viewset(
     model        = {model},
+    // Required: the only fields the API renders and a body may write.
     fields       = "id, ",
     filter_fields = "",
     search_fields = "",
@@ -2751,8 +2752,8 @@ use {crate_root}::viewset::ViewSet;
 use {model_path};
 
 pub fn router() -> Router<()> {{
-    ViewSet::for_model({model}::SCHEMA)
-        // .fields(&["id", "name", "created_at"])    // restrict response shape
+    // The only fields the API renders and a body may write.
+    ViewSet::for_model({model}::SCHEMA, &["id"])
         // .filter_fields(&["status", "owner_id"])    // ?status=draft&owner_id=42
         // .search_fields(&["name", "description"])   // ?search=foo (ILIKE)
         // .ordering(&[("created_at", true)])         // default ORDER BY
@@ -7582,6 +7583,9 @@ mod gen_tests {
             "app",
         );
         assert!(live(&pool, "read_only,"), "{pool}");
+        // Both name the write allow-list.
+        assert!(live(&tenant, "ViewSet::for_model(Post::SCHEMA, &[\"id\"])"), "{tenant}");
+        assert!(live(&pool, "fields       = \"id"), "{pool}");
     }
 
     #[test]

@@ -577,8 +577,8 @@ pub struct PostViewSet;
 Mount with: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Tenant template — **not a derive**. It emits a `pub fn router() -> Router<()>`
-built from `ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, with
-the whole builder chain (`fields` / `filter_fields` / `search_fields` /
+built from `ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, with
+the rest of the builder chain (`filter_fields` / `search_fields` /
 `ordering` / `page_size` / `permissions_for_model` / `read_only`) stubbed out as
 commented lines. The connection is resolved per request through the `Tenant`
 extractor rather than captured once at mount time, so one `router()` serves every

@@ -233,6 +233,7 @@ use rustango::ViewSet;
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
+    fields        = "id, title, body, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -244,9 +245,9 @@ pub struct PostViewSet;
 
 Añade `pub mod post_view_set;` a `src/blog/mod.rs`.
 
-> Con un serializador conectado no necesitas `fields = "..."` — el serializador
-> es la proyección. Usa `fields` solo cuando quieras la proyección de campos por
-> defecto (sin serializador) en su lugar.
+> `fields` es obligatorio: es la lista blanca de escritura, así que un body no
+> puede fijar otra columna (por ejemplo `author_id`). Un serializador la restringe
+> más; nunca la amplía.
 
 ### Step 6 — Mount the routes
 
@@ -466,6 +467,7 @@ serializador con `serializer = …`:
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
+    fields        = "id, title, body, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -485,7 +487,7 @@ con `.serializer::<S>()`:
 use rustango::viewset::ViewSet;
 use rustango::core::Model as _;
 
-let router = ViewSet::for_model(Post::SCHEMA)
+let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .serializer::<PostSerializer>()
     .filter_fields(&["author_id", "status"])
     .search_fields(&["title", "body"])
@@ -534,8 +536,8 @@ detecte la validación o la base de datos.
 Para un recurso de **solo lectura** (solo list + retrieve), añade `read_only`:
 
 ```rust
-#[viewset(model = Post, read_only)]            // macro
-ViewSet::for_model(Post::SCHEMA).read_only()   // builder
+#[viewset(model = Post, fields = "id, title", read_only)]    // macro
+ViewSet::for_model(Post::SCHEMA, &["id", "title"]).read_only() // builder
 ```
 
 No hay un interruptor por verbo más allá de read-only. Para "todo excepto
@@ -550,7 +552,7 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 |---|---|---|---|
 | `model` | `model = Post` | **requerido** | El modelo sobre el que se construye el recurso. |
 | `serializer` | `serializer = path::To::S` | ninguno | Conecta un serializador para **salida + entrada** tipadas (ver [arriba](#the-serializer-marriage-input--output)). |
-| `fields` | `"id, title, body"` | todos los campos escalares | Lista blanca para la proyección por defecto (sin serializador) + campos escribibles. |
+| `fields` | `"id, title, body"` | **obligatorio** | Los únicos campos que las respuestas muestran y los bodies pueden escribir; las demás claves se ignoran. Un serializador la restringe. |
 | `filter_fields` | `"author_id, status"` | ninguno | Campos filtrables vía `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | ninguno | Campos con los que coincide la caja `?search=` (OR sin distinción de mayúsculas). |
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
@@ -562,12 +564,12 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 
 ## Builder reference
 
-Cada método de `ViewSet::for_model(SCHEMA)` (cada uno devuelve `Self`):
+`ViewSet::for_model(SCHEMA, &["id", "title"])` recibe la lista de campos: los únicos
+que las respuestas muestran y los bodies pueden escribir. Cada otro método devuelve `Self`:
 
 | Método | Propósito |
 |---|---|
 | `serializer::<S>()` | Conecta un serializador para salida + entrada tipadas (tri-dialecto). |
-| `fields(&["…"])` | Lista blanca de proyección por defecto + campos escribibles. |
 | `filter_fields(&["…"])` | Habilita el filtrado `?field=value`. |
 | `search_fields(&["…"])` | Habilita `?search=`. |
 | `ordering(&[("field", desc)])` | Orden de clasificación por defecto. |
@@ -715,7 +717,7 @@ forma que envían tus propios handlers (#1193):
 ```rust
 use rustango::viewset::{ViewSet, ViewSetPerms};
 
-ViewSet::for_model(Post::SCHEMA)
+ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .permissions(ViewSetPerms {
         list:     vec!["post.view".into()],
         retrieve: vec!["post.view".into()],
@@ -734,7 +736,7 @@ autocompleta los codenames estándar `post.view`/`add`/`change`/`delete`.
 **El throttling** aplica límites de ventana fija por cliente, por acción:
 
 ```rust
-ViewSet::for_model(Post::SCHEMA)
+ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
     .router_pool("/api/posts", pool);
 ```
@@ -754,7 +756,7 @@ CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -790,7 +792,7 @@ use rustango::tenancy::auth_routes::{require_bearer, Config, JwtAuth};
 use rustango::viewset::{OwnedBy, ViewSet};
 
 let auth = JwtAuth::new(Config::default()); // uno solo, que también sirve `auth.router()`
-ViewSet::for_model(Note::SCHEMA)
+ViewSet::for_model(Note::SCHEMA, &["id", "body"])
     .filter_backend(OwnedBy::column("member_id"))
     .tenant_router("/api/notes")
     .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
@@ -876,7 +878,7 @@ impl ViewSetFilter for OwnerFilter {
     }
 }
 
-ViewSet::for_model(Note::SCHEMA)
+ViewSet::for_model(Note::SCHEMA, &["id", "body"])
     .filter_backend(OwnerFilter)
     .tenant_router("/api/notes")
 ```
@@ -901,7 +903,7 @@ Compón el router del ViewSet en tu app. Un solo inquilino, pool estático:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
 ```
 
 Multi-inquilino (sin pool capturado — cada petición resuelve su conexión de
@@ -909,7 +911,7 @@ inquilino):
 
 ```rust
 let api = urls::api()
-    .merge(ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts"));
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).tenant_router("/api/posts"));
 ```
 
 `make:api_routes <app>` genera una `api()` por app que reúne estas líneas

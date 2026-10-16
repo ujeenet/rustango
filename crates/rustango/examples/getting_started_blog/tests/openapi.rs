@@ -26,7 +26,7 @@ fn build_spec() -> OpenApiSpec {
 
     // 2. The CRUD path items are generated from the ViewSet (list/create/
     //    retrieve/update/patch/delete), including pagination + filter params.
-    let posts = ViewSet::for_model(Post::SCHEMA)
+    let posts = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body", "status", "author_id"])
         .filter_fields(&["author_id", "status"])
         .search_fields(&["title", "body"]);
     for (path, item) in posts.openapi_paths("/api/posts", "Post") {

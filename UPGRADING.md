@@ -255,6 +255,20 @@ t.max_connections = Some(20);
 
 A listed field with a column default that the POST omits is no longer a "required" error; the row gets the default. An empty value is still sent, so it is still checked.
 
+### `ViewSet` needs a field list
+
+`for_model` takes the list of fields responses render and bodies may write, and `.fields()` is gone. The derive needs `fields = "…"`, even with a serializer, which still narrows the list.
+
+```rust
+// before
+ViewSet::for_model(Post::SCHEMA).fields(&["id", "title"])
+ViewSet::for_model(Post::SCHEMA)                    // every column writable
+#[viewset(model = Post, serializer = PostSerializer)]
+// after
+ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+#[viewset(model = Post, fields = "id, title", serializer = PostSerializer)]
+```
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

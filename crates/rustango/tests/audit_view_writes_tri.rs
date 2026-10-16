@@ -125,7 +125,7 @@ async fn created_pks(pool: &Pool, table: &str) -> Vec<String> {
 async fn viewset_update_and_delete_are_audited(pool: &Pool) {
     let pks = seed(pool).await;
     let app =
-        || rustango::viewset::ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone());
+        || rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"]).router_pool("/docs", pool.clone());
     let uri = format!("/docs/{}", pks[0]);
     let status = send(app(), Method::PATCH, &uri, r#"{"title":"x"}"#.into(), false).await;
     assert_eq!(status, StatusCode::OK);
@@ -140,7 +140,7 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
 /// Single and bulk create each write one `create` row (#1816).
 async fn viewset_create_is_audited(pool: &Pool) {
     let app =
-        || rustango::viewset::ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone());
+        || rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"]).router_pool("/docs", pool.clone());
     let (status, body) = post_json(app(), "/docs", r#"{"title":"n"}"#).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(created_pks(pool, DOC).await, [body["id"].to_string()]);
@@ -266,7 +266,7 @@ mod sqlite_create {
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<Tok>(&pool).await;
         audit::ensure_table_pool(&pool).await.expect("audit table");
-        let app = ViewSet::for_model(Tok::SCHEMA).router_pool("/toks", pool.clone());
+        let app = ViewSet::for_model(Tok::SCHEMA, &["id", "name"]).router_pool("/toks", pool.clone());
         let (status, body) = post_json(app, "/toks", r#"{"name":"n"}"#).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let row = Tok::objects().fetch(&pool).await.unwrap().remove(0);
@@ -280,7 +280,7 @@ mod sqlite_create {
     async fn viewset_create_audit_failure_is_a_500() {
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<Doc>(&pool).await;
-        let app = || ViewSet::for_model(Doc::SCHEMA).router_pool("/docs", pool.clone());
+        let app = || ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"]).router_pool("/docs", pool.clone());
         for body in [r#"{"title":"n"}"#, r#"[{"title":"n"}]"#] {
             let (status, _) = post_json(app(), "/docs", body).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -317,7 +317,7 @@ mod serialized {
 
     async fn serializer_patch_is_audited(pool: &Pool) {
         let pks = seed(pool).await;
-        let app = rustango::viewset::ViewSet::for_model(Doc::SCHEMA)
+        let app = rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"])
             .serializer::<DocSerializer>()
             .router_pool("/docs", pool.clone());
         let uri = format!("/docs/{}", pks[0]);

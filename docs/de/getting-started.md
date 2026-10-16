@@ -679,12 +679,13 @@ Sobald ein Serializer angehängt ist, **bilden seine Felder die gesamte Schreibo
 
 Der Typ jedes Serializer-Felds spiegelt das passende Modellfeld wider, sodass `id` und `published_at` ihren `Auto<…>`-Wrapper vom Modell behalten (ein `Auto<i64>` serialisiert weiterhin zu einem schlichten JSON-Integer). Registriere dann das Modul, indem du `mod post_serializer;` zu den anderen `mod`-Deklarationen in `src/main.rs` hinzufügst.
 
-Verdrahte den Serializer mit dem ViewSet über das `serializer`-Attribut — List-, Retrieve- und Create-Antworten werden dann durch ihn gerendert (die feldbasierte `fields`-Projektion wird zugunsten der Form des Serializers umgangen):
+Verdrahte den Serializer mit dem ViewSet über das `serializer`-Attribut — List-, Retrieve- und Create-Antworten werden dann durch ihn gerendert. `fields` bleibt Pflicht: Ein Body schreibt nur Felder, die hier und im Serializer stehen:
 
 ```rust
 #[derive(ViewSet)]
 #[viewset(
     model = Post,
+    fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
 )]

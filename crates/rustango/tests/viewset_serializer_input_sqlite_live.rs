@@ -65,7 +65,7 @@ async fn router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    rustango::viewset::ViewSet::for_model(Item::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"])
         .serializer::<ItemSerializer>()
         .router_pool("/items", Pool::Sqlite(sq))
 }
@@ -234,7 +234,7 @@ async fn widget_router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    rustango::viewset::ViewSet::for_model(Widget::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Widget::SCHEMA, &["id", "code", "note", "priority", "status"])
         .serializer::<WidgetSerializer>()
         .router_pool("/widgets", Pool::Sqlite(sq))
 }
@@ -401,7 +401,7 @@ async fn doc_router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    rustango::viewset::ViewSet::for_model(Doc::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"])
         .serializer::<DocSerializer>()
         .router_pool("/docs", Pool::Sqlite(sq))
 }
@@ -603,7 +603,7 @@ async fn span_router() -> axum::Router {
     .execute(&sq)
     .await
     .expect("create");
-    rustango::viewset::ViewSet::for_model(Span::SCHEMA)
+    rustango::viewset::ViewSet::for_model(Span::SCHEMA, &["id", "lo", "hi"])
         .serializer::<SpanSerializer>()
         .router_pool("/spans", Pool::Sqlite(sq))
 }
@@ -697,7 +697,7 @@ async fn patch_skips_an_absent_write_only_field() {
     .execute(&sq)
     .await
     .expect("create");
-    let app = rustango::viewset::ViewSet::for_model(Acct::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"])
         .serializer::<AcctSerializer>()
         .router_pool("/accts", Pool::Sqlite(sq));
     let resp = app
@@ -881,7 +881,7 @@ fn spec_body(vs: rustango::viewset::ViewSet, path: &str, method: &str) -> serde_
 #[test]
 fn spec_request_bodies_follow_the_serializer_write_set() {
     use rustango::viewset::ViewSet;
-    let item = || ViewSet::for_model(Item::SCHEMA).serializer::<ItemSerializer>();
+    let item = || ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"]).serializer::<ItemSerializer>();
     let post = spec_body(item(), "/x", "post");
     assert_eq!(
         post["properties"],
@@ -893,7 +893,7 @@ fn spec_request_bodies_follow_the_serializer_write_set() {
         .get("required")
         .is_none());
 
-    let acct = ViewSet::for_model(Acct::SCHEMA).serializer::<AcctSerializer>();
+    let acct = ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"]).serializer::<AcctSerializer>();
     let put = spec_body(acct, "/x/{pk}", "put");
     assert_eq!(
         put["required"],
@@ -901,7 +901,7 @@ fn spec_request_bodies_follow_the_serializer_write_set() {
         "write_only: {put}"
     );
 
-    let doc = ViewSet::for_model(Doc::SCHEMA).serializer::<DocSerializer>();
+    let doc = ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"]).serializer::<DocSerializer>();
     let post = spec_body(doc, "/x", "post");
     assert_eq!(
         post["required"],

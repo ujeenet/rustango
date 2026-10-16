@@ -42,7 +42,7 @@ async fn make_router_and_pool(page_size: usize) -> (axum::Router, Pool) {
     .await
     .expect("create");
     let pool = Pool::Sqlite(sq);
-    let router = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let router = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .page_size(page_size)
         .cursor_pagination("id")
         .router_pool("/posts", pool.clone());
@@ -156,7 +156,7 @@ async fn cursor_pagination_descending_walks_back_from_highest_id() {
     .await
     .expect("create");
     let pool = Pool::Sqlite(sq);
-    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .page_size(3)
         .cursor_pagination_desc("id")
         .router_pool("/posts", pool);

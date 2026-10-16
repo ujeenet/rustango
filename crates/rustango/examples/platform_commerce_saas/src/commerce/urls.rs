@@ -111,7 +111,7 @@ fn jwt_auth() -> JwtAuth {
 /// Promotions over the API. The global scope hides `visible = false`
 /// rows from list, detail, update and delete (#1746).
 fn promotions() -> Router<AppState> {
-    ViewSet::for_model(Promotion::SCHEMA)
+    ViewSet::for_model(Promotion::SCHEMA, &["id", "code", "label", "amount_cents", "visible", "deleted_at"])
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
@@ -121,7 +121,7 @@ fn promotions() -> Router<AppState> {
 
 /// The card code is the primary key, and a create keeps it (#1671).
 fn gift_cards() -> Router<AppState> {
-    ViewSet::for_model(GiftCard::SCHEMA)
+    ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
         .tenant_router("/api/v1/gift-cards")
         .with_state(())
 }
@@ -369,7 +369,7 @@ fn cache_namespace() -> String {
 }
 
 fn products() -> Router<AppState> {
-    ViewSet::for_model(Product::SCHEMA)
+    ViewSet::for_model(Product::SCHEMA, &["id", "sku", "name", "description", "price_cents", "active", "created_at"])
         .serializer::<ProductSerializer>()
         .filter_fields(&["active", "sku"])
         .search_fields(&["sku", "name"])
@@ -381,10 +381,22 @@ fn products() -> Router<AppState> {
         .with_state(())
 }
 
+/// What the two order APIs render and write.
+const ORDER_FIELDS: &[&str] = &[
+    "id",
+    "reference",
+    "customer_id",
+    "assigned_picker_id",
+    "note",
+    "status",
+    "total_cents",
+    "placed_at",
+];
+
 /// Cursor pagination — deliberately the *other* style, so both
 /// paginators are exercised by the same soak.
 fn orders() -> Router<AppState> {
-    ViewSet::for_model(Order::SCHEMA)
+    ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
@@ -402,7 +414,7 @@ fn orders() -> Router<AppState> {
 /// the two together are what distinguish "the binder works" from "the
 /// serializer happens to hide the column".
 fn orders_raw() -> Router<AppState> {
-    ViewSet::for_model(Order::SCHEMA)
+    ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/orders-raw")
@@ -411,7 +423,7 @@ fn orders_raw() -> Router<AppState> {
 
 /// The bulk-create endpoint (#1403).
 fn order_lines() -> Router<AppState> {
-    ViewSet::for_model(OrderLine::SCHEMA)
+    ViewSet::for_model(OrderLine::SCHEMA, &["id", "order_id", "product_id", "quantity", "unit_price_cents"])
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
         .tenant_router("/api/v1/order-lines")
@@ -419,7 +431,7 @@ fn order_lines() -> Router<AppState> {
 }
 
 fn customers() -> Router<AppState> {
-    ViewSet::for_model(Customer::SCHEMA)
+    ViewSet::for_model(Customer::SCHEMA, &["id", "email", "full_name", "loyalty_tier", "created_at"])
         .serializer::<CustomerSerializer>()
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
@@ -429,7 +441,7 @@ fn customers() -> Router<AppState> {
 }
 
 fn inventory() -> Router<AppState> {
-    ViewSet::for_model(InventoryItem::SCHEMA)
+    ViewSet::for_model(InventoryItem::SCHEMA, &["id", "product_id", "location", "on_hand", "updated_at"])
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/inventory")

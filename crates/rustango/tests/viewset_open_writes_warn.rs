@@ -39,7 +39,7 @@ fn mount_logs(vs: ViewSet, pool: Pool) -> String {
 #[tokio::test]
 async fn open_writes_warn_unless_acknowledged() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
-    let vs = || ViewSet::for_model(Note::SCHEMA);
+    let vs = || ViewSet::for_model(Note::SCHEMA, &["id", "title"]);
 
     let open = mount_logs(vs(), pool.clone());
     assert!(open.contains("WARN"), "{open}");

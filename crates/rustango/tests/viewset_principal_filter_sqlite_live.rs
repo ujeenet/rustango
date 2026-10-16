@@ -100,7 +100,7 @@ async fn router() -> axum::Router {
             .await
             .expect("seed");
     }
-    ViewSet::for_model(Note::SCHEMA)
+    ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
         .page_size(100)
         .filter_backend(OwnerFilter)
         .router_pool("/notes", Pool::Sqlite(sq))
@@ -275,7 +275,7 @@ mod owned_by {
                 .await
                 .expect("seed");
         }
-        ViewSet::for_model(Note::SCHEMA)
+        ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
             .page_size(100)
             .filter_backend(backend)
             .router_pool("/notes", Pool::Sqlite(sq))

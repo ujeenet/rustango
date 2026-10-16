@@ -78,8 +78,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// Attributes:
 /// * `model = TypeName` — *required*. The `#[derive(Model)]` struct whose
 ///   `SCHEMA` constant drives the endpoints.
-/// * `fields = "a, b, c"` — scalar fields included in list/retrieve JSON
-///   and accepted on create/update (default: all scalar fields).
+/// * `fields = "a, b, c"` — *required*. The only scalar fields list/retrieve
+///   JSON renders and create/update accept; other body keys are ignored.
 /// * `filter_fields = "a, b"` — fields filterable via `?a=v` query params.
 /// * `search_fields = "a, b"` — fields searched by `?search=...`.
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
@@ -12679,7 +12679,7 @@ fn render_form_validators(
 
 struct ViewSetAttrs {
     model: syn::Path,
-    fields: Option<Vec<String>>,
+    fields: Vec<String>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
     /// (field_name, desc)
@@ -12730,13 +12730,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let attrs = parse_viewset_attrs(input)?;
     let model_path = &attrs.model;
 
-    // `.fields(&[...])` call — None means skip (use all scalar fields).
-    let fields_call = if let Some(ref fields) = attrs.fields {
-        let lits = fields.iter().map(|f| f.as_str());
-        quote!(.fields(&[ #(#lits),* ]))
-    } else {
-        quote!()
-    };
+    let field_lits = attrs.fields.iter().map(|f| f.as_str());
 
     let filter_fields_call = if attrs.filter_fields.is_empty() {
         quote!()
@@ -12828,9 +12822,9 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 pool: impl ::core::convert::Into<#root::sql::Pool>,
             ) -> #root::__axum::Router {
                 #root::viewset::ViewSet::for_model(
-                    <#model_path as #root::core::Model>::SCHEMA
+                    <#model_path as #root::core::Model>::SCHEMA,
+                    &[ #(#field_lits),* ],
                 )
-                    #fields_call
                     #filter_fields_call
                     #search_fields_call
                     #ordering_call
@@ -12940,6 +12934,13 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
 
     let model = model.ok_or_else(|| {
         syn::Error::new_spanned(&input.ident, "`#[viewset(model = SomeModel)]` is required")
+    })?;
+    // The field list is the write allow-list, so it is never implied.
+    let fields = fields.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &input.ident,
+            "`#[viewset(fields = \"id, title\")]` is required: the fields the API renders and writes",
+        )
     })?;
 
     Ok(ViewSetAttrs {

@@ -20,7 +20,7 @@ pub struct Post {
 }
 
 #[derive(ViewSet)]
-#[viewset(model = Post)]
+#[viewset(model = Post, fields = "id, title")]
 pub struct PostViewSet;
 
 // Compile-only: router() accepts each backend's pool via Into<Pool>.

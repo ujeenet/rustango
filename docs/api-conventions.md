@@ -69,7 +69,7 @@ How you build an object depends on what it needs. There are a few standard shape
 | `T::new(arg)` | One required dependency | `EnvSecrets::with_prefix(s)`, `RedisCache::new(url)` |
 | `T::with_X(arg)` | Builder-style override after `new()` | `InMemoryCache::with_default_ttl(d)`, `JwtLifecycle::new(s).with_access_ttl(60)` |
 | `T::from_X(arg)` | Convert FROM Y | `TotpSecret::from_base32(s)`, `Locale::new(s)` (sometimes `from_str`) |
-| `T::for_Y(arg)` | Build T scoped to a specific Y | `ViewSet::for_model(schema)` |
+| `T::for_Y(arg)` | Build T scoped to a specific Y | `ViewSet::for_model(schema, &fields)` |
 
 **Avoid this:** `T::with_X_and_Y_and_Z(a, b, c)` — one constructor that takes everything. Split it into `new(...)` plus chained `.with_*()` calls instead.
 

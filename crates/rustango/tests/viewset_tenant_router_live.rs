@@ -143,7 +143,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     // The full v0.30 builder chain — unsupported in the v1
     // tenant_router. If any of these silently no-op, the assertions
     // below would catch it.
-    let vs_router = ViewSet::for_model(Widget::SCHEMA)
+    let vs_router = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
         .filter_fields(&["label"])
         .search_fields(&["label"])
         .ordering(&[("id", false)])
@@ -182,7 +182,7 @@ async fn throttle_budgets_are_per_tenant() {
         ..rustango::testkit::org()
     };
     org_b.insert(&pool).await.unwrap();
-    let app = ViewSet::for_model(Widget::SCHEMA)
+    let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
         .throttle_all(1, 60)
         .tenant_router("/api/widgets")
         .layer(Extension(tenant_ctx(&pool)));
@@ -218,7 +218,7 @@ async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
         database_pool_acquire_timeout: std::time::Duration::from_secs(1),
         ..TenantPoolsConfig::default()
     }));
-    let app = ViewSet::for_model(Widget::SCHEMA)
+    let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
         .throttle_all(1, 60)
         .tenant_router("/api/widgets")
         .layer(Extension(Arc::new(ctx)));

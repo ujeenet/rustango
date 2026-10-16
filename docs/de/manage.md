@@ -470,8 +470,8 @@ Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
-`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, mit der ganzen
-Builder-Kette (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`ViewSet::for_model(Post::SCHEMA, &["id"]).tenant_router("/api/posts")`, mit der restlichen
+Builder-Kette (`filter_fields` / `search_fields` / `ordering` /
 `page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
 vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also

@@ -53,7 +53,7 @@ let mut spec = OpenApiSpec::new("Blog API", "1.0.0")
     .add_schema("Post", PostSerializer::openapi_schema()); // from #[derive(Serializer)]
 
 // CRUD path items straight off the ViewSet:
-for (path, item) in ViewSet::for_model(Post::SCHEMA).openapi_paths("/api/posts", "Post") {
+for (path, item) in ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).openapi_paths("/api/posts", "Post") {
     spec = spec.add_path(path, item);
 }
 
@@ -123,7 +123,7 @@ for the five standard CRUD routes — list, create, retrieve, update, partial
 update, delete — wired to reference a registered component schema:
 
 ```rust
-for (path, item) in ViewSet::for_model(Post::SCHEMA)
+for (path, item) in ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .filter_fields(&["author_id", "status"])
     .search_fields(&["title", "body"])
     .openapi_paths("/api/posts", "Post")
@@ -267,7 +267,7 @@ Type constructors: `string` · `integer` / `int32` · `number` · `boolean` ·
   the generated document stays 3.1.0. Opt in when your toolchain reads 3.2:
 
   ```rust,ignore
-  ViewSet::for_model(Post::SCHEMA).openapi_query(true)
+  ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
   ```
 
   The route is served either way; the flag only decides whether the document

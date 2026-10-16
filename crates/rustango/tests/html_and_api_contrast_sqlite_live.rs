@@ -46,6 +46,8 @@ pub struct Post {
     pub published_at: Auto<DateTime<Utc>>,
 }
 
+const POST_FIELDS: &[&str] = &["id", "title", "body", "status", "author_id", "published_at"];
+
 /// In-memory SQLite with the `posts` table + two rows.
 async fn seeded_pool() -> Pool {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
@@ -110,7 +112,7 @@ async fn app() -> axum::Router {
     let tera = tera();
     axum::Router::new()
         // The API view — JSON in, JSON out.
-        .merge(ViewSet::for_model(Post::SCHEMA).router_pool("/api/posts", pool.clone()))
+        .merge(ViewSet::for_model(Post::SCHEMA, POST_FIELDS).router_pool("/api/posts", pool.clone()))
         // The HTML views — server-rendered pages for a browser.
         .merge(
             ListView::for_model(Post::SCHEMA)
