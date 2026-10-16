@@ -794,18 +794,15 @@ fn merge_env_over(base: PoolTuning) -> PoolTuning {
 /// A boolean from `key`, warning about and ignoring anything else.
 fn env_bool(key: &str) -> Option<bool> {
     let raw = std::env::var(key).ok()?;
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => {
-            tracing::warn!(
-                target: "rustango::sql",
-                value = %raw,
-                "{key} must be true or false; ignoring it"
-            );
-            None
-        }
+    let flag = crate::env::parse_flag(&raw);
+    if flag.is_none() {
+        tracing::warn!(
+            target: "rustango::sql",
+            value = %raw,
+            "{key} must be true or false; ignoring it"
+        );
     }
+    flag
 }
 
 fn env_secs(key: &str) -> Option<Duration> {
