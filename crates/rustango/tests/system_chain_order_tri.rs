@@ -282,7 +282,10 @@ async fn dry_run_defers_a_table_pending_migrations_change(backend: Backend) {
         .filter(|l| l.contains("ADD COLUMN") && l.contains(column))
         .count();
     assert_eq!(adds, 1, "the project step adds it once:\n{out}");
-    assert!(out.contains(&format!("`{table}`: pending migrations")), "{out}");
+    assert!(
+        out.contains(&format!("`{table}`: pending migrations")),
+        "{out}"
+    );
     // Read-only: no column, no ledger row, no system ledger.
     assert!(!has_column(&pool, table, column).await);
     let applied = rustango::migrate::applied_set_pool(&pool).await.unwrap();
@@ -333,10 +336,13 @@ async fn dry_run_shows_the_not_null_refusal(backend: Backend) {
         "{out}"
     );
     assert!(
-        !out.lines().any(|l| l.contains("ADD COLUMN") && l.contains(&column)),
+        !out.lines()
+            .any(|l| l.contains("ADD COLUMN") && l.contains(&column)),
         "{out}"
     );
-    let err = manage_migrate(&pool, &dir).await.expect_err("migrate refuses");
+    let err = manage_migrate(&pool, &dir)
+        .await
+        .expect_err("migrate refuses");
     assert!(err.to_string().contains(&column), "{err}");
 }
 

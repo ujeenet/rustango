@@ -566,7 +566,14 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
         env.create(&dir, &slug, opts).await.expect("tenant");
         env.run(
             &dir,
-            &["create-user", &slug, user, "--skip-validation", "--password", "pw"],
+            &[
+                "create-user",
+                &slug,
+                user,
+                "--skip-validation",
+                "--password",
+                "pw",
+            ],
         )
         .await
         .expect("user");
@@ -583,7 +590,9 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     assert!(a.contains("alice") && !a.contains("bob"), "{a}");
     let orgs = dump(None, "Org").await.expect("registry dump");
     assert!(orgs.contains("mt-a") && orgs.contains("mt-b"), "{orgs}");
-    let err = dump(None, "User").await.expect_err("a tenant model on the registry");
+    let err = dump(None, "User")
+        .await
+        .expect_err("a tenant model on the registry");
     assert!(err.to_string().contains("--tenant"), "{err}");
 
     // Alice's row, renamed, into mt-b only.

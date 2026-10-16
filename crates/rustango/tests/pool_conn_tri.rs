@@ -244,12 +244,16 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
 /// The `_on` methods that took only a Postgres executor run on a held
 /// connection on every backend (#1395), one counted query each.
 async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
-    use rustango::sql::{annotate_count_children_on, explain_pool, fetch_aggregate_on, ExplainOptions};
+    use rustango::sql::{
+        annotate_count_children_on, explain_pool, fetch_aggregate_on, ExplainOptions,
+    };
     use rustango::test_assertions::assert_num_queries as one;
     let mut conn = pool.acquire().await.expect("acquire");
     let c = &mut conn;
 
-    let page = one(1, by_id().limit(1).fetch_paginated_on(&mut *c)).await.unwrap();
+    let page = one(1, by_id().limit(1).fetch_paginated_on(&mut *c))
+        .await
+        .unwrap();
     assert_eq!((page.rows.len(), page.total), (1, 2));
 
     let bulk = one(
@@ -308,7 +312,10 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(one(1, book.author.get_on(&mut *c)).await.unwrap().name, "Bob");
+    assert_eq!(
+        one(1, book.author.get_on(&mut *c)).await.unwrap().name,
+        "Bob"
+    );
 
     let renamed = one(
         1,

@@ -224,7 +224,11 @@ fn mysql_wraps_dml_in_subquery_only_when_it_reads_the_target() {
         .where_in_subquery("id", own())
         .compile_delete()
         .unwrap();
-    assert!(MySql.compile_delete(&del).unwrap().sql.contains("_rustango_in"));
+    assert!(MySql
+        .compile_delete(&del)
+        .unwrap()
+        .sql
+        .contains("_rustango_in"));
 }
 
 #[test]

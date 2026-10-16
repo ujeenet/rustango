@@ -950,7 +950,10 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
             continue;
         }
         let ddl = (b.ddl)(pool.dialect()).map_err(MigrateError::Validation)?;
-        let ddl = ddl.into_iter().map(super::chains::PreviewLine::Sql).collect();
+        let ddl = ddl
+            .into_iter()
+            .map(super::chains::PreviewLine::Sql)
+            .collect();
         after.push((format!("bootstrap {}", b.table), ddl));
     }
     if not_generated {
@@ -7817,7 +7820,10 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         }
         out.finish().unwrap();
         let text = String::from_utf8(sink.1).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()[99]["pk"], 99);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()[99]["pk"],
+            99
+        );
         assert!(sink.0 < 10, "{} writes for 100 entries", sink.0);
     }
 

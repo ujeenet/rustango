@@ -565,7 +565,10 @@ mod tests {
             assert!(s.starts_with("CREATE TABLE IF NOT EXISTS"), "{s}");
         }
         let mysql = super::idempotent_ddl(&snapshot, &crate::sql::MySql).unwrap();
-        assert!(mysql.iter().all(|s| !s.contains("IF NOT EXISTS")), "{mysql:?}");
+        assert!(
+            mysql.iter().all(|s| !s.contains("IF NOT EXISTS")),
+            "{mysql:?}"
+        );
     }
 
     #[test]

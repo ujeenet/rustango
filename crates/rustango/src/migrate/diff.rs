@@ -2220,8 +2220,8 @@ fn m2m_end<'a>(
     let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
         return (bigint(), "id", (FieldType::I64, None));
     };
-    let end = super::snapshot::field_type_from_name(&pk.ty)
-        .map(crate::sql::m2m::junction_column_type);
+    let end =
+        super::snapshot::field_type_from_name(&pk.ty).map(crate::sql::m2m::junction_column_type);
     if end == Some(FieldType::I64) {
         return (bigint(), &pk.column, (FieldType::I64, None));
     }

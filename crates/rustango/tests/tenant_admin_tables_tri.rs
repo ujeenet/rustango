@@ -310,7 +310,11 @@ async fn bootstrap_previews_create_their_tables(backend: Backend) {
     };
     let has_table = |t: &str| {
         let (pool, sql) = (pool.clone(), format!("SELECT 1 FROM {t} WHERE 1 = 0"));
-        async move { rustango::sql::raw_execute_pool(&pool, &sql, Vec::new()).await.is_ok() }
+        async move {
+            rustango::sql::raw_execute_pool(&pool, &sql, Vec::new())
+                .await
+                .is_ok()
+        }
     };
     manage(&["migrate"]).await.expect("migrate");
     #[allow(unused_mut)]
@@ -342,7 +346,9 @@ async fn bootstrap_previews_create_their_tables(backend: Backend) {
         }
         assert!(has_table(t).await, "the previewed DDL made no {t}");
     }
-    manage(&["migrate"]).await.expect("migrate over the previewed tables");
+    manage(&["migrate"])
+        .await
+        .expect("migrate over the previewed tables");
     let out = manage(&["migrate", "--dry-run"]).await.expect("dry run");
     assert!(!out.contains("-- bootstrap"), "{out}");
 }

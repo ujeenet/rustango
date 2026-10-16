@@ -122,6 +122,12 @@ async fn a_real_add_constraint_failure_still_surfaces() {
     .expect("orphan row");
     let err = rustango::testkit::create_tables(&pool, &models).await;
     raw_execute_pool(&pool, drop, Vec::new()).await.unwrap();
-    let err = format!("{:?}", err.expect_err("the FK over an orphan row must fail"));
-    assert!(err.contains("23503") || err.contains("foreign key"), "{err}");
+    let err = format!(
+        "{:?}",
+        err.expect_err("the FK over an orphan row must fail")
+    );
+    assert!(
+        err.contains("23503") || err.contains("foreign key"),
+        "{err}"
+    );
 }

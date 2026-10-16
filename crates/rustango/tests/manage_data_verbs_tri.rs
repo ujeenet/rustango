@@ -674,7 +674,11 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
     let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
     let rows = rows.as_array().expect("array");
     let pks: Vec<i64> = rows.iter().filter_map(|r| r["pk"].as_i64()).collect();
-    assert_eq!(pks, (1..=501).collect::<Vec<_>>(), "rows skipped or repeated");
+    assert_eq!(
+        pks,
+        (1..=501).collect::<Vec<_>>(),
+        "rows skipped or repeated"
+    );
     assert!(
         rows.iter()
             .all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
