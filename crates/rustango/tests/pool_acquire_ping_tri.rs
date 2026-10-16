@@ -70,8 +70,11 @@ async fn drop_idle_then_query(pool: &Pool) {
     // Settings, not env: a set_var here races the SQLite arms' env reads (pr-1408-r2 tests-003).
     // First call wins; every caller in this binary installs the same value.
     let threshold = std::time::Duration::from_secs(3);
+    // One connection: sqlx returns a released one in a spawned task, so a
+    // larger pool could open a fresh one instead of handing out the dead one.
     rustango::sql::configure_pools(rustango::sql::PoolTuning {
         idle_ping_after: Some(threshold),
+        max_connections: Some(1),
         ..Default::default()
     });
     let fresh = backend.pool().await.expect("the live URL is set");
@@ -96,6 +99,15 @@ async fn drop_idle_then_query(pool: &Pool) {
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn kill_idle(fresh: &Pool, pool: &Pool) {
     use rustango::sql::{sqlx, sqlx::Executor as _};
+    // sqlx pings a released connection in a spawned task; a kill before that
+    // ping lets sqlx drop it and the next checkout opens a live one.
+    macro_rules! wait_idle {
+        ($f:expr) => {
+            while $f.num_idle() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+    }
     let (kill, listed): (i64, String) = match (fresh, pool) {
         #[cfg(feature = "postgres")]
         (Pool::Postgres(f), Pool::Postgres(p)) => {
@@ -103,6 +115,7 @@ async fn kill_idle(fresh: &Pool, pool: &Pool) {
                 .fetch_one(f)
                 .await
                 .unwrap();
+            wait_idle!(f);
             let kill = format!("SELECT pg_terminate_backend({id})");
             p.execute(sqlx::raw_sql(&kill)).await.expect("kill");
             (id.into(), format!("SELECT COUNT(*) FROM pg_stat_activity WHERE pid = {id}"))
@@ -113,6 +126,7 @@ async fn kill_idle(fresh: &Pool, pool: &Pool) {
                 .fetch_one(f)
                 .await
                 .unwrap();
+            wait_idle!(f);
             p.execute(sqlx::raw_sql(&format!("KILL {id}"))).await.expect("kill");
             let listed = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
             (i64::try_from(id).unwrap(), listed)
