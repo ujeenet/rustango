@@ -193,9 +193,7 @@ where
     pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
         let select = self.compile()?;
         let stmt = paginated_statement(&Postgres, &select)?;
-        let raw_rows: Vec<PgRow> = pg_on_query(&stmt.sql, stmt.params)
-            .fetch_all(pool)
-            .await?;
+        let raw_rows: Vec<PgRow> = pg_on_query(&stmt.sql, stmt.params).fetch_all(pool).await?;
         let total: i64 = raw_rows
             .first()
             .map(|row| sqlx::Row::try_get::<i64, _>(row, "__rustango_total"))
@@ -1792,7 +1790,11 @@ pub(crate) async fn write_on<'c, E: SqlExecutor<'c>>(
 ) -> Result<u64, ExecError> {
     let guard = exec.guard()?;
     crate::test_assertions::query_counter::bump();
-    guard.check(exec.execute_rows(sql, params).await.map_err(ExecError::from))
+    guard.check(
+        exec.execute_rows(sql, params)
+            .await
+            .map_err(ExecError::from),
+    )
 }
 
 mod traits;

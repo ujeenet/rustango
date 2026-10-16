@@ -529,8 +529,7 @@ pub(crate) async fn converge_preview(
     // FKs last, as `converge_groups` runs them.
     let (mut out, mut fks) = (Vec::new(), Vec::new());
     for g in &groups {
-        match super::diff::render_changes_split_in_schema(g, &last.snapshot, pool.dialect(), None)
-        {
+        match super::diff::render_changes_split_in_schema(g, &last.snapshot, pool.dialect(), None) {
             Ok(b) if b.rebuild.is_none() => {
                 out.extend(b.immediate);
                 fks.extend(b.deferred_fks);

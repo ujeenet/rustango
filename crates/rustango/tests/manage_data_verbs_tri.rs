@@ -657,7 +657,8 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
     let rows = rows.as_array().expect("array");
     assert_eq!(rows.len(), 501);
     assert!(
-        rows.iter().all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
+        rows.iter()
+            .all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
         "a row lost its link"
     );
 }

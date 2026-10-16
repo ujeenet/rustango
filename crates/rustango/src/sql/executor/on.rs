@@ -249,7 +249,9 @@ fn my_exec<'c: 'e, 'e, 'q: 'e, E>(
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
-    let q = params.into_iter().fold(sqlx::query(sql), super::bind_query_my);
+    let q = params
+        .into_iter()
+        .fold(sqlx::query(sql), super::bind_query_my);
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
 }

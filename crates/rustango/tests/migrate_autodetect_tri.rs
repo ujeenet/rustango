@@ -626,9 +626,7 @@ async fn m2m_follows_non_integer_pks(pool: &Pool) {
         f["primary_key"] = json!(true);
         f
     };
-    let m2m = |through: &str, s: &str, sc: &str, d: &str, dc: &str| {
-        json!({"through": through, "src_table": s, "src_col": sc, "dst_table": d, "dst_col": dc})
-    };
+    let m2m = |through: &str, s: &str, sc: &str, d: &str, dc: &str| json!({"through": through, "src_table": s, "src_col": sc, "dst_table": d, "dst_col": dc});
     chain
         .step(
             pool,
@@ -648,9 +646,13 @@ async fn m2m_follows_non_integer_pks(pool: &Pool) {
     exec(pool, "INSERT INTO {} ({}) VALUES ('rust')", &[a, "code"])
         .await
         .unwrap();
-    exec(pool, &format!("INSERT INTO {{}} ({{}}) VALUES ('{uid}')"), &[b, "uid"])
-        .await
-        .unwrap();
+    exec(
+        pool,
+        &format!("INSERT INTO {{}} ({{}}) VALUES ('{uid}')"),
+        &[b, "uid"],
+    )
+    .await
+    .unwrap();
     exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[c, "num"])
         .await
         .unwrap();

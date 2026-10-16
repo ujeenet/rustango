@@ -3900,14 +3900,12 @@ fn junction_of(
     rel: &crate::core::M2MRelation,
 ) -> Result<Junction, MigrateError> {
     let pk_ty = |schema: Option<&'static crate::core::ModelSchema>, table: &str| {
-        schema
-            .and_then(crate::sql::m2m::end_type)
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "M2M `{}`: `{table}` has no registered primary key",
-                    rel.name
-                ))
-            })
+        schema.and_then(crate::sql::m2m::end_type).ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "M2M `{}`: `{table}` has no registered primary key",
+                rel.name
+            ))
+        })
     };
     let dst = crate::core::ModelEntry::for_table(rel.to).map(|e| e.schema);
     let junction = crate::sql::m2m::typed_junction(
@@ -7645,10 +7643,16 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             out.lines()
                 .any(|l| l.starts_with("CREATE TABLE") && l.contains("rustango_audit_log"))
         };
-        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
         assert!(creates_audit(&out), "{out}");
-        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
-        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
         assert!(!creates_audit(&out), "{out}");
         assert!(out.contains("nothing to migrate"), "{out}");
     }
@@ -7661,7 +7665,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("migrations");
         std::fs::create_dir_all(&dir).unwrap();
-        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
         assert!(out.contains("(system,"), "{out}");
         assert!(
             !root.path().join("system").exists(),
@@ -7678,7 +7684,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let dir = root.path().join("migrations");
         std::fs::create_dir_all(&dir).unwrap();
         let scratch = Pool::connect("sqlite::memory:").await.unwrap();
-        manage_out(&scratch, &dir, &["migrate"]).await.expect("migrate");
+        manage_out(&scratch, &dir, &["migrate"])
+            .await
+            .expect("migrate");
         let (table, column) = file::list_dir(&root.path().join("system").join("migrations"))
             .unwrap()
             .into_iter()
@@ -7695,11 +7703,19 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 })
             })
             .expect("a system table with an id pk");
-        file::write(&dir.join("0001_own.json"), &create_mig("0001_own", None, &table)).unwrap();
+        file::write(
+            &dir.join("0001_own.json"),
+            &create_mig("0001_own", None, &table),
+        )
+        .unwrap();
 
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
-        runner::migrate_pool(&pool, &dir).await.expect("project chain");
-        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        runner::migrate_pool(&pool, &dir)
+            .await
+            .expect("project chain");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
         let adds = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\"");
         assert!(out.contains(&adds), "{adds} missing from:\n{out}");
     }
@@ -8624,7 +8640,10 @@ mod db_cmd_tests {
             .chain(shim)
             .find(|p| runs(p))
         else {
-            assert!(std::env::var_os("CI").is_none(), "db:restore needs `psql` on PATH in CI");
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "db:restore needs `psql` on PATH in CI"
+            );
             eprintln!("SKIPPED: no `psql` on PATH and no ~/.local/docker-shims/psql; db:restore is unproven here");
             return;
         };

@@ -283,7 +283,9 @@ fn mysql_option_flags(url: &str) -> Result<Vec<OsString>, String> {
     let query = url.split_once('?').map_or("", |(_, q)| q);
     let query = query.split_once('#').map_or(query, |(q, _)| q);
     let safe = |v: &str, extra: &str| {
-        !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+        !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
     };
     let mut flags: Vec<OsString> = Vec::new();
     let mut init: Vec<String> = Vec::new();
@@ -294,7 +296,13 @@ fn mysql_option_flags(url: &str) -> Result<Vec<OsString>, String> {
         match key.as_str() {
             "sslmode" | "ssl-mode" => {
                 let mode = value.to_ascii_uppercase();
-                let known = ["DISABLED", "PREFERRED", "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY"];
+                let known = [
+                    "DISABLED",
+                    "PREFERRED",
+                    "REQUIRED",
+                    "VERIFY_CA",
+                    "VERIFY_IDENTITY",
+                ];
                 if !known.contains(&mode.as_str()) {
                     return Err(bad("is not a MySQL ssl mode"));
                 }
@@ -309,7 +317,9 @@ fn mysql_option_flags(url: &str) -> Result<Vec<OsString>, String> {
             "timezone" | "time-zone" if safe(&value, "+-:/_") => {
                 init.push(format!("time_zone = '{value}'"));
             }
-            "collation" if safe(&value, "_") => init.push(format!("collation_connection = {value}")),
+            "collation" if safe(&value, "_") => {
+                init.push(format!("collation_connection = {value}"))
+            }
             "timezone" | "time-zone" | "collation" => return Err(bad("has an unsafe value")),
             // sqlx's client-side statement cache; nothing for the shell.
             "statement-cache-capacity" => {}

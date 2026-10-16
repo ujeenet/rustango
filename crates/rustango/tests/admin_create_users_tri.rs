@@ -239,13 +239,20 @@ async fn deactivating_a_user_ends_its_sessions(pool: &Pool) {
     let pk = user_named(pool, &name).await.id.get().copied().unwrap();
     let uri = format!("/rustango_users/{pk}");
     // An unchecked checkbox is absent from the form.
-    let off = form(&[("username", name.as_str()), ("password_hash", ""), ("data", "")]);
+    let off = form(&[
+        ("username", name.as_str()),
+        ("password_hash", ""),
+        ("data", ""),
+    ]);
     let (status, body) = send(pool, Method::POST, &uri, off).await;
     assert!(status.is_redirection(), "{status}: {body}");
     let user = user_named(pool, &name).await;
     assert!(!user.active);
     let stamp = user.sessions_revoked_at.expect("sessions not revoked");
-    assert!(stamp >= chrono::Utc::now() - chrono::Duration::seconds(5), "{stamp}");
+    assert!(
+        stamp >= chrono::Utc::now() - chrono::Duration::seconds(5),
+        "{stamp}"
+    );
 
     // Reactivating leaves the stamp alone.
     let on = form(&[

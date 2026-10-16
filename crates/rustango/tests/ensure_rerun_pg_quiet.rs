@@ -70,7 +70,9 @@ async fn bootstrap_rerun_fails_no_statement() {
             .await
             .expect("model tables");
     }
-    assert!(raw_execute_pool(&pool, "SELECT 1/0", Vec::new()).await.is_err());
+    assert!(raw_execute_pool(&pool, "SELECT 1/0", Vec::new())
+        .await
+        .is_err());
     pool.close().await;
     let mut seen = 0;
     for _ in 0..100 {
@@ -81,5 +83,10 @@ async fn bootstrap_rerun_fails_no_statement() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let _ = raw_execute_pool(&admin, &format!("DROP DATABASE IF EXISTS {db}"), Vec::new()).await;
-    assert_eq!(seen, 1, "only the marker failed; the re-run sent {} failing statement(s)", seen - 1);
+    assert_eq!(
+        seen,
+        1,
+        "only the marker failed; the re-run sent {} failing statement(s)",
+        seen - 1
+    );
 }

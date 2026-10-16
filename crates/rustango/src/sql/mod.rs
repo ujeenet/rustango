@@ -93,6 +93,11 @@ pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 #[cfg(feature = "postgres")]
 pub use executor::row_to_json;
 
+#[cfg(feature = "postgres")]
+pub use executor::{
+    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
+    update_on,
+};
 /// Query operations that take a **borrowed executor** rather than a
 /// pool — for running against one connection you have already scoped,
 /// which is how tenancy schema-mode applies `SET search_path`.
@@ -113,11 +118,6 @@ pub use executor::row_to_json;
 /// [`SqlExecutor`] (#1395). The rest are **PostgreSQL only**, typed
 /// `E: sqlx::Executor<Database = Postgres>`; see #1293.
 pub use executor::{annotate_count_children_on, fetch_aggregate_on};
-#[cfg(feature = "postgres")]
-pub use executor::{
-    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
-    update_on,
-};
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor
 /// emissions. The functions inside are PG-typed (`E: sqlx::Executor<

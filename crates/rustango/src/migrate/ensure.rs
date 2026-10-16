@@ -135,7 +135,11 @@ pub(crate) fn idempotent_ddl(
 ) -> Result<Vec<String>, String> {
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
     let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
-    Ok(batch.immediate.into_iter().chain(batch.deferred_fks).collect())
+    Ok(batch
+        .immediate
+        .into_iter()
+        .chain(batch.deferred_fks)
+        .collect())
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an
@@ -486,7 +490,10 @@ mod tests {
         let s =
             r#"ALTER TABLE "a" ADD CONSTRAINT "a_b_fkey" FOREIGN KEY ("b") REFERENCES "b" ("id")"#;
         let wrapped = idempotent(s, "postgres");
-        assert!(wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"), "{wrapped}");
+        assert!(
+            wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"),
+            "{wrapped}"
+        );
         assert!(wrapped.contains("WHEN duplicate_object"), "{wrapped}");
         assert_eq!(idempotent(s, "mysql"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;

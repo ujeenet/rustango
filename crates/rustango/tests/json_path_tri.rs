@@ -251,15 +251,39 @@ async fn json_path_equals_null_and_reordered_object(pool: &Pool) {
     }
     let json = |v: serde_json::Value| SqlValue::Json(v);
     let null = || json(serde_json::Value::Null);
-    assert_eq!(count_path(pool, "z", false, Op::Eq, null()).await, 1, "= null");
-    assert_eq!(count_path(pool, "z", false, Op::Ne, null()).await, 0, "<> null");
+    assert_eq!(
+        count_path(pool, "z", false, Op::Eq, null()).await,
+        1,
+        "= null"
+    );
+    assert_eq!(
+        count_path(pool, "z", false, Op::Ne, null()).await,
+        0,
+        "<> null"
+    );
     let reordered = || json(serde_json::json!({"b": [1, 2], "a": 1}));
-    assert_eq!(count_path(pool, "o", false, Op::Eq, reordered()).await, 1, "key order");
-    assert_eq!(count_path(pool, "o", false, Op::Ne, reordered()).await, 1, "<> object");
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, reordered()).await,
+        1,
+        "key order"
+    );
+    assert_eq!(
+        count_path(pool, "o", false, Op::Ne, reordered()).await,
+        1,
+        "<> object"
+    );
     let swapped = json(serde_json::json!({"a": 1, "b": [2, 1]}));
-    assert_eq!(count_path(pool, "o", false, Op::Eq, swapped).await, 0, "array order");
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, swapped).await,
+        0,
+        "array order"
+    );
     let empty = json(serde_json::json!({}));
-    assert_eq!(count_path(pool, "o", false, Op::Eq, empty).await, 0, "empty object");
+    assert_eq!(
+        count_path(pool, "o", false, Op::Eq, empty).await,
+        0,
+        "empty object"
+    );
 }
 
 tri_dialect_test! {

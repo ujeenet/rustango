@@ -298,10 +298,7 @@ async fn unregistered_junction_round_trips(pool: &Pool) {
 
 /// The junction's ends take the models' pk types, so text keys bind (#1405).
 async fn text_keys_on_an_unregistered_junction(pool: &Pool) {
-    let (ann, bob) = (
-        Author { code: "ann".into() },
-        Author { code: "bob".into() },
-    );
+    let (ann, bob) = (Author { code: "ann".into() }, Author { code: "bob".into() });
     ann.genres_m2m().add("poetry", pool).await.expect("add");
     bob.genres_m2m()
         .set(&["drama", "satire"], pool)
@@ -317,7 +314,10 @@ async fn text_keys_on_an_unregistered_junction(pool: &Pool) {
         .contains("drama", pool)
         .await
         .expect("contains"));
-    bob.genres_m2m().remove("satire", pool).await.expect("remove");
+    bob.genres_m2m()
+        .remove("satire", pool)
+        .await
+        .expect("remove");
     let got: Vec<String> = bob.genres_m2m().all_as(pool).await.expect("all_as");
     assert_eq!(got, ["drama"]);
 }

@@ -263,7 +263,10 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
     assert_eq!(counts, [(1, 2), (2, 1)]);
 
-    let plan = by_id().explain_on(&mut *c, ExplainOptions::default()).await.unwrap();
+    let plan = by_id()
+        .explain_on(&mut *c, ExplainOptions::default())
+        .await
+        .unwrap();
     assert!(!plan.is_empty());
 
     let agg = Author::objects()
@@ -275,7 +278,12 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     let rows = fetch_aggregate_on(&agg, &mut *c).await.unwrap();
     assert_eq!(rows.len(), 1);
 
-    let mut book = Book::objects().filter("id", 3_i64).fetch_on(&mut *c).await.unwrap().remove(0);
+    let mut book = Book::objects()
+        .filter("id", 3_i64)
+        .fetch_on(&mut *c)
+        .await
+        .unwrap()
+        .remove(0);
     assert_eq!(book.author.get_on(&mut *c).await.unwrap().name, "Bob");
 
     let renamed = Author::objects()
@@ -286,11 +294,21 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
         .await
         .unwrap();
     assert_eq!(renamed, 1);
-    let gone = Book::objects().filter("id", 3_i64).delete_on(&mut *c).await.unwrap();
+    let gone = Book::objects()
+        .filter("id", 3_i64)
+        .delete_on(&mut *c)
+        .await
+        .unwrap();
     assert_eq!(gone, 1);
     drop(conn);
     assert_eq!(Book::objects().count(pool).await.unwrap(), 2);
-    let names: Vec<String> = by_id().fetch(pool).await.unwrap().into_iter().map(|a| a.name).collect();
+    let names: Vec<String> = by_id()
+        .fetch(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
     assert_eq!(names, ["Ada", "Cy"]);
 }
 
@@ -330,7 +348,10 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
         #[cfg(feature = "postgres")]
         PoolConn::Postgres(c) => {
             if set {
-                sqlx::query("SET application_name = 'rustango_leak'").execute(&mut **c).await.unwrap();
+                sqlx::query("SET application_name = 'rustango_leak'")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
             }
             sqlx::query_scalar("SELECT current_setting('application_name')")
                 .fetch_one(&mut **c)
@@ -340,7 +361,10 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
         #[cfg(feature = "mysql")]
         PoolConn::Mysql(c) => {
             if set {
-                sqlx::query("SET @rustango_leak = 'rustango_leak'").execute(&mut **c).await.unwrap();
+                sqlx::query("SET @rustango_leak = 'rustango_leak'")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
             }
             sqlx::query_scalar("SELECT CAST(COALESCE(@rustango_leak, '') AS CHAR)")
                 .fetch_one(&mut **c)
@@ -351,7 +375,10 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
         PoolConn::Sqlite(c) => {
             // Per connection; `cache_size` would live in the shared in-memory cache.
             if set {
-                sqlx::query("PRAGMA reverse_unordered_selects = 1").execute(&mut **c).await.unwrap();
+                sqlx::query("PRAGMA reverse_unordered_selects = 1")
+                    .execute(&mut **c)
+                    .await
+                    .unwrap();
             }
             sqlx::query_scalar::<_, i64>("PRAGMA reverse_unordered_selects")
                 .fetch_one(&mut **c)
@@ -374,7 +401,11 @@ async fn close_on_drop_keeps_session_state_out_of_the_pool(pool: &Pool) {
     assert_ne!(set, default);
     drop(conn);
     let mut conn = p.acquire().await.unwrap();
-    assert_eq!(session_setting(&mut conn, false).await, set, "premise: sqlx keeps it");
+    assert_eq!(
+        session_setting(&mut conn, false).await,
+        set,
+        "premise: sqlx keeps it"
+    );
     conn.close_on_drop();
     drop(conn);
     let mut conn = p.acquire().await.unwrap();

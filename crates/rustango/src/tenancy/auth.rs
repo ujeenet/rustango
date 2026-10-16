@@ -197,9 +197,9 @@ fn admin_revoke_on_deactivate<'a>(
     use crate::core::SqlValue;
     use crate::session::SESSIONS_REVOKED_AT;
     Box::pin(async move {
-        let was_active = before.and_then(|r| r.get("active")).is_some_and(|v| {
-            v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0)
-        });
+        let was_active = before
+            .and_then(|r| r.get("active"))
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0));
         let deactivates = values
             .iter()
             .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(false)));

@@ -812,7 +812,10 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
                 "got {next:?} after {first:?}"
             );
         } else {
-            assert!(matches!(first, Err(ExecError::AtomicAborted)), "got {first:?}");
+            assert!(
+                matches!(first, Err(ExecError::AtomicAborted)),
+                "got {first:?}"
+            );
         }
         let count = Note::objects().count_on(&mut *guard).await;
         assert!(

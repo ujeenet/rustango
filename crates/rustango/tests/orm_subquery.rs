@@ -111,7 +111,10 @@ mod scenarios {
                 .where_(Book::author_id.eq_expr(outer_ref("id")))
                 .filter("title", t.to_owned())
         };
-        let inner = titled("SQL Bits").union(titled("D1")).compile().expect("inner");
+        let inner = titled("SQL Bits")
+            .union(titled("D1"))
+            .compile()
+            .expect("inner");
         let rows: Vec<Author> = Author::objects()
             .where_exists(inner)
             .order_by(&[("name", false)])

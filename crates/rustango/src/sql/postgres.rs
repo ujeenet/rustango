@@ -361,4 +361,3 @@ fn write_pg_ident(sql: &mut String, name: &str) {
     }
     sql.push('"');
 }
-

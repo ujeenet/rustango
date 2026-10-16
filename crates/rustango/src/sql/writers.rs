@@ -2260,7 +2260,10 @@ fn write_sqlite_json_value_eq(
         return Ok(true);
     }
     // Same (relative key, type, atom) rows both ways; arrays keep order.
-    let col = format!("SELECT substr(fullkey, {}), type, atom FROM json_tree(", p.len() + 1);
+    let col = format!(
+        "SELECT substr(fullkey, {}), type, atom FROM json_tree(",
+        p.len() + 1
+    );
     let lit = "SELECT substr(fullkey, 2), type, atom FROM json_tree(";
     b.sql.push_str(&format!(", '{p}') IS NOT NULL AND "));
     b.sql.push_str(if ne { "NOT (" } else { "(" });
