@@ -595,7 +595,7 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
     let fixture = fixture.to_str().unwrap();
     let err = env
-        .run(&dir, &["loaddata", fixture])
+        .run(&dir, &["loaddata", fixture, "--fail-fast"])
         .await
         .expect_err("a tenant fixture on the registry");
     assert!(err.to_string().contains("--tenant"), "{err}");
