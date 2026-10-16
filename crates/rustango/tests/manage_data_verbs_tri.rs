@@ -652,6 +652,34 @@ async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     );
 }
 
+/// One bad link skips only its own row's links (pr-1408-r2 correctness-002).
+async fn a_bad_m2m_link_skips_only_its_row(pool: &Pool) {
+    fresh_text_m2m(pool).await;
+    let fixture = serde_json::json!([
+        {"model": "cli1393.TextLabel", "pk": "a", "fields": {}},
+        {"model": "cli1393.TextShelf", "pk": "s1", "fields": {"labels": ["a"]}},
+        {"model": "cli1393.TextShelf", "pk": "s2", "fields": {"labels": [{"not": "a pk"}]}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad_link.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let loaded = manage(pool, &["loaddata", path.to_str().unwrap()]).await;
+    let dumped = manage(
+        pool,
+        &["dumpdata", "--model", "cli1393.TextShelf", "--indent", "0"],
+    )
+    .await;
+    rustango::testkit::matrix::drop_table(pool, "cli1393_shelf_labels").await;
+    assert!(loaded.is_err(), "a skipped link fails the load: {loaded:?}");
+    let dumped = dumped.expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    let s1 = rows
+        .as_array()
+        .and_then(|r| r.iter().find(|r| r["pk"] == "s1"))
+        .unwrap_or_else(|| panic!("s1 loaded: {dumped}"));
+    assert_eq!(s1["fields"]["labels"], serde_json::json!(["a"]), "{dumped}");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -754,5 +782,6 @@ tri_dialect_test! {
         dumpdata_refuses_an_unknown_model_name,
         dump_and_load_keeps_m2m_links,
         dump_and_load_keeps_text_pk_m2m_links,
+        a_bad_m2m_link_skips_only_its_row,
     ],
 }

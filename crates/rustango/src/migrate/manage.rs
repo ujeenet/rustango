@@ -3776,21 +3776,46 @@ async fn load_links(
     schema: &'static crate::core::ModelSchema,
     rel: &crate::core::M2MRelation,
     rows: &[RowLinks],
-) -> Result<(), String> {
+    fail_fast: bool,
+) -> Result<Vec<String>, String> {
     let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
-    let mut values = Vec::new();
+    let insert = |values| async move {
+        let query =
+            crate::core::BulkInsertQuery::new(junction, vec![rel.src_col, rel.dst_col], values)
+                .on_conflict(crate::core::ConflictClause::DoNothing);
+        crate::sql::bulk_insert_pool(pool, &query).await
+    };
+    // Each failed row's message; a bad row skips only its own links.
+    let mut failed = Vec::new();
+    let mut converted = Vec::new();
     for (line, src, dsts) in rows {
-        let at = |e: String| format!("entry #{line}: {e}");
-        let src = json_to_sql_value(src, s).map_err(at)?;
-        for dst in dsts {
-            values.push(vec![src.clone(), json_to_sql_value(dst, d).map_err(at)?]);
+        let row: Result<Vec<_>, String> = json_to_sql_value(src, s).and_then(|src| {
+            dsts.iter()
+                .map(|dst| Ok(vec![src.clone(), json_to_sql_value(dst, d)?]))
+                .collect()
+        });
+        match row {
+            Ok(values) => converted.push((line, values)),
+            Err(e) => failed.push(format!("entry #{line}: {e}")),
+        }
+        if fail_fast && !failed.is_empty() {
+            return Ok(failed);
         }
     }
-    let query = crate::core::BulkInsertQuery::new(junction, vec![rel.src_col, rel.dst_col], values)
-        .on_conflict(crate::core::ConflictClause::DoNothing);
-    crate::sql::bulk_insert_pool(pool, &query)
-        .await
-        .map_err(|e| e.to_string())
+    let batch: Vec<_> = converted.iter().flat_map(|(_, v)| v.clone()).collect();
+    if batch.is_empty() || insert(batch).await.is_ok() {
+        return Ok(failed);
+    }
+    // The batch failed: find the rows that did, one at a time.
+    for (line, values) in converted {
+        if let Err(e) = insert(values).await {
+            failed.push(format!("entry #{line}: {e}"));
+            if fail_fast {
+                break;
+            }
+        }
+    }
+    Ok(failed)
 }
 
 #[derive(Debug, PartialEq)]
@@ -4045,16 +4070,25 @@ async fn loaddata_cmd<W: Write>(
     }
 
     if abort.is_none() {
-        for (schema, rel, model_name, rows) in links {
-            if let Err(e) = load_links(pool, schema, rel, &rows).await {
+        'rels: for (schema, rel, model_name, rows) in links {
+            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
+            {
+                Ok(failed) => {
+                    let n = failed.len();
+                    (failed, n)
+                }
+                // No junction to write: every row's links are lost.
+                Err(e) => (vec![e], rows.len()),
+            };
+            for e in failed {
                 let msg = format!("loaddata: `{model_name}` `{}`: {e}", rel.name);
                 if parsed.fail_fast {
                     abort = Some(msg);
-                    break;
+                    break 'rels;
                 }
                 tracing::warn!("{msg}");
-                skipped += rows.len();
             }
+            skipped += lost;
         }
     }
 
