@@ -162,6 +162,21 @@ impl Dialect for MySql {
     ///   `LONGTEXT`; `TEXT` caps at 64 KiB where PG/SQLite have no cap
     /// - no `DOUBLE PRECISION`; `DOUBLE`, and `REAL` is an alias for
     ///   `FLOAT`
+    /// InnoDB caps a key at 3072 bytes (1071); utf8mb4 counts 4 per char.
+    fn index_key_size(&self, cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
+        let bytes = cols
+            .iter()
+            .map(|(ty, len)| match (ty, len) {
+                (FieldType::String, Some(n)) => n.saturating_mul(4),
+                (FieldType::Uuid, _) => 36 * 4,
+                (FieldType::Decimal, _) => 30,
+                // Every other key-able type here is at most 8 bytes.
+                _ => 8,
+            })
+            .fold(0u32, u32::saturating_add);
+        Some((bytes, 3072))
+    }
+
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
             FieldType::I16 => "SMALLINT".into(),

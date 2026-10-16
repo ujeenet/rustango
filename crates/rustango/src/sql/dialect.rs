@@ -533,6 +533,12 @@ pub trait Dialect: Send + Sync {
         })
     }
 
+    /// `(bytes, cap)` of an index key over these `(type, max_length)`
+    /// columns, when the backend caps a key; `None` when it does not.
+    fn index_key_size(&self, _cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
+        None
+    }
+
     /// The `CREATE TABLE` column type for a field that is not an
     /// `Auto<T>` PK. `max_length` turns a [`FieldType::String`] into
     /// `VARCHAR(N)` instead of unbounded text.

@@ -1802,8 +1802,18 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
-                let (src_ty, src_pk) = m2m_end(current, src_table, dialect);
-                let (dst_ty, dst_pk) = m2m_end(current, dst_table, dialect);
+                let (src_ty, src_pk, src_key) = m2m_end(current, src_table, dialect);
+                let (dst_ty, dst_pk, dst_key) = m2m_end(current, dst_table, dialect);
+                if let Some((bytes, cap)) = dialect.index_key_size(&[src_key, dst_key]) {
+                    if bytes > cap {
+                        return Err(format!(
+                            "junction `{through}`: its primary key ({src_col}, {dst_col}) takes \
+                             {bytes} bytes, over {}'s {cap}-byte key limit; shorten the string \
+                             pks' max_length",
+                            dialect.name(),
+                        ));
+                    }
+                }
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
@@ -2167,7 +2177,7 @@ pub(crate) fn column_fk_sql(
         .map(|fk| match fk {
             ColumnFk::Field(rel) => field_fk_sql(table, column, rel, dialect, schema),
             ColumnFk::Junction(to) => {
-                let (_, pk) = m2m_end(snap, to, dialect);
+                let (_, pk, _) = m2m_end(snap, to, dialect);
                 Ok(m2m_fk_sql(table, column, to, pk, dialect, schema))
             }
         })
@@ -2195,24 +2205,27 @@ fn m2m_fk_sql(
 
 /// A junction column's type and the pk it references in `table` (#1404).
 /// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule; a table outside
-/// `current` keeps the old `BIGINT` to `id`.
+/// `current` keeps the old `BIGINT` to `id`. Also the `(type, max_length)` its key counts.
 fn m2m_end<'a>(
     current: &'a SchemaSnapshot,
     table: &str,
     dialect: &dyn crate::sql::Dialect,
-) -> (String, &'a str) {
-    let bigint = || dialect.column_type(crate::core::FieldType::I64, None);
+) -> (String, &'a str, (crate::core::FieldType, Option<u32>)) {
+    use crate::core::FieldType;
+    let bigint = || dialect.column_type(FieldType::I64, None);
     let mut pks = current
         .table(table)
         .into_iter()
         .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
     let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
-        return (bigint(), "id");
+        return (bigint(), "id", (FieldType::I64, None));
     };
-    let end = super::snapshot::field_type_from_name(&pk.ty).map(crate::sql::m2m::junction_column_type);
-    if end == Some(crate::core::FieldType::I64) {
-        return (bigint(), &pk.column);
+    let end = super::snapshot::field_type_from_name(&pk.ty)
+        .map(crate::sql::m2m::junction_column_type);
+    if end == Some(FieldType::I64) {
+        return (bigint(), &pk.column, (FieldType::I64, None));
     }
+    let key = (end.unwrap_or(FieldType::String), pk.max_length);
     let column = FieldSnapshot {
         primary_key: false,
         auto: false,
@@ -2220,7 +2233,7 @@ fn m2m_end<'a>(
         generated_as: None,
         ..pk.clone()
     };
-    (sql_type_with_dialect(&column, dialect), &pk.column)
+    (sql_type_with_dialect(&column, dialect), &pk.column, key)
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
@@ -2946,6 +2959,38 @@ mod sql_type_tests {
             dst_table: "tags".into(),
             dst_col: "tag_id".into(),
         }]
+    }
+
+    fn string_pk_snap(src_len: u32, dst_ty: &str) -> SchemaSnapshot {
+        let table = |name: &str, ty: &str, len: Option<u32>| {
+            serde_json::json!({ "name": name, "model": name, "fields": [
+                { "name": "id", "column": "id", "ty": ty, "nullable": false,
+                  "primary_key": true, "max_length": len }] })
+        };
+        serde_json::from_value(serde_json::json!({ "tables": [
+            table("posts", "string", Some(src_len)),
+            table("tags", dst_ty, (dst_ty == "string").then_some(src_len)),
+        ] }))
+        .unwrap()
+    }
+
+    /// MySQL caps a key at 3072 bytes (1071) and utf8mb4 VARCHAR(n) counts 4n.
+    #[test]
+    fn create_m2m_table_refuses_a_mysql_key_over_3072_bytes() {
+        let m2m = make_create_m2m();
+        let render = |snap: &SchemaSnapshot, d: &dyn crate::sql::Dialect| {
+            render_changes_split_with_dialect(&m2m, snap, d)
+        };
+        // 400 + 400 chars: MySQL 8 refuses it; PG and SQLite take it.
+        let wide = string_pk_snap(400, "string");
+        let err = render(&wide, &crate::sql::MySql).unwrap_err();
+        assert!(err.contains("post_tags") && err.contains("3072"), "{err}");
+        render(&wide, &crate::sql::Postgres).unwrap();
+        render(&wide, &crate::sql::Sqlite).unwrap();
+        // Exactly 3072 bytes, as MySQL accepts: 384 + 384, and 766 + BIGINT.
+        render(&string_pk_snap(384, "string"), &crate::sql::MySql).unwrap();
+        render(&string_pk_snap(766, "i64"), &crate::sql::MySql).unwrap();
+        render(&string_pk_snap(767, "i64"), &crate::sql::MySql).unwrap_err();
     }
 
     #[test]
