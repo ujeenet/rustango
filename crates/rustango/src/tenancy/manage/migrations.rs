@@ -173,12 +173,13 @@ fn write_tenant_report<W: Write>(
     tenant_failures(report.failure_count(), report.tenants.len())
 }
 
-/// Every tenant's names in `ledger`, inactive tenants included.
-/// A tenant that can't be read fails the whole call, so nothing is assumed (#2393).
-pub(super) async fn tenant_ledgers<DB: Database>(
+/// Every tenant's names in each of `ledgers`, inactive tenants included,
+/// opening each tenant pool once. A tenant that can't be read fails the
+/// whole call, so nothing is assumed (#2393).
+pub(super) async fn tenant_ledgers<DB: Database, const N: usize>(
     pools: &TenantPools<DB>,
-    ledger: &str,
-) -> Result<Vec<(String, std::collections::HashSet<String>)>, rustango::migrate::MigrateError>
+    ledgers: [&str; N],
+) -> Result<[TenantLedger; N], rustango::migrate::MigrateError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
@@ -193,21 +194,32 @@ where
     let orgs: Vec<crate::tenancy::org::Org> = crate::tenancy::org::Org::objects()
         .fetch(&pools.registry_pool())
         .await?;
-    let mut out = Vec::with_capacity(orgs.len());
+    let mut out: [TenantLedger; N] = std::array::from_fn(|_| Vec::with_capacity(orgs.len()));
     for org in orgs {
         let (pool, own) = pools
             .existing_pool_dyn(&org)
             .await
             .map_err(|e| unreadable(&org.slug, &e))?;
-        let applied = rustango::migrate::applied_or_empty(&pool, ledger).await;
+        let mut read = Ok(());
+        for (ledger, out) in ledgers.iter().zip(&mut out) {
+            match rustango::migrate::applied_or_empty(&pool, ledger).await {
+                Ok(applied) => out.push((org.slug.clone(), applied)),
+                Err(e) => {
+                    read = Err(e);
+                    break;
+                }
+            }
+        }
         if own {
             pool.close().await;
         }
-        let applied = applied.map_err(|e| unreadable(&org.slug, &e))?;
-        out.push((org.slug, applied));
+        read.map_err(|e| unreadable(&org.slug, &e))?;
     }
     Ok(out)
 }
+
+/// `(slug, applied names)` per tenant, for one ledger.
+pub(super) type TenantLedger = Vec<(String, std::collections::HashSet<String>)>;
 
 /// `showmigrations`: registry-scoped files from the registry ledger,
 /// tenant-scoped ones, framework steps too, from every tenant's (#1311).
@@ -220,10 +232,9 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use rustango::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
-    let project = tenant_ledgers(pools, LEDGER_TABLE).await;
-    let project = project.map_err(TenancyError::Migrate)?;
-    let system = tenant_ledgers(pools, SYSTEM_LEDGER_TABLE).await;
-    let system = system.map_err(TenancyError::Migrate)?;
+    let [project, system] = tenant_ledgers(pools, [LEDGER_TABLE, SYSTEM_LEDGER_TABLE])
+        .await
+        .map_err(TenancyError::Migrate)?;
     rustango::migrate::manage::showmigrations_with(
         &pools.registry_pool(),
         dir,

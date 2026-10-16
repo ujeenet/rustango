@@ -390,7 +390,11 @@ where
             dir,
             &args[1..],
             writer,
-            migrations::tenant_ledgers(pools, rustango::migrate::LEDGER_TABLE),
+            async {
+                let [project] =
+                    migrations::tenant_ledgers(pools, [rustango::migrate::LEDGER_TABLE]).await?;
+                Ok(project)
+            },
         )
         .await
         .map_err(TenancyError::Migrate),
