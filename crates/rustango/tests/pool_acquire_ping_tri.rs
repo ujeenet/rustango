@@ -56,7 +56,7 @@ async fn a_connection_dropped_while_idle_is_replaced(pool: &Pool) {
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn drop_idle_then_query(pool: &Pool) {
-    use rustango::sql::{raw_execute_pool, sqlx, sqlx::Executor as _};
+    use rustango::sql::raw_execute_pool;
     use rustango::testkit::matrix::Backend;
 
     let backend = match pool {
@@ -67,12 +67,34 @@ async fn drop_idle_then_query(pool: &Pool) {
         #[allow(unreachable_patterns)]
         _ => return, // SQLite has no server to drop it.
     };
-    std::env::set_var("RUSTANGO_DB_IDLE_PING_SECS", "1");
+    // Settings, not env: a set_var here races the SQLite arms' env reads (pr-1408-r2 tests-003).
+    // First call wins; every caller in this binary installs the same value.
+    rustango::sql::configure_pools(rustango::sql::PoolTuning {
+        idle_ping_after: Some(std::time::Duration::from_secs(1)),
+        ..Default::default()
+    });
     let fresh = backend.pool().await.expect("the live URL is set");
-    std::env::remove_var("RUSTANGO_DB_IDLE_PING_SECS");
 
-    // A fresh pool opens one connection for this and keeps it idle.
-    let kill = match (&fresh, pool) {
+    // Below the threshold the dead connection is handed out unpinged:
+    // the hot path pays no round trip (pr-1408-r2 tests-001).
+    kill_idle(&fresh, pool).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let stale = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
+    assert!(stale.is_err(), "a recently idle connection was pinged");
+
+    // Past the threshold, so the next checkout pings whatever the failure left idle.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    kill_idle(&fresh, pool).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let alive = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
+    assert!(alive.is_ok(), "the dead idle connection was handed out: {alive:?}");
+}
+
+/// Kill, server-side via `pool`, the one connection `fresh` keeps idle.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn kill_idle(fresh: &Pool, pool: &Pool) {
+    use rustango::sql::{sqlx, sqlx::Executor as _};
+    let kill = match (fresh, pool) {
         #[cfg(feature = "postgres")]
         (Pool::Postgres(f), Pool::Postgres(p)) => {
             let id: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -95,10 +117,6 @@ async fn drop_idle_then_query(pool: &Pool) {
         _ => unreachable!("same backend"),
     };
     kill.expect("drop the idle connection server-side");
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-
-    let alive = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
-    assert!(alive.is_ok(), "the dead idle connection was handed out: {alive:?}");
 }
 
 tri_dialect_test! {
