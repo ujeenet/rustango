@@ -528,6 +528,7 @@ where
     V: FlatScalar,
 {
     let stmt = pool.dialect().compile_select(query)?;
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {

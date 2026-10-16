@@ -56,6 +56,18 @@ A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `
 
 An as-text path compared with a number compares as a number, as on MySQL, and a JSON path equals a `SqlValue::Json` scalar (`"foo"`, `5`, `true`).
 
+### Fixed — self-referential relation subqueries correlate to the outer row (#1287)
+
+A subquery over its enclosing query's table reads it as `__rustango_self`, so `where_has`, `annotate_count` and the M2M aggregates on a self FK or self M2M no longer compare a row with itself.
+
+### Fixed — `assert_num_queries` counts values, pluck and aggregate reads (#1303)
+
+`values()`, `values_list()`, `pluck`, `pks`, `value`, `pluck_pairs` and `aggregate()` / `annotate()` each count one query; they counted none.
+
+### Fixed — docs no longer say saving sends model signals (#1323)
+
+No ORM write sends `pre_save` / `post_save` / `pre_delete` / `post_delete`; the ORM and caching guides now say to call `send_*` after the write.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

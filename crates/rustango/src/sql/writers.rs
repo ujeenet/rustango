@@ -31,7 +31,7 @@ pub(super) struct Sql<'d> {
     /// Open emission scopes, innermost last. A bare `Expr::Column`
     /// resolves against the top frame; `Expr::OuterRef` resolves
     /// against the one below it, the enclosing query.
-    pub scope_stack: Vec<&'static ModelSchema>,
+    pub scope_stack: Vec<Scope>,
     /// `(scope depth, qualifier)` for bare columns: the one carrier for
     /// predicates, ORDER BY and `Expr::Column`. A nested query pushes a
     /// scope frame, so it never inherits it (#2411).
@@ -50,6 +50,49 @@ pub(super) struct Sql<'d> {
     pub total: Option<CountQuery>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
     pub group_concat: bool,
+}
+
+/// The FROM name of a correlated subquery over its enclosing query's
+/// table, so the inner table does not hide the outer row (#1287).
+const SELF_ALIAS: &str = "__rustango_self";
+
+/// One open query: its model and the name its FROM exposes.
+#[derive(Clone, Copy)]
+pub(super) struct Scope {
+    model: &'static ModelSchema,
+    /// `model.table`, or [`SELF_ALIAS`] for a correlated subquery over
+    /// the enclosing query's table.
+    name: &'static str,
+}
+
+impl Scope {
+    /// A scope that is not correlated to the one it sits in: a top-level
+    /// query, a derived table, a set-operation branch.
+    fn plain(model: &'static ModelSchema) -> Self {
+        Self {
+            model,
+            name: model.table,
+        }
+    }
+
+    /// `<table>` or `<table> AS <alias>`, as a FROM item.
+    fn write_from(self, b: &mut Sql<'_>) {
+        b.write_ident(self.model.table);
+        if self.name != self.model.table {
+            b.sql.push_str(" AS ");
+            b.write_ident(self.name);
+        }
+    }
+
+    /// An explicit `<table>.` reference to this scope's own table reads
+    /// its FROM name.
+    fn rename<'a>(self, alias: &'a str) -> &'a str {
+        if alias == self.model.table {
+            self.name
+        } else {
+            alias
+        }
+    }
 }
 
 /// How a bare column of the current scope is written.
@@ -100,6 +143,31 @@ impl<'d> Sql<'d> {
             total: None,
             group_concat: false,
         }
+    }
+
+    /// A scope correlated to the innermost open one: aliased when both
+    /// read the same table.
+    fn correlated_scope(&self, model: &'static ModelSchema) -> Scope {
+        match self.scope_stack.last() {
+            Some(outer) if outer.name == model.table => Scope {
+                model,
+                name: SELF_ALIAS,
+            },
+            _ => Scope::plain(model),
+        }
+    }
+
+    /// The innermost open scope, or `model`'s plain one when none is.
+    fn scope_or(&self, model: &'static ModelSchema) -> Scope {
+        self.scope_stack
+            .last()
+            .copied()
+            .unwrap_or_else(|| Scope::plain(model))
+    }
+
+    /// The model of the innermost open scope.
+    fn scope_model(&self) -> Option<&'static ModelSchema> {
+        self.scope_stack.last().map(|s| s.model)
     }
 
     /// The qualifier of the innermost open scope, if one is set.
@@ -207,10 +275,21 @@ pub(super) fn null_cast_for(
 
 // ---- SELECT ----
 
+/// A SELECT that may correlate to the enclosing query through `OuterRef`.
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    let scope = b.correlated_scope(query.model);
+    write_select_as(b, query, scope)
+}
+
+/// A derived-table SELECT, which cannot see the query it feeds.
+fn write_derived_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    write_select_as(b, query, Scope::plain(query.model))
+}
+
+fn write_select_as(b: &mut Sql<'_>, query: &SelectQuery, scope: Scope) -> Result<(), SqlError> {
     // Only the outermost SELECT may widen its select list (#2567).
     let top_level = b.scope_stack.is_empty();
-    b.scope_stack.push(query.model);
+    b.scope_stack.push(scope);
     let result = if query.compound.is_empty() {
         write_select_inner(b, query, top_level)
     } else {
@@ -345,7 +424,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push(' ');
         // Own scope frame so subqueries in this branch resolve
         // `OuterRef` against it.
-        b.scope_stack.push(branch.query.model);
+        b.scope_stack.push(Scope::plain(branch.query.model));
         // Plain branches emit inline; `SELECT … UNION SELECT …` is
         // valid everywhere and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
@@ -433,6 +512,7 @@ fn write_distinct_on_via_window(
     // columns to avoid a name clash with a joined one. The derived
     // table `sub` then exposes them under their bare names.
     let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
+    let scope = b.scope_or(query.model);
 
     // Outer SELECT: projection columns only, no __rn.
     b.sql.push_str("SELECT ");
@@ -465,7 +545,7 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            write_distinct_inner_col(b, query.model.table, col, qualify);
+            write_distinct_inner_col(b, scope.name, col, qualify);
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -473,7 +553,7 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            write_distinct_inner_col(b, query.model.table, field.column, qualify);
+            write_distinct_inner_col(b, scope.name, field.column, qualify);
         }
     }
     // ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) AS __rn
@@ -482,7 +562,7 @@ fn write_distinct_on_via_window(
         if i > 0 {
             b.sql.push_str(", ");
         }
-        write_distinct_inner_col(b, query.model.table, col, qualify);
+        write_distinct_inner_col(b, scope.name, col, qualify);
     }
     if !query.order_by.is_empty() {
         b.sql.push_str(" ORDER BY ");
@@ -492,7 +572,7 @@ fn write_distinct_on_via_window(
             }
             match item {
                 crate::core::OrderItem::Column { column, desc, .. } => {
-                    write_distinct_inner_col(b, query.model.table, column, qualify);
+                    write_distinct_inner_col(b, scope.name, column, qualify);
                     if *desc {
                         b.sql.push_str(" DESC");
                     }
@@ -514,7 +594,7 @@ fn write_distinct_on_via_window(
         }
     }
     b.sql.push_str(") AS __rn FROM ");
-    b.write_ident(query.model.table);
+    scope.write_from(b);
     // The joins sit in the inner SELECT next to the ROW_NUMBER()
     // partition, so they shape the rows the window ranks.
     write_model_joins(b, &query.joins)?;
@@ -577,9 +657,14 @@ fn write_subquery_joins(
         // The subquery writers push their own scope frame, so an
         // `OuterRef` inside a LATERAL subquery resolves to the
         // enclosing query.
-        match &sj.subquery {
-            crate::core::DerivedSource::Select(s) => write_select(b, s)?,
-            crate::core::DerivedSource::Aggregate(a) => write_aggregate(b, a)?,
+        // Only a LATERAL subquery can see the query it joins.
+        match (&sj.subquery, sj.lateral) {
+            (crate::core::DerivedSource::Select(s), true) => write_select(b, s)?,
+            (crate::core::DerivedSource::Select(s), false) => write_derived_select(b, s)?,
+            (crate::core::DerivedSource::Aggregate(a), true) => write_aggregate(b, a)?,
+            (crate::core::DerivedSource::Aggregate(a), false) => {
+                write_aggregate_as(b, a, Scope::plain(a.model))?;
+            }
         }
         b.sql.push_str(") AS ");
         b.write_ident(sj.alias);
@@ -636,7 +721,7 @@ fn write_select_body(
     order_helpers: bool,
 ) -> Result<(), SqlError> {
     let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
-    let q = qualify.then_some(Qualifier::Base(query.model.table));
+    let q = qualify.then_some(Qualifier::Base(b.scope_or(query.model).name));
     b.with_qualifier(q, |b| {
         write_select_body_qualified(b, query, qualify, order_helpers)
     })
@@ -656,6 +741,7 @@ fn write_select_body_qualified(
         }
     }
 
+    let scope = b.scope_or(query.model);
     b.sql.push_str("SELECT ");
     // Plain `DISTINCT` works on every dialect; `DISTINCT ON` is PG
     // only, and the other dialects already returned above.
@@ -684,7 +770,7 @@ fn write_select_body_qualified(
             }
             first_col = false;
             if qualify {
-                b.write_ident(query.model.table);
+                b.write_ident(scope.name);
                 b.sql.push('.');
             }
             b.write_ident(col);
@@ -696,7 +782,7 @@ fn write_select_body_qualified(
             }
             first_col = false;
             if qualify {
-                b.write_ident(query.model.table);
+                b.write_ident(scope.name);
                 b.sql.push('.');
             }
             b.write_ident(field.column);
@@ -725,7 +811,7 @@ fn write_select_body_qualified(
     }
 
     b.sql.push_str(" FROM ");
-    b.write_ident(query.model.table);
+    scope.write_from(b);
 
     write_model_joins(b, &query.joins)?;
 
@@ -847,10 +933,11 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
 // ---- COUNT ----
 
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
-    b.scope_stack.push(query.model);
+    let scope = Scope::plain(query.model);
+    b.scope_stack.push(scope);
     let r = (|| {
         b.sql.push_str("SELECT COUNT(*)");
-        write_from_source(b, query.model, query.source.as_deref())?;
+        write_from_source(b, scope, query.source.as_deref())?;
         write_where_with_search(
             b,
             &query.where_clause,
@@ -867,16 +954,18 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
 /// clauses resolve against the derived rows unchanged.
 fn write_from_source(
     b: &mut Sql<'_>,
-    model: &'static ModelSchema,
+    scope: Scope,
     source: Option<&SelectQuery>,
 ) -> Result<(), SqlError> {
     b.sql.push_str(" FROM ");
     if let Some(sub) = source {
         b.sql.push('(');
-        write_select(b, sub)?;
+        write_derived_select(b, sub)?;
         b.sql.push_str(") AS ");
+        b.write_ident(scope.name);
+    } else {
+        scope.write_from(b);
     }
-    b.write_ident(model.table);
     Ok(())
 }
 
@@ -932,12 +1021,22 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
     Ok(())
 }
 
+/// An aggregate that may correlate to the enclosing query through `OuterRef`.
 pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
+    let scope = b.correlated_scope(query.model);
+    write_aggregate_as(b, query, scope)
+}
+
+fn write_aggregate_as(
+    b: &mut Sql<'_>,
+    query: &AggregateQuery,
+    scope: Scope,
+) -> Result<(), SqlError> {
     // The scope frame gives a HAVING predicate's aggregates a model
     // to resolve their COALESCE-default cast against.
-    b.scope_stack.push(query.model);
+    b.scope_stack.push(scope);
     let r = with_join_types(b, &query.joins, query.source.as_deref(), |b| {
-        write_aggregate_inner(b, query)
+        write_aggregate_inner(b, query, scope)
     });
     b.scope_stack.pop();
     r
@@ -953,20 +1052,21 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
 fn write_agg_group_col(
     b: &mut Sql<'_>,
     col: &str,
-    model_table: &str,
+    scope: Scope,
     has_joins: bool,
     derived: bool,
     project: bool,
 ) {
+    let model_table = scope.name;
     if let Some((alias, c)) = col.split_once('.') {
         let flat = crate::core::joins::joined_label(alias, c);
         // A derived source already projects the joined column as `alias__col`.
-        if derived && alias != model_table {
+        if derived && alias != scope.model.table {
             b.write_ident(model_table);
             b.sql.push('.');
             b.write_ident(&flat);
         } else {
-            b.write_ident(alias);
+            b.write_ident(scope.rename(alias));
             b.sql.push('.');
             b.write_ident(c);
         }
@@ -987,7 +1087,11 @@ fn write_agg_group_col(
     }
 }
 
-fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
+fn write_aggregate_inner(
+    b: &mut Sql<'_>,
+    query: &AggregateQuery,
+    scope: Scope,
+) -> Result<(), SqlError> {
     b.sql.push_str("SELECT ");
     let has_joins = !query.joins.is_empty();
     let derived = query.source.is_some();
@@ -996,8 +1100,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         if i > 0 {
             b.sql.push_str(", ");
         }
-        let table = query.model.table;
-        write_agg_group_col(b, col, table, has_joins, derived, /*project=*/ true);
+        write_agg_group_col(b, col, scope, has_joins, derived, /*project=*/ true);
     }
     for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
         if !query.group_by.is_empty() || i > 0 {
@@ -1008,7 +1111,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         b.write_ident(alias.as_ref());
     }
 
-    write_from_source(b, query.model, query.source.as_deref())?;
+    write_from_source(b, scope, query.source.as_deref())?;
     write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
@@ -1018,14 +1121,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            write_agg_group_col(
-                b,
-                col,
-                query.model.table,
-                has_joins,
-                derived,
-                /*project=*/ false,
-            );
+            write_agg_group_col(b, col, scope, has_joins, derived, /*project=*/ false);
         }
     }
 
@@ -1034,7 +1130,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
     if let Some(src) = query.source.as_deref() {
         b.derived_joins = Some(DerivedJoins {
             depth: b.scope_stack.len(),
-            table: query.model.table,
+            table: scope.name,
             aliases: src.joins.iter().map(|j| j.alias).collect(),
         });
     }
@@ -1080,8 +1176,7 @@ enum AggCast {
 fn aggregate_cast_kind(b: &Sql<'_>, expr: &AggregateExpr) -> Option<AggCast> {
     match expr {
         AggregateExpr::Sum(col) => sum_cast(
-            b.scope_stack
-                .last()
+            b.scope_model()
                 .and_then(|m| m.field_by_column(col))
                 .map(|f| f.ty),
         ),
@@ -1640,7 +1735,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
     if query.set.is_empty() {
         return Err(SqlError::EmptyUpdateSet);
     }
-    b.scope_stack.push(query.model);
+    b.scope_stack.push(Scope::plain(query.model));
     let r = (|| {
         b.sql.push_str("UPDATE ");
         b.write_ident(query.model.table);
@@ -1687,8 +1782,7 @@ fn write_expr(
             let alias = match b.qualifier() {
                 Some(Qualifier::Join(a)) => Some(a),
                 Some(Qualifier::Base(t))
-                    if b.scope_stack
-                        .last()
+                    if b.scope_model()
                         .map_or(true, |m| m.field_by_column(name).is_some()) =>
                 {
                     Some(t)
@@ -1842,8 +1936,6 @@ fn write_expr(
             b.sql.push_str("(SELECT ");
             b.sql.push_str(&agg);
             b.sql.push_str(" FROM ");
-            b.write_ident(table);
-            b.sql.push_str(" WHERE ");
             write_rel_correlation(b, table, correlation)?;
             b.sql.push(')');
             Ok(())
@@ -1856,7 +1948,7 @@ fn write_expr(
                 return Err(SqlError::OuterRefOutsideSubquery { column: col });
             }
             let outer = b.scope_stack[len - 2];
-            let qualified = format!("{}.{}", b.d.quote_ident(outer.table), b.d.quote_ident(col),);
+            let qualified = format!("{}.{}", b.d.quote_ident(outer.name), b.d.quote_ident(col),);
             b.sql.push_str(&qualified);
             Ok(())
         }
@@ -1871,7 +1963,11 @@ fn write_expr(
                         b.d.quote_ident(&crate::core::joins::joined_label(alias, column))
                     )
                 }
-                _ => format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column)),
+                _ => {
+                    // The current table, written under its FROM name.
+                    let alias = b.scope_stack.last().map_or(*alias, |s| s.rename(alias));
+                    format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column))
+                }
             };
             b.sql.push_str(&qualified);
             Ok(())
@@ -1887,9 +1983,7 @@ fn write_expr(
             // The aggregate writer needs a model for the COALESCE
             // cast lookup; the top scope frame is the right one.
             let model = b
-                .scope_stack
-                .last()
-                .copied()
+                .scope_model()
                 .expect("Expr::Aggregate emitted outside any scope frame");
             write_aggregate_expr(b, agg, model)
         }
@@ -1908,7 +2002,7 @@ fn expr_type(b: &Sql<'_>, expr: &crate::core::Expr) -> Option<crate::core::Field
     match expr {
         Expr::Literal(v) => v.field_type(),
         Expr::Column(c) if !matches!(b.qualifier(), Some(Qualifier::Join(_))) => {
-            b.scope_stack.last()?.field_by_column(c).map(|f| f.ty)
+            b.scope_model()?.field_by_column(c).map(|f| f.ty)
         }
         Expr::AliasedColumn { alias, column } => {
             alias_model(b, alias)?.field_by_column(column).map(|f| f.ty)
@@ -1930,7 +2024,10 @@ fn alias_model(b: &Sql<'_>, alias: &str) -> Option<&'static ModelSchema> {
             .rev()
             .find(|(d, a, _)| *d == depth && *a == alias)
             .map(|(_, _, m)| *m)
-            .or_else(|| Some(b.scope_stack[depth - 1]).filter(|m| m.table == alias))
+            .or_else(|| {
+                let s = b.scope_stack[depth - 1];
+                (s.name == alias || s.model.table == alias).then_some(s.model)
+            })
     })
 }
 
@@ -3547,7 +3644,7 @@ fn write_call_unary(
 // ---- DELETE ----
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
-    b.scope_stack.push(query.model);
+    b.scope_stack.push(Scope::plain(query.model));
     let r = (|| {
         b.sql.push_str("DELETE FROM ");
         b.write_ident(query.model.table);
@@ -3852,8 +3949,6 @@ pub(super) fn write_where_expr(
             b.sql
                 .push_str(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
             b.sql.push_str("SELECT 1 FROM ");
-            b.write_ident(table);
-            b.sql.push_str(" WHERE ");
             write_rel_correlation(b, table, correlation)?;
             b.sql.push(')');
             Ok(())
@@ -3861,10 +3956,11 @@ pub(super) fn write_where_expr(
     }
 }
 
-/// Write the WHERE body that ties a raw-table relation subquery back
-/// to the enclosing row. These nodes hold no [`SelectQuery`] and push
-/// no scope frame, so the enclosing query is the **top** of the
-/// stack — unlike [`Expr::OuterRef`], which looks one frame down.
+/// Write `<table> WHERE <correlation>`, tying a raw-table relation
+/// subquery back to the enclosing row. These nodes hold no
+/// [`SelectQuery`] and push no scope frame, so the enclosing query is
+/// the **top** of the stack — unlike [`Expr::OuterRef`], which looks
+/// one frame down.
 fn write_rel_correlation(
     b: &mut Sql<'_>,
     table: &str,
@@ -3872,7 +3968,7 @@ fn write_rel_correlation(
 ) -> Result<(), SqlError> {
     use crate::core::RelCorrelation;
     let outer_table = match b.scope_stack.last() {
-        Some(m) => m.table,
+        Some(s) => s.name,
         // These only appear inside a query that pushed a frame.
         None => {
             return Err(SqlError::OuterRefOutsideSubquery {
@@ -3880,6 +3976,16 @@ fn write_rel_correlation(
             })
         }
     };
+    b.write_ident(table);
+    // A self relation must not hide the outer row (#1287).
+    let table = if table == outer_table {
+        b.sql.push_str(" AS ");
+        b.write_ident(SELF_ALIAS);
+        SELF_ALIAS
+    } else {
+        table
+    };
+    b.sql.push_str(" WHERE ");
     match correlation {
         RelCorrelation::Fk {
             fk_column,
@@ -4764,7 +4870,7 @@ pub(crate) fn compile_where_order_tail(
 ) -> Result<CompiledStatement, SqlError> {
     let mut b = Sql::new(d);
     if let Some(m) = model {
-        b.scope_stack.push(m);
+        b.scope_stack.push(Scope::plain(m));
     }
     b.with_qualifier(qualify_with.map(Qualifier::Base), |b| {
         write_where_with_search(b, where_clause, search, model)?;

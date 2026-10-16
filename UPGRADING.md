@@ -190,6 +190,14 @@ On MySQL, `ConflictClause::DoUpdate` / `bulk_upsert_pool` now return `SqlError::
 
 A custom `Dialect` adds a `columns: &[&str]` argument after `model`. On MySQL, a `DoUpdate` insert that binds an `Auto` PK now counts the PK as a key that can clash, so a target other than the PK is refused.
 
+### Self-table subqueries are aliased (#1287)
+
+A subquery over the same table as its outer query now reads `FROM "t" AS "__rustango_self"`. Raw SQL snapshots of such queries change; results of self `where_has` / `annotate_*` are now correct.
+
+### `assert_num_queries` counts values and aggregate reads (#1303)
+
+`values()`, `pluck`, `value`, `pluck_pairs` and `aggregate()` reads now count one each. Raise the expected count in tests that run them inside the block.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

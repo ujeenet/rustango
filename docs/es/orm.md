@@ -1773,6 +1773,8 @@ Ejecuta un callback cuando algo ocurre — las señales. Hay dos registros indep
 
 Dispara un hook antes o después de que un modelo se guarde o elimine: `pre_save`, `post_save`, `pre_delete`, `post_delete`. Registra uno con `connect_post_save::<Post, _, _>(...)`.
 
+Guardar no las envía: ninguna escritura del ORM dispara estas señales, así que llama tú a `send_post_save(&post, PostSaveContext { created })` (y las demás) después de escribir.
+
 ```rust
 use rustango::signals::{connect_post_save, PostSaveContext};
 

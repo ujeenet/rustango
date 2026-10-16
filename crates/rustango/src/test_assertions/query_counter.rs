@@ -54,6 +54,8 @@
 //! - `select_rows_pool` / `select_rows_pool_with_related` /
 //!   `select_one_row_pool` — typed reads
 //! - `count_rows_pool`, `fetch_aggregate_pool`, `fetch_paginated_pool`
+//! - the values family: `values()` / `values_list()` / `pluck` / `pks` /
+//!   `value` / `pluck_pairs` and `aggregate()` / `annotate()` (#1303)
 //! - `insert_pool` / `update_pool` / `delete_pool` — single-row writes
 //! - the `_tx` counterparts of all of the above
 //! - every `_on` read through `SqlExecutor`, on any backend (#2675):

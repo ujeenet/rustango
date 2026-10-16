@@ -1774,6 +1774,8 @@ Exécute une fonction de rappel quand quelque chose se produit — les signaux. 
 
 Déclenche un hook avant ou après qu'un modèle soit sauvegardé ou supprimé : `pre_save`, `post_save`, `pre_delete`, `post_delete`. Enregistrez-en un avec `connect_post_save::<Post, _, _>(...)`.
 
+Sauvegarder ne les envoie pas : aucune écriture de l'ORM ne déclenche ces signaux, appelez donc vous-même `send_post_save(&post, PostSaveContext { created })` (et les autres) après l'écriture.
+
 ```rust
 use rustango::signals::{connect_post_save, PostSaveContext};
 

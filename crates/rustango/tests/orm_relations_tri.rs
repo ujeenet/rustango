@@ -137,6 +137,36 @@ pub struct Shift {
     pub crew: Option<ForeignKey<Crew>>,
 }
 
+/// Self-referential: a reverse FK and an M2M back to its own table.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rel1287_cat",
+    app = "rel2293",
+    reverse_has(name = "children", child = "Cat", child_fk_column = "parent_id"),
+    m2m(
+        name = "links",
+        to = "rel1287_cat",
+        through = "rel1287_cat_link",
+        src = "from_id",
+        dst = "to_id"
+    )
+)]
+pub struct Cat {
+    #[rustango(primary_key)]
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub weight: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rel1287_cat_link", app = "rel2293")]
+pub struct CatLink {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub from_id: i64,
+    pub to_id: i64,
+}
+
 /// The generic M2M pivot, kept out of the model registry.
 const TAGGABLES: &ModelSchema = &{
     const FIELDS: &[FieldSchema] = &[
@@ -233,6 +263,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Note>(pool).await;
     fresh_table::<Crew>(pool).await;
     fresh_table::<Shift>(pool).await;
+    fresh_table::<Cat>(pool).await;
+    fresh_table::<CatLink>(pool).await;
     rustango::testkit::create_tables(pool, &[TAGGABLES])
         .await
         .expect("taggables");
@@ -950,6 +982,72 @@ async fn bulk_update_is_all_or_none(pool: &Pool) {
     assert_eq!(moved, 0, "earlier batches rolled back");
 }
 
+/// A self relation's subquery correlates to the outer row, not its own
+/// (#1287). Cat 1 has children 2 and 3; 2 has child 4. Links: 1->2,
+/// 1->3, 2->4.
+async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
+    for (id, parent_id) in [(1, None), (2, Some(1)), (3, Some(1)), (4, Some(2))] {
+        Cat {
+            id,
+            parent_id,
+            weight: id * 10,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed cat");
+    }
+    for (from_id, to_id) in [(1, 2), (1, 3), (2, 4)] {
+        let mut l = CatLink {
+            id: Auto::default(),
+            from_id,
+            to_id,
+        };
+        l.insert_pool(pool).await.expect("seed link");
+    }
+    let ids = |rows: Vec<Cat>| {
+        let mut v: Vec<i64> = rows.into_iter().map(|c| c.id).collect();
+        v.sort_unstable();
+        v
+    };
+    let has = Cat::objects().where_has("children").fetch(pool).await;
+    assert_eq!(ids(has.expect("where_has")), vec![1, 2]);
+    let hasnt = Cat::objects()
+        .where_doesnt_have("children")
+        .fetch(pool)
+        .await;
+    assert_eq!(ids(hasnt.expect("where_doesnt_have")), vec![3, 4]);
+
+    let col = |rows: &[std::collections::HashMap<String, SqlValue>], key: &str| {
+        let mut v: Vec<(i64, String)> = rows
+            .iter()
+            .map(|r| match &r["id"] {
+                SqlValue::I64(id) => (*id, format!("{:?}", r[key])),
+                other => panic!("id: {other:?}"),
+            })
+            .collect();
+        v.sort_unstable();
+        v.into_iter().map(|(_, s)| s).collect::<Vec<_>>()
+    };
+    let counts = Cat::objects()
+        .annotate_count("children")
+        .fetch(pool)
+        .await
+        .expect("annotate_count");
+    assert_eq!(
+        col(&counts, "children_count"),
+        ["I64(2)", "I64(1)", "I64(0)", "I64(0)"]
+    );
+    let sums = Cat::objects()
+        .annotate_max("links", "weight")
+        .fetch(pool)
+        .await
+        .expect("annotate_max");
+    assert_eq!(
+        col(&sums, "links_max_weight"),
+        ["I64(30)", "I64(40)", "Null", "Null"]
+    );
+}
+
 async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
     let post = Post { id: 1 };
     post.tags_m2m()
@@ -1081,6 +1179,7 @@ tri_dialect_test! {
         prefetch_soft_past_the_bind_cap,
         bulk_update_is_all_or_none,
         m2m_set_ignores_repeated_ids,
+        self_relation_correlates_to_the_outer_row,
         generic_m2m_set_ignores_repeated_ids,
         prefetch_generic_keeps_i32_pks,
         prefetch_reverse_generic_past_the_bind_cap,

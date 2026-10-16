@@ -275,7 +275,6 @@ async fn fetch_dst<K: FlatScalar>(
 ) -> Result<Vec<K>, ExecError> {
     let mut query = SelectQuery::new(junction).where_clause(WhereExpr::and_predicates(filters));
     query.projection = Some(vec![dst_col]);
-    crate::test_assertions::query_counter::bump();
     super::executor::fetch_values_flat(pool, &query).await
 }
 

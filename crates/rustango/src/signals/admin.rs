@@ -1,8 +1,8 @@
 //! Save and delete signals that fire only for writes made through
 //! the bundled admin.
 //!
-//! The signals in [`crate::signals`] cover every ORM write anywhere.
-//! These ones come only from the bundled admin's create, update, delete
+//! The signals in [`crate::signals`] are sent by hand, from any code.
+//! These ones are sent for you, but only from the bundled admin's create, update, delete
 //! and bulk-action handlers (one signal per row), so admin-only side effects — audit attribution,
 //! owner stamping, notifications — need no `if request.is_admin()`
 //! check.

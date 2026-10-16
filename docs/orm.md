@@ -1783,6 +1783,8 @@ Run a callback when something happens. There are two independent registries: one
 
 Fire a hook before or after a model is saved or deleted: `pre_save`, `post_save`, `pre_delete`, `post_delete`. Register one with `connect_post_save::<Post, _, _>(...)`.
 
+Saving does not send them: no ORM write fires these signals, so call `send_post_save(&post, PostSaveContext { created })` (and friends) yourself after the write.
+
 ```rust
 use rustango::signals::{connect_post_save, PostSaveContext};
 
