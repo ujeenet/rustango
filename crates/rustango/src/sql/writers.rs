@@ -2271,11 +2271,13 @@ fn write_sqlite_json_value_eq(
         return Ok(true);
     }
     // Same (relative key, type, atom) rows both ways; arrays keep order.
+    // integer and real are one type, so 1 = 1.0 as on PG and MySQL.
+    let ty = "CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END";
     let col = format!(
-        "SELECT substr(fullkey, {}), type, atom FROM json_tree(",
+        "SELECT substr(fullkey, {}), {ty}, atom FROM json_tree(",
         p.len() + 1
     );
-    let lit = "SELECT substr(fullkey, 2), type, atom FROM json_tree(";
+    let lit = format!("SELECT substr(fullkey, 2), {ty}, atom FROM json_tree(");
     b.sql.push_str(&format!(", '{p}') IS NOT NULL AND "));
     b.sql.push_str(if ne { "NOT (" } else { "(" });
     b.sql.push_str("NOT EXISTS (");
