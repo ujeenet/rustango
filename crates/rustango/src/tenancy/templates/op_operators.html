@@ -82,11 +82,16 @@ reach every tenant, so this list is the console's access control.</p>
           {% endif %}
         </form>
         {% endif %}
+        {% if op.is_self %}
+        <a class="btn-row-action" href="{{ console_prefix }}/change-password">Change password</a>
+        {% else %}
         <a class="btn-row-action" href="#reset-{{ op.id }}">Reset password</a>
+        {% endif %}
       </td>
       {% endif %}
     </tr>
-    {% if manage_enabled %}
+    {#- Your own password goes through change-password (#1342). -#}
+    {% if manage_enabled and not op.is_self %}
     <tr id="reset-{{ op.id }}" class="reset-row">
       <td colspan="6">
         <form method="post" action="{{ console_prefix }}/operators/{{ op.id }}/reset-password" class="inline-reset">
@@ -98,9 +103,7 @@ reach every tenant, so this list is the console's access control.</p>
                  minlength="8" autocomplete="new-password">
           <button type="submit" class="btn btn-secondary">Set</button>
           <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
-          <span class="field-helper">Signs
-          {% if op.is_self %}you{% else %}<code>{{ op.username }}</code>{% endif %}
-          out everywhere.</span>
+          <span class="field-helper">Signs <code>{{ op.username }}</code> out everywhere.</span>
         </form>
       </td>
     </tr>

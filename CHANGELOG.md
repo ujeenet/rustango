@@ -16,6 +16,26 @@ A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_byt
 
 `PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
 
+### Fixed — the admin never shows password hashes or database URLs (#1158)
+
+`password_hash`, `password` and `database_url` columns are secret in the admin whatever the model's widgets: not shown in list, detail, search or filters, and audited as `[changed]`. The registry admin hashes an operator password typed into it.
+
+### Fixed — console sessions idle out; run streams end with the session (#1344)
+
+An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `SESSION_TTL_SECS` (now 12 h, was 7 days) after sign-in; each request re-issues the cookie. The provisioning SSE stream re-checks the session on every poll. New `session::SESSION_IDLE_SECS`, `SessionPayload::renewed`.
+
+### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
+
+`tenancy::operators::set_active(false)` stamps `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
+
+### Fixed — JWT `/refresh` re-runs the claims hook (#1150)
+
+`auth_routes::Config::extra_claims` runs on every refresh against the user's current row, so a demoted user's next pair drops the old role claims.
+
+### Fixed — CSRF `exempt_prefix` matches whole path segments (#1128)
+
+`.exempt_prefix("/beacon")` covers `/beacon` and `/beacon/…`, no longer `/beacon-admin/…`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

@@ -162,6 +162,26 @@ untouched.
 
 Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
+### Admin treats credential columns as secret (#1158)
+
+Columns named `password_hash`, `password` or `database_url` now behave like a `password` widget in the admin: shown only as set/unset, rendered empty on edit (empty keeps the stored value), and not searchable or filterable.
+
+### Operator console sessions are shorter (#1344)
+
+Console sessions now end after 30 minutes idle or 12 hours after sign-in (`tenancy::session::SESSION_TTL_SECS` was 7 days). `session::decode` refuses a cookie older than that cap whatever its `exp`, so cookies issued before the upgrade more than 12 hours ago need a fresh sign-in.
+
+### Operator deactivation signs out; self-reset moved (#1342)
+
+Deactivating an operator (console or CLI) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
+
+### The JWT claims hook runs on refresh too (#1150)
+
+`Config::extra_claims` is now called on `/refresh` as well as `/login`, with the user's current row. A hook with side effects runs once per refresh.
+
+### CSRF exempt prefixes match by segment (#1128)
+
+`CsrfConfig::exempt_prefix("/beacon")` no longer exempts `/beacon-admin`. A prefix meant to cover sibling paths must list each one.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

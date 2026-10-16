@@ -178,6 +178,15 @@ inventory::submit! {
     }
 }
 
+// The registry admin serves operators too; never store their password raw (#1158).
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_operators",
+        derive: admin_hash_password,
+    }
+}
+
 // One role must not grant superuser or take another account (#2521).
 #[cfg(feature = "admin")]
 crate::admin::object_permissions::lock_user_credentials!(User, "rustango_users");
@@ -534,6 +543,23 @@ pub fn parse_basic_auth(header_value: Option<&str>) -> Option<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1158 — an operator password typed into the registry admin is hashed.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn the_admin_hashes_an_operator_password() {
+        use crate::core::SqlValue;
+        let mut values = vec![("password_hash", SqlValue::String("typed-pw-1158".into()))];
+        crate::admin::derived_fields::apply("rustango_operators", &mut values, None)
+            .await
+            .unwrap();
+        let Some((_, SqlValue::String(hash))) = values.iter().find(|(c, _)| *c == "password_hash")
+        else {
+            panic!("no password_hash: {values:?}");
+        };
+        let ok = password::verify_async("typed-pw-1158", hash).await;
+        assert!(ok.unwrap(), "{hash}");
+    }
 
     #[test]
     fn parse_basic_auth_decodes_standard_format() {
