@@ -7886,6 +7886,25 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(sink.0 < 10, "{} writes for 100 entries", sink.0);
     }
 
+    /// A full disk on the last buffer must fail the dump, not be lost on drop.
+    #[test]
+    fn fixture_writer_reports_a_failed_flush() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = Full;
+        let mut out = FixtureWriter::new(&mut sink, 0);
+        out.entry(&serde_json::json!({"pk": 1})).unwrap();
+        let err = out.finish().expect_err("lost write error");
+        assert!(err.to_string().contains("disk full"), "{err}");
+    }
+
     #[allow(dead_code)]
     #[derive(crate::Model, Debug)]
     #[rustango(
