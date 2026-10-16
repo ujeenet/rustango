@@ -1627,6 +1627,51 @@ mod tests {
         assert!(rotate(&auth, &pool, &pair.refresh).await.is_some());
     }
 
+    /// rel-0608 — a hook that turns to a reserved claim fails the refresh
+    /// before it redeems the token, so a retry is no reuse.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_reserved_claim_on_refresh_keeps_the_token() {
+        let hook: ClaimsHook = Arc::new(|c: &ClaimsContext<'_>| {
+            let mut m = serde_json::Map::new();
+            if !c.is_superuser {
+                m.insert("sub".into(), "spoof".into());
+            }
+            m
+        });
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
+            .await
+            .unwrap();
+        let mut user = crate::tenancy::auth::User {
+            is_superuser: true,
+            ..crate::testkit::user()
+        };
+        user.insert_pool(&pool).await.unwrap();
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            extra_claims: Some(hook),
+            ..Config::default()
+        });
+        let first = login(&auth, &user);
+        let scope = || TenantScope::for_test(crate::testkit::org(), pool.clone());
+
+        user.is_superuser = false;
+        user.save_pool(&pool).await.unwrap();
+        let input = RefreshInput {
+            refresh: first.clone(),
+        };
+        assert!(refresh_in(auth.clone(), scope(), input).await.is_err());
+
+        user.is_superuser = true;
+        user.save_pool(&pool).await.unwrap();
+        let input = RefreshInput { refresh: first };
+        assert!(
+            refresh_in(auth.clone(), scope(), input).await.is_ok(),
+            "the failed refresh burnt the token"
+        );
+    }
+
     #[test]
     #[should_panic(expected = "refresh_absolute_ttl_secs must be > 0")]
     fn a_zero_session_cap_is_refused() {
