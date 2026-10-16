@@ -36,6 +36,26 @@ An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `
 
 `.exempt_prefix("/beacon")` covers `/beacon` and `/beacon/…`, no longer `/beacon-admin/…`.
 
+### Fixed — MySQL upsert no longer updates a row of another unique key (#1357)
+
+`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column don't count.
+
+### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes (#1358)
+
+A statement with `GROUP_CONCAT` carries a `SET_VAR(group_concat_max_len = …)` hint, so no pool or session setup is needed.
+
+### Fixed — MySQL `now()` and casts to DateTime / Time keep microseconds (#1359)
+
+They emit `NOW(6)`, `DATETIME(6)` and `TIME(6)`, as PG and SQLite already kept the fraction.
+
+### Fixed — SQLite compares a Decimal with an expression as a number (#1217)
+
+A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `x * 2 > Decimal` no longer compares a number with text. New provided method `Dialect::write_decimal_param`.
+
+### Fixed — SQLite `json_path` comparisons match PG and MySQL (#1346)
+
+An as-text path compared with a number compares as a number, as on MySQL, and a JSON path equals a `SqlValue::Json` scalar (`"foo"`, `5`, `true`).
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

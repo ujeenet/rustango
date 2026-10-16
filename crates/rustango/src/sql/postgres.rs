@@ -241,6 +241,7 @@ impl Dialect for Postgres {
         &self,
         sql: &mut String,
         _model: &ModelSchema,
+        _columns: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {

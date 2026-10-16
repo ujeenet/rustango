@@ -847,7 +847,8 @@ macro_rules! bind_match_mysql {
 /// SQLite counterpart of [`bind_match`]. `sqlx-sqlite` has no
 /// `Decimal: Type<Sqlite>` impl, so the `Decimal` arm binds
 /// `to_string()`. NUMERIC affinity stores it as INTEGER or REAL, so
-/// digits past what a REAL holds (~15) are lost.
+/// digits past what a REAL holds (~15) are lost. The writer wraps the
+/// placeholder in `CAST(? AS NUMERIC)` so expressions compare it as a number.
 #[cfg(feature = "sqlite")]
 macro_rules! bind_match_sqlite {
     ($q:expr, $value:expr) => {

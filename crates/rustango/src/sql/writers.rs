@@ -48,6 +48,8 @@ pub(super) struct Sql<'d> {
     pub join_types: Vec<(usize, &'static str, &'static ModelSchema)>,
     /// Count the next SELECT body writes as its `__rustango_total` column.
     pub total: Option<CountQuery>,
+    /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
+    pub group_concat: bool,
 }
 
 /// How a bare column of the current scope is written.
@@ -81,6 +83,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            group_concat: false,
         }
     }
 
@@ -95,6 +98,7 @@ impl<'d> Sql<'d> {
             derived_joins: None,
             join_types: Vec::new(),
             total: None,
+            group_concat: false,
         }
     }
 
@@ -146,16 +150,20 @@ impl<'d> Sql<'d> {
     }
 
     /// Add `value` to the bind list and return its placeholder, which
-    /// a JSON value gets wrapped in by the dialect.
+    /// a JSON or Decimal value gets wrapped in by the dialect.
     pub(super) fn bind(&mut self, value: SqlValue) -> String {
-        let is_json = matches!(value, SqlValue::Json(_));
+        let wrap: Option<fn(&dyn Dialect, &mut String, &str)> = match value {
+            SqlValue::Json(_) => Some(|d, s, p| d.write_json_param(s, p)),
+            SqlValue::Decimal(_) => Some(|d, s, p| d.write_decimal_param(s, p)),
+            _ => None,
+        };
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
-        if !is_json {
+        let Some(wrap) = wrap else {
             return p;
-        }
+        };
         let mut wrapped = String::new();
-        self.d.write_json_param(&mut wrapped, &p);
+        wrap(self.d, &mut wrapped, &p);
         wrapped
     }
 
@@ -165,7 +173,20 @@ impl<'d> Sql<'d> {
         self.push_param_typed(value, None);
     }
 
-    pub(super) fn finish(self) -> CompiledStatement {
+    pub(super) fn finish(mut self) -> CompiledStatement {
+        if self.group_concat {
+            // A statement-level hint: it covers the GROUP_CONCAT in any block.
+            let start = self.sql.len() - self.sql.trim_start_matches('(').len();
+            let kw = ["SELECT", "INSERT", "UPDATE", "DELETE"]
+                .into_iter()
+                .find(|kw| self.sql[start..].starts_with(kw));
+            if let Some(kw) = kw {
+                self.sql.insert_str(
+                    start + kw.len(),
+                    " /*+ SET_VAR(group_concat_max_len = 4294967295) */",
+                );
+            }
+        }
         CompiledStatement {
             sql: self.sql,
             params: self.params,
@@ -1283,6 +1304,7 @@ fn write_aggregate_expr(
                     // `SEPARATOR` takes no bound parameter, so the
                     // delimiter is inlined as a quoted literal.
                     // ORDER BY goes before SEPARATOR.
+                    b.group_concat = true;
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
@@ -1523,7 +1545,7 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, conflict)?;
+        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
     }
     Ok(())
 }
@@ -1605,7 +1627,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, conflict)?;
+        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
     }
 
     write_returning(b, &query.returning)?;
@@ -2402,7 +2424,7 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // PG and MySQL have `NOW()`.
+            // PG has `NOW()`; MySQL needs `NOW(6)` to keep microseconds (#1359).
             //
             // SQLite must use the same format as every other write
             // path. Its datetime columns are TEXT compared as text,
@@ -2415,6 +2437,8 @@ fn write_function(
                     "strftime('{}','now')",
                     crate::sql::SQLITE_DATETIME_FORMAT
                 );
+            } else if b.d.name() == "mysql" {
+                b.sql.push_str("NOW(6)");
             } else {
                 b.sql.push_str("NOW()");
             }
@@ -3966,8 +3990,7 @@ fn write_expr_compare(
     if let Some(kw) = binary_op_str {
         write_expr(b, lhs, None)?;
         b.sql.push_str(kw);
-        write_expr(b, rhs, None)?;
-        return Ok(());
+        return write_compare_rhs(b, lhs, rhs);
     }
     // Lookups that span a relation, such as `author__name__contains`,
     // land here. The lhs is typed so Postgres can cast a non-text column.
@@ -4087,6 +4110,37 @@ fn write_expr_compare(
             dialect: b.d.name(),
         }),
     }
+}
+
+/// The right side of `<lhs> <op> <rhs>`. SQLite's `json_extract` gives an
+/// SQL value, so a JSON literal is unwrapped the same way; its as-text path
+/// has no affinity, so a number gets NUMERIC to compare as one (#1346).
+fn write_compare_rhs(
+    b: &mut Sql<'_>,
+    lhs: &crate::core::Expr,
+    rhs: &crate::core::Expr,
+) -> Result<(), SqlError> {
+    use crate::core::Expr;
+    let (Expr::JsonPath { as_text, .. }, Expr::Literal(v)) = (lhs, rhs) else {
+        return write_expr(b, rhs, None);
+    };
+    let (open, close) = match (as_text, v) {
+        _ if b.d.name() != "sqlite" => return write_expr(b, rhs, None),
+        (false, SqlValue::Json(_)) => ("json_extract(", ", '$')"),
+        (
+            true,
+            SqlValue::I16(_)
+            | SqlValue::I32(_)
+            | SqlValue::I64(_)
+            | SqlValue::F32(_)
+            | SqlValue::F64(_),
+        ) => ("CAST(", " AS NUMERIC)"),
+        _ => return write_expr(b, rhs, None),
+    };
+    b.sql.push_str(open);
+    b.push_param(v.clone());
+    b.sql.push_str(close);
+    Ok(())
 }
 
 /// Write `<col> <op> <rhs>` for a [`crate::core::ColumnFilter`].

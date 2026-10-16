@@ -790,6 +790,12 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
+    /// Write the placeholder of a bound Decimal. SQLite wraps it, since
+    /// sqlx binds it as text there.
+    fn write_decimal_param(&self, sql: &mut String, placeholder: &str) {
+        sql.push_str(placeholder);
+    }
+
     /// JSON containment: `<col> @> <p>::jsonb` (Postgres) /
     /// `JSON_CONTAINS(<col>, <p>)` (MySQL).
     fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
@@ -840,8 +846,10 @@ pub trait Dialect: Send + Sync {
     }
 
     /// Append this dialect's `ON CONFLICT` clause. `model` is the insert's
-    /// table: MySQL names its PK in the clause. MySQL ignores a `DoUpdate`
-    /// target, since `ON DUPLICATE KEY UPDATE` fires on any unique key.
+    /// table and `columns` the ones it binds: MySQL names its PK in the
+    /// clause, and refuses a `DoUpdate` target that is not the only
+    /// unique key a row can hit, since `ON DUPLICATE KEY UPDATE` fires on
+    /// any unique key.
     ///
     /// # Errors
     /// [`SqlError::ConflictNotSupportedInDialect`] when the dialect
@@ -850,9 +858,10 @@ pub trait Dialect: Send + Sync {
         &self,
         sql: &mut String,
         model: &ModelSchema,
+        columns: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
-        let _ = (sql, model);
+        let _ = (sql, model, columns);
         let shape = match conflict {
             ConflictClause::DoNothing => "DO NOTHING",
             ConflictClause::DoUpdate { .. } => "DO UPDATE",

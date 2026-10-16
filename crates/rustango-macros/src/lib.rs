@@ -7506,7 +7506,8 @@ fn inherent_impl_tokens(
             /// `on_conflict = DoUpdate { target, update_columns }`. The
             /// writer dispatches per-dialect:
             /// * Postgres / SQLite: `INSERT … ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
-            /// * MySQL: `INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col)` (target ignored — MySQL matches every UNIQUE index)
+            /// * MySQL: `INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col)`; refused when
+            ///   `target` is not the only unique key, since MySQL matches every UNIQUE index
             ///
             /// `target` names the column(s) whose unique constraint
             /// defines the conflict (typically a `unique` or
