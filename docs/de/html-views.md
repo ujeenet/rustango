@@ -185,7 +185,8 @@ let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
 Die Feldliste ist Pflicht. Sie ist die Schreib-Allowlist: Das Formular zeigt nur
 diese Felder, jeder andere gesendete Schlüssel (etwa `author_id=1`) wird ignoriert.
 Bei UpdateView behält ein gelistetes, aber nicht gesendetes Feld seinen Wert; nur
-ein `bool` wird `false`, weil eine nicht angehakte Checkbox nichts sendet.
+ein `bool` wird `false`, weil eine nicht angehakte Checkbox nichts sendet. Bei
+CreateView bekommt ein gelistetes, nicht gesendetes Feld mit Spalten-Default diesen Default.
 
 Das Formular-Template (`posts_form.html`) wird mit UpdateView geteilt. `is_update`
 unterscheidet die beiden, und **`form`** trägt sowohl die Felder als auch etwaige

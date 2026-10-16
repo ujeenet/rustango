@@ -187,7 +187,8 @@ let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
 La liste des champs est obligatoire. C'est la liste blanche d'écriture : le
 formulaire n'affiche que ces champs et toute autre clé envoyée (par exemple
 `author_id=1`) est ignorée. Avec UpdateView, un champ listé mais absent garde sa
-valeur ; seul un `bool` passe à `false`, car une case décochée n'envoie rien.
+valeur ; seul un `bool` passe à `false`, car une case décochée n'envoie rien. Avec
+CreateView, un champ listé absent qui a un défaut de colonne reçoit ce défaut.
 
 Le template de formulaire (`posts_form.html`) est partagé avec UpdateView. `is_update`
 distingue les deux, et **`form`** porte à la fois les champs et les éventuels messages de

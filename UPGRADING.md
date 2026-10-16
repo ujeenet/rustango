@@ -251,6 +251,10 @@ let mut t = PoolTuning::default();
 t.max_connections = Some(20);
 ```
 
+### `CreateView` fills an unsent defaulted field
+
+A listed field with a column default that the POST omits is no longer a "required" error; the row gets the default. An empty value is still sent, so it is still checked.
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts

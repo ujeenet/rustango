@@ -131,6 +131,20 @@ pub struct Story {
     pub owner_id: Option<i64>,
 }
 
+/// Listed fields with a column default.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "tv1402_badge", app = "tv1915")]
+pub struct Badge {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(max_length = 16, default = "'bronze'")]
+    pub tier: String,
+    #[rustango(default = "3")]
+    pub rank: i64,
+}
+
 const STORY_FIELDS: &[&str] = &["title", "note", "featured"];
 const EVENT_FIELDS: &[&str] = &["day", "at", "token", "meta", "done", "author_id", "note"];
 
@@ -149,6 +163,7 @@ async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<Memo>(pool).await;
     rustango::testkit::matrix::fresh_table::<Story>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Badge>(pool).await;
 }
 
 fn app(pool: &Pool) -> axum::Router {
@@ -250,6 +265,12 @@ fn app(pool: &Pool) -> axum::Router {
                 .template("form.html")
                 .success_url("/stories")
                 .router("/stories", t.clone(), pool.clone()),
+        )
+        .merge(
+            CreateView::for_model(Badge::SCHEMA, &["name", "tier", "rank"])
+                .template("form.html")
+                .success_url("/badges")
+                .router("/badges", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Pin::SCHEMA)
@@ -890,9 +911,23 @@ async fn update_view_unticked_checkbox_is_false(pool: &Pool) {
     assert!(!story(pool).await.featured, "unticked box kept true");
 }
 
+/// A listed field the create POST leaves out takes its column default.
+async fn create_view_unsent_field_takes_the_column_default(pool: &Pool) {
+    let (status, body) = send(pool, Method::POST, "/badges/new", "name=a").await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let b = Badge::objects().fetch(pool).await.expect("badges").remove(0);
+    assert_eq!((b.tier.as_str(), b.rank), ("bronze", 3));
+    // A sent value still wins over the default.
+    let (status, body) = send(pool, Method::POST, "/badges/new", "name=b&tier=gold&rank=1").await;
+    assert!(status.is_redirection(), "create: {status} {body}");
+    let b = Badge::objects().filter("name", "b").fetch(pool).await.expect("b").remove(0);
+    assert_eq!((b.tier.as_str(), b.rank), ("gold", 1));
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        create_view_unsent_field_takes_the_column_default,
         form_views_ignore_unlisted_columns,
         update_view_keeps_an_unsent_field,
         update_view_unticked_checkbox_is_false,

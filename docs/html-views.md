@@ -187,7 +187,9 @@ let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])  // the only f
 ```
 
 The field list is required. It is the write allow-list: the form renders only
-these fields, and any other posted key (say `author_id=1`) is ignored.
+these fields, and any other posted key (say `author_id=1`) is ignored. On
+create, a listed field with a column default that the POST leaves out gets
+that default.
 
 The form template (`posts_form.html`) is shared with UpdateView. `is_update`
 tells the two apart, and **`form`** carries both the fields and any validation

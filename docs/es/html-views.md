@@ -189,7 +189,8 @@ let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
 La lista de campos es obligatoria. Es la lista blanca de escritura: el formulario
 muestra solo esos campos y cualquier otra clave enviada (por ejemplo `author_id=1`)
 se ignora. En UpdateView, un campo listado que no llega conserva su valor; solo un
-`bool` pasa a `false`, porque una casilla sin marcar no envía nada.
+`bool` pasa a `false`, porque una casilla sin marcar no envía nada. En CreateView,
+un campo listado con default de columna que no llega recibe ese default.
 
 La plantilla del formulario (`posts_form.html`) se comparte con UpdateView. `is_update`
 distingue las dos, y **`form`** transporta tanto los campos como cualquier mensaje de

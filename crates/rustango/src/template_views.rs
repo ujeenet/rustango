@@ -2273,6 +2273,13 @@ fn parse_form(
         {
             continue;
         }
+        // An unsent defaulted field takes the column default on create, as in `ModelForm`.
+        if raw.is_none()
+            && kind == crate::core::WriteKind::Insert
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form)
+        {
+            continue;
+        }
         let raw = raw.cloned().unwrap_or_default();
         if raw.is_empty() && !f.nullable && !matches!(f.ty, crate::core::FieldType::Bool) {
             // Bool checkboxes legitimately submit nothing when
