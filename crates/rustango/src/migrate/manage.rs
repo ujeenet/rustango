@@ -3759,27 +3759,31 @@ async fn m2m_links(
     Ok(out)
 }
 
-/// Insert the `src` → `dsts` links of `rel`; a link already there is kept.
+/// One fixture row's links of one relation: its entry line, pk and targets.
+type RowLinks = (usize, serde_json::Value, Vec<serde_json::Value>);
+
+/// Insert every row's links of `rel` in bind-sized batches; a link already
+/// there is kept.
 async fn load_links(
     pool: &Pool,
     schema: &'static crate::core::ModelSchema,
     rel: &crate::core::M2MRelation,
-    src: &serde_json::Value,
-    dsts: &[serde_json::Value],
+    rows: &[RowLinks],
 ) -> Result<(), String> {
     let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
-    let src = json_to_sql_value(src, s)?;
-    for dst in dsts {
-        let query = crate::core::InsertQuery::new(
-            junction,
-            vec![rel.src_col, rel.dst_col],
-            vec![src.clone(), json_to_sql_value(dst, d)?],
-        );
-        crate::sql::insert_or_ignore(pool, &query)
-            .await
-            .map_err(|e| e.to_string())?;
+    let mut values = Vec::new();
+    for (line, src, dsts) in rows {
+        let at = |e: String| format!("entry #{line}: {e}");
+        let src = json_to_sql_value(src, s).map_err(at)?;
+        for dst in dsts {
+            values.push(vec![src.clone(), json_to_sql_value(dst, d).map_err(at)?]);
+        }
     }
-    Ok(())
+    let query = crate::core::BulkInsertQuery::new(junction, vec![rel.src_col, rel.dst_col], values)
+        .on_conflict(crate::core::ConflictClause::DoNothing);
+    crate::sql::bulk_insert_pool(pool, &query)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, PartialEq)]
@@ -3910,8 +3914,14 @@ async fn loaddata_cmd<W: Write>(
     // `--fail-fast` stops here, but the rows already in still need their
     // sequences moved, so the error is raised after the reset.
     let mut abort: Option<String> = None;
-    // M2M links load after every row, so both ends exist (#1226).
-    let mut links = Vec::new();
+    // M2M links load after every row, so both ends exist (#1226), one
+    // batched insert per relation.
+    let mut links: Vec<(
+        &'static crate::core::ModelSchema,
+        &'static crate::core::M2MRelation,
+        String,
+        Vec<RowLinks>,
+    )> = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -4004,7 +4014,14 @@ async fn loaddata_cmd<W: Write>(
                     touched.push(schema);
                 }
                 for (rel, dsts) in row_links {
-                    links.push((line, model_name.to_owned(), schema, rel, src_pk.clone(), dsts));
+                    let row = (line, src_pk.clone(), dsts);
+                    match links
+                        .iter_mut()
+                        .find(|(s, r, _, _)| s.table == schema.table && r.name == rel.name)
+                    {
+                        Some((_, _, _, rows)) => rows.push(row),
+                        None => links.push((schema, rel, model_name.to_owned(), vec![row])),
+                    }
                 }
             }
             Err(e) => {
@@ -4020,15 +4037,15 @@ async fn loaddata_cmd<W: Write>(
     }
 
     if abort.is_none() {
-        for (line, model_name, schema, rel, src, dsts) in links {
-            if let Err(e) = load_links(pool, schema, rel, &src, &dsts).await {
-                let msg = format!("loaddata: entry #{line} (`{model_name}`) `{}`: {e}", rel.name);
+        for (schema, rel, model_name, rows) in links {
+            if let Err(e) = load_links(pool, schema, rel, &rows).await {
+                let msg = format!("loaddata: `{model_name}` `{}`: {e}", rel.name);
                 if parsed.fail_fast {
                     abort = Some(msg);
                     break;
                 }
                 tracing::warn!("{msg}");
-                skipped += 1;
+                skipped += rows.len();
             }
         }
     }
