@@ -2,7 +2,8 @@
 //!
 //! [`Pool`] reaches Postgres, MySQL or SQLite through one handle and
 //! picks the matching [`Dialect`] for you. It is the multi-backend entry
-//! point; the `&PgPool` / `_on` APIs are the Postgres-only executor forms.
+//! point; the `&PgPool` APIs and the `_on` methods outside `SqlExecutor`
+//! (#1395) are the Postgres-only executor forms.
 //!
 //! Wrap a pool you already have:
 //!
