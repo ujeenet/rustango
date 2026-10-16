@@ -2,6 +2,7 @@
 //! pooled connection, on any backend (#2675).
 
 use futures_util::future::BoxFuture;
+use futures_util::stream::{BoxStream, TryStreamExt as _};
 
 use super::atomic::{self, Gate};
 use super::{Dialect, ExecError, PoolTx};
@@ -77,15 +78,27 @@ impl PoolConn {
     }
 }
 
-/// Rows of one statement, in the backend's own row type.
+/// One result row, in the backend's own row type.
 #[doc(hidden)]
-pub enum Rows {
+pub enum RowRef<'r> {
     #[cfg(feature = "postgres")]
-    Postgres(Vec<sqlx::postgres::PgRow>),
+    Postgres(&'r sqlx::postgres::PgRow),
     #[cfg(feature = "mysql")]
-    Mysql(Vec<sqlx::mysql::MySqlRow>),
+    Mysql(&'r sqlx::mysql::MySqlRow),
     #[cfg(feature = "sqlite")]
-    Sqlite(Vec<sqlx::sqlite::SqliteRow>),
+    Sqlite(&'r sqlx::sqlite::SqliteRow),
+}
+
+/// Decode each row as it arrives, so raw rows are never all held (rel-0608).
+async fn drain<R, U>(
+    mut rows: BoxStream<'_, Result<R, sqlx::Error>>,
+    mut decode: impl FnMut(&R) -> Result<U, sqlx::Error>,
+) -> Result<Vec<U>, sqlx::Error> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.try_next().await? {
+        out.push(decode(&row)?);
+    }
+    Ok(out)
 }
 
 /// Refuses a statement on an `atomic` transaction the server ended.
@@ -110,16 +123,20 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         Ok(Guard(Gate::OPEN))
     }
 
-    /// Runs one statement. Boxed, so callers hold no per-executor type
-    /// across an `.await` (that broke `Send` on `&Pool`).
+    /// Runs one statement, decoding each row with `decode`. Boxed, so
+    /// callers hold no per-executor type across an `.await` (that broke
+    /// `Send` on `&Pool`).
     #[doc(hidden)]
-    fn fetch_rows<'e, 'q: 'e>(
+    fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+        decode: F,
+    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
     where
-        'c: 'e;
+        'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e;
 }
 
 mod sealed {
@@ -127,45 +144,54 @@ mod sealed {
 }
 
 #[cfg(feature = "postgres")]
-fn pg_rows<'c: 'e, 'e, 'q: 'e, E>(
+fn pg_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+    mut decode: F,
+) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    U: Send + 'e,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let fut = exec.fetch_all(params.into_iter().fold(sqlx::query(sql), super::bind_query));
-    Box::pin(async move { fut.await.map(Rows::Postgres) })
+    let rows = exec.fetch(params.into_iter().fold(sqlx::query(sql), super::bind_query));
+    Box::pin(drain(rows, move |r| decode(RowRef::Postgres(r))))
 }
 
 #[cfg(feature = "mysql")]
-fn my_rows<'c: 'e, 'e, 'q: 'e, E>(
+fn my_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+    mut decode: F,
+) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
+    U: Send + 'e,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let fut = exec.fetch_all(params.into_iter().fold(sqlx::query(sql), super::bind_query_my));
-    Box::pin(async move { fut.await.map(Rows::Mysql) })
+    let rows = exec.fetch(params.into_iter().fold(sqlx::query(sql), super::bind_query_my));
+    Box::pin(drain(rows, move |r| decode(RowRef::Mysql(r))))
 }
 
 #[cfg(feature = "sqlite")]
-fn sq_rows<'c: 'e, 'e, 'q: 'e, E>(
+fn sq_rows<'c: 'e, 'e, 'q: 'e, E, U, F>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+    mut decode: F,
+) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
+    U: Send + 'e,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
     let q = params
         .into_iter()
         .fold(sqlx::query(sql), super::bind_query_sqlite);
-    let fut = exec.fetch_all(q);
-    Box::pin(async move { fut.await.map(Rows::Sqlite) })
+    let rows = exec.fetch(q);
+    Box::pin(drain(rows, move |r| decode(RowRef::Sqlite(r))))
 }
 
 impl<'c> sealed::Sealed<'c> for &'c Pool {}
@@ -174,21 +200,24 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         Pool::dialect(self)
     }
 
-    fn fetch_rows<'e, 'q: 'e>(
+    fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+        decode: F,
+    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
     where
         'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
         match self {
             #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => pg_rows(p, sql, params),
+            Pool::Postgres(p) => pg_rows(p, sql, params, decode),
             #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => my_rows(p, sql, params),
+            Pool::Mysql(p) => my_rows(p, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => sq_rows(p, sql, params),
+            Pool::Sqlite(p) => sq_rows(p, sql, params, decode),
         }
     }
 }
@@ -199,21 +228,24 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         PoolConn::dialect(self)
     }
 
-    fn fetch_rows<'e, 'q: 'e>(
+    fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+        decode: F,
+    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
     where
         'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
         match self {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => pg_rows(&mut **c, sql, params),
+            PoolConn::Postgres(c) => pg_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => my_rows(&mut **c, sql, params),
+            PoolConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => sq_rows(&mut **c, sql, params),
+            PoolConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
         }
     }
 }
@@ -228,21 +260,24 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         atomic::gate(self).map(Guard)
     }
 
-    fn fetch_rows<'e, 'q: 'e>(
+    fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+        decode: F,
+    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
     where
         'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
         match self {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => pg_rows(&mut **t, sql, params),
+            PoolTx::Postgres(t) => pg_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(t) => my_rows(&mut **t, sql, params),
+            PoolTx::Mysql(t) => my_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => sq_rows(&mut **t, sql, params),
+            PoolTx::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
         }
     }
 }
@@ -256,14 +291,17 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         crate::sql::postgres::DIALECT
     }
 
-    fn fetch_rows<'e, 'q: 'e>(
+    fn fetch_rows<'e, 'q: 'e, U, F>(
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Rows, sqlx::Error>>
+        decode: F,
+    ) -> BoxFuture<'e, Result<Vec<U>, sqlx::Error>>
     where
         'c: 'e,
+        U: Send + 'e,
+        F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        pg_rows(self, sql, params)
+        pg_rows(self, sql, params, decode)
     }
 }

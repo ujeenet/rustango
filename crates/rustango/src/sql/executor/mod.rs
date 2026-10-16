@@ -934,11 +934,7 @@ pub async fn fetch_aggregate_on<'c, E>(
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
-    let stmt = Postgres.compile_aggregate(query)?;
-    let rows = pg_on_query(&stmt.sql, stmt.params)
-        .fetch_all(executor)
-        .await?;
-    Ok(decode::rows_to_dicts(&rows, &[], usize::MAX))
+    values::fetch_aggregate_dict_on(executor, query).await
 }
 
 // Result cells to `SqlValue`, one plan per result set (#2655).
@@ -950,7 +946,7 @@ pub use tx::{transaction_pool, PoolTx};
 
 // One executor for every `_on` method (#2675).
 mod on;
-use on::Rows;
+use on::RowRef;
 pub use on::{PoolConn, SqlExecutor};
 
 mod atomic;
@@ -1727,35 +1723,47 @@ pub(crate) async fn count_rows_on<'c, E: SqlExecutor<'c>>(
     query: &CountQuery,
 ) -> Result<i64, ExecError> {
     let stmt = exec.dialect().compile_count(query)?;
-    let rows = run_on(exec, &stmt.sql, stmt.params).await?;
-    fn first_i64<R>(rows: &[R]) -> Result<i64, sqlx::Error>
+    fn cell_i64<R>(row: &R) -> Result<i64, sqlx::Error>
     where
         R: sqlx::Row,
         usize: sqlx::ColumnIndex<R>,
         i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     {
-        rows.first().ok_or(sqlx::Error::RowNotFound)?.try_get(0)
+        row.try_get(0)
     }
-    Ok(match rows {
+    let counts = run_on(exec, &stmt.sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
-        Rows::Postgres(r) => first_i64(&r)?,
+        RowRef::Postgres(r) => cell_i64(r),
         #[cfg(feature = "mysql")]
-        Rows::Mysql(r) => first_i64(&r)?,
+        RowRef::Mysql(r) => cell_i64(r),
         #[cfg(feature = "sqlite")]
-        Rows::Sqlite(r) => first_i64(&r)?,
+        RowRef::Sqlite(r) => cell_i64(r),
     })
+    .await?;
+    Ok(counts.first().copied().ok_or(sqlx::Error::RowNotFound)?)
 }
 
-/// Run one statement on `exec`, refused on an `atomic` transaction the
-/// server already ended. Counted here, so every `_on` read is.
-pub(crate) async fn run_on<'c, E: SqlExecutor<'c>>(
+/// Run one statement on `exec`, decoding row by row, refused on an
+/// `atomic` transaction the server already ended. Counted here, so every
+/// `_on` read is.
+pub(crate) async fn run_on<'c, E, U, F>(
     exec: E,
     sql: &str,
     params: Vec<SqlValue>,
-) -> Result<Rows, ExecError> {
+    decode: F,
+) -> Result<Vec<U>, ExecError>
+where
+    E: SqlExecutor<'c>,
+    U: Send,
+    F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send,
+{
     let guard = exec.guard()?;
     crate::test_assertions::query_counter::bump();
-    guard.check(exec.fetch_rows(sql, params).await.map_err(ExecError::from))
+    guard.check(
+        exec.fetch_rows(sql, params, decode)
+            .await
+            .map_err(ExecError::from),
+    )
 }
 
 mod traits;
@@ -2350,43 +2358,34 @@ where
     // Each JOIN target is stitched from the same row, once per FK chain
     // (from its leaf alias). No joins: plain decode.
     let leaves = select_related_leaves(&query.select_related);
-    let rows = run_on(exec, &stmt.sql, stmt.params).await?;
-    let out: Result<Vec<T>, sqlx::Error> = match rows {
+    let leaves = &leaves;
+    run_on(exec, &stmt.sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
-        Rows::Postgres(rows) => rows
-            .iter()
-            .map(|row| {
-                let mut t = <T as sqlx::FromRow<PgRow>>::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = t.__rustango_load_related(row, alias, first_hop)?;
-                }
-                Ok(t)
-            })
-            .collect(),
+        RowRef::Postgres(row) => {
+            let mut t = <T as sqlx::FromRow<PgRow>>::from_row(row)?;
+            for &(alias, first_hop) in leaves {
+                let _ = t.__rustango_load_related(row, alias, first_hop)?;
+            }
+            Ok(t)
+        }
         #[cfg(feature = "mysql")]
-        Rows::Mysql(rows) => rows
-            .iter()
-            .map(|row| {
-                let mut t = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = t.__rustango_load_related_my(row, alias, first_hop)?;
-                }
-                Ok(t)
-            })
-            .collect(),
+        RowRef::Mysql(row) => {
+            let mut t = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
+            for &(alias, first_hop) in leaves {
+                let _ = t.__rustango_load_related_my(row, alias, first_hop)?;
+            }
+            Ok(t)
+        }
         #[cfg(feature = "sqlite")]
-        Rows::Sqlite(rows) => rows
-            .iter()
-            .map(|row| {
-                let mut t = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
-                for &(alias, first_hop) in &leaves {
-                    let _ = t.__rustango_load_related_sqlite(row, alias, first_hop)?;
-                }
-                Ok(t)
-            })
-            .collect(),
-    };
-    Ok(out?)
+        RowRef::Sqlite(row) => {
+            let mut t = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
+            for &(alias, first_hop) in leaves {
+                let _ = t.__rustango_load_related_sqlite(row, alias, first_hop)?;
+            }
+            Ok(t)
+        }
+    })
+    .await
 }
 
 /// Gives `QuerySet` a `fetch(&Pool)` method that works on any

@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use super::RowRef;
 use crate::core::{FieldType, SqlValue};
 
 /// A leading result column: its output name and the type its model declares.
@@ -57,15 +58,15 @@ pub(super) trait DecodeRow: sqlx::Row {
 
 /// The names and decoders of a result set's first `width` columns, from
 /// its first row.
-struct RowPlan<'r> {
-    names: Vec<&'r str>,
+struct RowPlan {
+    names: Vec<String>,
     cells: Vec<Cell>,
 }
 
-impl<'r> RowPlan<'r> {
+impl RowPlan {
     /// Only the leading `typed` columns count: an alias that shares a
     /// column name (`SUM(x) AS flag`) is not that column (#2296).
-    fn new<R: DecodeRow>(first: &'r R, typed: &[TypedCol], width: usize) -> Self {
+    fn new<R: DecodeRow>(first: &R, typed: &[TypedCol], width: usize) -> Self {
         use sqlx::Column as _;
         let (names, cells) = first
             .columns()
@@ -77,7 +78,7 @@ impl<'r> RowPlan<'r> {
                     .get(i)
                     .filter(|(name, _)| name == c.name())
                     .and_then(|(_, ty)| *ty);
-                (c.name(), first.plan_cell(i, declared))
+                (c.name().to_owned(), first.plan_cell(i, declared))
             })
             .unzip();
         Self { names, cells }
@@ -89,42 +90,65 @@ impl<'r> RowPlan<'r> {
             .enumerate()
             .map(move |(i, &cell)| row.decode_cell(i, cell))
     }
+
+    /// The public type needs an owned key per cell; each map is sized up front (#2661).
+    fn dict<R: DecodeRow>(&self, row: &R) -> HashMap<String, SqlValue> {
+        let mut map = HashMap::with_capacity(self.names.len());
+        for (name, v) in self.names.iter().zip(self.row(row)) {
+            map.insert(name.clone(), v);
+        }
+        map
+    }
 }
 
-/// Each row as its first `width` cells, in column order.
-pub(super) fn rows_to_lists<R: DecodeRow>(
-    rows: &[R],
-    typed: &[TypedCol],
+/// Decodes value rows one at a time, planned from the first row seen.
+/// `typed` gives the model's column types; Postgres reports its own.
+pub(super) struct RowReader<F> {
+    typed: F,
     width: usize,
-) -> Vec<Vec<SqlValue>> {
-    let Some(first) = rows.first() else {
-        return Vec::new();
-    };
-    let plan = RowPlan::new(first, typed, width);
-    rows.iter().map(|row| plan.row(row).collect()).collect()
+    plan: Option<RowPlan>,
 }
 
-/// Each row as a map from column name to its first `width` cells. The
-/// public type needs an owned key per cell; the names are read once and
-/// each map is sized up front (#2661).
-pub(super) fn rows_to_dicts<R: DecodeRow>(
-    rows: &[R],
-    typed: &[TypedCol],
-    width: usize,
-) -> Vec<HashMap<String, SqlValue>> {
-    let Some(first) = rows.first() else {
-        return Vec::new();
-    };
-    let plan = RowPlan::new(first, typed, width);
-    rows.iter()
-        .map(|row| {
-            let mut map = HashMap::with_capacity(plan.names.len());
-            for (name, v) in plan.names.iter().zip(plan.row(row)) {
-                map.insert((*name).to_owned(), v);
-            }
-            map
+impl<F: Fn() -> Vec<TypedCol>> RowReader<F> {
+    pub(super) fn new(typed: F, width: usize) -> Self {
+        Self {
+            typed,
+            width,
+            plan: None,
+        }
+    }
+
+    fn plan<R: DecodeRow>(&mut self, row: &R, use_typed: bool) -> &RowPlan {
+        let Self { typed, width, plan } = self;
+        plan.get_or_insert_with(|| {
+            let typed = if use_typed { typed() } else { Vec::new() };
+            RowPlan::new(row, &typed, *width)
         })
-        .collect()
+    }
+
+    /// The row as its first `width` cells, in column order.
+    pub(super) fn list(&mut self, row: RowRef<'_>) -> Vec<SqlValue> {
+        match row {
+            #[cfg(feature = "postgres")]
+            RowRef::Postgres(r) => self.plan(r, false).row(r).collect(),
+            #[cfg(feature = "mysql")]
+            RowRef::Mysql(r) => self.plan(r, true).row(r).collect(),
+            #[cfg(feature = "sqlite")]
+            RowRef::Sqlite(r) => self.plan(r, true).row(r).collect(),
+        }
+    }
+
+    /// The row as a map from column name to its first `width` cells.
+    pub(super) fn dict(&mut self, row: RowRef<'_>) -> HashMap<String, SqlValue> {
+        match row {
+            #[cfg(feature = "postgres")]
+            RowRef::Postgres(r) => self.plan(r, false).dict(r),
+            #[cfg(feature = "mysql")]
+            RowRef::Mysql(r) => self.plan(r, true).dict(r),
+            #[cfg(feature = "sqlite")]
+            RowRef::Sqlite(r) => self.plan(r, true).dict(r),
+        }
+    }
 }
 
 /// The first type in the list sqlx would decode a `ty` column as.

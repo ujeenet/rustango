@@ -9,7 +9,7 @@ use sqlx::postgres::PgArguments;
 #[cfg(feature = "postgres")]
 use sqlx::query::Query;
 
-use super::{run_on, ExecError, Rows, SqlExecutor};
+use super::{run_on, ExecError, RowRef, SqlExecutor};
 use crate::core::{AggregateQuery, SelectQuery, SqlValue};
 use crate::sql::Pool;
 use crate::sql::{
@@ -24,10 +24,7 @@ use super::bind_query_my;
 #[cfg(feature = "sqlite")]
 use super::bind_query_sqlite;
 
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-use super::decode::TypedCol;
-use super::decode::{rows_to_dicts, rows_to_lists};
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
+use super::decode::{RowReader, TypedCol};
 use crate::core::joins::joined_label;
 
 /// Cells of a value row: the projection, then each join's columns. Any
@@ -42,7 +39,6 @@ fn values_width(query: &SelectQuery) -> usize {
 
 /// The model columns a SELECT emits first: its projection, else every
 /// field, then each join's projected `alias__col`.
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
     let model = query.model;
     let typed = |c: &'static str| (c.into(), model.field_by_column(c).map(|f| f.ty));
@@ -63,7 +59,6 @@ fn select_model_cols(query: &SelectQuery) -> Vec<TypedCol> {
 /// joined `alias.col` comes back as `alias__col`, typed by the joined
 /// model (#2322). MAX / MIN / ANY_VALUE take their column's type, as PG
 /// and MySQL report it (dialects-001); other aggregates stay untyped.
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn aggregate_cols(query: &AggregateQuery) -> Vec<TypedCol> {
     let model = query.model;
     let ty = |col: &str| match col.split_once('.') {
@@ -119,15 +114,8 @@ async fn fetch_values_dict_on<'c, E: SqlExecutor<'c>>(
     query: &SelectQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_select(query)?;
-    let width = values_width(query);
-    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
-        #[cfg(feature = "postgres")]
-        Rows::Postgres(rows) => rows_to_dicts(&rows, &[], width),
-        #[cfg(feature = "mysql")]
-        Rows::Mysql(rows) => rows_to_dicts(&rows, &select_model_cols(query), width),
-        #[cfg(feature = "sqlite")]
-        Rows::Sqlite(rows) => rows_to_dicts(&rows, &select_model_cols(query), width),
-    })
+    let mut reader = RowReader::new(|| select_model_cols(query), values_width(query));
+    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.dict(row))).await
 }
 
 /// [`fetch_values_dict`] for an [`AggregateQuery`]: each row comes
@@ -147,19 +135,13 @@ pub async fn fetch_aggregate_dict(
     fetch_aggregate_dict_on(pool, query).await
 }
 
-async fn fetch_aggregate_dict_on<'c, E: SqlExecutor<'c>>(
+pub(super) async fn fetch_aggregate_dict_on<'c, E: SqlExecutor<'c>>(
     exec: E,
     query: &AggregateQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_aggregate(query)?;
-    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
-        #[cfg(feature = "postgres")]
-        Rows::Postgres(rows) => rows_to_dicts(&rows, &[], usize::MAX),
-        #[cfg(feature = "mysql")]
-        Rows::Mysql(rows) => rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX),
-        #[cfg(feature = "sqlite")]
-        Rows::Sqlite(rows) => rows_to_dicts(&rows, &aggregate_cols(query), usize::MAX),
-    })
+    let mut reader = RowReader::new(|| aggregate_cols(query), usize::MAX);
+    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.dict(row))).await
 }
 
 /// Run a [`SelectQuery`] with a projection and return each row as a
@@ -180,15 +162,8 @@ async fn fetch_values_list_on<'c, E: SqlExecutor<'c>>(
     query: &SelectQuery,
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_select(query)?;
-    let width = values_width(query);
-    Ok(match run_on(exec, &stmt.sql, stmt.params).await? {
-        #[cfg(feature = "postgres")]
-        Rows::Postgres(rows) => rows_to_lists(&rows, &[], width),
-        #[cfg(feature = "mysql")]
-        Rows::Mysql(rows) => rows_to_lists(&rows, &select_model_cols(query), width),
-        #[cfg(feature = "sqlite")]
-        Rows::Sqlite(rows) => rows_to_lists(&rows, &select_model_cols(query), width),
-    })
+    let mut reader = RowReader::new(|| select_model_cols(query), values_width(query));
+    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.list(row))).await
 }
 
 /// The bound `.values_list_flat::<U>(…)` needs on Postgres. With the
@@ -527,15 +502,15 @@ async fn fetch_values_flat_on<'c, U: FlatScalar, E: SqlExecutor<'c>>(
     query: &SelectQuery,
 ) -> Result<Vec<U>, ExecError> {
     let stmt = exec.dialect().compile_select(query)?;
-    let rows: Result<Vec<U>, sqlx::Error> = match run_on(exec, &stmt.sql, stmt.params).await? {
+    run_on(exec, &stmt.sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
-        Rows::Postgres(rows) => rows.iter().map(decode_flat).collect(),
+        RowRef::Postgres(r) => decode_flat(r),
         #[cfg(feature = "mysql")]
-        Rows::Mysql(rows) => rows.iter().map(decode_flat).collect(),
+        RowRef::Mysql(r) => decode_flat(r),
         #[cfg(feature = "sqlite")]
-        Rows::Sqlite(rows) => rows.iter().map(decode_flat).collect(),
-    };
-    Ok(rows?)
+        RowRef::Sqlite(r) => decode_flat(r),
+    })
+    .await
 }
 
 /// Run a two-column [`SelectQuery`] and decode each row into
