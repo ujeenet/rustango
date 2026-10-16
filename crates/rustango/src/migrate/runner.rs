@@ -2748,13 +2748,6 @@ async fn pg_table_exists(
     Ok(n > 0)
 }
 
-/// Record `mig` as applied **without running its `forward` ops**, and
-/// tombstone every migration it `replaces`.
-///
-/// The squash row is inserted *before* the replaced rows are deleted, so a
-/// crash midway leaves the ledger over-full (squash + some predecessors)
-/// rather than empty — the next run then sees a full/partial state it can
-/// report, instead of silently re-running the squash against live tables.
 /// The ledger insert and tombstone delete of a fake apply, for `name`: a
 /// placeholder when run, a literal when previewed.
 fn fake_statements(dialect: &dyn crate::sql::Dialect, ledger: &str, name: &str) -> (String, String) {
@@ -2767,6 +2760,13 @@ fn fake_statements(dialect: &dyn crate::sql::Dialect, ledger: &str, name: &str) 
     )
 }
 
+/// Record `mig` as applied **without running its `forward` ops**, and
+/// tombstone every migration it `replaces`.
+///
+/// The squash row is inserted *before* the replaced rows are deleted, so a
+/// crash midway leaves the ledger over-full (squash + some predecessors)
+/// rather than empty — the next run then sees a full/partial state it can
+/// report, instead of silently re-running the squash against live tables.
 async fn fake_apply_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
