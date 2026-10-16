@@ -795,11 +795,14 @@ fn write_my_ident(sql: &mut String, name: &str) {
 
 /// True when every unique key a new row can clash on is `target`. A key
 /// with an `Auto` column the insert leaves out holds a generated value,
-/// so it never clashes; a bound one can (rel-0608 correctness-003).
+/// so it never clashes; a bound one can (rel-0608 correctness-003), unless
+/// it is a `default_uuid_v7` column: bound on every insert, fresh unless set.
 fn my_target_is_only_unique_key(model: &ModelSchema, bound: &[&str], target: &[&str]) -> bool {
     let fits = |cols: &[&str]| {
         let generated = cols.iter().any(|c| {
-            model.field_by_column(c).is_some_and(|f| f.auto) && !bound.contains(c)
+            model
+                .field_by_column(c)
+                .is_some_and(|f| f.is_rust_side_uuid() || (f.auto && !bound.contains(c)))
         });
         generated || (cols.len() == target.len() && cols.iter().all(|c| target.contains(c)))
     };
@@ -1235,6 +1238,42 @@ mod tests {
             matches!(bound, Err(SqlError::ConflictNotSupportedInDialect { .. })),
             "{bound:?}"
         );
+    }
+
+    /// A `default_uuid_v7` PK is always bound, but with a fresh value.
+    #[test]
+    fn conflict_do_update_accepts_a_rust_side_uuid_pk() {
+        use crate::core::{InsertQuery, SqlValue};
+        let base = with_pk(
+            empty_model_with(
+                "item",
+                &[("id", FieldType::Uuid), ("name", FieldType::String)],
+            ),
+            "id",
+            true,
+        );
+        let fields: Vec<crate::core::FieldSchema> = base
+            .fields
+            .iter()
+            .map(|f| crate::core::FieldSchema {
+                unique: f.column == "name",
+                ..*f
+            })
+            .collect();
+        let model: &'static crate::core::ModelSchema = Box::leak(Box::new(crate::core::ModelSchema {
+            fields: Box::leak(fields.into_boxed_slice()),
+            ..*base
+        }));
+        let q = InsertQuery::new(
+            model,
+            vec!["id", "name"],
+            vec![SqlValue::Uuid(uuid::Uuid::nil()), SqlValue::String("a".into())],
+        )
+        .on_conflict(ConflictClause::DoUpdate {
+            target: vec!["name"],
+            update_columns: vec!["name"],
+        });
+        MySql.compile_insert(&q).expect("a Rust-filled uuid PK never clashes");
     }
 
     #[test]
