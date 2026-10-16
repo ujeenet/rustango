@@ -1775,6 +1775,11 @@ The `_on` methods are `fetch_on`, `first_on`, `count_on`, `exists_on`,
 `&mut PoolTx`, `&Pool`, or on Postgres any sqlx executor (`&PgPool`,
 `&mut PgConnection`, `t.conn()`).
 
+A connection goes back to the pool with any session state you set on it
+(`SET …`, MySQL `@vars`, SQLite `PRAGMA`); the next borrower inherits it, which
+on a registry pool can be another tenant's request. After such a change call
+`conn.close_on_drop()`, so the connection is closed instead of reused.
+
 ---
 
 ## Signals

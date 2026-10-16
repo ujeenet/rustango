@@ -237,6 +237,92 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     assert_eq!(names, ["Ada", "Cy"]);
 }
 
+/// A one-connection pool on the same database, so a release is visible.
+async fn one_conn(pool: &Pool) -> Pool {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(p) => Pool::Postgres(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(p) => Pool::Mysql(
+            sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(p) => Pool::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with((*p.connect_options()).clone())
+                .await
+                .unwrap(),
+        ),
+    }
+}
+
+/// Read one session setting on `conn`, after setting it when `set`.
+async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
+    match conn {
+        #[cfg(feature = "postgres")]
+        PoolConn::Postgres(c) => {
+            if set {
+                sqlx::query("SET application_name = 'rustango_leak'").execute(&mut **c).await.unwrap();
+            }
+            sqlx::query_scalar("SELECT current_setting('application_name')")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+        }
+        #[cfg(feature = "mysql")]
+        PoolConn::Mysql(c) => {
+            if set {
+                sqlx::query("SET @rustango_leak = 'rustango_leak'").execute(&mut **c).await.unwrap();
+            }
+            sqlx::query_scalar("SELECT CAST(COALESCE(@rustango_leak, '') AS CHAR)")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+        }
+        #[cfg(feature = "sqlite")]
+        PoolConn::Sqlite(c) => {
+            if set {
+                sqlx::query("PRAGMA cache_size = 1234").execute(&mut **c).await.unwrap();
+            }
+            sqlx::query_scalar::<_, i64>("PRAGMA cache_size")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap()
+                .to_string()
+        }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("no backend enabled"),
+    }
+}
+
+/// Session state set on a held connection reaches the next borrower,
+/// unless the connection is closed on drop (#1397).
+async fn close_on_drop_keeps_session_state_out_of_the_pool(pool: &Pool) {
+    let p = one_conn(pool).await;
+    let mut conn = p.acquire().await.unwrap();
+    let default = session_setting(&mut conn, false).await;
+    let set = session_setting(&mut conn, true).await;
+    assert_ne!(set, default);
+    drop(conn);
+    let mut conn = p.acquire().await.unwrap();
+    assert_eq!(session_setting(&mut conn, false).await, set, "premise: sqlx keeps it");
+    conn.close_on_drop();
+    drop(conn);
+    let mut conn = p.acquire().await.unwrap();
+    assert_eq!(session_setting(&mut conn, false).await, default);
+}
+
 tri_dialect_test!(
     setup: seeded,
     scenarios: [
@@ -245,5 +331,6 @@ tri_dialect_test!(
         queries_run_on_the_held_session,
         on_tx_sees_its_writes,
         former_pg_only_on_methods_run_on_a_held_conn,
+        close_on_drop_keeps_session_state_out_of_the_pool,
     ]
 );

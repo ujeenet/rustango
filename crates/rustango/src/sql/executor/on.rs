@@ -18,8 +18,9 @@ use crate::sql::Pool;
 /// let total = Post::objects().count_on(&mut conn).await?;
 /// ```
 ///
-/// Session state set on it (`SET …`) stays with the connection when it
-/// goes back to the pool.
+/// Session state set on it (`SET …`, MySQL `@vars`, SQLite `PRAGMA`) stays
+/// with the connection when it goes back to the pool, so the next borrower
+/// gets it: call [`Self::close_on_drop`] after changing any (#1397).
 #[non_exhaustive]
 pub enum PoolConn {
     #[cfg(feature = "postgres")]
@@ -58,6 +59,20 @@ impl PoolConn {
             PoolConn::Mysql(_) => crate::sql::mysql::DIALECT,
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
+        }
+    }
+
+    /// Close the connection on drop instead of returning it to the pool, so
+    /// session state set on it cannot reach the next borrower. sqlx never
+    /// resets it, and a reset would also undo an `after_connect` setup.
+    pub fn close_on_drop(&mut self) {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolConn::Postgres(c) => c.close_on_drop(),
+            #[cfg(feature = "mysql")]
+            PoolConn::Mysql(c) => c.close_on_drop(),
+            #[cfg(feature = "sqlite")]
+            PoolConn::Sqlite(c) => c.close_on_drop(),
         }
     }
 

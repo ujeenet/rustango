@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — `PoolConn::close_on_drop` keeps session state out of the pool (#1397)
+
+sqlx returns a connection with its `SET` state intact; call it after changing session state so the next borrower gets a fresh connection.
+
 ### Fixed — a terminated PG backend aborts the `atomic` block at once (#1403)
 
 A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.

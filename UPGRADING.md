@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Session state on a `PoolConn` reaches the next borrower (#1397)
+
+Nothing resets it on release. If you `SET` anything on a held connection, call `conn.close_on_drop()` before dropping it.
+
 ### PG FATAL errors end an `atomic` block (#1403)
 
 After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_timeout`) later statements in the block return `ExecError::AtomicAborted`, not a driver I/O error.
