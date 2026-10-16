@@ -193,17 +193,34 @@ where
     pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
         let select = self.compile()?;
         let stmt = paginated_statement(&Postgres, &select)?;
-        let raw_rows: Vec<PgRow> = pg_on_query(&stmt.sql, stmt.params).fetch_all(pool).await?;
-        let total: i64 = raw_rows
-            .first()
-            .map(|row| sqlx::Row::try_get::<i64, _>(row, "__rustango_total"))
-            .transpose()?
-            .unwrap_or(0);
-        let mut rows = Vec::with_capacity(raw_rows.len());
-        for row in &raw_rows {
-            rows.push(T::from_row(row)?);
-        }
-        Ok(Page { rows, total })
+        // Its own decode only for the looser `FromRow<PgRow>` bound.
+        let rows = run_on(pool, &stmt.sql, stmt.params, |row| match row {
+            RowRef::Postgres(r) => paged::<T, _>(r),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("a PgPool yields Postgres rows"),
+        })
+        .await?;
+        Ok(into_page(rows))
+    }
+}
+
+/// One `fetch_paginated` row and its window total.
+fn paged<T, R>(row: &R) -> Result<(T, i64), sqlx::Error>
+where
+    R: sqlx::Row,
+    T: for<'r> sqlx::FromRow<'r, R>,
+    for<'a> &'a str: sqlx::ColumnIndex<R>,
+    i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    Ok((T::from_row(row)?, row.try_get("__rustango_total")?))
+}
+
+/// An empty page has no row to carry the total, so it is 0.
+fn into_page<T>(rows: Vec<(T, i64)>) -> Page<T> {
+    let total = rows.first().map_or(0, |(_, total)| *total);
+    Page {
+        rows: rows.into_iter().map(|(row, _)| row).collect(),
+        total,
     }
 }
 
@@ -240,15 +257,6 @@ where
         self,
         exec: E,
     ) -> Result<Page<T>, ExecError> {
-        fn paged<T, R>(row: &R) -> Result<(T, i64), sqlx::Error>
-        where
-            R: sqlx::Row,
-            T: for<'r> sqlx::FromRow<'r, R>,
-            for<'a> &'a str: sqlx::ColumnIndex<R>,
-            i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-        {
-            Ok((T::from_row(row)?, row.try_get("__rustango_total")?))
-        }
         let select = self.compile()?;
         let stmt = paginated_statement(exec.dialect(), &select)?;
         let rows = run_on(exec, &stmt.sql, stmt.params, |row| match row {
@@ -260,11 +268,7 @@ where
             RowRef::Sqlite(r) => paged::<T, _>(r),
         })
         .await?;
-        let total = rows.first().map_or(0, |(_, total)| *total);
-        Ok(Page {
-            rows: rows.into_iter().map(|(row, _)| row).collect(),
-            total,
-        })
+        Ok(into_page(rows))
     }
 
     /// [`QuerySet::in_bulk`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
@@ -363,12 +367,13 @@ where
     P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
     let stmt = annotate_count_statement(&Postgres, parent_qs, child_table, child_fk_column)?;
-    let raw_rows = pg_on_query(&stmt.sql, stmt.params).fetch_all(pool).await?;
-    let mut out = Vec::with_capacity(raw_rows.len());
-    for row in &raw_rows {
-        out.push(counted::<P, _>(row)?);
-    }
-    Ok(out)
+    // Its own decode only for the looser `FromRow<PgRow>` bound.
+    run_on(pool, &stmt.sql, stmt.params, |row| match row {
+        RowRef::Postgres(r) => counted::<P, _>(r),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("a PgPool yields Postgres rows"),
+    })
+    .await
 }
 
 /// [`annotate_count_children`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
