@@ -1810,8 +1810,8 @@ fn render_changes_split_inner(
                     // Emit the FK clauses inside the CREATE TABLE statement.
                     let q_src_table = fk_target(dialect, schema, src_table);
                     let q_dst_table = fk_target(dialect, schema, dst_table);
-                    let q_src_pk = dialect.quote_ident(src_pk);
-                    let q_dst_pk = dialect.quote_ident(dst_pk);
+                    let src_on = dialect.quote_ident(src_pk);
+                    let dst_on = dialect.quote_ident(dst_pk);
                     let q_src_fk =
                         dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
                     let q_dst_fk =
@@ -1819,8 +1819,8 @@ fn render_changes_split_inner(
                     out.immediate.push(format!(
                         "CREATE TABLE {q_through} ({q_src_col} {src_ty} NOT NULL, {q_dst_col} {dst_ty} NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}), \
-                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_src_pk}) ON DELETE CASCADE, \
-                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_dst_pk}) ON DELETE CASCADE)",
+                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({src_on}) ON DELETE CASCADE, \
+                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({dst_on}) ON DELETE CASCADE)",
                     ));
                 } else {
                     // PG / MySQL: defer FK creation so cross-table cycles
