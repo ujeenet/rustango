@@ -3662,8 +3662,30 @@ type Junction = (
     [&'static crate::core::FieldSchema; 2],
 );
 
-fn junction_of(rel: &crate::core::M2MRelation) -> Result<Junction, MigrateError> {
-    let junction = crate::sql::m2m::junction(rel.through, &[rel.src_col, rel.dst_col]);
+/// Both ends take their model's pk type, so a text or UUID key decodes.
+fn junction_of(
+    src: &'static crate::core::ModelSchema,
+    rel: &crate::core::M2MRelation,
+) -> Result<Junction, MigrateError> {
+    let pk_ty = |schema: Option<&'static crate::core::ModelSchema>, table: &str| {
+        schema
+            .and_then(crate::core::ModelSchema::primary_key)
+            .map(|pk| pk.ty)
+            .ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "M2M `{}`: `{table}` has no registered primary key",
+                    rel.name
+                ))
+            })
+    };
+    let dst = crate::core::ModelEntry::for_table(rel.to).map(|e| e.schema);
+    let junction = crate::sql::m2m::typed_junction(
+        rel.through,
+        &[
+            (rel.src_col, pk_ty(Some(src), src.table)?),
+            (rel.dst_col, pk_ty(dst, rel.to)?),
+        ],
+    );
     let end = |col: &str| {
         junction.field_by_column(col).ok_or_else(|| {
             MigrateError::Validation(format!("junction `{}` has no `{col}` column", rel.through))
@@ -3680,7 +3702,7 @@ async fn m2m_links(
 ) -> Result<Vec<(&'static str, LinksBySource)>, MigrateError> {
     let mut out = Vec::new();
     for rel in schema.m2m.iter().filter(|r| r.auto_create) {
-        let (junction, [src, dst]) = junction_of(rel)?;
+        let (junction, [src, dst]) = junction_of(schema, rel)?;
         let query = crate::core::SelectQuery::new(junction);
         let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
             .await
@@ -3697,7 +3719,7 @@ async fn m2m_links(
             }
         }
         for dsts in by_src.values_mut() {
-            dsts.sort_by_key(serde_json::Value::as_i64);
+            dsts.sort_by(|a, b| (a.as_i64(), a.as_str()).cmp(&(b.as_i64(), b.as_str())));
         }
         out.push((rel.name, by_src));
     }
@@ -3707,11 +3729,12 @@ async fn m2m_links(
 /// Insert the `src` → `dsts` links of `rel`; a link already there is kept.
 async fn load_links(
     pool: &Pool,
+    schema: &'static crate::core::ModelSchema,
     rel: &crate::core::M2MRelation,
     src: &serde_json::Value,
     dsts: &[serde_json::Value],
 ) -> Result<(), String> {
-    let (junction, [s, d]) = junction_of(rel).map_err(|e| e.to_string())?;
+    let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
     let src = json_to_sql_value(src, s)?;
     for dst in dsts {
         let query = crate::core::InsertQuery::new(
@@ -3948,7 +3971,7 @@ async fn loaddata_cmd<W: Write>(
                     touched.push(schema);
                 }
                 for (rel, dsts) in row_links {
-                    links.push((line, model_name.to_owned(), rel, src_pk.clone(), dsts));
+                    links.push((line, model_name.to_owned(), schema, rel, src_pk.clone(), dsts));
                 }
             }
             Err(e) => {
@@ -3964,8 +3987,8 @@ async fn loaddata_cmd<W: Write>(
     }
 
     if abort.is_none() {
-        for (line, model_name, rel, src, dsts) in links {
-            if let Err(e) = load_links(pool, rel, &src, &dsts).await {
+        for (line, model_name, schema, rel, src, dsts) in links {
+            if let Err(e) = load_links(pool, schema, rel, &src, &dsts).await {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) `{}`: {e}", rel.name);
                 if parsed.fail_fast {
                     abort = Some(msg);

@@ -177,6 +177,31 @@ pub struct M2mTag {
     pub n: i64,
 }
 
+/// Text pk on both ends, with no model for the junction.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cli1393_shelf",
+    app = "cli1393",
+    m2m(
+        name = "labels",
+        to = "cli1393_label",
+        through = "cli1393_shelf_labels",
+        src = "shelf_code",
+        dst = "label_code"
+    )
+)]
+pub struct TextShelf {
+    #[rustango(primary_key, max_length = 32)]
+    pub code: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1393_label", app = "cli1393")]
+pub struct TextLabel {
+    #[rustango(primary_key, max_length = 32)]
+    pub code: String,
+}
+
 // Two tables that reference each other through nullable links.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli2318_a", app = "cli2318")]
@@ -582,6 +607,78 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
+/// Empty shelf and label tables, joined by the junction migrations build.
+async fn fresh_text_m2m(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "cli1393_shelf_labels").await;
+    fresh_table::<TextShelf>(pool).await;
+    fresh_table::<TextLabel>(pool).await;
+    let create = SchemaChange::CreateM2MTable {
+        through: "cli1393_shelf_labels".into(),
+        src_table: TextShelf::SCHEMA.table.into(),
+        src_col: "shelf_code".into(),
+        dst_table: TextLabel::SCHEMA.table.into(),
+        dst_col: "label_code".into(),
+    };
+    let snap = SchemaSnapshot::from_models(&[TextShelf::SCHEMA, TextLabel::SCHEMA]);
+    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
+    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
+        raw_execute_pool(pool, sql, vec![])
+            .await
+            .expect("junction ddl");
+    }
+}
+
+/// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
+async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
+    fresh_text_m2m(pool).await;
+    let shelf = TextShelf { code: "s1".into() };
+    shelf.insert_pool(pool).await.expect("shelf");
+    for code in ["a", "b"] {
+        let label = TextLabel { code: code.into() };
+        label.insert_pool(pool).await.expect("label");
+        shelf.labels_m2m().add(code, pool).await.expect("link");
+    }
+    let dumped = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1393.TextShelf",
+            "--model",
+            "cli1393.TextLabel",
+            "--indent",
+            "0",
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    let shelf_row = rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|e| e["model"] == "cli1393.TextShelf")
+        .expect("shelf row");
+    assert_eq!(
+        shelf_row["fields"]["labels"],
+        serde_json::json!(["a", "b"]),
+        "{dumped}"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("text_m2m.json");
+    std::fs::write(&fixture, dumped.trim()).unwrap();
+
+    fresh_text_m2m(pool).await;
+    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    let mut links: Vec<String> = shelf.labels_m2m().all_as(pool).await.expect("links");
+    rustango::testkit::matrix::drop_table(pool, "cli1393_shelf_labels").await;
+    out.expect("loaddata");
+    links.sort_unstable();
+    assert_eq!(links, ["a", "b"], "the reload lost the M2M links: {dumped}");
+}
+
 async fn dump(pool: &Pool) -> serde_json::Value {
     let out = manage(
         pool,
@@ -683,5 +780,6 @@ tri_dialect_test! {
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
         dump_and_load_keeps_m2m_links,
+        dump_and_load_keeps_text_pk_m2m_links,
     ],
 }

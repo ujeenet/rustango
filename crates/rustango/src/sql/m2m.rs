@@ -236,7 +236,17 @@ impl M2MManager {
 /// The junction as a schema the emitters compile against (#2136): the
 /// registered through model, else one naming just the manager's columns.
 pub(crate) fn junction(through: &'static str, cols: &[&'static str]) -> &'static ModelSchema {
-    type Key = (&'static str, Vec<&'static str>);
+    // Binding: types only pick NULL casts, and a junction never binds NULL.
+    let cols: Vec<_> = cols.iter().map(|c| (*c, FieldType::I64)).collect();
+    typed_junction(through, &cols)
+}
+
+/// [`junction`] with each column's real type, for callers that decode it.
+pub(crate) fn typed_junction(
+    through: &'static str,
+    cols: &[(&'static str, FieldType)],
+) -> &'static ModelSchema {
+    type Key = (&'static str, Vec<(&'static str, FieldType)>);
     // Keys are `&'static` names from `m2m(...)` declarations, so this stays small.
     static CACHE: OnceLock<Mutex<HashMap<Key, &'static ModelSchema>>> = OnceLock::new();
     let mut cache = CACHE
@@ -247,10 +257,9 @@ pub(crate) fn junction(through: &'static str, cols: &[&'static str]) -> &'static
         if let Some(entry) = crate::core::ModelEntry::for_table(through) {
             return entry.schema;
         }
-        // Types only pick NULL casts, and a junction never binds NULL.
         let fields: Vec<FieldSchema> = cols
             .iter()
-            .map(|c| FieldSchema::new(c, c, FieldType::I64))
+            .map(|(c, ty)| FieldSchema::new(c, c, *ty))
             .collect();
         let mut schema = ModelSchema::new(through, through);
         schema.fields = Box::leak(fields.into_boxed_slice());
