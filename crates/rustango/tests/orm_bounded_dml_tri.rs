@@ -227,6 +227,32 @@ async fn anti_join_delete(pool: &Pool) {
     assert_eq!(left.iter().map(|l| l.id).collect::<Vec<_>>(), vec![1, 3]);
 }
 
+/// #1361 — `IN (SELECT … FROM <target>)` in a write; MySQL raised 1093.
+async fn same_table_in_subquery_dml(pool: &Pool) {
+    let high = || {
+        Item::objects()
+            .filter("rank__gt", 35_i64)
+            .values_list_flat("id")
+            .compile()
+            .unwrap()
+    };
+    let n = Item::objects()
+        .where_in_subquery("id", high())
+        .update()
+        .set("tag", "hi")
+        .execute_pool(pool)
+        .await
+        .expect("update IN (same table)");
+    assert_eq!(n, 2);
+    assert_eq!(ids_tagged(pool, "hi").await, vec![1, 3]);
+    let q = Item::objects()
+        .where_not_in_subquery("id", high())
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.expect("delete NOT IN"), 3);
+    assert_eq!(ids(pool).await, vec![1, 3]);
+}
+
 /// `difference` used to be dropped, so the excluded rows went too (#2452).
 async fn set_operation_dml_is_refused(pool: &Pool) {
     let pinned = || Item::objects().filter("id", 1_i64);
@@ -267,6 +293,7 @@ tri_dialect_test! {
         ties_page_by_pk,
         unbounded_paths_unchanged,
         anti_join_delete,
+        same_table_in_subquery_dml,
         set_operation_dml_is_refused,
     ],
 }

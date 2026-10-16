@@ -50,6 +50,8 @@ pub(super) struct Sql<'d> {
     pub total: Option<CountQuery>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
     pub group_concat: bool,
+    /// Writing an UPDATE/DELETE: MySQL needs every `IN (subquery)` derived (#1361).
+    pub in_dml: bool,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -127,6 +129,7 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
+            in_dml: false,
         }
     }
 
@@ -142,6 +145,7 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
+            in_dml: false,
         }
     }
 
@@ -422,9 +426,11 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
-        // Own scope frame so subqueries in this branch resolve
-        // `OuterRef` against it.
-        b.scope_stack.push(Scope::plain(branch.query.model));
+        // A branch is the head's sibling: its frame replaces the head's,
+        // so its own `OuterRef` reaches the enclosing query (#1409).
+        let head_frame = b.scope_stack.pop();
+        let frame = b.correlated_scope(branch.query.model);
+        b.scope_stack.push(frame);
         // Plain branches emit inline; `SELECT … UNION SELECT …` is
         // valid everywhere and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
@@ -455,6 +461,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
             r
         };
         b.scope_stack.pop();
+        b.scope_stack.extend(head_frame);
         r?;
     }
 
@@ -1747,6 +1754,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
         return Err(SqlError::EmptyUpdateSet);
     }
     b.scope_stack.push(Scope::plain(query.model));
+    b.in_dml = true;
     let r = (|| {
         b.sql.push_str("UPDATE ");
         b.write_ident(query.model.table);
@@ -3732,6 +3740,7 @@ fn write_call_unary(
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
     b.scope_stack.push(Scope::plain(query.model));
+    b.in_dml = true;
     let r = (|| {
         b.sql.push_str("DELETE FROM ");
         b.write_ident(query.model.table);
@@ -4015,7 +4024,7 @@ pub(super) fn write_where_expr(
                 || subquery.offset.is_some()
                 || subquery.compound_limit.is_some()
                 || subquery.compound_offset.is_some();
-            let wrap = limited && b.d.in_subquery_limit_needs_derived_table();
+            let wrap = (limited || b.in_dml) && b.d.in_subquery_limit_needs_derived_table();
             if wrap {
                 b.sql.push_str("SELECT * FROM (");
             }

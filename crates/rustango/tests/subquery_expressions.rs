@@ -160,8 +160,10 @@ fn in_subquery_over_values_list_flat_projects_one_column() {
     );
     for d in [&Postgres as &dyn Dialect, &MySql, &Sqlite] {
         let sql = d.compile_update(&q).unwrap().sql;
-        let want = format!("IN (SELECT {} FROM", d.quote_ident("author_id"));
+        // MySQL wraps it in a derived table inside a write (#1361).
+        let want = format!("(SELECT {} FROM", d.quote_ident("author_id"));
         assert!(sql.contains(&want), "{}: {sql}", d.name());
+        assert_eq!(sql.contains("_rustango_in"), d.name() == "mysql", "{sql}");
     }
 }
 

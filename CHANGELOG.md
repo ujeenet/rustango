@@ -44,6 +44,22 @@ A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block 
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.
 
+### Fixed — MySQL `dbshell` keeps URL options like `ssl-mode` (#1410)
+
+`ssl-mode`, `ssl-ca`, `ssl-cert`, `ssl-key`, `charset`, `socket`, `timezone` and `collation` become `mysql` client flags; any other option is refused with its name instead of being dropped.
+
+### Fixed — `OuterRef` in a set-operation branch points at the enclosing query (#1409)
+
+It used to bind to the head branch, so the branch matched the wrong rows or failed with an unknown column.
+
+### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
+
+The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
+
+### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
+
+Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.
+
 ## [0.60.8] — 2026-10-17
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.

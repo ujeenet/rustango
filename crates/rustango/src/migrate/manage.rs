@@ -3459,12 +3459,13 @@ fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
 
 /// `psql` for `url`; the password goes in its env, not argv (#2324).
 fn psql_restore_command(
+    psql: &str,
     parsed: &RestorePlan,
     url: &str,
 ) -> Result<std::process::Command, MigrateError> {
     let mut cmd = crate::dbshell::LibpqConn::new(url)
         .map_err(MigrateError::Validation)?
-        .command("psql");
+        .command(psql);
     cmd.args(build_psql_argv(parsed));
     Ok(cmd)
 }
@@ -3496,16 +3497,18 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 .into(),
         )
     })?;
-    run_psql_restore(&parsed, &url, w)
+    run_psql_restore("psql", &parsed, &url, w)
 }
 
-/// Split from [`db_restore_cmd`] so a test can aim it at a private database.
+/// Split from [`db_restore_cmd`] so a test can aim it at a private database
+/// and a `psql` off `PATH`.
 fn run_psql_restore<W: Write>(
+    psql: &str,
     parsed: &RestorePlan,
     url: &str,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    let mut cmd = psql_restore_command(parsed, url)?;
+    let mut cmd = psql_restore_command(psql, parsed, url)?;
     writeln!(w, "running: psql {}", shown_args(&cmd))?;
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
@@ -8466,7 +8469,7 @@ mod db_cmd_tests {
         };
         for cmd in [
             pg_dump_command(&dump, url).unwrap(),
-            psql_restore_command(&plan, url).unwrap(),
+            psql_restore_command("psql", &plan, url).unwrap(),
         ] {
             assert!(
                 !cmd.get_args()
@@ -8609,13 +8612,22 @@ mod db_cmd_tests {
             eprintln!("DATABASE_URL not set — skipping");
             return;
         };
-        assert!(
-            std::process::Command::new("psql")
+        // `psql` on PATH, else the Docker shim; CI must have one (#1413).
+        let runs = |p: &str| {
+            std::process::Command::new(p)
                 .arg("--version")
                 .output()
-                .is_ok_and(|o| o.status.success()),
-            "db:restore needs `psql` on PATH"
-        );
+                .is_ok_and(|o| o.status.success())
+        };
+        let shim = std::env::var("HOME").map(|h| format!("{h}/.local/docker-shims/psql"));
+        let Some(psql) = std::iter::once("psql".to_owned())
+            .chain(shim)
+            .find(|p| runs(p))
+        else {
+            assert!(std::env::var_os("CI").is_none(), "db:restore needs `psql` on PATH in CI");
+            eprintln!("SKIPPED: no `psql` on PATH and no ~/.local/docker-shims/psql; db:restore is unproven here");
+            return;
+        };
         let db = format!("rustango_restore_{}", std::process::id());
         let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
         let private = format!("{base}/{db}");
@@ -8640,7 +8652,7 @@ mod db_cmd_tests {
 
         let plan = RestorePlan::check(restore_args(bad.to_str().unwrap(), true, true), |_| true)
             .expect("plan");
-        let res = run_psql_restore(&plan, &private, &mut Vec::new());
+        let res = run_psql_restore(&psql, &plan, &private, &mut Vec::new());
         let kept: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM keep")
             .fetch_one(&p)
             .await;
