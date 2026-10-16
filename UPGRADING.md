@@ -162,6 +162,10 @@ untouched.
 
 Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
+### Tenant-user deactivation in the admin signs out (#1412)
+
+A user deactivated in the admin must sign in again after reactivation; old cookies and refresh tokens no longer come back.
+
 ### Admin treats credential columns as secret (#1158)
 
 Columns named `password_hash`, `password` or `database_url` now behave like a `password` widget in the admin: shown only as set/unset, rendered empty on edit (empty keeps the stored value), and not searchable or filterable.
