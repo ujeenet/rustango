@@ -84,6 +84,18 @@ Each row carries its links as `"<relation>": [pk, ...]` in `fields`; `loaddata` 
 
 They read the ledgers as `migrate` does: a file replaced by an applied squash counts as applied, a squash `migrate` would only record previews no DDL, and the framework's system chain is listed and previewed. `--dry-run` no longer creates the ledger. Under tenancy, `showmigrations` marks tenant-scoped files from the tenant ledgers. New `migrate_dry_run_pool_with_ledger` re-export.
 
+### Fixed — the translation editor form carries a CSRF token (#1259)
+
+Every Save, add and delete was refused with 403 under session auth.
+
+### Fixed — the admin 403 page's Sign-out form carries a CSRF token (#1260)
+
+A non-superuser could not sign out from it: `/logout` refused the tokenless POST.
+
+### Fixed — the fullstack template's admin keeps its session key across restarts (#1335)
+
+`admin_router` loads the key with `load_session_secret_for_tier`: `./var/` in dev, and a refused boot on prod without `RUSTANGO_SESSION_SECRET`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)
