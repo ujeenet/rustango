@@ -151,17 +151,6 @@ impl Dialect for MySql {
         })
     }
 
-    /// MySQL's column types differ from the Postgres ones in
-    /// several ways:
-    /// - no `BOOLEAN`; it is an alias for `TINYINT(1)`
-    /// - no `TIMESTAMPTZ`; `DATETIME(6)` holds microseconds but no
-    ///   timezone, and sqlx binds a `DateTime<Utc>` into it correctly
-    /// - no `JSONB`; `JSON` validates on write and stores binary
-    /// - no `UUID`; `CHAR(36)` is the usual form
-    /// - `VARCHAR` needs a length, so an unbounded `String` becomes
-    ///   `LONGTEXT`; `TEXT` caps at 64 KiB where PG/SQLite have no cap
-    /// - no `DOUBLE PRECISION`; `DOUBLE`, and `REAL` is an alias for
-    ///   `FLOAT`
     /// InnoDB caps a key at 3072 bytes (1071); utf8mb4 counts 4 per char.
     fn index_key_size(&self, cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
         let bytes = cols
@@ -177,6 +166,17 @@ impl Dialect for MySql {
         Some((bytes, 3072))
     }
 
+    /// MySQL's column types differ from the Postgres ones in
+    /// several ways:
+    /// - no `BOOLEAN`; it is an alias for `TINYINT(1)`
+    /// - no `TIMESTAMPTZ`; `DATETIME(6)` holds microseconds but no
+    ///   timezone, and sqlx binds a `DateTime<Utc>` into it correctly
+    /// - no `JSONB`; `JSON` validates on write and stores binary
+    /// - no `UUID`; `CHAR(36)` is the usual form
+    /// - `VARCHAR` needs a length, so an unbounded `String` becomes
+    ///   `LONGTEXT`; `TEXT` caps at 64 KiB where PG/SQLite have no cap
+    /// - no `DOUBLE PRECISION`; `DOUBLE`, and `REAL` is an alias for
+    ///   `FLOAT`
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
             FieldType::I16 => "SMALLINT".into(),
