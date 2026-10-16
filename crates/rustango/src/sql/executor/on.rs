@@ -21,6 +21,9 @@ use crate::sql::Pool;
 /// Session state set on it (`SET …`, MySQL `@vars`, SQLite `PRAGMA`) stays
 /// with the connection when it goes back to the pool, so the next borrower
 /// gets it: call [`Self::close_on_drop`] after changing any (#1397).
+///
+/// Do not call a `&Pool` method while holding one: that takes a second
+/// connection, and `max_connections` such requests deadlock the pool (#1396).
 #[non_exhaustive]
 pub enum PoolConn {
     #[cfg(feature = "postgres")]

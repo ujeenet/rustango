@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
+
+`docs/orm.md` and the `PoolConn` docs say to pass the held connection to every query in the handler.
+
 ### Added — `PoolConn::close_on_drop` keeps session state out of the pool (#1397)
 
 sqlx returns a connection with its `SET` state intact; call it after changing session state so the next borrower gets a fresh connection.

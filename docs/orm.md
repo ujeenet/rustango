@@ -1780,6 +1780,11 @@ A connection goes back to the pool with any session state you set on it
 on a registry pool can be another tenant's request. After such a change call
 `conn.close_on_drop()`, so the connection is closed instead of reused.
 
+While you hold a `PoolConn`, pass it to every query: a `&Pool` method in the
+same handler checks out a second connection. With `max_connections` such
+requests at once, each holds one and waits for another, and all of them time
+out. Drop the conn before calling code that takes `&Pool`.
+
 ---
 
 ## Signals
