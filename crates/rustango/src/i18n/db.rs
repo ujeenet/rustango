@@ -72,7 +72,7 @@ pub struct Translation {
 /// **No `--` comments inside the returned string.** Its newlines
 /// collapse before the driver sees it, so a `--` swallows the rest of
 /// the statement and SQLite rejects it with `incomplete input`.
-fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
+pub(crate) fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
     let ts = dialect.timestamp_now_column();
     match dialect.name() {
         "mysql" => format!(

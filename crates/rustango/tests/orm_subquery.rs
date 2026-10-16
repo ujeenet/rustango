@@ -102,6 +102,43 @@ mod scenarios {
         assert_eq!(names(rows), vec!["Ada", "Bob", "Dan"]);
     }
 
+    /// #1409 — an `OuterRef` in a set-operation branch binds to the
+    /// enclosing query, not the head branch.
+    pub async fn check_outer_ref_in_a_union_branch(pool: &Pool) {
+        use rustango::core::Column as _;
+        let titled = |t: &str| {
+            Book::objects()
+                .where_(Book::author_id.eq_expr(outer_ref("id")))
+                .filter("title", t.to_owned())
+        };
+        let inner = titled("SQL Bits")
+            .union(titled("D1"))
+            .compile()
+            .expect("inner");
+        let rows: Vec<Author> = Author::objects()
+            .where_exists(inner)
+            .order_by(&[("name", false)])
+            .fetch(pool)
+            .await
+            .expect("EXISTS (union) fetch");
+        assert_eq!(names(rows), vec!["Bob", "Dan"]);
+
+        // Branches over the enclosing table alias it, like the head (#1287).
+        let named = |n: &str| {
+            Author::objects()
+                .where_(Author::id.eq_expr(outer_ref("id")))
+                .filter("name", n.to_owned())
+        };
+        let inner = named("Ada").union(named("Cara")).compile().expect("inner");
+        let rows: Vec<Author> = Author::objects()
+            .where_exists(inner)
+            .order_by(&[("name", false)])
+            .fetch(pool)
+            .await
+            .expect("EXISTS (self union) fetch");
+        assert_eq!(names(rows), vec!["Ada", "Cara"]);
+    }
+
     /// Same scenario through the typed-column form
     /// (`Book::author_id.eq_expr(outer_ref("id"))`) and negated via
     /// `where_not_exists`.
@@ -361,6 +398,7 @@ mod pg_live {
     }
 
     pg_case!(check_exists_with_outer_ref);
+    pg_case!(check_outer_ref_in_a_union_branch);
     pg_case!(check_not_exists_typed_outer_ref);
     pg_case!(check_exclude_relation_spanning_semantics);
     pg_case!(check_in_subquery);
@@ -413,6 +451,7 @@ mod sqlite_live {
     }
 
     sqlite_case!(check_exists_with_outer_ref);
+    sqlite_case!(check_outer_ref_in_a_union_branch);
     sqlite_case!(check_not_exists_typed_outer_ref);
     sqlite_case!(check_exclude_relation_spanning_semantics);
     sqlite_case!(check_in_subquery);
@@ -483,6 +522,7 @@ mod mysql_live {
     }
 
     mysql_case!(check_exists_with_outer_ref);
+    mysql_case!(check_outer_ref_in_a_union_branch);
     mysql_case!(check_not_exists_typed_outer_ref);
     mysql_case!(check_exclude_relation_spanning_semantics);
     mysql_case!(check_in_subquery);

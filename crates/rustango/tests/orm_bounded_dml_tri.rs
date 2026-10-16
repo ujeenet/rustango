@@ -227,6 +227,96 @@ async fn anti_join_delete(pool: &Pool) {
     assert_eq!(left.iter().map(|l| l.id).collect::<Vec<_>>(), vec![1, 3]);
 }
 
+/// #1361 — `IN (SELECT … FROM <target>)` in a write; MySQL raised 1093.
+async fn same_table_in_subquery_dml(pool: &Pool) {
+    let high = || {
+        Item::objects()
+            .filter("rank__gt", 35_i64)
+            .values_list_flat("id")
+            .compile()
+            .unwrap()
+    };
+    let n = Item::objects()
+        .where_in_subquery("id", high())
+        .update()
+        .set("tag", "hi")
+        .execute_pool(pool)
+        .await
+        .expect("update IN (same table)");
+    assert_eq!(n, 2);
+    assert_eq!(ids_tagged(pool, "hi").await, vec![1, 3]);
+    let q = Item::objects()
+        .where_not_in_subquery("id", high())
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.expect("delete NOT IN"), 3);
+    assert_eq!(ids(pool).await, vec![1, 3]);
+}
+
+/// The target read only by a nested IN or EXISTS still raises 1093 on MySQL;
+/// a correlated subquery over another table runs as a plain IN.
+async fn nested_and_correlated_in_subquery_dml(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    rustango::testkit::matrix::fresh_table::<Link>(pool).await;
+    for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 3)] {
+        Link { id, item_id }.insert_pool(pool).await.unwrap();
+    }
+    let high = || {
+        Item::objects()
+            .filter("rank__gt", 35_i64)
+            .values_list_flat("id")
+            .compile()
+            .unwrap()
+    };
+    let linked_high = Link::objects()
+        .where_in_subquery("item_id", high())
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
+    let n = Item::objects()
+        .where_in_subquery("id", linked_high)
+        .update()
+        .set("tag", "d2")
+        .execute_pool(pool)
+        .await
+        .expect("update IN (IN (same table))");
+    assert_eq!(n, 2);
+    assert_eq!(ids_tagged(pool, "d2").await, vec![1, 3]);
+
+    let correlated = Link::objects()
+        .where_(Link::item_id.eq_expr(outer_ref("id")))
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
+    let n = Item::objects()
+        .where_in_subquery("id", correlated)
+        .update()
+        .set("tag", "lk")
+        .execute_pool(pool)
+        .await
+        .expect("update IN (correlated)");
+    assert_eq!(n, 3);
+    assert_eq!(ids_tagged(pool, "lk").await, vec![1, 3, 5]);
+
+    let alive_high = Link::objects()
+        .where_exists(
+            Item::objects()
+                .where_(Item::id.eq_expr(outer_ref("item_id")))
+                .filter("rank__gt", 35_i64)
+                .compile()
+                .unwrap(),
+        )
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
+    let q = Item::objects()
+        .where_in_subquery("id", alive_high)
+        .compile_delete()
+        .unwrap();
+    assert_eq!(delete_pool(pool, &q).await.expect("delete IN (EXISTS)"), 2);
+    assert_eq!(ids(pool).await, vec![2, 4, 5]);
+}
+
 /// `difference` used to be dropped, so the excluded rows went too (#2452).
 async fn set_operation_dml_is_refused(pool: &Pool) {
     let pinned = || Item::objects().filter("id", 1_i64);
@@ -267,6 +357,8 @@ tri_dialect_test! {
         ties_page_by_pk,
         unbounded_paths_unchanged,
         anti_join_delete,
+        same_table_in_subquery_dml,
+        nested_and_correlated_in_subquery_dml,
         set_operation_dml_is_refused,
     ],
 }

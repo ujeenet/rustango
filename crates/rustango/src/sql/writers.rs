@@ -50,6 +50,10 @@ pub(super) struct Sql<'d> {
     pub total: Option<CountQuery>,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap (#1358).
     pub group_concat: bool,
+    /// The UPDATE/DELETE target being written, if any (#1361).
+    pub dml_target: Option<&'static str>,
+    /// A FROM or JOIN item named [`Self::dml_target`] since the flag was last cleared.
+    pub read_dml_target: bool,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -77,7 +81,7 @@ impl Scope {
 
     /// `<table>` or `<table> AS <alias>`, as a FROM item.
     fn write_from(self, b: &mut Sql<'_>) {
-        b.write_ident(self.model.table);
+        b.write_table(self.model.table);
         if self.name != self.model.table {
             b.sql.push_str(" AS ");
             b.write_ident(self.name);
@@ -127,6 +131,8 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
+            dml_target: None,
+            read_dml_target: false,
         }
     }
 
@@ -142,6 +148,8 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             group_concat: false,
+            dml_target: None,
+            read_dml_target: false,
         }
     }
 
@@ -196,6 +204,13 @@ impl<'d> Sql<'d> {
     /// Append a quoted identifier using the dialect's quoting rules.
     pub(super) fn write_ident(&mut self, name: &str) {
         self.sql.push_str(&self.d.quote_ident(name));
+    }
+
+    /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
+    /// item goes through here, so MySQL knows which subqueries hit 1093.
+    fn write_table(&mut self, name: &str) {
+        self.read_dml_target |= self.dml_target == Some(name);
+        self.write_ident(name);
     }
 
     /// Add `value` to the bind list and write its placeholder.
@@ -422,9 +437,11 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
-        // Own scope frame so subqueries in this branch resolve
-        // `OuterRef` against it.
-        b.scope_stack.push(Scope::plain(branch.query.model));
+        // A branch is the head's sibling: its frame replaces the head's,
+        // so its own `OuterRef` reaches the enclosing query (#1409).
+        let head_frame = b.scope_stack.pop();
+        let frame = b.correlated_scope(branch.query.model);
+        b.scope_stack.push(frame);
         // Plain branches emit inline; `SELECT … UNION SELECT …` is
         // valid everywhere and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
@@ -455,6 +472,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
             r
         };
         b.scope_stack.pop();
+        b.scope_stack.extend(head_frame);
         r?;
     }
 
@@ -1008,7 +1026,7 @@ fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(),
         b.sql.push(' ');
         b.sql.push_str(kind_kw);
         b.sql.push(' ');
-        b.write_ident(join.target.table);
+        b.write_table(join.target.table);
         b.sql.push_str(" AS ");
         b.write_ident(join.alias);
         b.sql.push_str(" ON ");
@@ -1747,6 +1765,7 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
         return Err(SqlError::EmptyUpdateSet);
     }
     b.scope_stack.push(Scope::plain(query.model));
+    b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("UPDATE ");
         b.write_ident(query.model.table);
@@ -2077,28 +2096,9 @@ fn write_json_path(
     as_text: bool,
 ) -> Result<(), SqlError> {
     use crate::core::{JsonPathStep, SqlValue};
-    if path.is_empty() {
-        return Err(SqlError::OpNotSupportedInDialect {
-            op: "JsonPath requires at least one path step",
-            dialect: b.d.name(),
-        });
-    }
-    // MySQL and SQLite inline the key, so it must be safe. PG binds
-    // it, but use the same rule everywhere.
-    let key_safe =
-        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    for step in path {
-        if let JsonPathStep::Key(k) = step {
-            if !key_safe(k) {
-                return Err(SqlError::OpNotSupportedInDialect {
-                    op: "JsonPath key contains characters outside the safe set [A-Za-z0-9_]",
-                    dialect: b.d.name(),
-                });
-            }
-        }
-    }
     let dialect = b.d.name();
     if dialect == "postgres" {
+        check_json_path(path, dialect)?;
         // Chained `->` … `->>`. PG counts a negative index from the
         // end on its own.
         write_expr(b, source, None)?;
@@ -2122,36 +2122,7 @@ fn write_json_path(
         }
         return Ok(());
     }
-    // MySQL and SQLite: build a `$.<k>.<k>[<n>]` path string.
-    let mut json_path = String::from("$");
-    for step in path {
-        match step {
-            JsonPathStep::Key(k) => {
-                json_path.push('.');
-                json_path.push_str(k);
-            }
-            JsonPathStep::Index(n) => {
-                if *n < 0 {
-                    // SQLite 3.31+ counts from the end with `$[#-1]`.
-                    // MySQL's path grammar has no negative form.
-                    if dialect == "sqlite" {
-                        json_path.push_str("[#");
-                        json_path.push_str(&n.to_string());
-                        json_path.push(']');
-                    } else {
-                        return Err(SqlError::OpNotSupportedInDialect {
-                            op: "JsonPath negative indices are unsupported on MySQL (the $[N] path grammar has no negative form; PG + SQLite support them)",
-                            dialect,
-                        });
-                    }
-                } else {
-                    json_path.push('[');
-                    json_path.push_str(&n.to_string());
-                    json_path.push(']');
-                }
-            }
-        }
-    }
+    let json_path = json_path_text(path, dialect)?;
     if dialect == "mysql" {
         if as_text {
             // A JSON null reads as SQL NULL, as PG's `->>` gives.
@@ -2191,6 +2162,135 @@ fn write_json_path(
     b.sql.push_str(&json_path);
     b.sql.push_str("')");
     Ok(())
+}
+
+/// Refuse an empty path or an unsafe key. MySQL and SQLite inline the
+/// key, so it must be safe; PG binds it but uses the same rule.
+fn check_json_path(
+    path: &[crate::core::JsonPathStep],
+    dialect: &'static str,
+) -> Result<(), SqlError> {
+    use crate::core::JsonPathStep;
+    if path.is_empty() {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "JsonPath requires at least one path step",
+            dialect,
+        });
+    }
+    let key_safe =
+        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    for step in path {
+        if let JsonPathStep::Key(k) = step {
+            if !key_safe(k) {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "JsonPath key contains characters outside the safe set [A-Za-z0-9_]",
+                    dialect,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The checked MySQL / SQLite `$.<k>.<k>[<n>]` path string.
+fn json_path_text(
+    path: &[crate::core::JsonPathStep],
+    dialect: &'static str,
+) -> Result<String, SqlError> {
+    use crate::core::JsonPathStep;
+    check_json_path(path, dialect)?;
+    let mut json_path = String::from("$");
+    for step in path {
+        match step {
+            JsonPathStep::Key(k) => {
+                json_path.push('.');
+                json_path.push_str(k);
+            }
+            JsonPathStep::Index(n) => {
+                if *n < 0 {
+                    // SQLite 3.31+ counts from the end with `$[#-1]`.
+                    // MySQL's path grammar has no negative form.
+                    if dialect == "sqlite" {
+                        json_path.push_str("[#");
+                        json_path.push_str(&n.to_string());
+                        json_path.push(']');
+                    } else {
+                        return Err(SqlError::OpNotSupportedInDialect {
+                            op: "JsonPath negative indices are unsupported on MySQL (the $[N] path grammar has no negative form; PG + SQLite support them)",
+                            dialect,
+                        });
+                    }
+                } else {
+                    json_path.push('[');
+                    json_path.push_str(&n.to_string());
+                    json_path.push(']');
+                }
+            }
+        }
+    }
+    Ok(json_path)
+}
+
+/// SQLite `json_path = <JSON null, object or array>` by value, as PG's
+/// `jsonb` compares: `json_extract` gives NULL for a JSON null and the
+/// stored text for an object, key order included (#1398). `Ok(false)`
+/// when the comparison is not one of those.
+fn write_sqlite_json_value_eq(
+    b: &mut Sql<'_>,
+    lhs: &crate::core::Expr,
+    op: Op,
+    rhs: &crate::core::Expr,
+) -> Result<bool, SqlError> {
+    use crate::core::Expr;
+    let (
+        Expr::JsonPath {
+            source,
+            path,
+            as_text: false,
+        },
+        Expr::Literal(SqlValue::Json(v)),
+        Op::Eq | Op::Ne,
+        "sqlite",
+    ) = (lhs, rhs, op, b.d.name())
+    else {
+        return Ok(false);
+    };
+    if !(v.is_null() || v.is_object() || v.is_array()) {
+        return Ok(false);
+    }
+    let p = json_path_text(path, "sqlite")?;
+    let ne = matches!(op, Op::Ne);
+    if !v.is_null() {
+        b.sql.push('(');
+    }
+    b.sql.push_str("json_type(");
+    write_expr(b, source, None)?;
+    if v.is_null() {
+        b.sql.push_str(&format!(", '{p}') "));
+        b.sql.push_str(if ne { "<> 'null'" } else { "= 'null'" });
+        return Ok(true);
+    }
+    // Same (relative key, type, atom) rows both ways; arrays keep order.
+    // integer and real are one type, so 1 = 1.0 as on PG and MySQL.
+    let ty = "CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END";
+    let col = format!(
+        "SELECT substr(fullkey, {}), {ty}, atom FROM json_tree(",
+        p.len() + 1
+    );
+    let lit = format!("SELECT substr(fullkey, 2), {ty}, atom FROM json_tree(");
+    b.sql.push_str(&format!(", '{p}') IS NOT NULL AND "));
+    b.sql.push_str(if ne { "NOT (" } else { "(" });
+    b.sql.push_str("NOT EXISTS (");
+    b.sql.push_str(&col);
+    write_expr(b, source, None)?;
+    b.sql.push_str(&format!(", '{p}') EXCEPT {lit}"));
+    b.push_param(SqlValue::Json(v.clone()));
+    b.sql.push_str(&format!(")) AND NOT EXISTS ({lit}"));
+    b.push_param(SqlValue::Json(v.clone()));
+    b.sql.push_str(&format!(") EXCEPT {col}"));
+    write_expr(b, source, None)?;
+    b.sql.push_str(&format!(", '{p}'))))"));
+    Ok(true)
 }
 
 /// Emit `<fn>(args) OVER (PARTITION BY … ORDER BY … [frame])`. This
@@ -3656,6 +3756,7 @@ fn write_call_unary(
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
     b.scope_stack.push(Scope::plain(query.model));
+    b.dml_target = Some(query.model.table);
     let r = (|| {
         b.sql.push_str("DELETE FROM ");
         b.write_ident(query.model.table);
@@ -3939,12 +4040,15 @@ pub(super) fn write_where_expr(
                 || subquery.offset.is_some()
                 || subquery.compound_limit.is_some()
                 || subquery.compound_offset.is_some();
-            let wrap = limited && b.d.in_subquery_limit_needs_derived_table();
-            if wrap {
-                b.sql.push_str("SELECT * FROM (");
-            }
+            // Only a subquery reading the write's target needs it (1093): a
+            // correlated derived table re-runs per outer row.
+            let outer_read = std::mem::take(&mut b.read_dml_target);
+            let start = b.sql.len();
             write_select(b, subquery)?;
-            if wrap {
+            let reads_target = b.read_dml_target;
+            b.read_dml_target |= outer_read;
+            if (limited || reads_target) && b.d.in_subquery_limit_needs_derived_table() {
+                b.sql.insert_str(start, "SELECT * FROM (");
                 b.sql.push_str(") AS ");
                 b.write_ident("_rustango_in");
             }
@@ -3987,7 +4091,7 @@ fn write_rel_correlation(
             })
         }
     };
-    b.write_ident(table);
+    b.write_table(table);
     // A self relation must not hide the outer row (#1287).
     let table = if table == outer_table {
         b.sql.push_str(" AS ");
@@ -4020,7 +4124,7 @@ fn write_rel_correlation(
                 b.sql.push_str(" = (SELECT ");
                 b.write_ident(ct.ct_pk);
                 b.sql.push_str(" FROM ");
-                b.write_ident(ct.ct_table);
+                b.write_table(ct.ct_table);
                 b.sql.push_str(" WHERE ");
                 b.write_ident(ct.ct_table_col);
                 b.sql.push_str(" = ");
@@ -4044,7 +4148,7 @@ fn write_rel_correlation(
             b.sql.push_str(" IN (SELECT ");
             b.write_ident(dst_col);
             b.sql.push_str(" FROM ");
-            b.write_ident(through);
+            b.write_table(through);
             b.sql.push_str(" WHERE ");
             b.write_ident(through);
             b.sql.push('.');
@@ -4104,6 +4208,9 @@ fn write_expr_compare(
         Op::Gte => Some(" >= "),
         _ => None,
     };
+    if write_sqlite_json_value_eq(b, lhs, op, rhs)? {
+        return Ok(());
+    }
     if let Some(kw) = binary_op_str {
         write_expr(b, lhs, None)?;
         b.sql.push_str(kw);
@@ -4867,7 +4974,6 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
 
 /// Compile only the WHERE / ORDER BY / LIMIT / OFFSET tail, for
 /// callers that build the head of the statement themselves.
-#[allow(unused)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_where_order_tail(
     d: &dyn Dialect,

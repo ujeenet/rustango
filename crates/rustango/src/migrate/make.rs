@@ -219,6 +219,33 @@ pub fn make_migrations_system(
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
+    let dir = project_root.join("system").join("migrations");
+    let prior = if dir.exists() {
+        file::list_dir(&dir)?
+    } else {
+        Vec::new()
+    };
+    let Some(mig) = plan_system_step(scope, name_override, &prior)? else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    let path = dir.join(format!("{}.json", mig.name));
+    file::write(&path, &mig)?;
+    Ok(Some(mig))
+}
+
+/// The step [`make_migrations_system`] would write after `prior`, unwritten,
+/// so a `--dry-run` can show it (#1411).
+///
+/// # Errors
+/// As [`make_migrations_system`], minus the write.
+pub(crate) fn plan_system_step(
+    scope: crate::core::ModelScope,
+    name_override: Option<&str>,
+    prior: &[Migration],
+) -> Result<Option<Migration>, MigrateError> {
     // Skip the registry scope when no model declares it, which means
     // this build has no registry database. Its snapshot is still
     // non-empty, because the shared tables are copied into every
@@ -235,18 +262,12 @@ pub fn make_migrations_system(
     {
         return Ok(None);
     }
-    let dir = project_root.join("system").join("migrations");
     let migration_scope = match scope {
         crate::core::ModelScope::Registry => super::MigrationScope::Registry,
         crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
     };
     super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry_system_for_scope(scope);
-    let prior = if dir.exists() {
-        file::list_dir(&dir)?
-    } else {
-        Vec::new()
-    };
     let prior_scoped: Vec<&Migration> = prior
         .iter()
         .filter(|m| m.scope == migration_scope)
@@ -278,23 +299,17 @@ pub fn make_migrations_system(
     );
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
-    let mig = Migration {
-        name: name.clone(),
+    Ok(Some(Migration {
+        name,
         created_at,
         prev: prev_name,
         atomic: true,
         scope: migration_scope,
         replaces: Vec::new(),
         merges: Vec::new(),
-        snapshot: current.clone(),
+        snapshot: current,
         forward: changes.into_iter().map(Operation::Schema).collect(),
-    };
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)?;
-    }
-    let path = dir.join(format!("{name}.json"));
-    file::write(&path, &mig)?;
-    Ok(Some(mig))
+    }))
 }
 
 /// The framework's `system/migrations/` dir and where its files came from.

@@ -807,10 +807,14 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
     // migration path, so this cannot drift from the model. The table is
     // shared per database, so this stays as a defensive helper next to the
     // system migrations.
-    use crate::core::Model as _;
-    let snapshot = crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA]);
-    crate::migrate::apply_idempotent(pool, &snapshot).await?;
+    crate::migrate::apply_idempotent(pool, &bootstrap_snapshot()).await?;
     Ok(())
+}
+
+/// The audit-log table as [`ensure_table_pool`] creates it.
+pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
+    use crate::core::Model as _;
+    crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA])
 }
 
 /// MySQL counterpart of [`emit_one`] — `?` placeholders and backtick

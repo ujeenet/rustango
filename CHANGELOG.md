@@ -4,6 +4,78 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
+
+### Fixed — `migrate --dry-run` shows everything `migrate` runs (#1411)
+
+The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table. The converge part uses `migrate`'s own planner, so it shows its NOT NULL refusals, and names a table pending migrations change instead of guessing its SQL.
+
+### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
+
+With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry.
+
+### Performance — `dumpdata` streams rows and M2M links by page (#1399)
+
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before.
+
+### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
+
+The idempotent `ensure_*` and testkit paths send `ADD CONSTRAINT` inside a `DO` block that catches the duplicate, so an existing FK no longer writes an ERROR to the server log on every boot.
+
+### Fixed — M2M `add` takes text keys on a junction that is no model (#1405)
+
+The manager types an auto-created junction's columns by each end's pk, so a `String` or `Uuid` key no longer fails with `TypeMismatch`.
+
+### Fixed — auto-created M2M junctions follow the pk they reference (#1404)
+
+A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
+
+### Fixed — MySQL refuses a junction whose primary key exceeds 3072 bytes
+
+Two long string pks gave ERROR 1071 at migrate time; rendering now fails with an error that names the junction and the limit.
+
+### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL (#1398)
+
+A JSON `null` literal matched nothing, and objects compared as text, so key order mattered. They now compare by value; arrays keep their order.
+
+### Fixed — SQLite `json_path = <object>` treats 1 and 1.0 as equal, as PG and MySQL do
+
+### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
+
+`docs/orm.md` and the `PoolConn` docs say to pass the held connection to every query in the handler.
+
+### Added — `PoolConn::close_on_drop` keeps session state out of the pool (#1397)
+
+sqlx returns a connection with its `SET` state intact; call it after changing session state so the next borrower gets a fresh connection.
+
+### Fixed — a terminated PG backend aborts the `atomic` block at once (#1403)
+
+A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.
+
+### Fixed — more `_on` query methods run on every backend (#1395)
+
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.
+
+### Fixed — MySQL `dbshell` keeps URL options like `ssl-mode` (#1410)
+
+`ssl-mode`, `ssl-ca`, `ssl-cert`, `ssl-key`, `charset`, `socket`, `timezone` and `collation` become `mysql` client flags; any other option is refused with its name instead of being dropped.
+
+### Fixed — `OuterRef` in a set-operation branch points at the enclosing query (#1409)
+
+It used to bind to the head branch, so the branch matched the wrong rows or failed with an unknown column.
+
+### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
+
+The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
+
+### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target (rel-0609)
+
+A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows).
+
+### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
+
+Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.
+
 ## [0.60.8] — 2026-10-17
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.

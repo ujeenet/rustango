@@ -164,8 +164,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..]),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
-        "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
-        "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
+        "dumpdata" => dumpdata_cmd(pool, &args[1..], None, writer).await,
+        "loaddata" => loaddata_cmd(pool, &args[1..], None, writer).await,
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
         // #253 slice B — bootstrap an AdminUser row for projects
@@ -854,6 +854,8 @@ async fn migrate<W: Write>(
 pub(crate) struct SystemView {
     dir: std::path::PathBuf,
     scope: super::MigrationScope,
+    /// The scopes `migrate` generates steps for before it runs.
+    generates: &'static [crate::core::ModelScope],
 }
 
 impl SystemView {
@@ -862,6 +864,10 @@ impl SystemView {
         Self {
             dir: super::make::SystemChain::dir_for(dir),
             scope: super::MigrationScope::Tenant,
+            generates: &[
+                crate::core::ModelScope::Registry,
+                crate::core::ModelScope::Tenant,
+            ],
         }
     }
 
@@ -871,7 +877,20 @@ impl SystemView {
         Self {
             dir: super::make::SystemChain::dir_for(dir),
             scope: super::MigrationScope::Registry,
+            generates: &[crate::core::ModelScope::Registry],
         }
+    }
+
+    /// The chain as `migrate` runs it: the files, then the steps it would
+    /// generate from today's models, unwritten (#1411).
+    fn planned(&self, files: Option<Vec<Migration>>) -> Result<Vec<Migration>, MigrateError> {
+        let mut all = files.unwrap_or_default();
+        for &scope in self.generates {
+            if let Some(step) = super::make::plan_system_step(scope, None, &all)? {
+                all.push(step);
+            }
+        }
+        Ok(all)
     }
 
     /// The chain's files, or `None` before `migrate` first generates them.
@@ -899,27 +918,48 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
 ) -> Result<(), MigrateError> {
     let mut previews = Vec::new();
     let system_files = system.files()?;
-    if let Some(all) = &system_files {
-        let ledger = runner::SYSTEM_LEDGER_TABLE;
-        let owned = super::chains::project_owned(dir)?;
-        let steps = runner::preview_pending(
-            pool,
-            &system.dir,
-            all,
-            Some(system.scope),
-            ledger,
-            true,
-            &owned,
-        )
-        .await?;
-        previews.extend(steps.into_iter().map(|p| (p, "system, ")));
-    }
+    let not_generated = system_files.is_none();
+    let all = system.planned(system_files)?;
+    let ledger = runner::SYSTEM_LEDGER_TABLE;
+    let owned = super::chains::project_owned(dir)?;
+    let steps = runner::preview_pending(
+        pool,
+        &system.dir,
+        &all,
+        Some(system.scope),
+        ledger,
+        true,
+        &owned,
+    )
+    .await?;
+    previews.extend(steps.into_iter().map(|p| (p, "system, ")));
     let project = runner::migrate_dry_run_pool(pool, dir).await?;
     previews.extend(project.into_iter().map(|p| (p, "")));
-    if system_files.is_none() {
+    // What `migrate` runs after both chains (#1411).
+    let mut after = Vec::new();
+    let converge = super::chains::converge_preview(pool, &all, system.scope, dir).await?;
+    if !converge.is_empty() {
+        after.push(("converge framework tables".to_owned(), converge));
+    }
+    let tenant = system.scope == super::MigrationScope::Tenant;
+    let bootstrap = shared_bootstrap()
+        .into_iter()
+        .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
+    for b in bootstrap {
+        if runner::try_table_exists_here(pool, b.table).await? {
+            continue;
+        }
+        let ddl = (b.ddl)(pool.dialect()).map_err(MigrateError::Validation)?;
+        let ddl = ddl
+            .into_iter()
+            .map(super::chains::PreviewLine::Sql)
+            .collect();
+        after.push((format!("bootstrap {}", b.table), ddl));
+    }
+    if not_generated {
         writeln!(w, "-- {NOT_GENERATED}")?;
     }
-    if previews.is_empty() {
+    if previews.is_empty() && after.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
         return Ok(());
     }
@@ -934,6 +974,16 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
         writeln!(w, "-- {} ({chain}{atomic})", p.name)?;
         for stmt in &p.statements {
             writeln!(w, "{stmt};")?;
+        }
+    }
+    for (label, lines) in &after {
+        writeln!(w)?;
+        writeln!(w, "-- {label} (idempotent)")?;
+        for line in lines {
+            match line {
+                super::chains::PreviewLine::Sql(stmt) => writeln!(w, "{stmt};")?,
+                super::chains::PreviewLine::Note(note) => writeln!(w, "-- {note}")?,
+            }
         }
     }
     Ok(())
@@ -1018,14 +1068,10 @@ where
 /// # Errors
 /// Driver or SQL failures from the DDL.
 pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    // Writes to `audit(track = ...)` models record from the first migrate.
-    crate::audit::ensure_table_pool(pool).await?;
-    // The admin login fails closed on a missing TOTP table (#1644), so a
-    // fresh install needs it before the first login, not at enrollment.
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    crate::admin::totp_store::ensure_table(pool).await?;
-    // The admin lists translations wherever they live (#2360).
-    crate::i18n::db::ensure_table_pool(pool).await
+    for b in shared_bootstrap() {
+        (b.ensure)(pool).await?;
+    }
+    Ok(())
 }
 
 /// The `managed = false` tables each tenant holds: the single database, or
@@ -1033,12 +1079,88 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
 ///
 /// # Errors
 /// Driver or SQL failures from the DDL.
-#[allow(clippy::unused_async, unused_variables)]
 pub(crate) async fn ensure_tenant_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    // Passkey sign-in reads it from the first login (#2364).
-    #[cfg(feature = "passkey")]
-    crate::passkey::ensure_table(pool).await?;
+    for b in tenant_bootstrap() {
+        (b.ensure)(pool).await?;
+    }
     Ok(())
+}
+
+type EnsureFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
+
+/// A bootstrap table: how `migrate` ensures it, and the DDL that creates it,
+/// which `--dry-run` shows while the table is missing (#1411).
+struct Bootstrap {
+    table: &'static str,
+    ensure: for<'a> fn(&'a Pool) -> EnsureFuture<'a>,
+    ddl: fn(&dyn crate::sql::Dialect) -> Result<Vec<String>, String>,
+}
+
+/// The `managed = false` framework tables of the database that holds them.
+fn shared_bootstrap() -> Vec<Bootstrap> {
+    use crate::core::Model as _;
+    fn audit(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::audit::ensure_table_pool(pool))
+    }
+    fn i18n(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::i18n::db::ensure_table_pool(pool))
+    }
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    fn totp(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::admin::totp_store::ensure_table(pool))
+    }
+    vec![
+        // Writes to `audit(track = ...)` models record from the first migrate.
+        Bootstrap {
+            table: crate::audit::AuditLog::SCHEMA.table,
+            ensure: audit,
+            ddl: |d| super::ensure::idempotent_ddl(&crate::audit::bootstrap_snapshot(), d),
+        },
+        // The admin login fails closed on a missing TOTP table (#1644), so a
+        // fresh install needs it before the first login, not at enrollment.
+        #[cfg(all(feature = "admin", feature = "totp"))]
+        Bootstrap {
+            table: crate::admin::totp_store::AdminTotp::SCHEMA.table,
+            ensure: totp,
+            ddl: |d| {
+                super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
+            },
+        },
+        // The admin lists translations wherever they live (#2360).
+        Bootstrap {
+            table: crate::i18n::db::Translation::SCHEMA.table,
+            ensure: i18n,
+            ddl: |d| {
+                Ok(crate::i18n::db::ddl(d)
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect())
+            },
+        },
+    ]
+}
+
+/// The `managed = false` tables each tenant holds.
+fn tenant_bootstrap() -> Vec<Bootstrap> {
+    #[cfg(feature = "passkey")]
+    fn passkey(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::passkey::ensure_table(pool))
+    }
+    vec![
+        // Passkey sign-in reads it from the first login (#2364).
+        #[cfg(feature = "passkey")]
+        Bootstrap {
+            table: {
+                use crate::core::Model as _;
+                crate::passkey::WebauthnCredential::SCHEMA.table
+            },
+            ensure: passkey,
+            ddl: |d| super::ensure::idempotent_ddl(&crate::passkey::bootstrap_snapshot(), d),
+        },
+    ]
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
@@ -3344,12 +3466,13 @@ fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
 
 /// `psql` for `url`; the password goes in its env, not argv (#2324).
 fn psql_restore_command(
+    psql: &str,
     parsed: &RestorePlan,
     url: &str,
 ) -> Result<std::process::Command, MigrateError> {
     let mut cmd = crate::dbshell::LibpqConn::new(url)
         .map_err(MigrateError::Validation)?
-        .command("psql");
+        .command(psql);
     cmd.args(build_psql_argv(parsed));
     Ok(cmd)
 }
@@ -3381,16 +3504,18 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 .into(),
         )
     })?;
-    run_psql_restore(&parsed, &url, w)
+    run_psql_restore("psql", &parsed, &url, w)
 }
 
-/// Split from [`db_restore_cmd`] so a test can aim it at a private database.
+/// Split from [`db_restore_cmd`] so a test can aim it at a private database
+/// and a `psql` off `PATH`.
 fn run_psql_restore<W: Write>(
+    psql: &str,
     parsed: &RestorePlan,
     url: &str,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    let mut cmd = psql_restore_command(parsed, url)?;
+    let mut cmd = psql_restore_command(psql, parsed, url)?;
     writeln!(w, "running: psql {}", shown_args(&cmd))?;
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
@@ -3549,9 +3674,11 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
     Ok(out)
 }
 
-async fn dumpdata_cmd<W: Write>(
+/// `dumpdata` over every model, or only those of `scope` (#1424).
+pub(crate) async fn dumpdata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
+    scope: Option<crate::core::ModelScope>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
@@ -3596,19 +3723,29 @@ async fn dumpdata_cmd<W: Write>(
     let indent = parsed.indent;
     // A typo would otherwise dump `[]` and exit 0 (#1312).
     for name in model_filters.iter().chain(&parsed.excludes) {
-        let known = inventory::iter::<crate::core::ModelEntry>()
-            .any(|e| model_matches(name, &dotted_model_name(e), e.schema));
-        if !known {
+        let mut named = inventory::iter::<crate::core::ModelEntry>()
+            .filter(|e| model_matches(name, &dotted_model_name(e), e.schema))
+            .peekable();
+        let Some(owner) = named.peek().map(|e| e.schema.scope) else {
             return Err(MigrateError::Validation(format!(
                 "dumpdata: unknown model `{name}` (use `app.Model` or `Model`)"
+            )));
+        };
+        if !named.any(|e| in_scope(e.schema, scope)) {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: {}",
+                out_of_scope(name, owner)
             )));
         }
     }
 
-    // Walk every registered model, fetching rows from each.
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    // Walk every registered model, writing its rows a page at a time.
+    let mut out = FixtureWriter::new(w, indent);
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
+        if !in_scope(schema, scope) {
+            continue;
+        }
         let dotted_name = dotted_model_name(entry);
         let matches = |f: &String| model_matches(f, &dotted_name, schema);
 
@@ -3632,56 +3769,167 @@ async fn dumpdata_cmd<W: Write>(
 
         // Identify the PK column for fixture `pk` extraction.
         let pk_field = schema.primary_key();
-
-        // Build a minimal "select every column" SelectQuery.
-        // #562 — the empty-WHERE/full-table dump is exactly
-        // SelectQuery::new(model).
         let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-        let query = crate::core::SelectQuery::new(schema);
-
-        let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
-            .await
-            .map_err(|e| {
-                MigrateError::Validation(format!(
-                    "dumpdata: select from `{}` failed: {e}",
-                    schema.table
-                ))
-            })?;
-        let links = m2m_links(pool, schema).await?;
-
-        for mut row in rows {
-            // Pop the PK column off `fields` into the outer fixture
-            // entry's `pk` slot: a fixture separates identity from
-            // payload.
-            let pk_value = match pk_field {
-                Some(pk) => row
-                    .as_object_mut()
-                    .and_then(|m| m.remove(pk.name))
-                    .unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
-            };
-            if let Some(map) = row.as_object_mut() {
-                for (name, by_src) in &links {
-                    let dsts = by_src.get(&pk_value.to_string()).cloned();
-                    map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+        // Pages in pk order, so neither rows nor links are held whole (#1399).
+        // `pk > last` skips ties, so only a real one-column key pages.
+        let paged = match pk_field {
+            Some(pk) => is_sole_pk(pool, schema.table, pk.column).await?,
+            None => false,
+        };
+        let mut after: Option<crate::core::SqlValue> = None;
+        loop {
+            let mut query = crate::core::SelectQuery::new(schema);
+            if let Some(pk) = pk_field {
+                query.order_by = vec![crate::core::OrderClause {
+                    column: pk.column,
+                    desc: false,
+                }
+                .into()];
+            }
+            if let Some(pk) = pk_field.filter(|_| paged) {
+                query.limit = Some(DUMP_PAGE);
+                if let Some(last) = after.take() {
+                    query.where_clause = crate::core::WhereExpr::Predicate(crate::core::Filter {
+                        column: pk.column,
+                        op: crate::core::Op::Gt,
+                        value: last,
+                    });
                 }
             }
-            out.push(serde_json::json!({
-                "model": dotted_name,
-                "pk": pk_value,
-                "fields": row,
-            }));
+            let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
+                .await
+                .map_err(|e| {
+                    MigrateError::Validation(format!(
+                        "dumpdata: select from `{}` failed: {e}",
+                        schema.table
+                    ))
+                })?;
+            let full = paged && rows.len() == DUMP_PAGE as usize;
+            let pks: Vec<crate::core::SqlValue> = match pk_field {
+                Some(pk) => rows
+                    .iter()
+                    .filter_map(|r| r.get(pk.name))
+                    .map(|v| json_to_sql_value(v, pk).map_err(MigrateError::Validation))
+                    .collect::<Result<_, _>>()?,
+                None => Vec::new(),
+            };
+            let mut links: Vec<(&str, LinksBySource)> = Vec::new();
+            for chunk in pks.chunks(DUMP_PAGE as usize) {
+                for (name, by_src) in m2m_links(pool, schema, chunk).await? {
+                    match links.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, all)) => all.extend(by_src),
+                        None => links.push((name, by_src)),
+                    }
+                }
+            }
+
+            for mut row in rows {
+                // Pop the PK column off `fields` into the outer fixture
+                // entry's `pk` slot: a fixture separates identity from
+                // payload.
+                let pk_value = match pk_field {
+                    Some(pk) => row
+                        .as_object_mut()
+                        .and_then(|m| m.remove(pk.name))
+                        .unwrap_or(serde_json::Value::Null),
+                    None => serde_json::Value::Null,
+                };
+                if let Some(map) = row.as_object_mut() {
+                    for (name, by_src) in &links {
+                        let dsts = by_src.get(&pk_value.to_string()).cloned();
+                        map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+                    }
+                }
+                out.entry(&serde_json::json!({
+                    "model": dotted_name,
+                    "pk": pk_value,
+                    "fields": row,
+                }))?;
+            }
+            if !full {
+                break;
+            }
+            after = pks.last().cloned();
+        }
+    }
+    out.finish()
+}
+
+/// Rows per dumpdata page.
+const DUMP_PAGE: i64 = 500;
+
+/// Whether a data verb run for `scope` covers `s`; `None` is every model.
+fn in_scope(s: &crate::core::ModelSchema, scope: Option<crate::core::ModelScope>) -> bool {
+    scope.is_none_or(|sc| s.scope == sc)
+}
+
+/// The refusal for a model that lives on the other side of the registry.
+fn out_of_scope(name: &str, owner: crate::core::ModelScope) -> String {
+    let hint = match owner {
+        crate::core::ModelScope::Registry => "a registry model: run without `--tenant`",
+        _ => "a tenant model: pass `--tenant <slug>`",
+    };
+    format!("`{name}` is {hint}")
+}
+
+/// Whether `column` alone is `table`'s primary key in the database: inspectdb
+/// marks one column of a composite key, and a view has none.
+async fn is_sole_pk(pool: &Pool, table: &str, column: &str) -> Result<bool, MigrateError> {
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    let pk = super::inspectdb::list_pk_columns(pool, &schema, table).await?;
+    Ok(matches!(pk.as_slice(), [c] if c == column))
+}
+
+/// Writes a fixture array an entry at a time, as `serde_json` would whole.
+/// Buffered: stdout flushes on every newline, twice per pretty entry.
+struct FixtureWriter<'w, W: Write> {
+    w: std::io::BufWriter<&'w mut W>,
+    pretty: bool,
+    started: bool,
+}
+
+impl<'w, W: Write> FixtureWriter<'w, W> {
+    fn new(w: &'w mut W, indent: usize) -> Self {
+        Self {
+            w: std::io::BufWriter::new(w),
+            pretty: indent != 0,
+            started: false,
         }
     }
 
-    let rendered = if indent == 0 {
-        serde_json::to_string(&out)
-    } else {
-        serde_json::to_string_pretty(&out)
+    fn entry(&mut self, v: &serde_json::Value) -> Result<(), MigrateError> {
+        let json = |e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}"));
+        let sep = match (self.started, self.pretty) {
+            (false, false) => "[",
+            (false, true) => "[\n",
+            (true, false) => ",",
+            (true, true) => ",\n",
+        };
+        self.started = true;
+        self.w.write_all(sep.as_bytes())?;
+        if self.pretty {
+            // JSON strings escape newlines, so every line is structure.
+            let text = serde_json::to_string_pretty(v).map_err(json)?;
+            let lines: Vec<String> = text.lines().map(|l| format!("  {l}")).collect();
+            self.w.write_all(lines.join("\n").as_bytes())?;
+        } else {
+            serde_json::to_writer(&mut self.w, v).map_err(json)?;
+        }
+        Ok(())
     }
-    .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
-    writeln!(w, "{rendered}")?;
-    Ok(())
+
+    fn finish(mut self) -> Result<(), MigrateError> {
+        let end = match (self.started, self.pretty) {
+            (false, _) => "[]",
+            (true, false) => "]",
+            (true, true) => "\n]",
+        };
+        writeln!(self.w, "{end}")?;
+        self.w.flush()?;
+        Ok(())
+    }
 }
 
 /// `app.Model`, or the bare name for a model with no app.
@@ -3712,15 +3960,12 @@ fn junction_of(
     rel: &crate::core::M2MRelation,
 ) -> Result<Junction, MigrateError> {
     let pk_ty = |schema: Option<&'static crate::core::ModelSchema>, table: &str| {
-        schema
-            .and_then(crate::core::ModelSchema::primary_key)
-            .map(|pk| pk.ty)
-            .ok_or_else(|| {
-                MigrateError::Validation(format!(
-                    "M2M `{}`: `{table}` has no registered primary key",
-                    rel.name
-                ))
-            })
+        schema.and_then(crate::sql::m2m::end_type).ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "M2M `{}`: `{table}` has no registered primary key",
+                rel.name
+            ))
+        })
     };
     let dst = crate::core::ModelEntry::for_table(rel.to).map(|e| e.schema);
     let junction = crate::sql::m2m::typed_junction(
@@ -3738,16 +3983,20 @@ fn junction_of(
     Ok((junction, [end(rel.src_col)?, end(rel.dst_col)?]))
 }
 
-/// Each auto-created M2M relation of `schema` and its links. Those
-/// junctions are no model, so the links ride on the source rows (#1226).
+/// Each auto-created M2M relation of `schema` and the links of `src_pks`.
+/// Those junctions are no model, so the links ride on the source rows (#1226).
 async fn m2m_links(
     pool: &Pool,
     schema: &'static crate::core::ModelSchema,
+    src_pks: &[crate::core::SqlValue],
 ) -> Result<Vec<(&'static str, LinksBySource)>, MigrateError> {
     let mut out = Vec::new();
+    if src_pks.is_empty() {
+        return Ok(out);
+    }
     for rel in schema.m2m.iter().filter(|r| r.auto_create) {
         let (junction, [src, dst]) = junction_of(schema, rel)?;
-        let query = crate::core::SelectQuery::new(junction);
+        let query = crate::core::SelectQuery::by_pk_in(junction, rel.src_col, src_pks.to_vec());
         let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
             .await
             .map_err(|e| {
@@ -3892,9 +4141,11 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 ///   Time / Uuid / Binary [hex] / String)
 /// - null → `SqlValue::Null`
 /// - object / array → `SqlValue::Json`
-async fn loaddata_cmd<W: Write>(
+/// `loaddata` into every model, or only those of `scope` (#1424).
+pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
+    scope: Option<crate::core::ModelScope>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_loaddata_args(args)?;
@@ -3931,13 +4182,18 @@ async fn loaddata_cmd<W: Write>(
     // Build a lookup map: "app.Model" + bare "Model" → &'static ModelSchema.
     let mut schemas: std::collections::HashMap<String, &'static crate::core::ModelSchema> =
         std::collections::HashMap::new();
+    // Models of the other scope, refused rather than written to this pool.
+    let mut elsewhere = std::collections::HashMap::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let app = entry.resolved_app_label().unwrap_or("");
-        if !app.is_empty() {
-            schemas.insert(format!("{app}.{}", schema.name), schema);
+        let names = std::iter::once(schema.name.to_owned())
+            .chain((!app.is_empty()).then(|| format!("{app}.{}", schema.name)));
+        if in_scope(schema, scope) {
+            schemas.extend(names.map(|n| (n, schema)));
+        } else {
+            elsewhere.extend(names.map(|n| (n, schema.scope)));
         }
-        schemas.insert(schema.name.to_owned(), schema);
     }
 
     // Parents first: fixtures come in registration order, and a child
@@ -3964,10 +4220,16 @@ async fn loaddata_cmd<W: Write>(
         let schema = match schemas.get(model_name) {
             Some(s) => *s,
             None => {
-                let msg = format!(
-                    "loaddata: entry #{line}: unknown model `{model_name}` (registered: {} models)",
-                    schemas.len() / 2, // dotted + bare keys
-                );
+                let msg = match elsewhere.get(model_name) {
+                    Some(owner) => format!(
+                        "loaddata: entry #{line}: {}",
+                        out_of_scope(model_name, *owner)
+                    ),
+                    None => format!(
+                        "loaddata: entry #{line}: unknown model `{model_name}` (registered: {} models)",
+                        schemas.len() / 2, // dotted + bare keys
+                    ),
+                };
                 if parsed.fail_fast {
                     abort = Some(msg);
                     break;
@@ -6414,6 +6676,33 @@ mod gen_tests {
         }
     }
 
+    /// The streamed fixture is byte for byte what `serde_json` writes whole (#1399).
+    #[test]
+    fn fixture_writer_matches_serde_json() {
+        let entries = vec![
+            serde_json::json!({"model": "a.B", "pk": 1, "fields": {"s": "x\ny", "l": [1, 2]}}),
+            serde_json::json!({"model": "a.B", "pk": 2, "fields": {}}),
+        ];
+        for n in 0..=entries.len() {
+            let some = &entries[..n];
+            for indent in [0, 2] {
+                let mut buf = Vec::new();
+                let mut w = FixtureWriter::new(&mut buf, indent);
+                for e in some {
+                    w.entry(e).unwrap();
+                }
+                w.finish().unwrap();
+                let whole = if indent == 0 {
+                    serde_json::to_string(some)
+                } else {
+                    serde_json::to_string_pretty(some)
+                }
+                .unwrap();
+                assert_eq!(String::from_utf8(buf).unwrap(), format!("{whole}\n"));
+            }
+        }
+    }
+
     #[test]
     fn json_to_sql_value_null_passes_through() {
         let f = field("x", crate::core::FieldType::I64);
@@ -7415,6 +7704,177 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.contains("(system,"), "{out}");
     }
 
+    /// #1411 — dry-run shows the bootstrap DDL `migrate` runs for a missing table.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_bootstrap_ddl() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let creates_audit = |out: &str| {
+            out.lines()
+                .any(|l| l.starts_with("CREATE TABLE") && l.contains("rustango_audit_log"))
+        };
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
+        assert!(creates_audit(&out), "{out}");
+        // A preview creates nothing: no table, no ledger (rel-0609 tests-004).
+        let tables: Vec<(i64,)> =
+            crate::sql::raw_query_pool("SELECT COUNT(*) FROM sqlite_master", Vec::new(), &pool)
+                .await
+                .unwrap();
+        assert_eq!(tables[0].0, 0, "the dry run wrote to the database");
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
+        assert!(!creates_audit(&out), "{out}");
+        assert!(out.contains("nothing to migrate"), "{out}");
+    }
+
+    /// #1411 — dry-run shows the system step `migrate` would generate first.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_the_system_step_migrate_generates() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
+        assert!(out.contains("(system,"), "{out}");
+        assert!(
+            !root.path().join("system").exists(),
+            "a preview writes no system files"
+        );
+    }
+
+    /// #1411 — dry-run shows the columns `migrate` adds to a framework table
+    /// the project chain created.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_the_converge_of_project_owned_tables() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Pool::connect("sqlite::memory:").await.unwrap();
+        manage_out(&scratch, &dir, &["migrate"])
+            .await
+            .expect("migrate");
+        let (table, column) = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope == super::super::MigrationScope::Tenant)
+            .find_map(|m| {
+                m.forward.iter().find_map(|op| match op {
+                    Operation::Schema(super::super::SchemaChange::CreateTable(t)) => {
+                        let fields = &m.snapshot.table(t)?.fields;
+                        let id = fields.iter().find(|f| f.primary_key)?;
+                        let other = fields.iter().find(|f| !f.primary_key)?;
+                        (id.column == "id").then(|| (t.clone(), other.column.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .expect("a system table with an id pk");
+        file::write(
+            &dir.join("0001_own.json"),
+            &create_mig("0001_own", None, &table),
+        )
+        .unwrap();
+
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        runner::migrate_pool(&pool, &dir)
+            .await
+            .expect("project chain");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
+            .await
+            .unwrap();
+        let adds = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\"");
+        assert!(out.contains(&adds), "{adds} missing from:\n{out}");
+    }
+
+    /// A dump reaches the caller's writer in large chunks, not per entry (rel-0609 performance-001).
+    #[test]
+    fn fixture_writer_buffers() {
+        struct Counting(usize, Vec<u8>);
+        impl Write for Counting {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                self.1.extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = Counting(0, Vec::new());
+        let mut out = FixtureWriter::new(&mut sink, 2);
+        for pk in 0..100 {
+            out.entry(&serde_json::json!({"pk": pk})).unwrap();
+        }
+        out.finish().unwrap();
+        let text = String::from_utf8(sink.1).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()[99]["pk"],
+            99
+        );
+        assert!(sink.0 < 10, "{} writes for 100 entries", sink.0);
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(
+        table = "dl1399_post",
+        m2m(
+            name = "tags",
+            to = "dl1399_tag",
+            through = "dl1399_post_tags",
+            src = "post_id",
+            dst = "tag_id"
+        )
+    )]
+    pub struct DlPost {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "dl1399_tag")]
+    pub struct DlTag {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    /// A page reads only its own rows' links, not the whole junction (rel-0609 tests-002).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn m2m_links_reads_only_the_page() {
+        use crate::core::Model as _;
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        for sql in [
+            "CREATE TABLE dl1399_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
+            "INSERT INTO dl1399_post_tags VALUES (1, 10), (2, 20)",
+        ] {
+            crate::sql::raw_execute_pool(&pool, sql, Vec::new())
+                .await
+                .unwrap();
+        }
+        let page = [crate::core::SqlValue::I64(1)];
+        let links = m2m_links(&pool, DlPost::SCHEMA, &page).await.unwrap();
+        let [(_, by_src)] = links.as_slice() else {
+            panic!("one relation: {links:?}");
+        };
+        let srcs: Vec<&String> = by_src.keys().collect();
+        assert_eq!(srcs, ["1"], "read links of rows outside the page");
+    }
+
     /// #1311 — once a squash is applied, the file it replaced is not pending.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -8180,7 +8640,7 @@ mod db_cmd_tests {
         };
         for cmd in [
             pg_dump_command(&dump, url).unwrap(),
-            psql_restore_command(&plan, url).unwrap(),
+            psql_restore_command("psql", &plan, url).unwrap(),
         ] {
             assert!(
                 !cmd.get_args()
@@ -8323,13 +8783,22 @@ mod db_cmd_tests {
             eprintln!("DATABASE_URL not set — skipping");
             return;
         };
-        assert!(
-            std::process::Command::new("psql")
+        // `$RUSTANGO_TEST_PSQL`, else `psql` on PATH; CI must have one (#1413).
+        let runs = |p: &str| {
+            std::process::Command::new(p)
                 .arg("--version")
                 .output()
-                .is_ok_and(|o| o.status.success()),
-            "db:restore needs `psql` on PATH"
-        );
+                .is_ok_and(|o| o.status.success())
+        };
+        let psql = std::env::var("RUSTANGO_TEST_PSQL").unwrap_or_else(|_| "psql".to_owned());
+        if !runs(&psql) {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "db:restore needs `psql` on PATH in CI"
+            );
+            eprintln!("SKIPPED: `{psql}` does not run (set RUSTANGO_TEST_PSQL); db:restore is unproven here");
+            return;
+        }
         let db = format!("rustango_restore_{}", std::process::id());
         let (base, _) = url.rsplit_once('/').expect("DATABASE_URL names a database");
         let private = format!("{base}/{db}");
@@ -8354,7 +8823,7 @@ mod db_cmd_tests {
 
         let plan = RestorePlan::check(restore_args(bad.to_str().unwrap(), true, true), |_| true)
             .expect("plan");
-        let res = run_psql_restore(&plan, &private, &mut Vec::new());
+        let res = run_psql_restore(&psql, &plan, &private, &mut Vec::new());
         let kept: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM keep")
             .fetch_one(&p)
             .await;

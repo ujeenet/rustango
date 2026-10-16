@@ -312,7 +312,8 @@ pub trait Dialect: Send + Sync {
     }
 
     /// `true` if `IN (<subquery>)` rejects a `LIMIT`/`OFFSET` inside
-    /// (MySQL 1235), so the writer wraps it in a derived table.
+    /// (MySQL 1235), so the writer wraps it in a derived table. Inside an
+    /// UPDATE/DELETE it also wraps one that reads the target (1093).
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
         false
     }
@@ -530,6 +531,12 @@ pub trait Dialect: Send + Sync {
             // PostGIS casts text to geometry implicitly, so a NULL needs no cast.
             FieldType::Geometry(_) => return None,
         })
+    }
+
+    /// `(bytes, cap)` of an index key over these `(type, max_length)`
+    /// columns, when the backend caps a key; `None` when it does not.
+    fn index_key_size(&self, _cols: &[(FieldType, Option<u32>)]) -> Option<(u32, u32)> {
+        None
     }
 
     /// The `CREATE TABLE` column type for a field that is not an

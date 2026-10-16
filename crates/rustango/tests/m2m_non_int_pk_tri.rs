@@ -176,11 +176,58 @@ const ITEM_TAG: &rustango::core::ModelSchema = &{
     s
 };
 
+/// Text keys on both ends of a junction that is no model (#1405).
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "m2m1926_author",
+    app = "m2m1926",
+    m2m(
+        name = "genres",
+        to = "m2m1926_genre",
+        through = "m2m1926_author_genre",
+        src = "author_code",
+        dst = "genre_code"
+    )
+)]
+pub struct Author {
+    #[rustango(primary_key, max_length = 64)]
+    pub code: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "m2m1926_genre", app = "m2m1926")]
+pub struct Genre {
+    #[rustango(primary_key, max_length = 64)]
+    pub code: String,
+}
+
+/// `m2m1926_author_genre`, kept out of the model registry.
+const AUTHOR_GENRE: &rustango::core::ModelSchema = &{
+    use rustango::core::{FieldSchema, FieldType, IndexSchema, ModelSchema};
+    const fn text(name: &'static str) -> FieldSchema {
+        let mut f = FieldSchema::new(name, name, FieldType::String);
+        f.max_length = Some(64);
+        f
+    }
+    const FIELDS: &[FieldSchema] = &[text("author_code"), text("genre_code")];
+    const INDEXES: &[IndexSchema] = &[{
+        let mut i = IndexSchema::new("m2m1926_author_genre_pair", &["author_code", "genre_code"]);
+        i.unique = true;
+        i
+    }];
+    let mut s = ModelSchema::new("AuthorGenre", "m2m1926_author_genre");
+    s.fields = FIELDS;
+    s.indexes = INDEXES;
+    s
+};
+
 async fn setup(pool: &Pool) {
-    rustango::testkit::matrix::drop_table(pool, ITEM_TAG.table).await;
-    rustango::testkit::create_tables(pool, &[ITEM_TAG])
-        .await
-        .expect("item_tag");
+    for junction in [ITEM_TAG, AUTHOR_GENRE] {
+        rustango::testkit::matrix::drop_table(pool, junction.table).await;
+        rustango::testkit::create_tables(pool, &[junction])
+            .await
+            .expect(junction.table);
+    }
     rustango::testkit::matrix::fresh_table::<RackBadge>(pool).await;
     rustango::testkit::matrix::fresh_table::<PostTag>(pool).await;
     rustango::testkit::matrix::fresh_table::<DocTag>(pool).await;
@@ -247,6 +294,32 @@ async fn unregistered_junction_round_trips(pool: &Pool) {
     assert_eq!(b.tags_m2m().all(pool).await.expect("all"), vec![2]);
     a.tags_m2m().clear(pool).await.expect("clear");
     assert!(a.tags_m2m().all(pool).await.expect("all").is_empty());
+}
+
+/// The junction's ends take the models' pk types, so text keys bind (#1405).
+async fn text_keys_on_an_unregistered_junction(pool: &Pool) {
+    let (ann, bob) = (Author { code: "ann".into() }, Author { code: "bob".into() });
+    ann.genres_m2m().add("poetry", pool).await.expect("add");
+    bob.genres_m2m()
+        .set(&["drama", "satire"], pool)
+        .await
+        .expect("set");
+    assert!(ann
+        .genres_m2m()
+        .contains("poetry", pool)
+        .await
+        .expect("contains"));
+    assert!(!ann
+        .genres_m2m()
+        .contains("drama", pool)
+        .await
+        .expect("contains"));
+    bob.genres_m2m()
+        .remove("satire", pool)
+        .await
+        .expect("remove");
+    let got: Vec<String> = bob.genres_m2m().all_as(pool).await.expect("all_as");
+    assert_eq!(got, ["drama"]);
 }
 
 /// `set` splits a list past the backend's bind limit like `bulk_insert` (#2136).
@@ -386,6 +459,7 @@ tri_dialect_test! {
         too_long_key_is_an_error,
         set_past_the_bind_limit,
         unregistered_junction_round_trips,
+        text_keys_on_an_unregistered_junction,
         uuid_pk_rows_stay_per_source,
         unsaved_source_is_refused,
         string_destination_keys_round_trip,

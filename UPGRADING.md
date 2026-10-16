@@ -150,6 +150,48 @@ untouched.
 
 ## Unreleased
 
+### `migrate --dry-run` prints more (#1411)
+
+A fresh project's dry-run now lists the framework's system tables and the bootstrap tables, under `-- … (system, …)` and `-- bootstrap <table> (idempotent)` headers. Scripts that took "nothing to migrate" for granted on a new database will see SQL instead.
+
+### `dumpdata` writes rows in pk order (#1399)
+
+Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
+
+### Tenancy `dumpdata` / `loaddata` are scoped (#1424)
+
+In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry.
+
+### M2M junction DDL follows the target pk (#1404)
+
+New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
+
+On MySQL, an auto-created junction whose two pk columns exceed 3072 bytes (4 per VARCHAR char) is refused when the migration renders; shorten the string pks' `max_length`.
+
+### SQLite JSON-path equality with null or an object (#1398)
+
+`json_path(..) = Json(null)` now matches stored JSON nulls, and object literals match whatever their key order. Such filters return more rows on SQLite than before; they no longer use an index on `json_extract`.
+
+### Session state on a `PoolConn` reaches the next borrower (#1397)
+
+Nothing resets it on release. If you `SET` anything on a held connection, call `conn.close_on_drop()` before dropping it.
+
+### PG FATAL errors end an `atomic` block (#1403)
+
+After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_timeout`) later statements in the block return `ExecError::AtomicAborted`, not a driver I/O error.
+
+### More `_on` methods work on every backend (#1395)
+
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only. This corrects the 0.60.8 note that the other `_on` methods stay Postgres-only.
+
+### MySQL `dbshell` refuses unknown URL options (#1410)
+
+`manage dbshell` now fails on a MySQL `DATABASE_URL` option it cannot pass to the `mysql` client (anything but the sqlx ones); it used to drop them all, `ssl-mode` included.
+
+### Tenant-user deactivation in the admin signs out (#1412)
+
+A user deactivated in the admin must sign in again after reactivation; old cookies and refresh tokens no longer come back.
+
 ## 0.60.8
 
 ### Pools no longer ping before every checkout (#2674)

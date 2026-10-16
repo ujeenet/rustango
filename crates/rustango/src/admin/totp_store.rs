@@ -87,10 +87,14 @@ const WINDOW: i64 = 1;
 /// Driver or SQL failures. Duplicate-object errors are ignored, so
 /// repeat calls succeed.
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
-    use crate::core::Model as _;
-    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
-    crate::migrate::apply_idempotent(pool, &snapshot).await?;
+    crate::migrate::apply_idempotent(pool, &bootstrap_snapshot()).await?;
     add_new_columns(pool).await
+}
+
+/// The table as [`ensure_table`] creates it.
+pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
+    use crate::core::Model as _;
+    crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA])
 }
 
 /// Columns newer than the table, added to one created by an older
@@ -98,10 +102,9 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 /// "no second factor" (#1644).
 async fn add_new_columns(pool: &Pool) -> Result<(), sqlx::Error> {
     use crate::core::Model as _;
-    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
     crate::migrate::add_columns_idempotent(
         pool,
-        &snapshot,
+        &bootstrap_snapshot(),
         &[
             (AdminTotp::SCHEMA.table, "last_used_step"),
             (AdminTotp::SCHEMA.table, "pending_secret_base32"),

@@ -236,9 +236,45 @@ impl M2MManager {
 /// The junction as a schema the emitters compile against (#2136): the
 /// registered through model, else one naming just the manager's columns.
 pub(crate) fn junction(through: &'static str, cols: &[&'static str]) -> &'static ModelSchema {
-    // Binding: types only pick NULL casts, and a junction never binds NULL.
-    let cols: Vec<_> = cols.iter().map(|c| (*c, FieldType::I64)).collect();
+    let cols: Vec<_> = cols
+        .iter()
+        .map(|c| (*c, auto_column_type(through, c).unwrap_or(FieldType::I64)))
+        .collect();
     typed_junction(through, &cols)
+}
+
+/// The type of a junction column referencing `target`'s pk.
+pub(crate) fn end_type(target: &ModelSchema) -> Option<FieldType> {
+    target.primary_key().map(|pk| junction_column_type(pk.ty))
+}
+
+/// A junction column's type for a pk of type `pk`: integers widen to BIGINT
+/// (#1404). The one rule for the runtime and the migration writer.
+pub(crate) fn junction_column_type(pk: FieldType) -> FieldType {
+    match pk {
+        FieldType::I16 | FieldType::I32 => FieldType::I64,
+        ty => ty,
+    }
+}
+
+/// `column`'s type in an auto-created junction `through`: its end's pk type,
+/// `I64` when that model is not registered (#1405). `None` for no such column.
+fn auto_column_type(through: &str, column: &str) -> Option<FieldType> {
+    inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .flat_map(|e| e.schema.m2m.iter().map(move |r| (e.schema, r)))
+        .filter(|(_, r)| r.auto_create && r.through == through)
+        .find_map(|(src, r)| {
+            let end = if r.dst_col == column {
+                r.to
+            } else if r.src_col == column {
+                src.table
+            } else {
+                return None;
+            };
+            let target = crate::core::ModelEntry::for_table(end).map(|e| e.schema);
+            Some(target.and_then(end_type).unwrap_or(FieldType::I64))
+        })
 }
 
 /// [`junction`] with each column's real type, for callers that decode it.
@@ -393,17 +429,13 @@ fn dst_key(
     })
 }
 
-/// The `dst` column's type: from the registered through model, else BIGINT for
-/// a junction the migration writer creates. `None` when neither is known.
+/// The `dst` column's type: from the registered through model, else as the
+/// migration writer creates the junction. `None` when neither is known.
 fn dst_column_type(through: &str, dst_col: &str) -> Option<FieldType> {
     if let Some(entry) = crate::core::ModelEntry::for_table(through) {
         return entry.schema.field_by_column(dst_col).map(|f| f.ty);
     }
-    inventory::iter::<crate::core::ModelEntry>
-        .into_iter()
-        .flat_map(|e| e.schema.m2m)
-        .any(|r| r.auto_create && r.through == through && r.dst_col == dst_col)
-        .then_some(FieldType::I64)
+    auto_column_type(through, dst_col)
 }
 
 // ============================================================ polymorphic (generic) M2M

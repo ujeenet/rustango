@@ -1767,11 +1767,23 @@ pass `&mut conn` to the `_on` methods, e.g. `Post::objects().fetch_on(&mut conn)
 This works on all three backends. `conn.begin()` opens a `PoolTx` on the same
 connection.
 
-The `_on` methods are `fetch_on`, `first_on`, `count_on`, `exists_on` on a
-queryset, and `fetch_on` on `values()`, `values_list()`, `values_list_flat()`
+The `_on` methods are `fetch_on`, `first_on`, `count_on`, `exists_on`,
+`fetch_paginated_on`, `in_bulk_on`, `explain_on`, `delete_on` on a queryset,
+`execute_on` on `update()`, `ForeignKey::get_on`, `annotate_count_children_on`,
+`fetch_aggregate_on`, and `fetch_on` on `values()`, `values_list()`, `values_list_flat()`
 (plus `first_on`) and `aggregate()`. They take any `SqlExecutor`: `&mut PoolConn`,
 `&mut PoolTx`, `&Pool`, or on Postgres any sqlx executor (`&PgPool`,
 `&mut PgConnection`, `t.conn()`).
+
+A connection goes back to the pool with any session state you set on it
+(`SET …`, MySQL `@vars`, SQLite `PRAGMA`); the next borrower inherits it, which
+on a registry pool can be another tenant's request. After such a change call
+`conn.close_on_drop()`, so the connection is closed instead of reused.
+
+While you hold a `PoolConn`, pass it to every query: a `&Pool` method in the
+same handler checks out a second connection. With `max_connections` such
+requests at once, each holds one and waits for another, and all of them time
+out. Drop the conn before calling code that takes `&Pool`.
 
 ---
 

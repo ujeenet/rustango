@@ -198,8 +198,8 @@ pub enum SchemaChange {
         name: String,
         table: String,
     },
-    /// Create a many-to-many junction table: two `BIGINT NOT NULL`
-    /// FK columns and a composite `PRIMARY KEY`.
+    /// Create a many-to-many junction table: two `NOT NULL` FK columns
+    /// typed like the pks they reference, and a composite `PRIMARY KEY`.
     CreateM2MTable {
         through: String,
         src_table: String,
@@ -1447,7 +1447,7 @@ fn render_changes_split_inner(
                     }
                 }
                 // A serial's sequence keeps its old type, so i32 → i64 still stops at 2^31 (#2245).
-                if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
+                if field.is_some_and(|f| f.auto) && super::snapshot::is_integer_ty(to) {
                     // A tagged body, so a `$$` in a name cannot end it.
                     const TAG: &str = "$rustango_seq$";
                     if target.contains(TAG) || column.contains(TAG) {
@@ -1802,34 +1802,49 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
+                let (src_ty, src_pk, src_key) = m2m_end(current, src_table, dialect);
+                let (dst_ty, dst_pk, dst_key) = m2m_end(current, dst_table, dialect);
+                if let Some((bytes, cap)) = dialect.index_key_size(&[src_key, dst_key]) {
+                    if bytes > cap {
+                        return Err(format!(
+                            "junction `{through}`: its primary key ({src_col}, {dst_col}) takes \
+                             {bytes} bytes, over {}'s {cap}-byte key limit; shorten the string \
+                             pks' max_length",
+                            dialect.name(),
+                        ));
+                    }
+                }
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
                     // Emit the FK clauses inside the CREATE TABLE statement.
                     let q_src_table = fk_target(dialect, schema, src_table);
                     let q_dst_table = fk_target(dialect, schema, dst_table);
-                    let q_id = dialect.quote_ident("id");
+                    let src_on = dialect.quote_ident(src_pk);
+                    let dst_on = dialect.quote_ident(dst_pk);
                     let q_src_fk =
                         dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
                     let q_dst_fk =
                         dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
                     out.immediate.push(format!(
-                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                        "CREATE TABLE {q_through} ({q_src_col} {src_ty} NOT NULL, {q_dst_col} {dst_ty} NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}), \
-                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE, \
-                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE)",
+                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({src_on}) ON DELETE CASCADE, \
+                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({dst_on}) ON DELETE CASCADE)",
                     ));
                 } else {
                     // PG / MySQL: defer FK creation so cross-table cycles
                     // resolve cleanly within a single migration batch.
                     out.immediate.push(format!(
-                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                        "CREATE TABLE {q_through} ({q_src_col} {src_ty} NOT NULL, {q_dst_col} {dst_ty} NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}))",
                     ));
-                    out.deferred_fks
-                        .push(m2m_fk_sql(through, src_col, src_table, dialect, schema));
-                    out.deferred_fks
-                        .push(m2m_fk_sql(through, dst_col, dst_table, dialect, schema));
+                    out.deferred_fks.push(m2m_fk_sql(
+                        through, src_col, src_table, src_pk, dialect, schema,
+                    ));
+                    out.deferred_fks.push(m2m_fk_sql(
+                        through, dst_col, dst_table, dst_pk, dialect, schema,
+                    ));
                 }
             }
             SchemaChange::DropM2MTable { through } => {
@@ -1985,7 +2000,7 @@ pub(super) fn create_table_sql_as(
         // type token for `Auto<T>` PKs — `PRIMARY KEY` is part of the
         // type, not a separate clause. Skip the standalone append.
         let serial_pk_inline = f.auto
-            && matches!(f.ty.as_str(), "i16" | "i32" | "i64")
+            && super::snapshot::is_integer_ty(&f.ty)
             && dialect.serial_type_includes_primary_key();
         if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
@@ -2161,7 +2176,10 @@ pub(crate) fn column_fk_sql(
     column_fk(snap, table, column)
         .map(|fk| match fk {
             ColumnFk::Field(rel) => field_fk_sql(table, column, rel, dialect, schema),
-            ColumnFk::Junction(to) => Ok(m2m_fk_sql(table, column, to, dialect, schema)),
+            ColumnFk::Junction(to) => {
+                let (_, pk, _) = m2m_end(snap, to, dialect);
+                Ok(m2m_fk_sql(table, column, to, pk, dialect, schema))
+            }
         })
         .transpose()
 }
@@ -2171,6 +2189,7 @@ fn m2m_fk_sql(
     through: &str,
     column: &str,
     to: &str,
+    pk: &str,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> String {
@@ -2180,8 +2199,41 @@ fn m2m_fk_sql(
         dialect.quote_ident(&super::ddl::fk_constraint_name(through, column)),
         dialect.quote_ident(column),
         fk_target(dialect, schema, to),
-        dialect.quote_ident("id"),
+        dialect.quote_ident(pk),
     )
+}
+
+/// A junction column's type and the pk it references in `table` (#1404).
+/// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule; a table outside
+/// `current` keeps the old `BIGINT` to `id`. Also the `(type, max_length)` its key counts.
+fn m2m_end<'a>(
+    current: &'a SchemaSnapshot,
+    table: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> (String, &'a str, (crate::core::FieldType, Option<u32>)) {
+    use crate::core::FieldType;
+    let bigint = || dialect.column_type(FieldType::I64, None);
+    let mut pks = current
+        .table(table)
+        .into_iter()
+        .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
+    let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
+        return (bigint(), "id", (FieldType::I64, None));
+    };
+    let end =
+        super::snapshot::field_type_from_name(&pk.ty).map(crate::sql::m2m::junction_column_type);
+    if end == Some(FieldType::I64) {
+        return (bigint(), &pk.column, (FieldType::I64, None));
+    }
+    let key = (end.unwrap_or(FieldType::String), pk.max_length);
+    let column = FieldSnapshot {
+        primary_key: false,
+        auto: false,
+        default: None,
+        generated_as: None,
+        ..pk.clone()
+    };
+    (sql_type_with_dialect(&column, dialect), &pk.column, key)
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
@@ -2401,37 +2453,7 @@ fn sql_type(f: &FieldSnapshot) -> String {
 /// AUTO_INCREMENT`; PG's stays `BIGSERIAL`.
 fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
     use crate::core::FieldType;
-    // Map snapshot's lowercase ty string to FieldType.
-    let ty = match f.ty.as_str() {
-        "i16" => Some(FieldType::I16),
-        "i32" => Some(FieldType::I32),
-        "i64" => Some(FieldType::I64),
-        "f32" => Some(FieldType::F32),
-        "f64" => Some(FieldType::F64),
-        "bool" => Some(FieldType::Bool),
-        "string" => Some(FieldType::String),
-        "datetime" => Some(FieldType::DateTime),
-        "date" => Some(FieldType::Date),
-        "time" => Some(FieldType::Time),
-        "uuid" => Some(FieldType::Uuid),
-        "json" => Some(FieldType::Json),
-        "decimal" => Some(FieldType::Decimal),
-        "binary" => Some(FieldType::Binary),
-        // #341 — PG array element kinds; route through `column_type`
-        // (→ `text[]` / `integer[]` / `bigint[]` on PG).
-        "array_text" => Some(FieldType::Array(crate::core::ArrayElem::Text)),
-        "array_int" => Some(FieldType::Array(crate::core::ArrayElem::Int)),
-        "array_bigint" => Some(FieldType::Array(crate::core::ArrayElem::BigInt)),
-        // #343 — PG range element kinds.
-        "range_int" => Some(FieldType::Range(crate::core::RangeElem::Int)),
-        "range_bigint" => Some(FieldType::Range(crate::core::RangeElem::BigInt)),
-        "range_numeric" => Some(FieldType::Range(crate::core::RangeElem::Numeric)),
-        "range_date" => Some(FieldType::Range(crate::core::RangeElem::Date)),
-        "range_datetime" => Some(FieldType::Range(crate::core::RangeElem::DateTime)),
-        // #342 — PG hstore.
-        "hstore" => Some(FieldType::HStore),
-        _ => None,
-    };
+    let ty = super::snapshot::field_type_from_name(&f.ty);
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"
     // for integer types; field-mixin auto (auto_now_add etc.) on
     // non-integer types falls through to the regular column_type
@@ -2937,6 +2959,38 @@ mod sql_type_tests {
             dst_table: "tags".into(),
             dst_col: "tag_id".into(),
         }]
+    }
+
+    fn string_pk_snap(src_len: u32, dst_ty: &str) -> SchemaSnapshot {
+        let table = |name: &str, ty: &str, len: Option<u32>| {
+            serde_json::json!({ "name": name, "model": name, "fields": [
+                { "name": "id", "column": "id", "ty": ty, "nullable": false,
+                  "primary_key": true, "max_length": len }] })
+        };
+        serde_json::from_value(serde_json::json!({ "tables": [
+            table("posts", "string", Some(src_len)),
+            table("tags", dst_ty, (dst_ty == "string").then_some(src_len)),
+        ] }))
+        .unwrap()
+    }
+
+    /// MySQL caps a key at 3072 bytes (1071) and utf8mb4 VARCHAR(n) counts 4n.
+    #[test]
+    fn create_m2m_table_refuses_a_mysql_key_over_3072_bytes() {
+        let m2m = make_create_m2m();
+        let render = |snap: &SchemaSnapshot, d: &dyn crate::sql::Dialect| {
+            render_changes_split_with_dialect(&m2m, snap, d)
+        };
+        // 400 + 400 chars: MySQL 8 refuses it; PG and SQLite take it.
+        let wide = string_pk_snap(400, "string");
+        let err = render(&wide, &crate::sql::MySql).unwrap_err();
+        assert!(err.contains("post_tags") && err.contains("3072"), "{err}");
+        render(&wide, &crate::sql::Postgres).unwrap();
+        render(&wide, &crate::sql::Sqlite).unwrap();
+        // Exactly 3072 bytes, as MySQL accepts: 384 + 384, and 766 + BIGINT.
+        render(&string_pk_snap(384, "string"), &crate::sql::MySql).unwrap();
+        render(&string_pk_snap(766, "i64"), &crate::sql::MySql).unwrap();
+        render(&string_pk_snap(767, "i64"), &crate::sql::MySql).unwrap_err();
     }
 
     #[test]
