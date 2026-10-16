@@ -1238,7 +1238,7 @@ impl InsertQuery {
         }
     }
 
-    /// Mark `columns` as holding values the writer generated. See [`Self::generated`].
+    /// Mark `columns` as holding values the writer generated (the `generated` field).
     #[must_use]
     pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
         self.generated = columns;
@@ -1312,7 +1312,7 @@ pub struct BulkInsertQuery {
     pub returning: Vec<&'static str>,
     /// Optional `ON CONFLICT` clause applied to every row in the batch.
     pub on_conflict: Option<ConflictClause>,
-    /// As [`InsertQuery::generated`]: only columns generated on every row.
+    /// As `InsertQuery`'s `generated`: only columns generated on every row.
     pub generated: Vec<&'static str>,
 }
 
@@ -1334,7 +1334,7 @@ impl BulkInsertQuery {
         }
     }
 
-    /// Mark `columns` as generated on every row. See [`Self::generated`].
+    /// Mark `columns` as generated on every row (the `generated` field).
     #[must_use]
     pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
         self.generated = columns;
