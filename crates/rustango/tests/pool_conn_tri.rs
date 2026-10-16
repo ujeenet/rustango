@@ -242,29 +242,53 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
 }
 
 /// The `_on` methods that took only a Postgres executor run on a held
-/// connection on every backend (#1395).
+/// connection on every backend (#1395), one counted query each.
 async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
-    use rustango::sql::{annotate_count_children_on, fetch_aggregate_on, ExplainOptions};
+    use rustango::sql::{annotate_count_children_on, explain_pool, fetch_aggregate_on, ExplainOptions};
+    use rustango::test_assertions::assert_num_queries as one;
     let mut conn = pool.acquire().await.expect("acquire");
     let c = &mut conn;
 
-    let page = by_id().limit(1).fetch_paginated_on(&mut *c).await.unwrap();
+    let page = one(1, by_id().limit(1).fetch_paginated_on(&mut *c)).await.unwrap();
     assert_eq!((page.rows.len(), page.total), (1, 2));
 
-    let bulk = Author::objects()
-        .in_bulk_on(Author::id, [1_i64, 2], |a| a.id, &mut *c)
-        .await
-        .unwrap();
+    let bulk = one(
+        1,
+        Author::objects().in_bulk_on(Author::id, [1_i64, 2], |a| a.id, &mut *c),
+    )
+    .await
+    .unwrap();
     assert_eq!(bulk[&2].name, "Bob");
 
-    let counts = annotate_count_children_on::<Author, _>(by_id(), "pc_book", "author", &mut *c)
-        .await
-        .unwrap();
+    let counts = one(
+        1,
+        annotate_count_children_on::<Author, _>(by_id(), "pc_book", "author", &mut *c),
+    )
+    .await
+    .unwrap();
     let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
     assert_eq!(counts, [(1, 2), (2, 1)]);
 
-    let plan = by_id()
-        .explain_on(&mut *c, ExplainOptions::default())
+    // The `&PgPool` wrappers count too.
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        let page = one(1, by_id().limit(1).fetch_paginated(pg)).await.unwrap();
+        assert_eq!((page.rows.len(), page.total), (1, 2));
+        let counts = one(
+            1,
+            rustango::sql::annotate_count_children(by_id(), "pc_book", "author", pg),
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts.len(), 2);
+    }
+
+    let plan = one(1, by_id().explain_on(&mut *c, ExplainOptions::default()))
+        .await
+        .unwrap();
+    assert!(!plan.is_empty());
+    let q = by_id().compile().unwrap();
+    let plan = one(1, explain_pool(pool, &q, ExplainOptions::default()))
         .await
         .unwrap();
     assert!(!plan.is_empty());
@@ -275,7 +299,7 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
         .annotate("n", AggregateExpr::Count(None))
         .compile()
         .unwrap();
-    let rows = fetch_aggregate_on(&agg, &mut *c).await.unwrap();
+    let rows = one(1, fetch_aggregate_on(&agg, &mut *c)).await.unwrap();
     assert_eq!(rows.len(), 1);
 
     let mut book = Book::objects()
@@ -284,19 +308,20 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(book.author.get_on(&mut *c).await.unwrap().name, "Bob");
+    assert_eq!(one(1, book.author.get_on(&mut *c)).await.unwrap().name, "Bob");
 
-    let renamed = Author::objects()
-        .filter("id", 2_i64)
-        .update()
-        .set("name", "Cy")
-        .execute_on(&mut *c)
-        .await
-        .unwrap();
+    let renamed = one(
+        1,
+        Author::objects()
+            .filter("id", 2_i64)
+            .update()
+            .set("name", "Cy")
+            .execute_on(&mut *c),
+    )
+    .await
+    .unwrap();
     assert_eq!(renamed, 1);
-    let gone = Book::objects()
-        .filter("id", 3_i64)
-        .delete_on(&mut *c)
+    let gone = one(1, Book::objects().filter("id", 3_i64).delete_on(&mut *c))
         .await
         .unwrap();
     assert_eq!(gone, 1);
