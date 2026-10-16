@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed — `migrate --dry-run` shows everything `migrate` runs (#1411)
 
-The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table.
+The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table. The converge part uses `migrate`'s own planner, so it shows its NOT NULL refusals, and names a table pending migrations change instead of guessing its SQL.
 
 ### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
 

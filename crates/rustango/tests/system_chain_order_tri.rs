@@ -246,6 +246,100 @@ async fn pending_project_add_column(backend: Backend) {
     manage_migrate(&pool, &dir).await.expect("second run");
 }
 
+async fn dry_run(pool: &Pool, dir: &Path) -> String {
+    let mut out = Vec::new();
+    let args = ["migrate".to_owned(), "--dry-run".to_owned()];
+    rustango::migrate::manage::run_with_writer(pool, dir, args, &mut out)
+        .await
+        .expect("dry run");
+    String::from_utf8(out).unwrap()
+}
+
+/// rel-0609 correctness-002 — a table a pending project migration changes is
+/// not previewed from today's catalog, and the dry run writes nothing.
+async fn dry_run_defers_a_table_pending_migrations_change(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "dryadd").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let (table, column) = ("rustango_admin_users", "sessions_revoked_at");
+    let dir = root.join("migrations");
+    project_initial(&dir, current_table(table, Some(column)));
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    write_step(
+        &dir,
+        "0002_add",
+        Some("0001_initial"),
+        json!({ "tables": [current_table(table, None)] }),
+        vec![json!({ "AddColumn": { "table": table, "column": column } })],
+    );
+    let out = dry_run(&pool, &dir).await;
+    let adds = out
+        .lines()
+        .filter(|l| l.contains("ADD COLUMN") && l.contains(column))
+        .count();
+    assert_eq!(adds, 1, "the project step adds it once:\n{out}");
+    assert!(out.contains(&format!("`{table}`: pending migrations")), "{out}");
+    // Read-only: no column, no ledger row, no system ledger.
+    assert!(!has_column(&pool, table, column).await);
+    let applied = rustango::migrate::applied_set_pool(&pool).await.unwrap();
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert!(!has_table(&pool, "__rustango_system_migrations__").await);
+    manage_migrate(&pool, &dir).await.expect("migrate");
+    assert!(has_column(&pool, table, column).await);
+}
+
+/// rel-0609 correctness-002 — the dry run shows the NOT NULL refusal
+/// `migrate` hits on a table with rows, not an ADD COLUMN it never runs.
+async fn dry_run_shows_the_not_null_refusal(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "drynn").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let table = "rustango_admin_users";
+    let mut only_pk = current_table(table, None);
+    only_pk["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|f| f["primary_key"] == true);
+    let column = current_table(table, None)["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["nullable"] == false && f["default"].is_null() && f["primary_key"] == false)
+        .expect("a NOT NULL column with no default")["column"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = tmp.path().join("app");
+    system_chain(&root);
+    let dir = root.join("migrations");
+    project_initial(&dir, only_pk);
+    rustango::migrate::migrate_pool(&pool, &dir).await.unwrap();
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!("INSERT INTO {table} (id) VALUES (1)"),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let out = dry_run(&pool, &dir).await;
+    assert!(
+        out.contains(&format!("column `{table}.{column}`: `migrate` fails here")),
+        "{out}"
+    );
+    assert!(
+        !out.lines().any(|l| l.contains("ADD COLUMN") && l.contains(&column)),
+        "{out}"
+    );
+    let err = manage_migrate(&pool, &dir).await.expect_err("migrate refuses");
+    assert!(err.to_string().contains(&column), "{err}");
+}
+
 /// Finding 2 — system step N adds a column to a project-owned table and
 /// N+1 alters it; the alter must find the column.
 async fn alter_after_add_on_owned(backend: Backend) {
@@ -1782,6 +1876,8 @@ per_backend!(
     single_step_chain_converges_project_table,
     tenant_project_table_converges,
     pending_project_add_column,
+    dry_run_defers_a_table_pending_migrations_change,
+    dry_run_shows_the_not_null_refusal,
     alter_after_add_on_owned,
     owned_table_dropped_later,
     not_null_column_on_empty_table,

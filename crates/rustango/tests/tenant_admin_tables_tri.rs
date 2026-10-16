@@ -288,6 +288,65 @@ async fn assert_no_passkey_admin(router: &axum::Router) {
     );
 }
 
+/// Each bootstrap table's `--dry-run` DDL creates it, and `migrate` then
+/// takes the table as it is (rel-0609 tests-005).
+async fn bootstrap_previews_create_their_tables(backend: Backend) {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((pool, _, _db)) = fresh(backend, tmp.path(), "boot").await else {
+        eprintln!("skipping — backend URL unset");
+        return;
+    };
+    let dir = tmp.path().join("app/migrations");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manage = |args: &'static [&'static str]| {
+        let (pool, dir) = (pool.clone(), dir.clone());
+        async move {
+            let mut out = Vec::new();
+            let args = args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+            rustango::migrate::manage::run_with_writer(&pool, &dir, args, &mut out)
+                .await
+                .map(|()| String::from_utf8(out).unwrap())
+        }
+    };
+    let has_table = |t: &str| {
+        let (pool, sql) = (pool.clone(), format!("SELECT 1 FROM {t} WHERE 1 = 0"));
+        async move { rustango::sql::raw_execute_pool(&pool, &sql, Vec::new()).await.is_ok() }
+    };
+    manage(&["migrate"]).await.expect("migrate");
+    #[allow(unused_mut)]
+    let mut tables = vec!["rustango_audit_log", "rustango_translations"];
+    #[cfg(feature = "totp")]
+    tables.push("rustango_admin_totp");
+    #[cfg(feature = "passkey")]
+    tables.push("rustango_webauthn_credentials");
+    for t in &tables {
+        rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE {t}"), Vec::new())
+            .await
+            .expect("drop");
+    }
+    let out = manage(&["migrate", "--dry-run"]).await.expect("dry run");
+    for t in &tables {
+        assert!(!has_table(t).await, "the dry run created {t}");
+        let header = format!("-- bootstrap {t} (idempotent)");
+        let section = out
+            .split(&header)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {header}:\n{out}"));
+        let section = section.split("\n\n").next().unwrap();
+        for stmt in section.split(";\n").map(|s| s.trim().trim_end_matches(';')) {
+            if !stmt.is_empty() {
+                rustango::sql::raw_execute_pool(&pool, stmt, Vec::new())
+                    .await
+                    .unwrap_or_else(|e| panic!("{t}: {stmt}: {e}"));
+            }
+        }
+        assert!(has_table(t).await, "the previewed DDL made no {t}");
+    }
+    manage(&["migrate"]).await.expect("migrate over the previewed tables");
+    let out = manage(&["migrate", "--dry-run"]).await.expect("dry run");
+    assert!(!out.contains("-- bootstrap"), "{out}");
+}
+
 macro_rules! per_backend {
     ($($scenario:ident),* $(,)?) => {
         $(
@@ -312,7 +371,11 @@ macro_rules! per_backend {
     };
 }
 
-per_backend!(database_mode_tenant_admin, single_database_admin);
+per_backend!(
+    database_mode_tenant_admin,
+    single_database_admin,
+    bootstrap_previews_create_their_tables
+);
 
 /// The same on a schema-mode tenant, whose `search_path` also reaches `public`.
 #[cfg(feature = "postgres")]

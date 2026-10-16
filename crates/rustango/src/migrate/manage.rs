@@ -950,6 +950,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
             continue;
         }
         let ddl = (b.ddl)(pool.dialect()).map_err(MigrateError::Validation)?;
+        let ddl = ddl.into_iter().map(super::chains::PreviewLine::Sql).collect();
         after.push((format!("bootstrap {}", b.table), ddl));
     }
     if not_generated {
@@ -972,11 +973,14 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
             writeln!(w, "{stmt};")?;
         }
     }
-    for (label, stmts) in &after {
+    for (label, lines) in &after {
         writeln!(w)?;
         writeln!(w, "-- {label} (idempotent)")?;
-        for stmt in stmts {
-            writeln!(w, "{stmt};")?;
+        for line in lines {
+            match line {
+                super::chains::PreviewLine::Sql(stmt) => writeln!(w, "{stmt};")?,
+                super::chains::PreviewLine::Note(note) => writeln!(w, "-- {note}")?,
+            }
         }
     }
     Ok(())
@@ -7713,6 +7717,12 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .await
             .unwrap();
         assert!(creates_audit(&out), "{out}");
+        // A preview creates nothing: no table, no ledger (rel-0609 tests-004).
+        let tables: Vec<(i64,)> =
+            crate::sql::raw_query_pool("SELECT COUNT(*) FROM sqlite_master", Vec::new(), &pool)
+                .await
+                .unwrap();
+        assert_eq!(tables[0].0, 0, "the dry run wrote to the database");
         manage_out(&pool, &dir, &["migrate"])
             .await
             .expect("migrate");
