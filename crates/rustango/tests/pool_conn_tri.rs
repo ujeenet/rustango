@@ -212,6 +212,7 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
 
     let agg = Author::objects()
         .aggregate()
+        .values(&[])
         .annotate("n", AggregateExpr::Count(None))
         .compile()
         .unwrap();
