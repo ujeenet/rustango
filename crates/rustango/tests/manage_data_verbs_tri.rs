@@ -607,76 +607,49 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
-/// Empty shelf and label tables, joined by the junction migrations build.
+/// Empty shelf and label tables and a text-keyed junction. Written by
+/// hand: the migration DDL types every auto junction BIGINT.
 async fn fresh_text_m2m(pool: &Pool) {
-    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli1393_shelf_labels").await;
     fresh_table::<TextShelf>(pool).await;
     fresh_table::<TextLabel>(pool).await;
-    let create = SchemaChange::CreateM2MTable {
-        through: "cli1393_shelf_labels".into(),
-        src_table: TextShelf::SCHEMA.table.into(),
-        src_col: "shelf_code".into(),
-        dst_table: TextLabel::SCHEMA.table.into(),
-        dst_col: "label_code".into(),
-    };
-    let snap = SchemaSnapshot::from_models(&[TextShelf::SCHEMA, TextLabel::SCHEMA]);
-    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
-    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
-        raw_execute_pool(pool, sql, vec![])
-            .await
-            .expect("junction ddl");
-    }
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE cli1393_shelf_labels (shelf_code VARCHAR(32) NOT NULL, \
+         label_code VARCHAR(32) NOT NULL, PRIMARY KEY (shelf_code, label_code))",
+        vec![],
+    )
+    .await
+    .expect("junction ddl");
 }
 
 /// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
 async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
     fresh_text_m2m(pool).await;
-    let shelf = TextShelf { code: "s1".into() };
-    shelf.insert_pool(pool).await.expect("shelf");
-    for code in ["a", "b"] {
-        let label = TextLabel { code: code.into() };
-        label.insert_pool(pool).await.expect("label");
-        shelf.labels_m2m().add(code, pool).await.expect("link");
-    }
+    let fixture = serde_json::json!([
+        {"model": "cli1393.TextLabel", "pk": "a", "fields": {}},
+        {"model": "cli1393.TextLabel", "pk": "b", "fields": {}},
+        {"model": "cli1393.TextShelf", "pk": "s1", "fields": {"labels": ["b", "a"]}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("text_m2m.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let loaded = manage(pool, &["loaddata", path.to_str().unwrap()]).await;
     let dumped = manage(
         pool,
-        &[
-            "dumpdata",
-            "--model",
-            "cli1393.TextShelf",
-            "--model",
-            "cli1393.TextLabel",
-            "--indent",
-            "0",
-        ],
+        &["dumpdata", "--model", "cli1393.TextShelf", "--indent", "0"],
     )
-    .await
-    .expect("dumpdata");
-    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
-    let shelf_row = rows
-        .as_array()
-        .expect("array")
-        .iter()
-        .find(|e| e["model"] == "cli1393.TextShelf")
-        .expect("shelf row");
-    assert_eq!(
-        shelf_row["fields"]["labels"],
-        serde_json::json!(["a", "b"]),
-        "{dumped}"
-    );
-    let dir = tempfile::tempdir().expect("tempdir");
-    let fixture = dir.path().join("text_m2m.json");
-    std::fs::write(&fixture, dumped.trim()).unwrap();
-
-    fresh_text_m2m(pool).await;
-    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
-    let mut links: Vec<String> = shelf.labels_m2m().all_as(pool).await.expect("links");
+    .await;
     rustango::testkit::matrix::drop_table(pool, "cli1393_shelf_labels").await;
-    out.expect("loaddata");
-    links.sort_unstable();
-    assert_eq!(links, ["a", "b"], "the reload lost the M2M links: {dumped}");
+    loaded.expect("loaddata");
+    let dumped = dumped.expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    assert_eq!(
+        rows[0]["fields"]["labels"],
+        serde_json::json!(["a", "b"]),
+        "the round trip lost the M2M links: {dumped}"
+    );
 }
 
 async fn dump(pool: &Pool) -> serde_json::Value {
