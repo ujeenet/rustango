@@ -69,41 +69,43 @@ async fn drop_idle_then_query(pool: &Pool) {
     };
     // Settings, not env: a set_var here races the SQLite arms' env reads (pr-1408-r2 tests-003).
     // First call wins; every caller in this binary installs the same value.
+    let threshold = std::time::Duration::from_secs(3);
     rustango::sql::configure_pools(rustango::sql::PoolTuning {
-        idle_ping_after: Some(std::time::Duration::from_secs(1)),
+        idle_ping_after: Some(threshold),
         ..Default::default()
     });
     let fresh = backend.pool().await.expect("the live URL is set");
+    let past_threshold = || tokio::time::sleep(threshold + std::time::Duration::from_millis(300));
 
     // Below the threshold the dead connection is handed out unpinged:
     // the hot path pays no round trip (pr-1408-r2 tests-001).
     kill_idle(&fresh, pool).await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let stale = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
     assert!(stale.is_err(), "a recently idle connection was pinged");
 
     // Past the threshold, so the next checkout pings whatever the failure left idle.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    past_threshold().await;
     kill_idle(&fresh, pool).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    past_threshold().await;
     let alive = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
     assert!(alive.is_ok(), "the dead idle connection was handed out: {alive:?}");
 }
 
-/// Kill, server-side via `pool`, the one connection `fresh` keeps idle.
+/// Kill, server-side via `pool`, the one connection `fresh` keeps idle,
+/// and wait until the server no longer lists it.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 async fn kill_idle(fresh: &Pool, pool: &Pool) {
     use rustango::sql::{sqlx, sqlx::Executor as _};
-    let kill = match (fresh, pool) {
+    let (kill, listed): (i64, String) = match (fresh, pool) {
         #[cfg(feature = "postgres")]
         (Pool::Postgres(f), Pool::Postgres(p)) => {
             let id: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(f)
                 .await
                 .unwrap();
-            p.execute(sqlx::raw_sql(&format!("SELECT pg_terminate_backend({id})")))
-                .await
-                .map(drop)
+            let kill = format!("SELECT pg_terminate_backend({id})");
+            p.execute(sqlx::raw_sql(&kill)).await.expect("kill");
+            (id.into(), format!("SELECT COUNT(*) FROM pg_stat_activity WHERE pid = {id}"))
         }
         #[cfg(feature = "mysql")]
         (Pool::Mysql(f), Pool::Mysql(p)) => {
@@ -111,12 +113,29 @@ async fn kill_idle(fresh: &Pool, pool: &Pool) {
                 .fetch_one(f)
                 .await
                 .unwrap();
-            p.execute(sqlx::raw_sql(&format!("KILL {id}"))).await.map(drop)
+            p.execute(sqlx::raw_sql(&format!("KILL {id}"))).await.expect("kill");
+            let listed = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
+            (i64::try_from(id).unwrap(), listed)
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("same backend"),
     };
-    kill.expect("drop the idle connection server-side");
+    // KILL returns before the server closes the socket (seen under load).
+    for _ in 0..100 {
+        let n = match pool {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => sqlx::query_scalar::<_, i64>(&listed).fetch_one(p).await,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => sqlx::query_scalar::<_, i64>(&listed).fetch_one(p).await,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("same backend"),
+        };
+        if n.expect("list connections") == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("connection {kill} still listed after its kill");
 }
 
 tri_dialect_test! {
