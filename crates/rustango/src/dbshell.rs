@@ -363,6 +363,16 @@ mod tests {
         assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
+    /// rel-0608 — a raw `#` or `?` in the password stays out of argv too.
+    #[test]
+    fn conn_strips_a_password_holding_hash_or_question_mark() {
+        for pw in ["pa#ss", "pa?ss", "p?a#s@s"] {
+            let c = LibpqConn::new(&format!("postgres://app:{pw}@db:5432/app"));
+            assert_eq!(c.url, "postgres://app@db:5432/app", "{pw}");
+            assert_eq!(c.password.as_deref(), Some(pw));
+        }
+    }
+
     /// #1310 — sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
     #[test]
     fn sqlite_path_drops_the_query_and_decodes() {
