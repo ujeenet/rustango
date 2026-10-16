@@ -615,6 +615,68 @@ async fn m2m_drops_before_its_tables(pool: &Pool) {
         .expect("the junction drops first");
 }
 
+/// Junction columns take the type and name of the pk they reference (#1404).
+async fn m2m_follows_non_integer_pks(pool: &Pool) {
+    let (a, b, c) = ("mad_mk_label", "mad_mk_badge", "mad_mk_shelf");
+    let (ab, cb) = ("mad_mk_label_badge", "mad_mk_shelf_label");
+    let chain = Chain::new(pool, "mk", &[ab, cb, a, b, c]).await;
+    let pk = |name: &str, ty: &str, extra: Value| {
+        let mut f = col(name, ty, extra);
+        f["nullable"] = json!(false);
+        f["primary_key"] = json!(true);
+        f
+    };
+    let m2m = |through: &str, s: &str, sc: &str, d: &str, dc: &str| {
+        json!({"through": through, "src_table": s, "src_col": sc, "dst_table": d, "dst_col": dc})
+    };
+    chain
+        .step(
+            pool,
+            json!({
+                "tables": [
+                    table(a, vec![pk("code", "string", json!({"max_length": 16}))]),
+                    table(b, vec![pk("uid", "uuid", json!({}))]),
+                    table(c, vec![pk("num", "i64", json!({}))]),
+                ],
+                "m2m_tables": [m2m(ab, a, "label_code", b, "badge_uid"),
+                               m2m(cb, c, "shelf_num", a, "label_code")],
+            }),
+        )
+        .await
+        .expect("the junctions apply");
+    let uid = "6f1c1e3a-2b4d-4c5e-9f00-1a2b3c4d5e6f";
+    exec(pool, "INSERT INTO {} ({}) VALUES ('rust')", &[a, "code"])
+        .await
+        .unwrap();
+    exec(pool, &format!("INSERT INTO {{}} ({{}}) VALUES ('{uid}')"), &[b, "uid"])
+        .await
+        .unwrap();
+    exec(pool, "INSERT INTO {} ({}) VALUES (7)", &[c, "num"])
+        .await
+        .unwrap();
+    exec(
+        pool,
+        &format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ('rust', '{uid}')"),
+        &[ab, "label_code", "badge_uid"],
+    )
+    .await
+    .expect("text and uuid keys link");
+    exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (7, 'rust')",
+        &[cb, "shelf_num", "label_code"],
+    )
+    .await
+    .expect("an integer pk not named id links");
+    let orphan = exec(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (7, 'nope')",
+        &[cb, "shelf_num", "label_code"],
+    )
+    .await;
+    assert!(orphan.is_err(), "the FK names the pk column");
+}
+
 /// A composite FK drops before the table it references and before that
 /// table's unique index.
 async fn composite_fk_drops_before_its_parent(pool: &Pool) {
@@ -3644,6 +3706,7 @@ tri_dialect_test!(
         column_drops_after_its_index_and_check,
         tables_drop_child_first,
         m2m_drops_before_its_tables,
+        m2m_follows_non_integer_pks,
         composite_fk_drops_before_its_parent,
         type_change_is_not_undone_by_max_length,
         shrinking_max_length_refuses_to_truncate,

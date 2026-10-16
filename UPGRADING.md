@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### M2M junction DDL follows the target pk (#1404)
+
+New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
+
 ### Pools no longer ping before every checkout (#2674)
 
 `test_before_acquire` is now off, tenant pools included; only a connection idle 30 s or more (`RUSTANGO_DB_IDLE_PING_SECS`) is pinged before checkout. Set `pool_test_before_acquire = true` or `RUSTANGO_DB_TEST_BEFORE_ACQUIRE=true` to ping every checkout. `PoolTuning` gains `test_before_acquire` and `idle_ping_after`, `DatabaseSettings` gains `pool_test_before_acquire` and `pool_idle_ping_secs`, so struct literals need them or `..Default::default()`.

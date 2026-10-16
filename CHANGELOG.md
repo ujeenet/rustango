@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — auto-created M2M junctions follow the pk they reference (#1404)
+
+A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
+
 ### Performance — pools skip sqlx's ping before every checkout (#2674)
 
 The ping cost 8–16% of request CPU. New `[database].pool_test_before_acquire` / `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` turns it back on; the default is off on all three backends, tenant pools included. A connection idle 30 s or more (`pool_idle_ping_secs` / `RUSTANGO_DB_IDLE_PING_SECS`) is still pinged.

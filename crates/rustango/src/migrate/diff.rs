@@ -198,8 +198,8 @@ pub enum SchemaChange {
         name: String,
         table: String,
     },
-    /// Create a many-to-many junction table: two `BIGINT NOT NULL`
-    /// FK columns and a composite `PRIMARY KEY`.
+    /// Create a many-to-many junction table: two `NOT NULL` FK columns
+    /// typed like the pks they reference, and a composite `PRIMARY KEY`.
     CreateM2MTable {
         through: String,
         src_table: String,
@@ -1802,34 +1802,39 @@ fn render_changes_split_inner(
                 let q_through = dialect.quote_ident(through);
                 let q_src_col = dialect.quote_ident(src_col);
                 let q_dst_col = dialect.quote_ident(dst_col);
+                let (src_ty, src_pk) = m2m_end(current, src_table, dialect);
+                let (dst_ty, dst_pk) = m2m_end(current, dst_table, dialect);
 
                 if dialect.inline_fks_in_create_table() {
                     // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
                     // Emit the FK clauses inside the CREATE TABLE statement.
                     let q_src_table = fk_target(dialect, schema, src_table);
                     let q_dst_table = fk_target(dialect, schema, dst_table);
-                    let q_id = dialect.quote_ident("id");
+                    let q_src_pk = dialect.quote_ident(src_pk);
+                    let q_dst_pk = dialect.quote_ident(dst_pk);
                     let q_src_fk =
                         dialect.quote_ident(&super::ddl::fk_constraint_name(through, src_col));
                     let q_dst_fk =
                         dialect.quote_ident(&super::ddl::fk_constraint_name(through, dst_col));
                     out.immediate.push(format!(
-                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                        "CREATE TABLE {q_through} ({q_src_col} {src_ty} NOT NULL, {q_dst_col} {dst_ty} NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}), \
-                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE, \
-                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE)",
+                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_src_pk}) ON DELETE CASCADE, \
+                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_dst_pk}) ON DELETE CASCADE)",
                     ));
                 } else {
                     // PG / MySQL: defer FK creation so cross-table cycles
                     // resolve cleanly within a single migration batch.
                     out.immediate.push(format!(
-                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                        "CREATE TABLE {q_through} ({q_src_col} {src_ty} NOT NULL, {q_dst_col} {dst_ty} NOT NULL, \
                          PRIMARY KEY ({q_src_col}, {q_dst_col}))",
                     ));
-                    out.deferred_fks
-                        .push(m2m_fk_sql(through, src_col, src_table, dialect, schema));
-                    out.deferred_fks
-                        .push(m2m_fk_sql(through, dst_col, dst_table, dialect, schema));
+                    out.deferred_fks.push(m2m_fk_sql(
+                        through, src_col, src_table, src_pk, dialect, schema,
+                    ));
+                    out.deferred_fks.push(m2m_fk_sql(
+                        through, dst_col, dst_table, dst_pk, dialect, schema,
+                    ));
                 }
             }
             SchemaChange::DropM2MTable { through } => {
@@ -2161,7 +2166,10 @@ pub(crate) fn column_fk_sql(
     column_fk(snap, table, column)
         .map(|fk| match fk {
             ColumnFk::Field(rel) => field_fk_sql(table, column, rel, dialect, schema),
-            ColumnFk::Junction(to) => Ok(m2m_fk_sql(table, column, to, dialect, schema)),
+            ColumnFk::Junction(to) => {
+                let (_, pk) = m2m_end(snap, to, dialect);
+                Ok(m2m_fk_sql(table, column, to, pk, dialect, schema))
+            }
         })
         .transpose()
 }
@@ -2171,6 +2179,7 @@ fn m2m_fk_sql(
     through: &str,
     column: &str,
     to: &str,
+    pk: &str,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
 ) -> String {
@@ -2180,8 +2189,37 @@ fn m2m_fk_sql(
         dialect.quote_ident(&super::ddl::fk_constraint_name(through, column)),
         dialect.quote_ident(column),
         fk_target(dialect, schema, to),
-        dialect.quote_ident("id"),
+        dialect.quote_ident(pk),
     )
+}
+
+/// A junction column's type and the pk it references in `table` (#1404).
+/// Integer pks stay BIGINT, as `M2MManager` decodes `i64`; a table outside
+/// `current` keeps the old `BIGINT` to `id`.
+fn m2m_end<'a>(
+    current: &'a SchemaSnapshot,
+    table: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> (String, &'a str) {
+    let bigint = || dialect.column_type(crate::core::FieldType::I64, None);
+    let mut pks = current
+        .table(table)
+        .into_iter()
+        .flat_map(|t| t.fields.iter().filter(|f| f.primary_key));
+    let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
+        return (bigint(), "id");
+    };
+    if matches!(pk.ty.as_str(), "i16" | "i32" | "i64") {
+        return (bigint(), &pk.column);
+    }
+    let column = FieldSnapshot {
+        primary_key: false,
+        auto: false,
+        default: None,
+        generated_as: None,
+        ..pk.clone()
+    };
+    (sql_type_with_dialect(&column, dialect), &pk.column)
 }
 
 /// ` REFERENCES <to> (<on>) [ON DELETE …]`, for SQLite's inline FKs.
