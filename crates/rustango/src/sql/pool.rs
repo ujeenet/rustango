@@ -1168,6 +1168,16 @@ mod tuning_tests {
                 .await
                 .expect("build a tenant pool");
             assert_eq!(p.options().get_test_before_acquire(), want, "tenant pool");
+            let pools = crate::tenancy::DatabasePools::<sqlx::Sqlite>::new(
+                crate::tenancy::BackendKind::Sqlite,
+            );
+            let p = pools.build_pool("sqlite::memory:").await.expect("DatabasePools pool");
+            assert_eq!(p.options().get_test_before_acquire(), want, "DatabasePools pool");
+        }
+        #[cfg(all(feature = "tenancy", feature = "postgres"))]
+        {
+            let o = crate::tenancy::scoped_pool_options(&Default::default());
+            assert_eq!(o.get_test_before_acquire(), want, "schema-mode tenant pool");
         }
     }
 
