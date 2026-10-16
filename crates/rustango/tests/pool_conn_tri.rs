@@ -293,10 +293,11 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
         }
         #[cfg(feature = "sqlite")]
         PoolConn::Sqlite(c) => {
+            // Per connection; `cache_size` would live in the shared in-memory cache.
             if set {
-                sqlx::query("PRAGMA cache_size = 1234").execute(&mut **c).await.unwrap();
+                sqlx::query("PRAGMA reverse_unordered_selects = 1").execute(&mut **c).await.unwrap();
             }
-            sqlx::query_scalar::<_, i64>("PRAGMA cache_size")
+            sqlx::query_scalar::<_, i64>("PRAGMA reverse_unordered_selects")
                 .fetch_one(&mut **c)
                 .await
                 .unwrap()
