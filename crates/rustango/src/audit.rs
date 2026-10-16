@@ -2270,7 +2270,8 @@ where
         (&query.on_conflict, skipped.is_empty())
     {
         let upsert = crate::core::BulkInsertQuery::new(query.model, query.columns.clone(), skipped)
-            .on_conflict(clause.clone());
+            .on_conflict(clause.clone())
+            .generated(query.generated.clone());
         updated = crate::sql::bulk_insert_pks_tx(&mut tx, &upsert).await?;
     }
     for (pks, op) in [(created, AuditOp::Create), (updated, AuditOp::Update)] {

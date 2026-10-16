@@ -162,13 +162,12 @@ serializer = ["forms"]
 # `NullCache` (no-op), `InMemoryCache` (tokio RwLock + TTL) and
 # `FileCache` (on disk; `fs4`/`libc` for its lock files). Redis
 # backend is behind the separate `cache-redis` feature.
-cache = ["_async_trait", "dep:sha2", "dep:fs4", "dep:libc"]
+cache = ["_async_trait", "dep:sha2", "dep:fs4", "dep:libc", "dep:bytes", "dep:base64"]
 
 # Per-view caching tower layer (`rustango::cache_page`) — caches a
 # whole successful response, plus `Cache-Control` / `Vary` builders.
-# Implies `cache` (cache backend) + `admin` (axum types) + base64 for
-# body round-trip serialization.
-cache-page = ["cache", "admin", "dep:base64"]
+# Implies `cache` (cache backend) + `admin` (axum types).
+cache-page = ["cache", "admin"]
 
 # Signals layer (`rustango::signals`) — pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
@@ -582,6 +581,8 @@ futures-util     = { version = "0.3", default-features = false, features = ["all
 tower            = { workspace = true, optional = true }
 tokio-util       = { version = "0.7", features = ["io"], optional = true }
 redis            = { workspace = true, optional = true }
+# Already linked through axum/redis; `Cache::get_bytes` hands out `Bytes`.
+bytes            = { version = "1", optional = true }
 
 # `oauth2` feature deps — optional.
 reqwest     = { workspace = true, optional = true }

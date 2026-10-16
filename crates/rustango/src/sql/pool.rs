@@ -2,7 +2,8 @@
 //!
 //! [`Pool`] reaches Postgres, MySQL or SQLite through one handle and
 //! picks the matching [`Dialect`] for you. It is the multi-backend entry
-//! point; the `&PgPool` / `_on` APIs are the Postgres-only executor forms.
+//! point; the `&PgPool` APIs and the `_on` methods outside `SqlExecutor`
+//! (#1395) are the Postgres-only executor forms.
 //!
 //! Wrap a pool you already have:
 //!
@@ -184,8 +185,33 @@ macro_rules! tuned {
         if t.max_lifetime.is_some() {
             o = o.max_lifetime(t.max_lifetime);
         }
-        o
+        checkout_check(o, &t)
     }};
+}
+
+/// How a connection is checked before checkout. Every pool goes through
+/// here, tenant pools included (rel-0608 tenancy-001).
+pub(crate) fn checkout_check<DB: sqlx::Database>(
+    o: sqlx::pool::PoolOptions<DB>,
+    t: &PoolTuning,
+) -> sqlx::pool::PoolOptions<DB> {
+    if t.test_before_acquire {
+        return o.test_before_acquire(true);
+    }
+    // Ping only a connection idle long enough for a server or load
+    // balancer to have dropped it; the hot path pays nothing (rel-0608).
+    let after = t
+        .idle_ping_after
+        .unwrap_or(Duration::from_secs(IDLE_PING_DEFAULT_SECS));
+    o.test_before_acquire(false)
+        .before_acquire(move |conn, meta| {
+            Box::pin(async move {
+                if meta.idle_for >= after {
+                    sqlx::Connection::ping(conn).await?;
+                }
+                Ok(true)
+            })
+        })
 }
 
 impl Pool {
@@ -646,6 +672,10 @@ pub const ACQUIRE_TIMEOUT_ENV: &str = "RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS";
 /// Five seconds is still plenty for a busy but healthy pool.
 const ACQUIRE_TIMEOUT_DEFAULT_SECS: u64 = 5;
 
+/// With the checkout ping off, a connection idle this long is still
+/// pinged: under the 4 min idle cut of common load balancers.
+const IDLE_PING_DEFAULT_SECS: u64 = 30;
+
 /// Env overrides for the rest of the pool settings, so a deploy can
 /// retune a pool without a config change. See [`ACQUIRE_TIMEOUT_ENV`].
 pub const MAX_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MAX_CONNECTIONS";
@@ -655,6 +685,10 @@ pub const MIN_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MIN_CONNECTIONS";
 pub const IDLE_TIMEOUT_ENV: &str = "RUSTANGO_DB_IDLE_TIMEOUT_SECS";
 /// See [`MAX_CONNECTIONS_ENV`].
 pub const MAX_LIFETIME_ENV: &str = "RUSTANGO_DB_MAX_LIFETIME_SECS";
+/// `true`/`false` (also `1`/`0`, `on`/`off`). See [`PoolTuning::test_before_acquire`].
+pub const TEST_BEFORE_ACQUIRE_ENV: &str = "RUSTANGO_DB_TEST_BEFORE_ACQUIRE";
+/// See [`PoolTuning::idle_ping_after`].
+pub const IDLE_PING_ENV: &str = "RUSTANGO_DB_IDLE_PING_SECS";
 
 /// How every pool this process opens is sized and timed.
 ///
@@ -682,6 +716,15 @@ pub struct PoolTuning {
     /// can keep connections to a server that has failed over, or
     /// with credentials that have since been revoked.
     pub max_lifetime: Option<Duration>,
+    /// Ping each connection before handing it out. Off by default: it
+    /// costs a round trip per checkout (8–16% of request CPU, #2674).
+    /// Without it only connections idle past [`Self::idle_ping_after`]
+    /// are pinged; `idle_timeout` and `max_lifetime` (sqlx defaults 10
+    /// and 30 min) still recycle old connections.
+    pub test_before_acquire: bool,
+    /// With `test_before_acquire` off, ping a connection idle at least
+    /// this long before handing it out. `None` means 30 s.
+    pub idle_ping_after: Option<Duration>,
 }
 
 static TUNING: std::sync::OnceLock<PoolTuning> = std::sync::OnceLock::new();
@@ -720,7 +763,7 @@ pub fn configure_pools(from_settings: PoolTuning) -> bool {
 /// an app connecting in `main()`, a second test in the same binary —
 /// permanently froze env-only tuning for the whole process, silently.
 /// Now a read falls back without writing, and notes that it happened.
-fn tuning() -> PoolTuning {
+pub(crate) fn tuning() -> PoolTuning {
     match TUNING.get() {
         Some(t) => *t,
         None => {
@@ -744,7 +787,23 @@ fn merge_env_over(base: PoolTuning) -> PoolTuning {
         ),
         idle_timeout: env_secs(IDLE_TIMEOUT_ENV).or(base.idle_timeout),
         max_lifetime: env_secs(MAX_LIFETIME_ENV).or(base.max_lifetime),
+        test_before_acquire: env_bool(TEST_BEFORE_ACQUIRE_ENV).unwrap_or(base.test_before_acquire),
+        idle_ping_after: env_secs(IDLE_PING_ENV).or(base.idle_ping_after),
     }
+}
+
+/// A boolean from `key`, warning about and ignoring anything else.
+fn env_bool(key: &str) -> Option<bool> {
+    let raw = std::env::var(key).ok()?;
+    let flag = crate::env::parse_flag(&raw);
+    if flag.is_none() {
+        tracing::warn!(
+            target: "rustango::sql",
+            value = %raw,
+            "{key} must be true or false; ignoring it"
+        );
+    }
+    flag
 }
 
 fn env_secs(key: &str) -> Option<Duration> {
@@ -928,6 +987,8 @@ mod tuning_tests {
             IDLE_TIMEOUT_ENV,
             MAX_LIFETIME_ENV,
             ACQUIRE_TIMEOUT_ENV,
+            TEST_BEFORE_ACQUIRE_ENV,
+            IDLE_PING_ENV,
         ] {
             std::env::remove_var(k);
         }
@@ -960,8 +1021,37 @@ mod tuning_tests {
             acquire_timeout: Some(Duration::from_secs(9)),
             idle_timeout: Some(Duration::from_secs(600)),
             max_lifetime: Some(Duration::from_secs(1800)),
+            test_before_acquire: true,
+            idle_ping_after: Some(Duration::from_secs(45)),
         };
         assert_eq!(merge_env_over(from_toml), from_toml);
+    }
+
+    /// #2674: the per-checkout ping is off unless asked for.
+    #[test]
+    fn the_acquire_ping_is_off_by_default() {
+        let _g = env_lock();
+        clear();
+        assert!(!merge_env_over(PoolTuning::default()).test_before_acquire);
+    }
+
+    #[test]
+    fn the_acquire_ping_env_beats_settings_and_ignores_junk() {
+        let _g = env_lock();
+        clear();
+        let on = PoolTuning {
+            test_before_acquire: true,
+            ..PoolTuning::default()
+        };
+        for (raw, want) in [("off", false), ("0", false), ("FALSE", false), ("junk", true)] {
+            std::env::set_var(TEST_BEFORE_ACQUIRE_ENV, raw);
+            assert_eq!(merge_env_over(on).test_before_acquire, want, "{raw:?}");
+        }
+        for raw in ["true", "1", "on", "yes"] {
+            std::env::set_var(TEST_BEFORE_ACQUIRE_ENV, raw);
+            assert!(merge_env_over(PoolTuning::default()).test_before_acquire, "{raw:?}");
+        }
+        clear();
     }
 
     /// A deploy-time override must not need a config change.
@@ -999,9 +1089,11 @@ mod tuning_tests {
         let _g = env_lock();
         clear();
         std::env::set_var(IDLE_TIMEOUT_ENV, "300");
+        std::env::set_var(IDLE_PING_ENV, "20");
         let t = merge_env_over(PoolTuning::default());
         clear();
         assert_eq!(t.idle_timeout, Some(Duration::from_secs(300)));
+        assert_eq!(t.idle_ping_after, Some(Duration::from_secs(20)));
     }
 
     /// The settings must reach the pool, not merely parse. A lazy
@@ -1039,6 +1131,55 @@ mod tuning_tests {
             "acquire_timeout"
         );
         clear();
+    }
+
+    /// #2674: the ping setting reaches every backend's pool, and the
+    /// idle and lifetime bounds that replace it as the safety net stay set.
+    #[tokio::test]
+    async fn the_acquire_ping_setting_reaches_every_backend() {
+        let _g = env_lock();
+        clear();
+        let want = tuning().test_before_acquire;
+        let mut seen = Vec::new();
+        #[cfg(feature = "postgres")]
+        seen.push(Pool::connect_postgres_lazy("postgres://u@localhost:1/x").map(|p| {
+            let o = p.options();
+            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
+        }));
+        #[cfg(feature = "mysql")]
+        seen.push(Pool::connect_mysql_lazy("mysql://u@localhost:1/x").map(|p| {
+            let o = p.options();
+            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
+        }));
+        #[cfg(feature = "sqlite")]
+        seen.push(Pool::connect_sqlite_lazy("sqlite::memory:").map(|p| {
+            let o = p.options();
+            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
+        }));
+        for got in seen {
+            let (ping, idle, life) = got.expect("build a lazy pool");
+            assert_eq!(ping, want, "test_before_acquire");
+            assert!(idle.is_some() && life.is_some(), "{idle:?} {life:?}");
+        }
+        // Tenant pools too (rel-0608 tenancy-001).
+        #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+        {
+            let config = crate::tenancy::TenantPoolsConfig::default();
+            let p = crate::tenancy::build_database_pool::<sqlx::Sqlite>("sqlite::memory:", &config)
+                .await
+                .expect("build a tenant pool");
+            assert_eq!(p.options().get_test_before_acquire(), want, "tenant pool");
+            let pools = crate::tenancy::DatabasePools::<sqlx::Sqlite>::new(
+                crate::tenancy::BackendKind::Sqlite,
+            );
+            let p = pools.build_pool("sqlite::memory:").await.expect("DatabasePools pool");
+            assert_eq!(p.options().get_test_before_acquire(), want, "DatabasePools pool");
+        }
+        #[cfg(all(feature = "tenancy", feature = "postgres"))]
+        {
+            let o = crate::tenancy::scoped_pool_options(&Default::default());
+            assert_eq!(o.get_test_before_acquire(), want, "schema-mode tenant pool");
+        }
     }
 
     /// Reading the tuning must not seal it. With `get_or_init`, a

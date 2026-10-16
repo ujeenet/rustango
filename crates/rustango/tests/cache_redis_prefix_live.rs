@@ -180,3 +180,27 @@ async fn delete_prefix_on_no_matches_is_a_noop() {
 
     redis.clear().await.ok();
 }
+
+/// #2656: bytes go to Redis raw, not base64, through a scope too.
+#[tokio::test]
+async fn bytes_are_stored_raw() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+    let shared: BoxedCache = Arc::new(redis);
+    let acme = ScopedCache::for_tenant(shared.clone(), "acme");
+
+    let raw: &[u8] = b"\xff\x00page\xfe";
+    acme.set_bytes("bin", raw, Some(std::time::Duration::from_secs(60)))
+        .await
+        .unwrap();
+    assert_eq!(acme.get_bytes("bin").await.unwrap().as_deref(), Some(raw));
+    acme.set_bytes("txt", b"plain", None).await.unwrap();
+    let key = format!("{}txt", acme.prefix());
+    assert_eq!(shared.get(&key).await.unwrap().as_deref(), Some("plain"));
+    assert_eq!(acme.get_bytes("none").await.unwrap(), None);
+
+    shared.clear().await.ok();
+}

@@ -1223,35 +1223,28 @@ impl TenantPools<sqlx::Postgres> {
     ) -> Result<PgPool, TenancyError> {
         let mut opts = (*registry.connect_options()).clone();
         opts = opts.options([("search_path", search_path_option(schema))]);
-        let mut builder = PgPoolOptions::new()
-            .max_connections(self.config.scoped_pool_max_connections)
-            // Explicitly 0: these are cached now, and every one of
-            // them points at the same registry server. Holding warm
-            // connections per tenant is what would make caching them
-            // expensive.
-            .min_connections(0)
-            .acquire_timeout(self.config.database_pool_acquire_timeout);
-        if let Some(idle) = self.config.database_pool_idle_timeout {
-            builder = builder.idle_timeout(idle);
-        }
-        if let Some(lifetime) = self.config.database_pool_max_lifetime {
-            builder = builder.max_lifetime(lifetime);
-        }
-        Ok(builder.connect_with(opts).await?)
+        Ok(scoped_pool_options(&self.config).connect_with(opts).await?)
     }
 }
 
-/// Build a single database-mode tenant pool with the timeout /
-/// keepalive / lifetime settings from `config`. Generic over the
-/// backend — uses sqlx's generic `PoolOptions<DB>` so PG / MySQL /
-/// SQLite all build through the same code path.
-async fn build_database_pool<DB: Database>(
-    url: &str,
+/// Options of a schema-mode tenant pool.
+#[cfg(feature = "postgres")]
+pub(crate) fn scoped_pool_options(config: &TenantPoolsConfig) -> PgPoolOptions {
+    // Min 0: these are cached and all point at the registry server, so
+    // warm connections per tenant would make caching them expensive.
+    tenant_pool_options(config, config.scoped_pool_max_connections, 0)
+}
+
+/// The one place a tenant pool's options are made, so none skips
+/// `checkout_check` (rel-0608 tenancy-001).
+pub(crate) fn tenant_pool_options<DB: Database>(
     config: &TenantPoolsConfig,
-) -> Result<sqlx::Pool<DB>, TenancyError> {
+    max: u32,
+    min: u32,
+) -> sqlx::pool::PoolOptions<DB> {
     let mut opts = sqlx::pool::PoolOptions::<DB>::new()
-        .max_connections(config.database_pool_max_connections)
-        .min_connections(config.database_pool_min_connections)
+        .max_connections(max)
+        .min_connections(min)
         .acquire_timeout(config.database_pool_acquire_timeout);
     if let Some(idle) = config.database_pool_idle_timeout {
         opts = opts.idle_timeout(idle);
@@ -1259,6 +1252,22 @@ async fn build_database_pool<DB: Database>(
     if let Some(lifetime) = config.database_pool_max_lifetime {
         opts = opts.max_lifetime(lifetime);
     }
+    crate::sql::checkout_check(opts, &crate::sql::pool_tuning())
+}
+
+/// Build a single database-mode tenant pool with the timeout /
+/// keepalive / lifetime settings from `config`. Generic over the
+/// backend — uses sqlx's generic `PoolOptions<DB>` so PG / MySQL /
+/// SQLite all build through the same code path.
+pub(crate) async fn build_database_pool<DB: Database>(
+    url: &str,
+    config: &TenantPoolsConfig,
+) -> Result<sqlx::Pool<DB>, TenancyError> {
+    let opts = tenant_pool_options::<DB>(
+        config,
+        config.database_pool_max_connections,
+        config.database_pool_min_connections,
+    );
     let url = ensure_sqlite_creates(url);
     Ok(opts.connect(&url).await?)
 }

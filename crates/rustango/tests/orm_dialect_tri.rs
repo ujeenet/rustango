@@ -79,6 +79,21 @@ pub struct Noted {
     pub n: i64,
 }
 
+/// Two unique keys besides the PK.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_account")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct Account {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64, unique)]
+    pub email: String,
+    #[rustango(max_length = 64, unique)]
+    pub username: String,
+    #[rustango(max_length = 64)]
+    pub note: String,
+}
+
 /// Seed one `Meas` row at the RFC 3339 instant `at`, plus a `Reading`
 /// of it.
 async fn seed_meas(pool: &Pool, n: i64, at: &str) {
@@ -116,6 +131,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Meas>(pool).await;
     fresh_table::<Reading>(pool).await;
     fresh_table::<Noted>(pool).await;
+    fresh_table::<Account>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -759,9 +775,149 @@ async fn relation_date_lookup(pool: &Pool) {
     }
 }
 
+/// #1357: MySQL's upsert fired on any unique key, so a username clash
+/// updated another row.
+async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
+    for (email, username) in [("a@x", "alice"), ("b@x", "bob")] {
+        Account {
+            id: Auto::default(),
+            email: email.into(),
+            username: username.into(),
+            note: String::new(),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed account");
+    }
+    let q = InsertQuery::new(
+        Account::SCHEMA,
+        vec!["email", "username", "note"],
+        vec![
+            SqlValue::from("new@x"),
+            SqlValue::from("bob"),
+            SqlValue::from("changed"),
+        ],
+    )
+    .on_conflict(ConflictClause::DoUpdate {
+        target: vec!["email"],
+        update_columns: vec!["note"],
+    });
+    let r = rustango::sql::insert_pool(pool, &q).await;
+    assert!(r.is_err(), "a username clash is not an email conflict");
+    let bob: Vec<Account> = Account::objects()
+        .filter("username", "bob")
+        .fetch(pool)
+        .await
+        .expect("fetch bob");
+    assert_eq!((bob[0].email.as_str(), bob[0].note.as_str()), ("b@x", ""));
+}
+
+/// #1358: MySQL cut `GROUP_CONCAT` at 1024 bytes.
+async fn string_agg_is_not_capped(pool: &Pool) {
+    let title = "t".repeat(60);
+    for i in 0..30 {
+        let mut p = post(&format!("s{i:02}"), None);
+        p.title = title.clone();
+        p.insert_pool(pool).await.expect("seed");
+    }
+    let rows = Post::objects()
+        .aggregate()
+        .values(&[])
+        .annotate(
+            "t",
+            AggregateExpr::string_agg_ordered("title", ",", &[("title", false)]),
+        )
+        .fetch(pool)
+        .await
+        .expect("string_agg");
+    let SqlValue::String(s) = &rows[0]["t"] else {
+        panic!("not a string: {:?}", rows[0]["t"]);
+    };
+    assert_eq!(s.len(), 30 * 60 + 29);
+}
+
+/// #1359: MySQL's `NOW()` and `CAST(.. AS DATETIME/TIME)` dropped the fraction.
+async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
+    use chrono::Timelike as _;
+    use rustango::core::{funcs::now, Expr, FieldType};
+    seed_meas(pool, 0, "2024-01-01T10:00:00.5Z").await;
+    let same = WhereExpr::ExprCompare {
+        lhs: Expr::Cast {
+            expr: Box::new(Expr::Column("at")),
+            ty: FieldType::DateTime,
+        },
+        op: Op::Eq,
+        rhs: Expr::Column("at"),
+    };
+    let n = Meas::objects().where_raw(same).count(pool).await;
+    assert_eq!(n.expect("count"), 1, "CAST to DateTime keeps the fraction");
+    // SQLite has no TIME type; its cast is to TEXT.
+    if pool.dialect().name() != "sqlite" {
+        let t = chrono::NaiveTime::from_hms_micro_opt(10, 0, 0, 250_000).unwrap();
+        let time = WhereExpr::ExprCompare {
+            lhs: Expr::Cast {
+                expr: Box::new(Expr::Literal(SqlValue::from("10:00:00.250000"))),
+                ty: FieldType::Time,
+            },
+            op: Op::Eq,
+            rhs: Expr::Literal(SqlValue::Time(t)),
+        };
+        let n = Meas::objects().where_raw(time).count(pool).await;
+        assert_eq!(n.expect("count"), 1, "CAST to Time keeps the fraction");
+    }
+    // A whole-second NOW() three times in a row means the fraction is gone.
+    let mut fractions = Vec::new();
+    for _ in 0..3 {
+        Meas::objects()
+            .update()
+            .set_expr("at", now())
+            .execute_pool(pool)
+            .await
+            .expect("set now()");
+        let rows: Vec<Meas> = Meas::objects().fetch(pool).await.expect("fetch");
+        fractions.push(rows[0].at.nanosecond());
+    }
+    assert!(
+        fractions.iter().any(|f| *f != 0),
+        "NOW() fraction: {fractions:?}"
+    );
+}
+
+/// #1217: SQLite bound a Decimal as text, which no number ever exceeds.
+async fn decimal_compares_with_expressions(pool: &Pool) {
+    use rust_decimal::Decimal;
+    use rustango::core::{BinOp, Expr};
+    seed_meas(pool, 100, "2024-01-01T00:00:00Z").await;
+    seed_meas(pool, 105, "2024-01-01T00:00:00Z").await;
+    let rows = Meas::objects()
+        .aggregate()
+        .group_by("taken_on")
+        .annotate("total", rustango::core::aggregates::sum("n").into())
+        .filter("total", Op::Gt, Decimal::from(200))
+        .fetch(pool)
+        .await
+        .expect("having sum > decimal");
+    assert_eq!(rows.len(), 1, "SUM(n) = 205 > 200");
+    let doubled = WhereExpr::ExprCompare {
+        lhs: Expr::BinOp {
+            left: Box::new(Expr::Column("n")),
+            op: BinOp::Mul,
+            right: Box::new(Expr::Literal(SqlValue::I64(2))),
+        },
+        op: Op::Gt,
+        rhs: Expr::Literal(SqlValue::Decimal(Decimal::new(2015, 1))),
+    };
+    let n = Meas::objects().where_raw(doubled).count(pool).await;
+    assert_eq!(n.expect("count"), 1, "n * 2 > 201.5");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        upsert_never_updates_a_row_of_another_unique_key,
+        string_agg_is_not_capped,
+        now_and_casts_keep_fractional_seconds,
+        decimal_compares_with_expressions,
         insert_or_ignore_on_a_natural_pk,
         insert_or_ignore_reports_a_skip_on_an_auto_pk,
         skip_in_a_tx_leaves_no_stale_id,

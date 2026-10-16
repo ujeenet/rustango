@@ -110,7 +110,8 @@ factory ran **exactly once** — the second call is served from the cache.
 
 > **Invalidate on write.** Cache-aside means stale data until the TTL expires.
 > For data that changes, also `delete(key)` when you write it — e.g. from a
-> [`post_save` signal](orm.md) — so the next read recomputes.
+> [`post_save` signal](orm.md) you send after the save (saving does not send
+> it) — so the next read recomputes.
 
 ---
 

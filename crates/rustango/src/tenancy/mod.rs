@@ -196,6 +196,10 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) use pools::build_database_pool;
+#[cfg(all(test, feature = "postgres"))]
+pub(crate) use pools::scoped_pool_options;
 pub(crate) use resolver::host_is_apex;
 pub use resolver::{
     invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, ListenerPort,

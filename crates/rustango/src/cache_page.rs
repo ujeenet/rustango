@@ -97,17 +97,30 @@ use crate::cache::{BoxedCache, CacheError};
 
 // ---------------------------------------------------------------- Wire format
 
-/// What gets stored in the cache. JSON, so the `Cache` trait's
-/// `String` value is enough. The body is base64 so non-UTF8 content
-/// such as images or gzipped HTML survives.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CachedResponse {
-    status: u16,
-    /// `(name, value)` pairs, stringified so the payload does not
-    /// depend on how `http` serializes its header types.
-    headers: Vec<(String, String)>,
-    /// Response body, base64-encoded.
-    body_b64: String,
+/// A stored page, written with [`Cache::set_bytes`](crate::cache::Cache::set_bytes)
+/// as one binary frame (#2656): no JSON or base64 on a hit.
+///
+/// Frame: `[FRAME_V1][status u16][count u32]`, then per header
+/// `[name_len u32][name][value_len u32][value]`, then the raw body.
+/// All integers big-endian.
+#[derive(Debug)]
+struct CachedPage {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+}
+
+/// The frame version. The JSON entries older releases wrote start with
+/// `{`, so they decode as an unknown version: a miss, then overwritten.
+const FRAME_V1: u8 = 1;
+
+/// Why a stored frame was refused; the layer treats each as a miss.
+#[derive(Debug, PartialEq, Eq)]
+enum FrameError {
+    UnknownVersion,
+    Truncated,
+    BadStatus,
+    BadHeader,
 }
 
 // ---------------------------------------------------------------- Layer
@@ -470,16 +483,15 @@ where
             );
 
             // Cache hit?
-            if let Ok(Some(serialized)) = cache.get(&key).await {
-                if let Ok(stored) = serde_json::from_str::<CachedResponse>(&serialized) {
-                    if let Some(mut resp) = stored.into_response(&vary) {
-                        if is_query {
-                            mark_query_response_private(resp.headers_mut());
-                        }
-                        return Ok(resp);
+            if let Ok(Some(frame)) = cache.get_bytes(&key).await {
+                if let Ok(stored) = CachedPage::decode(frame) {
+                    let mut resp = stored.into_response(&vary);
+                    if is_query {
+                        mark_query_response_private(resp.headers_mut());
                     }
+                    return Ok(resp);
                 }
-                // Corrupt entry: fall through and recompute.
+                // Corrupt or older-format entry: fall through and recompute.
             }
 
             // Miss: run the inner service, then store the response.
@@ -544,9 +556,13 @@ where
                 }
             };
 
-            let stored = CachedResponse::from_parts(&parts, &bytes);
-            if let Ok(json) = serde_json::to_string(&stored) {
-                if let Err(e) = cache.set(&key, &json, Some(timeout)).await {
+            let stored = CachedPage {
+                status: parts.status,
+                headers: parts.headers.clone(),
+                body: bytes.clone(),
+            };
+            if let Some(frame) = stored.encode() {
+                if let Err(e) = cache.set_bytes(&key, &frame, Some(timeout)).await {
                     tracing::warn!(
                         target: "rustango::cache_page",
                         error = %e,
@@ -827,59 +843,78 @@ fn apply_vary_header(headers: &mut HeaderMap, vary_on: &[HeaderName]) {
     }
 }
 
-impl CachedResponse {
-    fn from_parts(parts: &axum::http::response::Parts, body: &[u8]) -> Self {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
-        // `.iter()` yields duplicates too, so multi-value headers
-        // survive the round-trip. Skip `x-cache-status`: it is set
-        // fresh on every hit and would otherwise stack up.
-        let mut headers = Vec::with_capacity(parts.headers.len());
-        for (name, value) in parts.headers.iter() {
-            if name == X_CACHE_STATUS {
-                continue;
+impl CachedPage {
+    /// The frame for this page; `None` if a length overflows `u32`.
+    ///
+    /// Every header value is kept, duplicates and non-UTF-8 included,
+    /// except `x-cache-status`, which is set fresh on every hit.
+    fn encode(&self) -> Option<Vec<u8>> {
+        let kept = || self.headers.iter().filter(|(n, _)| *n != X_CACHE_STATUS);
+        let header_bytes: usize = kept().map(|(n, v)| 8 + n.as_str().len() + v.len()).sum();
+        let mut out = Vec::with_capacity(7 + header_bytes + self.body.len());
+        out.push(FRAME_V1);
+        out.extend_from_slice(&self.status.as_u16().to_be_bytes());
+        out.extend_from_slice(&u32::try_from(kept().count()).ok()?.to_be_bytes());
+        for (name, value) in kept() {
+            for part in [name.as_str().as_bytes(), value.as_bytes()] {
+                out.extend_from_slice(&u32::try_from(part.len()).ok()?.to_be_bytes());
+                out.extend_from_slice(part);
             }
-            if let Ok(v) = value.to_str() {
-                headers.push((name.as_str().to_owned(), v.to_owned()));
-            }
-            // Non-UTF8 values are dropped: they are legal but rare,
-            // and re-serialising them would corrupt the JSON.
         }
-        Self {
-            status: parts.status.as_u16(),
-            headers,
-            body_b64: B64.encode(body),
-        }
+        out.extend_from_slice(&self.body);
+        Some(out)
     }
 
-    /// Rebuild a `Response<Body>` from the cached bytes. Returns
-    /// `None` when the stored body will not base64-decode, and the
-    /// caller then recomputes.
-    ///
-    /// `vary_on` comes from the live layer config, so a changed vary
-    /// list takes effect on the next hit.
-    fn into_response(self, vary_on: &[HeaderName]) -> Option<Response<Body>> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
-        let body = B64.decode(&self.body_b64).ok()?;
-        let mut resp = Response::builder()
-            .status(StatusCode::from_u16(self.status).unwrap_or(StatusCode::OK))
-            .body(Body::from(body))
-            .ok()?;
-        let headers = resp.headers_mut();
-        // `append`, not `insert`, so duplicates are preserved.
-        for (name, value) in self.headers {
-            let Ok(n) = HeaderName::from_bytes(name.as_bytes()) else {
-                continue;
-            };
-            let Ok(v) = HeaderValue::from_str(&value) else {
-                continue;
-            };
-            headers.append(n, v);
+    /// Parse a frame. Header values and the body share `frame`'s buffer.
+    fn decode(mut frame: bytes::Bytes) -> Result<Self, FrameError> {
+        use bytes::Buf as _;
+        fn need(frame: &bytes::Bytes, n: usize) -> Result<(), FrameError> {
+            (frame.len() >= n).then_some(()).ok_or(FrameError::Truncated)
         }
+        fn len(frame: &mut bytes::Bytes) -> Result<usize, FrameError> {
+            need(frame, 4)?;
+            usize::try_from(frame.get_u32()).map_err(|_| FrameError::Truncated)
+        }
+        fn part(frame: &mut bytes::Bytes) -> Result<bytes::Bytes, FrameError> {
+            let n = len(frame)?;
+            need(frame, n)?;
+            Ok(frame.split_to(n))
+        }
+
+        need(&frame, 1)?;
+        if frame.get_u8() != FRAME_V1 {
+            return Err(FrameError::UnknownVersion);
+        }
+        need(&frame, 2)?;
+        let status = StatusCode::from_u16(frame.get_u16()).map_err(|_| FrameError::BadStatus)?;
+        let count = len(&mut frame)?;
+        let mut headers = HeaderMap::with_capacity(count.min(64));
+        for _ in 0..count {
+            let name = HeaderName::from_bytes(&part(&mut frame)?).map_err(|_| FrameError::BadHeader)?;
+            let value = HeaderValue::from_maybe_shared(part(&mut frame)?)
+                .map_err(|_| FrameError::BadHeader)?;
+            // `append`, not `insert`, so duplicates are preserved.
+            headers
+                .try_append(name, value)
+                .map_err(|_| FrameError::BadHeader)?;
+        }
+        Ok(Self {
+            status,
+            headers,
+            body: frame,
+        })
+    }
+
+    /// The response for a hit. `vary_on` comes from the live layer
+    /// config, so a changed vary list takes effect on the next hit.
+    fn into_response(self, vary_on: &[HeaderName]) -> Response<Body> {
+        let mut resp = Response::new(Body::from(self.body));
+        *resp.status_mut() = self.status;
+        *resp.headers_mut() = self.headers;
+        let headers = resp.headers_mut();
         headers.insert(X_CACHE_STATUS, HeaderValue::from_static("HIT"));
         apply_vary_header(headers, vary_on);
-        Some(resp)
+        resp
     }
 }
 
@@ -1093,6 +1128,72 @@ fn _trait_check(_h: &HeaderMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_page() -> CachedPage {
+        let mut headers = HeaderMap::new();
+        for i in 0..40 {
+            headers.append(
+                HeaderName::from_bytes(format!("x-h{i}").as_bytes()).unwrap(),
+                HeaderValue::from_str(&format!("v{i}")).unwrap(),
+            );
+        }
+        headers.append("set-thing", HeaderValue::from_static("a"));
+        headers.append("set-thing", HeaderValue::from_static("b"));
+        headers.insert("x-latin1", HeaderValue::from_bytes(b"caf\xe9").unwrap());
+        headers.insert(X_CACHE_STATUS, HeaderValue::from_static("MISS"));
+        CachedPage {
+            status: StatusCode::NON_AUTHORITATIVE_INFORMATION,
+            headers,
+            body: bytes::Bytes::from_static(b"\xff\x00\xfe binary \xc3"),
+        }
+    }
+
+    /// #2656: the frame round-trips status, every header (duplicates and
+    /// non-UTF-8 too) and a non-UTF-8 body, minus `x-cache-status`.
+    #[test]
+    fn a_page_frame_round_trips() {
+        let page = sample_page();
+        let back = CachedPage::decode(page.encode().unwrap().into()).unwrap();
+        assert_eq!(back.status, page.status);
+        assert_eq!(back.body, page.body);
+        assert!(back.headers.get(X_CACHE_STATUS).is_none());
+        let mut want = page.headers.clone();
+        want.remove(X_CACHE_STATUS);
+        assert_eq!(back.headers, want);
+        let dup: Vec<_> = back.headers.get_all("set-thing").iter().collect();
+        assert_eq!(dup, ["a", "b"]);
+    }
+
+    /// Unknown versions, the old JSON format and cut-off frames are refused.
+    #[test]
+    fn a_bad_frame_is_refused() {
+        let frame = sample_page().encode().unwrap();
+        let mut v2 = frame.clone();
+        v2[0] = 2;
+        assert_eq!(
+            CachedPage::decode(v2.into()).unwrap_err(),
+            FrameError::UnknownVersion
+        );
+        let json = br#"{"status":200,"headers":[],"body_b64":"aGk="}"#;
+        assert_eq!(
+            CachedPage::decode(bytes::Bytes::from_static(json)).unwrap_err(),
+            FrameError::UnknownVersion
+        );
+        // Cut inside the header block; past it, the cut only shortens the body.
+        for cut in [0, 1, 2, 5, 9, 20] {
+            assert_eq!(
+                CachedPage::decode(bytes::Bytes::copy_from_slice(&frame[..cut])).unwrap_err(),
+                FrameError::Truncated,
+                "cut at {cut}"
+            );
+        }
+        let mut bad_status = frame;
+        bad_status[1..3].copy_from_slice(&1000u16.to_be_bytes());
+        assert_eq!(
+            CachedPage::decode(bad_status.into()).unwrap_err(),
+            FrameError::BadStatus
+        );
+    }
 
     #[test]
     fn cache_control_builds_expected_directive() {

@@ -165,6 +165,16 @@ pub fn duration_millis(name: &str) -> Result<Duration, EnvError> {
     Ok(Duration::from_millis(ms))
 }
 
+/// The one yes/no set rustango reads flags with, any case: `1`/`true`/
+/// `yes`/`on` and `0`/`false`/`no`/`off`. `None` for anything else.
+pub(crate) fn parse_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 // ------------------------------------------------------------------ Startup validation
 
 /// One declared environment-variable requirement.

@@ -1982,6 +1982,7 @@ pub(crate) async fn create_submit(
         values,
         returning: vec![pk_field.column],
         on_conflict: None,
+        generated: vec![],
     };
     // A database-assigned key is not known yet, so `pk` is empty then.
     let typed_pk = query

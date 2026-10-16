@@ -1025,6 +1025,7 @@ jobs:
             --test orm_bounded_dml_tri \
             --test orm_relations_tri \
             --test orm_core_counts_tri \
+            --test pool_conn_tri \
             --test manage_data_verbs_tri \
             --test test_db_tri \
             --test orm_dialect_tri \
@@ -1035,6 +1036,7 @@ jobs:
             --test database_pools_sqlite_live \
             --test database_tenant_sqlite_live \
             --test explain_pool_tri \
+            --test pool_acquire_ping_tri \
             --test first_last_sqlite_live \
             --test fixtures_sqlite_live \
             --test foreign_key_sqlite_live \
@@ -1304,6 +1306,7 @@ jobs:
       # one guards the FK-ordering regression.
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql,testkit --test explain_pool_tri
+      - run: cargo test -p rustango --features mysql,testkit --test pool_acquire_ping_tri
       - run: cargo test -p rustango --features mysql,testkit --test bulk_upsert_tri
       # #1461 — the rest of the tri-dialect suites. A `_tri` file runs its
       # PostgreSQL and SQLite arms for free in `postgres_test`, so a
@@ -1324,6 +1327,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,testkit --test orm_bounded_dml_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_relations_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_core_counts_tri
+      - run: cargo test -p rustango --features mysql,testkit --test pool_conn_tri
       - run: cargo test -p rustango --features mysql,testkit --test orm_dialect_tri
       - run: cargo test -p rustango --features mysql,testkit --test atomic_savepoints_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri

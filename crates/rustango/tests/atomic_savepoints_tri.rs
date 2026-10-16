@@ -745,6 +745,80 @@ async fn join_lock_during_background_settle_is_refused(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![1]);
 }
 
+/// `_on` reads pass the atomic gate: once the server ended the block's
+/// transaction they refuse, and a read that ends it is recorded
+/// (rel-0608 tests-001).
+async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
+    use rustango::sql::{raw_execute_tx, transaction_pool};
+    Note {
+        id: 5,
+        label: "n5".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let p = one_conn(pool).await;
+    let other = one_conn(pool).await;
+    // Moved into the block, which must own what it holds; dropping it rolls back.
+    let mut held = transaction_pool(&other).await.unwrap();
+    let registry = pool.clone();
+    let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
+        put(tx, 1).await?;
+        let mut guard = tx.lock().await?;
+        // End the transaction on the server, the way each backend can.
+        let mut errors = 0;
+        if dialect(&registry) == "mysql" {
+            // A lock-wait timeout (1205), which rustango treats as ending the block;
+            // the server keeps the transaction open by default (innodb_rollback_on_timeout=OFF).
+            let lock = || Note::objects().filter("id", 5_i64).select_for_update();
+            lock().fetch_on(&mut held).await?;
+            raw_execute_tx(&mut guard, "SET SESSION innodb_lock_wait_timeout = 1", vec![]).await?;
+            let timed_out = lock().fetch_on(&mut *guard).await;
+            assert!(
+                matches!(timed_out, Err(ExecError::Driver(_))),
+                "got {timed_out:?}"
+            );
+            errors += 1;
+        }
+        #[allow(unreachable_patterns)]
+        match &mut *guard {
+            #[cfg(feature = "postgres")]
+            rustango::sql::PoolTx::Postgres(t) => {
+                let pid: i32 = rustango::sql::sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **t)
+                    .await?;
+                let kill = format!("SELECT pg_terminate_backend({pid})");
+                rustango::sql::raw_execute_pool(&registry, &kill, vec![]).await?;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            #[cfg(feature = "sqlite")]
+            rustango::sql::PoolTx::Sqlite(t) => {
+                use rustango::sql::{sqlx, sqlx::Executor as _};
+                (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
+            }
+            _ => {}
+        }
+        // PG: the reads that meet the dropped connection are driver errors
+        // until one is recorded as ending the transaction.
+        let refused = loop {
+            match Note::objects().fetch_on(&mut *guard).await {
+                Err(ExecError::AtomicAborted) => break true,
+                Err(ExecError::Driver(_)) if errors < 3 => errors += 1,
+                other => panic!("a read on the dead block ran: {other:?}"),
+            }
+        };
+        assert!(refused);
+        let count = Note::objects().count_on(&mut *guard).await;
+        assert!(matches!(count, Err(ExecError::AtomicAborted)), "got {count:?}");
+        let values = Note::objects().values_list(&["id"]).fetch_on(&mut *guard).await;
+        assert!(matches!(values, Err(ExecError::AtomicAborted)), "got {values:?}");
+        Ok(())
+    }))
+    .await;
+    assert!(matches!(res, Err(ExecError::AtomicAborted)), "got {res:?}");
+    assert_eq!(ids(pool).await, vec![5], "nothing commits");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -769,6 +843,7 @@ tri_dialect_test! {
         sqlite_rollback_refuses_later_statements,
         mysql_ddl_implicit_commit_is_reported,
         join_lock_during_background_settle_is_refused,
+        on_reads_refuse_a_dead_atomic_block,
     ],
 }
 

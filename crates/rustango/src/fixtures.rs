@@ -278,6 +278,7 @@ async fn insert_typed_row(
         values,
         returning: vec![],
         on_conflict: None,
+        generated: vec![],
     };
     crate::sql::insert_tx(tx, &query)
         .await

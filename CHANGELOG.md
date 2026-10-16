@@ -4,6 +4,100 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Performance — pools skip sqlx's ping before every checkout (#2674)
+
+The ping cost 8–16% of request CPU. New `[database].pool_test_before_acquire` / `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` turns it back on; the default is off on all three backends, tenant pools included. A connection idle 30 s or more (`pool_idle_ping_secs` / `RUSTANGO_DB_IDLE_PING_SECS`) is still pinged.
+
+### Performance — `CachePageLayer` stores pages as a binary frame (#2656)
+
+A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_bytes` default to base64 over `get`/`set`; `InMemoryCache`, `FileCache`, `RedisCache` and `ScopedCache` store raw bytes.
+
+### Added — `pool.acquire()` runs a request's queries on one connection (#2675)
+
+`PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
+
+### Fixed — the admin never shows password hashes or database URLs (#1158)
+
+`password_hash`, `password` and `database_url` columns are secret in the admin whatever the model's widgets: not shown in list, detail, search or filters, and audited as `[changed]`. The registry admin hashes an operator password typed into it.
+
+### Fixed — console sessions idle out; run streams end with the session (#1344)
+
+An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `SESSION_TTL_SECS` (now 12 h, was 7 days) after sign-in; each request re-issues the cookie. The provisioning SSE stream re-checks the session on every poll. New `session::SESSION_IDLE_SECS`, `SessionPayload::renewed`.
+
+### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
+
+`tenancy::operators::set_active(false)`, and unticking `active` in the registry admin, stamp `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
+
+### Fixed — JWT `/refresh` re-runs the claims hook (#1150)
+
+`auth_routes::Config::extra_claims` runs on every refresh against the user's current row, so a demoted user's next pair drops the old role claims.
+
+### Fixed — CSRF `exempt_prefix` matches whole path segments (#1128)
+
+`.exempt_prefix("/beacon")` covers `/beacon` and `/beacon/…`, no longer `/beacon-admin/…`.
+
+### Fixed — MySQL upsert no longer updates a row of another unique key (#1357)
+
+`ON DUPLICATE KEY UPDATE` fires on any unique key, so a `DoUpdate` whose target is not the only unique key a row can hit is refused with `ConflictNotSupportedInDialect`. Keys with an `Auto` column the caller left unset don't count; a set id, `default_uuid_v7` included, does (#1407). `Dialect::write_conflict_clause` takes the caller-set columns; new `InsertQuery::generated` / `BulkInsertQuery::generated`.
+
+### Fixed — MySQL `string_agg` is no longer cut at 1024 bytes (#1358)
+
+A statement with `GROUP_CONCAT` carries a `SET_VAR(group_concat_max_len = …)` hint, so no pool or session setup is needed.
+
+### Fixed — MySQL `now()` and casts to DateTime / Time keep microseconds (#1359)
+
+They emit `NOW(6)`, `DATETIME(6)` and `TIME(6)`, as PG and SQLite already kept the fraction.
+
+### Fixed — SQLite compares a Decimal with an expression as a number (#1217)
+
+A Decimal placeholder is `CAST(? AS NUMERIC)`, so `HAVING SUM(x) > Decimal` or `x * 2 > Decimal` no longer compares a number with text. New provided method `Dialect::write_decimal_param`.
+
+### Fixed — SQLite `json_path` comparisons match PG and MySQL (#1346)
+
+An as-text path compared with a number compares as a number, as on MySQL, and a JSON path equals a `SqlValue::Json` scalar (`"foo"`, `5`, `true`).
+
+### Fixed — self-referential relation subqueries correlate to the outer row (#1287)
+
+A subquery over its enclosing query's table reads it as `__rustango_self`, so `where_has`, `annotate_count` and the M2M aggregates on a self FK or self M2M no longer compare a row with itself.
+
+### Fixed — `assert_num_queries` counts values, pluck and aggregate reads (#1303)
+
+`values()`, `values_list()`, `pluck`, `pks`, `value`, `pluck_pairs` and `aggregate()` / `annotate()` each count one query; they counted none.
+
+### Fixed — docs no longer say saving sends model signals (#1323)
+
+No ORM write sends `pre_save` / `post_save` / `pre_delete` / `post_delete`; the ORM and caching guides now say to call `send_*` after the write.
+
+### Fixed — `dbshell` opens the database sqlx opens (#1310)
+
+`sqlite3` gets the path without its `?query` and percent-decoded, so `sqlite://./app.db?mode=rwc` no longer opens a new empty `app.db?mode=rwc`. `psql` gets the URL, so `sslmode` and friends survive; `mysql` credentials and database names are percent-decoded. A URL with a raw `@` after `?`/`#` is refused rather than guessed, so a password never goes to the wrong host.
+
+### Fixed — `prewarm-pools`, `audit-cleanup`, `check` and `dumpdata` fail loudly (#1312)
+
+`prewarm-pools` and `audit-cleanup` exit non-zero when a tenant fails. `check` refuses an unknown argument (`--deplyo`), and `dumpdata --model` / `--exclude` refuse an unknown model name instead of dumping `[]`.
+
+### Fixed — `dumpdata` / `loaddata` keep auto-created M2M links (#1226)
+
+Each row carries its links as `"<relation>": [pk, ...]` in `fields`; `loaddata` inserts them after every row, so both ends exist.
+
+### Fixed — `showmigrations`, `migrate --dry-run` and `sqlmigrate` match `migrate` (#1311)
+
+They read the ledgers as `migrate` does: a file replaced by an applied squash counts as applied, a squash `migrate` would only record previews no DDL, and the framework's system chain is listed and previewed. `--dry-run` no longer creates the ledger. Under tenancy, `showmigrations` marks tenant-scoped files from the tenant ledgers. New `migrate_dry_run_pool_with_ledger` re-export.
+
+Tenancy `showmigrations` lists the framework's tenant steps as `(d/n tenants)` too, and prints `[-] name (no tenants)` when there are no tenants.
+
+### Fixed — the translation editor form carries a CSRF token (#1259)
+
+Every Save, add and delete was refused with 403 under session auth.
+
+### Fixed — the admin 403 page's Sign-out form carries a CSRF token (#1260)
+
+A non-superuser could not sign out from it: `/logout` refused the tokenless POST.
+
+### Fixed — the fullstack template's admin keeps its session key across restarts (#1335)
+
+`admin_router` loads the key with `load_session_secret_for_tier`: `./var/` in dev, and a refused boot on prod without `RUSTANGO_SESSION_SECRET`.
+
 ## [0.60.7] — 2026-10-13
 
 ### Fixed — API keys are stored as an HMAC, not argon2 (#2617)

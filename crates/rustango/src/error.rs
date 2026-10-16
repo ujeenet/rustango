@@ -59,14 +59,7 @@ pub(crate) const DISCLOSE_ENV: &str = "RUSTANGO_DISCLOSE_ERRORS";
 /// unauthenticated client receives.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn disclose_server_errors() -> bool {
-    matches!(
-        std::env::var(DISCLOSE_ENV)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    std::env::var(DISCLOSE_ENV).is_ok_and(|raw| crate::env::parse_flag(&raw) == Some(true))
 }
 
 /// `true` when this process should serve the dev template-error
@@ -81,13 +74,12 @@ pub(crate) fn disclose_server_errors() -> bool {
     allow(dead_code)
 )]
 pub(crate) fn debug_details_enabled() -> bool {
-    if let Ok(raw) = std::env::var("RUSTANGO_TEMPLATE_DEBUG") {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => return true,
-            "0" | "false" | "no" | "off" => return false,
-            // Any other value: fall through to `RUSTANGO_ENV`.
-            _ => {}
-        }
+    // Any other value falls through to `RUSTANGO_ENV`.
+    if let Some(flag) = std::env::var("RUSTANGO_TEMPLATE_DEBUG")
+        .ok()
+        .and_then(|raw| crate::env::parse_flag(&raw))
+    {
+        return flag;
     }
     let env = std::env::var("RUSTANGO_ENV").unwrap_or_default();
     !matches!(

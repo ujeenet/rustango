@@ -134,9 +134,9 @@ pub struct CsrfConfig {
     /// collector endpoints (e.g. analytics), which cannot set an
     /// `X-CSRF-Token` header and — when the page is served from a CDN
     /// cache that strips `Set-Cookie` — may have no CSRF cookie at all.
-    /// Each entry is matched with `req.uri().path().starts_with(prefix)`,
-    /// so keep prefixes narrow and only exempt append-only endpoints
-    /// that read/write no auth state.
+    /// Each entry matches by path segment: `/beacon` covers `/beacon` and
+    /// `/beacon/x`, not `/beacon-admin` (#1128). Keep prefixes narrow and
+    /// only exempt append-only endpoints that read/write no auth state.
     pub exempt_prefixes: Vec<String>,
     /// Enforce CSRF on the HTTP `QUERY` method (RFC 10008). Default
     /// `false` — QUERY is a *safe* method, browsers can't form-submit it,
@@ -608,10 +608,13 @@ where
 /// turned a large admin edit (a long text field) into a 403 (#1714).
 const BODY_BUFFER_LIMIT: usize = 2 * 1024 * 1024;
 
-/// `true` when `path` starts with any configured exempt prefix. Used to
-/// skip CSRF enforcement for beacon/collector endpoints.
+/// `true` when `path` is under any configured exempt prefix, by whole
+/// segment, so `/beacon` does not exempt `/beacon-admin` (#1128).
 fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| path.starts_with(p.as_str()))
+    prefixes.iter().any(|p| {
+        path.strip_prefix(p.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || p.ends_with('/'))
+    })
 }
 
 fn is_safe_method(m: &Method) -> bool {
@@ -1109,6 +1112,18 @@ mod tests {
         assert!(!path_is_exempt("/", &prefixes));
         // Empty config exempts nothing (back-compat default).
         assert!(!path_is_exempt("/__cms__/collect", &[]));
+    }
+
+    /// #1128 — a prefix matches whole path segments only.
+    #[test]
+    fn exempt_prefix_matches_by_segment() {
+        let prefixes = vec!["/beacon".to_owned(), "/hook/".to_owned()];
+        assert!(path_is_exempt("/beacon", &prefixes));
+        assert!(path_is_exempt("/beacon/x", &prefixes));
+        assert!(!path_is_exempt("/beacon-admin/delete", &prefixes));
+        assert!(!path_is_exempt("/beaconx", &prefixes));
+        assert!(path_is_exempt("/hook/a", &prefixes));
+        assert!(!path_is_exempt("/hook", &prefixes));
     }
 
     #[test]

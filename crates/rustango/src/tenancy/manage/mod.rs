@@ -230,7 +230,7 @@ where
                 "prewarm: {} active tenants — warmed {}, failed {}, skipped (cap) {}",
                 report.total_active, report.warmed, report.failed, report.skipped_cap
             )?;
-            Ok(())
+            migrations::tenant_failures(report.failed, report.total_active)
         }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, &args[1..], writer).await
@@ -390,10 +390,15 @@ where
             dir,
             &args[1..],
             writer,
-            migrations::tenant_ledgers(pools),
+            async {
+                let [project] =
+                    migrations::tenant_ledgers(pools, [rustango::migrate::LEDGER_TABLE]).await?;
+                Ok(project)
+            },
         )
         .await
         .map_err(TenancyError::Migrate),
+        "showmigrations" | "status" => migrations::showmigrations_cmd(pools, dir, writer).await,
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -406,7 +411,7 @@ where
         "migrate" => {
             migrations::migrate_all_cmd(pools, registry_url, dir, &args[1..], writer).await
         }
-        // Everything else (makemigrations, showmigrations, downgrade,
+        // Everything else (makemigrations, sqlmigrate, downgrade,
         // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
         // v0.38 — `manage::run_with_writer` now accepts `&crate::sql::Pool`

@@ -769,21 +769,8 @@ async fn migrate_dry_run_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    let all = file::list_dir(dir)?;
-    let applied = applied_set_for(pool, ledger).await?;
-    let pending = all.iter().filter(|m| !applied.contains(&m.name));
-    let mut out = Vec::new();
-    for mig in pending {
-        let before = prev_snapshot(&all, mig, dir)?;
-        out.push(preview_migration(
-            mig,
-            &before,
-            &crate::sql::Postgres,
-            ledger,
-        )?);
-    }
-    Ok(out)
+    let pool = crate::sql::Pool::Postgres(pool.clone());
+    migrate_dry_run_pool_with_ledger(&pool, dir, ledger).await
 }
 
 /// `sqlmigrate <name>` — compute the SQL the named
@@ -2393,15 +2380,122 @@ fn outside_tables(mig: &Migration, existing: &[String]) -> Migration {
 /// forward. Without this filter those files would look pending
 /// on the very next run and try to recreate tables that already exist.
 fn pending_migrations(all: &[Migration], applied: &HashSet<String>) -> Vec<Migration> {
+    migration_states(all, applied)
+        .filter(|(_, s)| *s == MigrationState::Pending)
+        .map(|(m, _)| m.clone())
+        .collect()
+}
+
+/// Where a migration file stands against a ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MigrationState {
+    Applied,
+    /// An applied squash `replaces` it.
+    Replaced,
+    Pending,
+}
+
+/// Each of `all` with its state: the one reading `migrate`, `showmigrations`
+/// and `--dry-run` share (#1311).
+pub(crate) fn migration_states<'a>(
+    all: &'a [Migration],
+    applied: &'a HashSet<String>,
+) -> impl Iterator<Item = (&'a Migration, MigrationState)> + 'a {
     let superseded: HashSet<&str> = all
         .iter()
         .filter(|m| applied.contains(&m.name))
         .flat_map(|m| m.replaces.iter().map(String::as_str))
         .collect();
-    all.iter()
-        .filter(|m| !applied.contains(&m.name) && !superseded.contains(m.name.as_str()))
-        .cloned()
-        .collect()
+    all.iter().map(move |m| {
+        let state = if applied.contains(&m.name) {
+            MigrationState::Applied
+        } else if superseded.contains(m.name.as_str()) {
+            MigrationState::Replaced
+        } else {
+            MigrationState::Pending
+        };
+        (m, state)
+    })
+}
+
+/// `ledger`'s names, or none when it does not exist yet. Never creates it,
+/// so a preview writes nothing.
+///
+/// # Errors
+/// A failed catalog probe or ledger read.
+pub(crate) async fn applied_or_empty(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<HashSet<String>, MigrateError> {
+    if try_table_exists_here(pool, ledger).await? {
+        applied_set_pool_with_ledger(pool, ledger).await
+    } else {
+        Ok(HashSet::new())
+    }
+}
+
+/// The SQL `migrate` would run for `all`'s `scope` files under `ledger`:
+/// its pending set and reconcile verdicts, read without writing (#1311).
+/// `owned` tables are left out, as the system chain leaves the project's.
+///
+/// # Errors
+/// As the ledger read, a reconcile `migrate` would refuse, or a render.
+pub(crate) async fn preview_pending(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    all: &[Migration],
+    scope: Option<super::MigrationScope>,
+    ledger: &str,
+    fake_initial: bool,
+    owned: &[String],
+) -> Result<Vec<MigrationPreview>, MigrateError> {
+    let applied = applied_or_empty(pool, ledger).await?;
+    let mut out = Vec::new();
+    for mig in pending_migrations(all, &applied) {
+        if scope.is_some_and(|s| s != mig.scope) {
+            continue;
+        }
+        let before = prev_snapshot(all, &mig, dir)?;
+        let mig = without_tables(&mig, owned);
+        let effective = match reconcile(pool, &mig, &applied, fake_initial).await? {
+            ReconcileAction::Fake => {
+                out.push(faked_preview(&mig, ledger, pool.dialect()));
+                continue;
+            }
+            ReconcileAction::Run => mig,
+            ReconcileAction::RunPartial(existing) => without_tables(&mig, &existing),
+            ReconcileAction::RunOutside(existing) => outside_tables(&mig, &existing),
+        };
+        out.push(preview_migration(
+            &effective,
+            &before,
+            pool.dialect(),
+            ledger,
+        )?);
+    }
+    Ok(out)
+}
+
+/// What [`fake_apply_pool`] runs: a ledger row and the tombstones, no DDL.
+fn faked_preview(
+    mig: &Migration,
+    ledger: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> MigrationPreview {
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let (insert, _) = fake_statements(dialect, ledger, &literal(&mig.name));
+    let mut statements = vec![
+        "-- its end state is already present: recorded without running its SQL".to_owned(),
+        insert,
+    ];
+    for r in &mig.replaces {
+        statements.push(fake_statements(dialect, ledger, &literal(r)).1);
+    }
+    MigrationPreview {
+        name: mig.name.clone(),
+        atomic: false,
+        statements,
+    }
 }
 
 /// Every table this migration creates, in order. Unlike
@@ -2654,6 +2748,18 @@ async fn pg_table_exists(
     Ok(n > 0)
 }
 
+/// The ledger insert and tombstone delete of a fake apply, for `name`: a
+/// placeholder when run, a literal when previewed.
+fn fake_statements(dialect: &dyn crate::sql::Dialect, ledger: &str, name: &str) -> (String, String) {
+    let table = dialect.quote_ident(ledger);
+    let name_col = dialect.quote_ident("name");
+    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+    (
+        format!("INSERT INTO {table} ({name_col}) VALUES ({name}) {conflict_tail}"),
+        format!("DELETE FROM {table} WHERE {name_col} = {name}"),
+    )
+}
+
 /// Record `mig` as applied **without running its `forward` ops**, and
 /// tombstone every migration it `replaces`.
 ///
@@ -2671,14 +2777,7 @@ async fn fake_apply_pool(
     // future `Send` — see `count_existing_tables`).
     let (insert, delete) = {
         let dialect = pool.dialect();
-        let placeholder = dialect.placeholder(1);
-        let table = dialect.quote_ident(ledger);
-        let name_col = dialect.quote_ident("name");
-        let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
-        (
-            format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}"),
-            format!("DELETE FROM {table} WHERE {name_col} = {placeholder}"),
-        )
+        fake_statements(dialect, ledger, &dialect.placeholder(1))
     };
     crate::sql::raw_execute_pool(
         pool,
@@ -4137,16 +4236,8 @@ pub async fn migrate_dry_run_pool_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
-    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     let all = file::list_dir(dir)?;
-    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-    let pending = all.iter().filter(|m| !applied.contains(&m.name));
-    let mut out = Vec::new();
-    for mig in pending {
-        let before = prev_snapshot(&all, mig, dir)?;
-        out.push(preview_migration(mig, &before, pool.dialect(), ledger)?);
-    }
-    Ok(out)
+    preview_pending(pool, dir, &all, None, ledger, false, &[]).await
 }
 
 // ---- internal helpers ----

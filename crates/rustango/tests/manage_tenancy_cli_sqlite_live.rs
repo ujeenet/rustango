@@ -124,6 +124,7 @@ async fn migrate_target_and_dry_run_stay_registry_scoped() {
         !preview.contains("0002_ten"),
         "tenant migration listed as pending on the registry: {preview}"
     );
+    assert!(preview.contains("-- 0001_reg ("), "{preview}");
 
     let _ = b.run(&["migrate", "0002_ten"]).await;
     assert!(
@@ -135,6 +136,28 @@ async fn migrate_target_and_dry_run_stay_registry_scoped() {
         .await
         .expect("registry target");
     assert!(b.has_table("reg_t").await);
+}
+
+/// The registry dry-run previews a pending registry-scope system step.
+#[tokio::test]
+async fn migrate_dry_run_previews_the_registry_system_chain() {
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    let step = file::list_dir(&b.migrations.path().join("system").join("migrations"))
+        .expect("system chain")
+        .into_iter()
+        .find(|m| m.scope == MigrationScope::Registry)
+        .expect("a registry system step");
+    sqlx::query("DELETE FROM __rustango_system_migrations__ WHERE name = ?")
+        .bind(&step.name)
+        .execute(&b.raw)
+        .await
+        .expect("forget the step");
+    let preview = b.run(&["migrate", "--dry-run"]).await.expect("dry-run");
+    assert!(
+        preview.contains(&format!("-- {} (system,", step.name)),
+        "{preview}"
+    );
 }
 
 impl Booted {
@@ -262,6 +285,98 @@ async fn a_failed_tenant_fails_the_tenant_verbs() {
         &["migrate"],
         &["migrate", "--fake", "9999_none", "--all-tenants"],
     ] {
+        let err = b.run(args).await.expect_err(&args.join(" "));
+        assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
+    }
+}
+
+/// Tenant-scoped files are marked from the tenant ledgers, not the
+/// registry's, where they never land (#1311).
+#[tokio::test]
+async fn showmigrations_reads_the_tenant_ledgers() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(out.contains("[X] 0001_reg"), "{out}");
+    assert!(out.contains("[X] 0002_ten (1/1 tenants)"), "{out}");
+}
+
+/// Framework tenant steps are marked from the tenants' system ledgers.
+#[tokio::test]
+async fn showmigrations_lists_tenant_system_steps() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let step = file::list_dir(&b.migrations.path().join("system").join("migrations"))
+        .expect("system chain")
+        .into_iter()
+        .find(|m| m.scope == MigrationScope::Tenant)
+        .expect("a tenant system step");
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(
+        out.contains(&format!("[X] {} (1/1 tenants)", step.name)),
+        "{out}"
+    );
+
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        b._tmp.path().join("acme.db").display()
+    );
+    let tenant = sqlx::SqlitePool::connect(&url).await.expect("tenant db");
+    sqlx::query("DELETE FROM __rustango_system_migrations__ WHERE name = ?")
+        .bind(&step.name)
+        .execute(&tenant)
+        .await
+        .expect("forget the step");
+    tenant.close().await;
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(
+        out.contains(&format!("[ ] {} (0/1 tenants)", step.name)),
+        "{out}"
+    );
+}
+
+/// With no tenant, nothing tenant-scoped reads as pending.
+#[tokio::test]
+async fn showmigrations_without_tenants_owes_nothing() {
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(out.contains("[-] 0002_ten (no tenants)"), "{out}");
+    assert!(!out.contains("[ ]"), "{out}");
+}
+
+/// An unreachable tenant fails `prewarm-pools` and `audit-cleanup` (#1312).
+#[tokio::test]
+async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {
+    use rustango::sql::Auto;
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    // The parent dir does not exist, so SQLite cannot open the file.
+    let gone = b._tmp.path().join("no-such-dir").join("gone.db");
+    let mut org = rustango::tenancy::Org {
+        id: Auto::default(),
+        slug: "gone".into(),
+        display_name: "gone".into(),
+        storage_mode: "database".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!("sqlite://{}?mode=rwc", gone.display())),
+        schema_name: None,
+        host_pattern: None,
+        port: None,
+        path_prefix: None,
+        active: true,
+        created_at: chrono::Utc::now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
+    };
+    org.insert_pool(&b.pools.registry_pool())
+        .await
+        .expect("seed org");
+    for args in [&["prewarm-pools"][..], &["audit-cleanup", "--days", "30"]] {
         let err = b.run(args).await.expect_err(&args.join(" "));
         assert!(err.contains("1 of 1 tenant(s) failed"), "{args:?}: {err}");
     }
