@@ -2459,7 +2459,7 @@ pub(crate) async fn preview_pending(
         let mig = without_tables(&mig, owned);
         let effective = match reconcile(pool, &mig, &applied, fake_initial).await? {
             ReconcileAction::Fake => {
-                out.push(faked_preview(&mig, ledger));
+                out.push(faked_preview(&mig, ledger, pool.dialect()));
                 continue;
             }
             ReconcileAction::Run => mig,
@@ -2477,14 +2477,19 @@ pub(crate) async fn preview_pending(
 }
 
 /// What [`fake_apply_pool`] runs: a ledger row and the tombstones, no DDL.
-fn faked_preview(mig: &Migration, ledger: &str) -> MigrationPreview {
-    let quote = |s: &str| s.replace('\'', "''");
+fn faked_preview(
+    mig: &Migration,
+    ledger: &str,
+    dialect: &dyn crate::sql::Dialect,
+) -> MigrationPreview {
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let (insert, _) = fake_statements(dialect, ledger, &literal(&mig.name));
     let mut statements = vec![
         "-- its end state is already present: recorded without running its SQL".to_owned(),
-        format!("INSERT INTO {ledger} (name) VALUES ('{}')", quote(&mig.name)),
+        insert,
     ];
     for r in &mig.replaces {
-        statements.push(format!("DELETE FROM {ledger} WHERE name = '{}'", quote(r)));
+        statements.push(fake_statements(dialect, ledger, &literal(r)).1);
     }
     MigrationPreview {
         name: mig.name.clone(),
@@ -2750,6 +2755,18 @@ async fn pg_table_exists(
 /// crash midway leaves the ledger over-full (squash + some predecessors)
 /// rather than empty — the next run then sees a full/partial state it can
 /// report, instead of silently re-running the squash against live tables.
+/// The ledger insert and tombstone delete of a fake apply, for `name`: a
+/// placeholder when run, a literal when previewed.
+fn fake_statements(dialect: &dyn crate::sql::Dialect, ledger: &str, name: &str) -> (String, String) {
+    let table = dialect.quote_ident(ledger);
+    let name_col = dialect.quote_ident("name");
+    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+    (
+        format!("INSERT INTO {table} ({name_col}) VALUES ({name}) {conflict_tail}"),
+        format!("DELETE FROM {table} WHERE {name_col} = {name}"),
+    )
+}
+
 async fn fake_apply_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
@@ -2760,14 +2777,7 @@ async fn fake_apply_pool(
     // future `Send` — see `count_existing_tables`).
     let (insert, delete) = {
         let dialect = pool.dialect();
-        let placeholder = dialect.placeholder(1);
-        let table = dialect.quote_ident(ledger);
-        let name_col = dialect.quote_ident("name");
-        let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
-        (
-            format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}"),
-            format!("DELETE FROM {table} WHERE {name_col} = {placeholder}"),
-        )
+        fake_statements(dialect, ledger, &dialect.placeholder(1))
     };
     crate::sql::raw_execute_pool(
         pool,
