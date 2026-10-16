@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### More `_on` methods work on every backend (#1395)
+
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only.
+
 ### Pools no longer ping before every checkout (#2674)
 
 `test_before_acquire` is now off, tenant pools included; only a connection idle 30 s or more (`RUSTANGO_DB_IDLE_PING_SECS`) is pinged before checkout. Set `pool_test_before_acquire = true` or `RUSTANGO_DB_TEST_BEFORE_ACQUIRE=true` to ping every checkout. `PoolTuning` gains `test_before_acquire` and `idle_ping_after`, `DatabaseSettings` gains `pool_test_before_acquire` and `pool_idle_ping_secs`, so struct literals need them or `..Default::default()`.
@@ -160,7 +164,7 @@ untouched.
 
 ### `fetch_on` / `count_on` reads work on every backend (#2675)
 
-Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+`fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
 ### Admin treats credential columns as secret (#1158)
 

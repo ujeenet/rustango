@@ -4867,7 +4867,6 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
 
 /// Compile only the WHERE / ORDER BY / LIMIT / OFFSET tail, for
 /// callers that build the head of the statement themselves.
-#[allow(unused)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_where_order_tail(
     d: &dyn Dialect,

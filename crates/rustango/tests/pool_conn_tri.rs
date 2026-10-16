@@ -6,7 +6,7 @@
 use rustango::core::AggregateExpr;
 use rustango::query::QuerySet;
 use rustango::sql::sqlx;
-use rustango::sql::{CounterPool as _, FetcherPool as _, Pool, PoolConn};
+use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone, PartialEq)]
@@ -18,8 +18,20 @@ pub struct Author {
     pub name: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pc_book")]
+pub struct Book {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 40)]
+    pub title: String,
+    pub author: ForeignKey<Author>,
+}
+
 async fn seeded(pool: &Pool) {
-    rustango::testkit::matrix::fresh_table::<Author>(pool).await;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "pc_book").await;
+    fresh_table::<Author>(pool).await;
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
             id,
@@ -28,6 +40,17 @@ async fn seeded(pool: &Pool) {
         .insert_pool(pool)
         .await
         .expect("seed author");
+    }
+    fresh_table::<Book>(pool).await;
+    for (id, author) in [(1, 1_i64), (2, 1), (3, 2)] {
+        Book {
+            id,
+            title: format!("b{id}"),
+            author: ForeignKey::unloaded(author),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed book");
     }
 }
 
@@ -162,6 +185,58 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
     tx.rollback().await.expect("rollback");
 }
 
+/// The `_on` methods that took only a Postgres executor run on a held
+/// connection on every backend (#1395).
+async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
+    use rustango::sql::{annotate_count_children_on, fetch_aggregate_on, ExplainOptions};
+    let mut conn = pool.acquire().await.expect("acquire");
+    let c = &mut conn;
+
+    let page = by_id().limit(1).fetch_paginated_on(&mut *c).await.unwrap();
+    assert_eq!((page.rows.len(), page.total), (1, 2));
+
+    let bulk = Author::objects()
+        .in_bulk_on(Author::id, [1_i64, 2], |a| a.id, &mut *c)
+        .await
+        .unwrap();
+    assert_eq!(bulk[&2].name, "Bob");
+
+    let counts = annotate_count_children_on::<Author, _>(by_id(), "pc_book", "author", &mut *c)
+        .await
+        .unwrap();
+    let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
+    assert_eq!(counts, [(1, 2), (2, 1)]);
+
+    let plan = by_id().explain_on(&mut *c, ExplainOptions::default()).await.unwrap();
+    assert!(!plan.is_empty());
+
+    let agg = Author::objects()
+        .aggregate()
+        .annotate("n", AggregateExpr::Count(None))
+        .compile()
+        .unwrap();
+    let rows = fetch_aggregate_on(&agg, &mut *c).await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let mut book = Book::objects().filter("id", 3_i64).fetch_on(&mut *c).await.unwrap().remove(0);
+    assert_eq!(book.author.get_on(&mut *c).await.unwrap().name, "Bob");
+
+    let renamed = Author::objects()
+        .filter("id", 2_i64)
+        .update()
+        .set("name", "Cy")
+        .execute_on(&mut *c)
+        .await
+        .unwrap();
+    assert_eq!(renamed, 1);
+    let gone = Book::objects().filter("id", 3_i64).delete_on(&mut *c).await.unwrap();
+    assert_eq!(gone, 1);
+    drop(conn);
+    assert_eq!(Book::objects().count(pool).await.unwrap(), 2);
+    let names: Vec<String> = by_id().fetch(pool).await.unwrap().into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["Ada", "Cy"]);
+}
+
 tri_dialect_test!(
     setup: seeded,
     scenarios: [
@@ -169,5 +244,6 @@ tri_dialect_test!(
         on_conn_matches_pool,
         queries_run_on_the_held_session,
         on_tx_sees_its_writes,
+        former_pg_only_on_methods_run_on_a_held_conn,
     ]
 );
