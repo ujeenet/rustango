@@ -177,6 +177,31 @@ pub struct M2mTag {
     pub n: i64,
 }
 
+/// Text pk on both ends, with no model for the junction.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cli1393_shelf",
+    app = "cli1393",
+    m2m(
+        name = "labels",
+        to = "cli1393_label",
+        through = "cli1393_shelf_labels",
+        src = "shelf_code",
+        dst = "label_code"
+    )
+)]
+pub struct TextShelf {
+    #[rustango(primary_key, max_length = 32)]
+    pub code: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1393_label", app = "cli1393")]
+pub struct TextLabel {
+    #[rustango(primary_key, max_length = 32)]
+    pub code: String,
+}
+
 // Two tables that reference each other through nullable links.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli2318_a", app = "cli2318")]
@@ -483,8 +508,8 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
     assert_eq!(left, [0, 0], "rows left behind");
 }
 
-/// An auto-created M2M junction with rows does not block the flush; it clears too.
-async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+/// Empty post and tag tables, joined by the junction migrations build.
+async fn fresh_m2m(pool: &Pool) {
     use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli2317_post_tags").await;
@@ -505,6 +530,12 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
             .await
             .expect("junction ddl");
     }
+}
+
+/// An auto-created M2M junction with rows does not block the flush; it clears too.
+async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    fresh_m2m(pool).await;
     let mut post = M2mPost {
         id: Auto::default(),
         n: 1,
@@ -528,6 +559,97 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     let out = out.expect("flush --app cli2317");
     assert!(out.contains("cleared 3 table(s)"), "{out}");
     assert_eq!((left, links.len()), ([0, 0], 0), "rows left behind");
+}
+
+/// dumpdata → loaddata keeps auto-created M2M links (#1226).
+async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
+    fresh_m2m(pool).await;
+    let mut post = M2mPost {
+        id: Auto::default(),
+        n: 1,
+    };
+    post.insert_pool(pool).await.expect("post");
+    let mut want = Vec::new();
+    for n in [1, 2] {
+        let mut tag = M2mTag {
+            id: Auto::default(),
+            n,
+        };
+        tag.insert_pool(pool).await.expect("tag");
+        let id = tag.id.get().copied().expect("pk");
+        post.tags_m2m().add(id, pool).await.expect("link");
+        want.push(id);
+    }
+    let dumped = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli2317.M2mPost",
+            "--model",
+            "cli2317.M2mTag",
+            "--indent",
+            "0",
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("m2m.json");
+    std::fs::write(&fixture, dumped.trim()).unwrap();
+
+    fresh_m2m(pool).await;
+    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    let mut links = post.tags_m2m().all(pool).await.expect("links");
+    rustango::testkit::matrix::drop_table(pool, "cli2317_post_tags").await;
+    out.expect("loaddata");
+    links.sort_unstable();
+    assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
+}
+
+/// Empty shelf and label tables and a text-keyed junction. Written by
+/// hand: the migration DDL types every auto junction BIGINT.
+async fn fresh_text_m2m(pool: &Pool) {
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    drop_table(pool, "cli1393_shelf_labels").await;
+    fresh_table::<TextShelf>(pool).await;
+    fresh_table::<TextLabel>(pool).await;
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE cli1393_shelf_labels (shelf_code VARCHAR(32) NOT NULL, \
+         label_code VARCHAR(32) NOT NULL, PRIMARY KEY (shelf_code, label_code))",
+        vec![],
+    )
+    .await
+    .expect("junction ddl");
+}
+
+/// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
+async fn dump_and_load_keeps_text_pk_m2m_links(pool: &Pool) {
+    fresh_text_m2m(pool).await;
+    let fixture = serde_json::json!([
+        {"model": "cli1393.TextLabel", "pk": "a", "fields": {}},
+        {"model": "cli1393.TextLabel", "pk": "b", "fields": {}},
+        {"model": "cli1393.TextShelf", "pk": "s1", "fields": {"labels": ["b", "a"]}},
+    ]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("text_m2m.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let loaded = manage(pool, &["loaddata", path.to_str().unwrap()]).await;
+    let dumped = manage(
+        pool,
+        &["dumpdata", "--model", "cli1393.TextShelf", "--indent", "0"],
+    )
+    .await;
+    rustango::testkit::matrix::drop_table(pool, "cli1393_shelf_labels").await;
+    loaded.expect("loaddata");
+    let dumped = dumped.expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    assert_eq!(
+        rows[0]["fields"]["labels"],
+        serde_json::json!(["a", "b"]),
+        "the round trip lost the M2M links: {dumped}"
+    );
 }
 
 async fn dump(pool: &Pool) -> serde_json::Value {
@@ -606,6 +728,16 @@ async fn dumpdata_refuses_columns_it_cannot_read(pool: &Pool) {
     assert_eq!(out.trim(), "[]");
 }
 
+/// A misspelt `--model` / `--exclude` fails rather than dumping `[]` (#1312).
+async fn dumpdata_refuses_an_unknown_model_name(pool: &Pool) {
+    for flag in ["--model", "--exclude"] {
+        let err = manage(pool, &["dumpdata", flag, "cli1911.Psot"])
+            .await
+            .expect_err(flag);
+        assert!(err.contains("cli1911.Psot"), "{flag}: {err}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -619,5 +751,8 @@ tri_dialect_test! {
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
         fail_fast_still_resets_sequences,
+        dumpdata_refuses_an_unknown_model_name,
+        dump_and_load_keeps_m2m_links,
+        dump_and_load_keeps_text_pk_m2m_links,
     ],
 }

@@ -198,6 +198,22 @@ A subquery over the same table as its outer query now reads `FROM "t" AS "__rust
 
 `values()`, `pluck`, `value`, `pluck_pairs` and `aggregate()` reads now count one each. Raise the expected count in tests that run them inside the block.
 
+### `dbshell` hands `psql` the URL (#1310)
+
+`psql` now runs as `psql --dbname <url>` with the password in `PGPASSWORD`, so libpq reads every URL option; an option libpq does not know (a sqlx-only one) now fails the shell. `command_for` is unchanged.
+
+### CLI verbs that used to pass now fail (#1312)
+
+`prewarm-pools` and `audit-cleanup` exit non-zero when any tenant fails; `check` with any argument but `--deploy`, and `dumpdata --model` / `--exclude` with a name no model has, are errors.
+
+### `dumpdata` fixtures carry M2M links (#1226)
+
+Rows of a model with an auto-created M2M relation get a `"<relation>": [pk, ...]` field. Older fixtures still load; a tool that reads fixtures should ignore the new keys.
+
+### `showmigrations` and `migrate --dry-run` output (#1311)
+
+Both also list the framework's system chain, and `--dry-run` labels its steps `(system, …)`. A file replaced by an applied squash shows `[X] … (replaced by a squash)`. Tenancy `showmigrations` shows tenant-scoped files as `[X]` / `[~]` / `[ ]` with a `(k/n tenants)` count.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

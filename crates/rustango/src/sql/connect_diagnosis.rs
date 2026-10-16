@@ -268,8 +268,19 @@ pub(crate) fn split_userinfo(url: &str) -> Option<(&str, &str, &str)> {
     // `sqlite:path` and friends carry no credentials.
     let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split(['?', '#']).next().unwrap_or(rest);
-    let at = authority.rfind('@')?;
+    let at = authority.rfind('@').or_else(|| raw_query_char_at(rest))?;
     Some((scheme, &rest[..at], &rest[at + 1..]))
+}
+
+/// The userinfo `@` of `user:pa#ss@host/db`, whose raw `?`/`#` hid it: no
+/// path before the `?`/`#`, and a plain host after the `@`.
+fn raw_query_char_at(rest: &str) -> Option<usize> {
+    let at = rest.rfind('@')?;
+    let (userinfo, host) = (&rest[..at], &rest[at + 1..]);
+    let before_query = userinfo.split(['?', '#']).next().unwrap_or(userinfo);
+    let host = host.split('/').next().unwrap_or(host);
+    let plain_host = !host.contains(['?', '#', '&', '=']);
+    (before_query.contains(':') && !before_query.contains('/') && plain_host).then_some(at)
 }
 
 fn redact_userinfo(url: &str) -> String {

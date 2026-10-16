@@ -98,23 +98,26 @@ where
 {
     // Drop any `?query`: the CLI clients do not take URL options.
     let body = rest.split_once('?').map_or(rest, |(b, _)| b);
+    // Split auth from host on the last '@' first, so an '@' or '/' in the
+    // password does not break it (#2109).
+    let (auth, host_db) = match body.rsplit_once('@') {
+        Some((a, hd)) => (Some(a), hd),
+        None => (None, body),
+    };
     // Take the database name off the end.
-    let (auth_host, database) = match body.split_once('/') {
-        Some((auth_host, db)) if !db.is_empty() => (auth_host, Some(db.to_owned())),
-        Some((auth_host, _)) => (auth_host, None),
-        None => (body, None),
+    let (host_port, database) = match host_db.split_once('/') {
+        Some((hp, db)) if !db.is_empty() => (hp, Some(db.to_owned())),
+        Some((hp, _)) => (hp, None),
+        None => (host_db, None),
     };
-    // Split auth from host on the last '@', so an '@' in the password
-    // does not break it.
-    let (auth, host_port) = match auth_host.rsplit_once('@') {
-        Some((a, hp)) => (Some(a), hp),
-        None => (None, auth_host),
-    };
+    // Percent-decoded as sqlx does, or `p%40ss` reaches the server as is (#1310).
+    use crate::url_codec::percent_decode_path as decode;
+    let database = database.map(|db| decode(&db));
     let (user, password) = match auth {
         None => (None, None),
         Some(a) => match a.split_once(':') {
-            Some((u, p)) => (Some(u.to_owned()), Some(p.to_owned())),
-            None => (Some(a.to_owned()), None),
+            Some((u, p)) => (Some(decode(u)), Some(decode(p))),
+            None => (Some(decode(a)), None),
         },
     };
     let (host, port) = match host_port.rsplit_once(':') {
@@ -134,14 +137,15 @@ where
 }
 
 fn parse_sqlite_path(rest: &str) -> String {
-    // sqlx accepts `sqlite::memory:`, `sqlite:///abs/path` and
-    // `sqlite://path`. Once the scheme is stripped, what is left is
-    // already the path `sqlite3` wants, so pass it through. The leading
-    // `/` of the absolute form is part of the path and must stay.
-    if rest == ":memory:" || rest.starts_with(":memory:") {
+    // As sqlx reads it: the `?query` is options, not part of the file name,
+    // and the path is percent-decoded (#1310). The leading `/` of
+    // `sqlite:///abs/path` is part of the path and must stay.
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let in_memory = query.split('&').any(|kv| kv == "mode=memory");
+    if path == ":memory:" || in_memory {
         return ":memory:".to_owned();
     }
-    rest.to_owned()
+    crate::url_codec::percent_decode_path(path)
 }
 
 /// Build the call for `target` as `(program, args, env_vars)`.
@@ -149,7 +153,8 @@ fn parse_sqlite_path(rest: &str) -> String {
 /// The password never goes in `args`, because argv is readable by any
 /// user running `ps aux`. It goes in `env_vars` instead: `PGPASSWORD`
 /// for `psql`, `MYSQL_PWD` for `mysql`. SQLite has no auth, so it gets
-/// neither.
+/// neither. The Postgres flags carry no URL options; [`run`] hands `psql`
+/// the URL instead.
 #[must_use]
 pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(String, String)>) {
     match target {
@@ -224,14 +229,7 @@ pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(Stri
 /// When the URL cannot be parsed, and on non-Unix targets when the
 /// child fails to start or exits non-zero.
 pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    let target = parse_target(url).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let (program, args, env) = command_for(&target);
-
-    let mut cmd = Command::new(program);
-    cmd.args(&args);
-    for (k, v) in &env {
-        cmd.env(k, v);
-    }
+    let (program, mut cmd) = shell_command(url)?;
 
     #[cfg(unix)]
     {
@@ -255,6 +253,22 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
         )
         .into())
     }
+}
+
+/// The client `run` starts for `url`. `psql` gets the URL itself, so libpq
+/// keeps options like `sslmode` that its flags cannot carry (#1310).
+fn shell_command(url: &str) -> Result<(&'static str, Command), String> {
+    let target = parse_target(url)?;
+    if let DbTarget::Postgres { .. } = target {
+        return Ok(("psql", LibpqConn::new(url.trim()).command("psql")));
+    }
+    let (program, args, env) = command_for(&target);
+    let mut cmd = Command::new(program);
+    cmd.args(&args);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    Ok((program, cmd))
 }
 
 /// A libpq connection: the URL for argv, the password for `PGPASSWORD`,
@@ -347,6 +361,72 @@ mod tests {
         assert_eq!(c.url, "postgres://al@h/stage?sslmode=require");
         let argv: Vec<_> = c.command("psql").get_args().map(|a| a.to_owned()).collect();
         assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
+    }
+
+    /// rel-0608 — a raw `#` or `?` in the password stays out of argv too.
+    #[test]
+    fn conn_strips_a_password_holding_hash_or_question_mark() {
+        for pw in ["pa#ss", "pa?ss", "p?a#s@s"] {
+            let c = LibpqConn::new(&format!("postgres://app:{pw}@db:5432/app"));
+            assert_eq!(c.url, "postgres://app@db:5432/app", "{pw}");
+            assert_eq!(c.password.as_deref(), Some(pw));
+        }
+    }
+
+    /// #1310 — sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.
+    #[test]
+    fn sqlite_path_drops_the_query_and_decodes() {
+        let path = |url| match parse_target(url).unwrap() {
+            DbTarget::Sqlite { path } => path,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(path("sqlite://./app_dev.db?mode=rwc"), "./app_dev.db");
+        assert_eq!(path("sqlite:app.db?mode=ro&cache=shared"), "app.db");
+        assert_eq!(path("sqlite:///srv/my%20app.db"), "/srv/my app.db");
+        assert_eq!(path("sqlite://?mode=memory"), ":memory:");
+    }
+
+    /// #1310 — credentials reach the client decoded, as sqlx sends them.
+    #[test]
+    fn credentials_are_percent_decoded() {
+        assert_eq!(
+            parse_target("mysql://al%40x:p%40ss@h:3306/my%2Ddb").unwrap(),
+            DbTarget::Mysql {
+                host: Some("h".to_owned()),
+                port: Some(3306),
+                user: Some("al@x".to_owned()),
+                password: Some("p@ss".to_owned()),
+                database: Some("my-db".to_owned()),
+            }
+        );
+        // A raw '/' in the password stays in the password.
+        let DbTarget::Postgres { password, .. } = parse_target("postgres://al:p/w@h/app").unwrap()
+        else {
+            panic!("postgres")
+        };
+        assert_eq!(password.as_deref(), Some("p/w"));
+    }
+
+    /// #1310 — psql gets the URL, so `sslmode` survives and the password
+    /// is decoded into `PGPASSWORD`, not argv.
+    #[test]
+    fn psql_keeps_url_options() {
+        let (prog, cmd) =
+            shell_command("postgres://al:p%40ss@h:5432/app?sslmode=verify-full").unwrap();
+        assert_eq!(prog, "psql");
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            ["--dbname", "postgres://al@h:5432/app?sslmode=verify-full"]
+        );
+        let pw = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PGPASSWORD")
+            .and_then(|(_, v)| v);
+        assert_eq!(pw.and_then(|v| v.to_str()), Some("p@ss"));
     }
 
     #[test]
