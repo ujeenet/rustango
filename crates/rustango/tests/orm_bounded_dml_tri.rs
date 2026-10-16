@@ -19,7 +19,6 @@ pub struct Item {
     pub tag: String,
 }
 
-/// Only for compile-time refusals; never gets a table.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "bdml_child")]
 #[allow(dead_code)]
@@ -317,6 +316,71 @@ async fn nested_and_correlated_in_subquery_dml(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![2, 4, 5]);
 }
 
+/// MySQL wraps only the IN that reads the target itself: a wrapped inner IN
+/// hides its read, a JOIN to the target counts.
+async fn nested_in_wraps_once(pool: &Pool) {
+    use rustango::core::{subquery::outer_ref, Column as _};
+    use rustango::sql::{Dialect as _, MySql};
+    rustango::testkit::matrix::fresh_table::<Link>(pool).await;
+    for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 3)] {
+        Link { id, item_id }.insert_pool(pool).await.unwrap();
+    }
+    rustango::testkit::matrix::fresh_table::<Child>(pool).await;
+    for id in [1, 2, 3] {
+        Child {
+            id,
+            item: ForeignKey::unloaded(id),
+        }
+        .insert_pool(pool)
+        .await
+        .unwrap();
+    }
+    let high = || {
+        Item::objects()
+            .filter("rank__gt", 35_i64)
+            .values_list_flat("id")
+            .compile()
+            .unwrap()
+    };
+    let run = |inner: rustango::core::SelectQuery, tag: &'static str| async move {
+        let b = || Item::objects().where_in_subquery("id", inner.clone());
+        let q = b().update().set("tag", tag).compile().unwrap();
+        let sql = MySql.compile_update(&q).unwrap().sql;
+        assert_eq!(sql.matches("_rustango_in").count(), 1, "{sql}");
+        b().update()
+            .set("tag", tag)
+            .execute_pool(pool)
+            .await
+            .unwrap_or_else(|e| panic!("{tag}: {e}"))
+    };
+    // Correlated outer IN over Link holding an IN over the target.
+    let correlated = Link::objects()
+        .where_(Link::item_id.eq_expr(outer_ref("id")))
+        .where_in_subquery("item_id", high())
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
+    assert_eq!(run(correlated, "co").await, 2);
+    assert_eq!(ids_tagged(pool, "co").await, vec![1, 3]);
+    // Outer IN over the target holding an IN over Link.
+    let linked = Link::objects().values_list_flat("item_id").compile().unwrap();
+    let reverse = Item::objects()
+        .where_in_subquery("id", linked)
+        .values_list_flat("id")
+        .compile()
+        .unwrap();
+    assert_eq!(run(reverse, "rv").await, 3);
+    assert_eq!(ids_tagged(pool, "rv").await, vec![1, 3, 5]);
+    // The target only in a related-field JOIN.
+    let joined = Child::objects()
+        .filter("item__rank__gt", 35_i64)
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
+    assert_eq!(run(joined, "jn").await, 2);
+    assert_eq!(ids_tagged(pool, "jn").await, vec![1, 3]);
+}
+
 /// `difference` used to be dropped, so the excluded rows went too (#2452).
 async fn set_operation_dml_is_refused(pool: &Pool) {
     let pinned = || Item::objects().filter("id", 1_i64);
@@ -359,6 +423,7 @@ tri_dialect_test! {
         anti_join_delete,
         same_table_in_subquery_dml,
         nested_and_correlated_in_subquery_dml,
+        nested_in_wraps_once,
         set_operation_dml_is_refused,
     ],
 }

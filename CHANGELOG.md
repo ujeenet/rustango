@@ -70,9 +70,9 @@ It used to bind to the head branch, so the branch matched the wrong rows or fail
 
 The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
 
-### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target (rel-0609)
+### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target
 
-A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows).
+A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows). Nested `IN`s wrap only the level that reads the target.
 
 ### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
 
