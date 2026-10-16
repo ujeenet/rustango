@@ -330,6 +330,7 @@ impl DatabaseSettings {
             idle_timeout: self.pool_idle_timeout_secs.map(Duration::from_secs),
             max_lifetime: self.pool_max_lifetime_secs.map(Duration::from_secs),
             test_before_acquire: self.pool_test_before_acquire.unwrap_or(false),
+            idle_ping_after: None,
         }
     }
 }

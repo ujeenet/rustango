@@ -194,7 +194,23 @@ pub(crate) fn checkout_check<DB: sqlx::Database>(
     o: sqlx::pool::PoolOptions<DB>,
     t: &PoolTuning,
 ) -> sqlx::pool::PoolOptions<DB> {
-    o.test_before_acquire(t.test_before_acquire)
+    if t.test_before_acquire {
+        return o.test_before_acquire(true);
+    }
+    // Ping only a connection idle long enough for a server or load
+    // balancer to have dropped it; the hot path pays nothing (rel-0608).
+    let after = t
+        .idle_ping_after
+        .unwrap_or(Duration::from_secs(IDLE_PING_DEFAULT_SECS));
+    o.test_before_acquire(false)
+        .before_acquire(move |conn, meta| {
+            Box::pin(async move {
+                if meta.idle_for >= after {
+                    sqlx::Connection::ping(conn).await?;
+                }
+                Ok(true)
+            })
+        })
 }
 
 impl Pool {
@@ -655,6 +671,10 @@ pub const ACQUIRE_TIMEOUT_ENV: &str = "RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS";
 /// Five seconds is still plenty for a busy but healthy pool.
 const ACQUIRE_TIMEOUT_DEFAULT_SECS: u64 = 5;
 
+/// With the checkout ping off, a connection idle this long is still
+/// pinged: under the 4 min idle cut of common load balancers.
+const IDLE_PING_DEFAULT_SECS: u64 = 30;
+
 /// Env overrides for the rest of the pool settings, so a deploy can
 /// retune a pool without a config change. See [`ACQUIRE_TIMEOUT_ENV`].
 pub const MAX_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MAX_CONNECTIONS";
@@ -666,6 +686,8 @@ pub const IDLE_TIMEOUT_ENV: &str = "RUSTANGO_DB_IDLE_TIMEOUT_SECS";
 pub const MAX_LIFETIME_ENV: &str = "RUSTANGO_DB_MAX_LIFETIME_SECS";
 /// `true`/`false` (also `1`/`0`, `on`/`off`). See [`PoolTuning::test_before_acquire`].
 pub const TEST_BEFORE_ACQUIRE_ENV: &str = "RUSTANGO_DB_TEST_BEFORE_ACQUIRE";
+/// See [`PoolTuning::idle_ping_after`].
+pub const IDLE_PING_ENV: &str = "RUSTANGO_DB_IDLE_PING_SECS";
 
 /// How every pool this process opens is sized and timed.
 ///
@@ -695,10 +717,13 @@ pub struct PoolTuning {
     pub max_lifetime: Option<Duration>,
     /// Ping each connection before handing it out. Off by default: it
     /// costs a round trip per checkout (8–16% of request CPU, #2674).
-    /// Without it a connection the server dropped while idle fails one
-    /// query, then is discarded; `idle_timeout` and `max_lifetime`
-    /// (sqlx defaults 10 and 30 min) still recycle old connections.
+    /// Without it only connections idle past [`Self::idle_ping_after`]
+    /// are pinged; `idle_timeout` and `max_lifetime` (sqlx defaults 10
+    /// and 30 min) still recycle old connections.
     pub test_before_acquire: bool,
+    /// With `test_before_acquire` off, ping a connection idle at least
+    /// this long before handing it out. `None` means 30 s.
+    pub idle_ping_after: Option<Duration>,
 }
 
 static TUNING: std::sync::OnceLock<PoolTuning> = std::sync::OnceLock::new();
@@ -762,6 +787,7 @@ fn merge_env_over(base: PoolTuning) -> PoolTuning {
         idle_timeout: env_secs(IDLE_TIMEOUT_ENV).or(base.idle_timeout),
         max_lifetime: env_secs(MAX_LIFETIME_ENV).or(base.max_lifetime),
         test_before_acquire: env_bool(TEST_BEFORE_ACQUIRE_ENV).unwrap_or(base.test_before_acquire),
+        idle_ping_after: env_secs(IDLE_PING_ENV).or(base.idle_ping_after),
     }
 }
 
@@ -964,6 +990,7 @@ mod tuning_tests {
             MAX_LIFETIME_ENV,
             ACQUIRE_TIMEOUT_ENV,
             TEST_BEFORE_ACQUIRE_ENV,
+            IDLE_PING_ENV,
         ] {
             std::env::remove_var(k);
         }
@@ -997,6 +1024,7 @@ mod tuning_tests {
             idle_timeout: Some(Duration::from_secs(600)),
             max_lifetime: Some(Duration::from_secs(1800)),
             test_before_acquire: true,
+            idle_ping_after: Some(Duration::from_secs(45)),
         };
         assert_eq!(merge_env_over(from_toml), from_toml);
     }
@@ -1063,9 +1091,11 @@ mod tuning_tests {
         let _g = env_lock();
         clear();
         std::env::set_var(IDLE_TIMEOUT_ENV, "300");
+        std::env::set_var(IDLE_PING_ENV, "20");
         let t = merge_env_over(PoolTuning::default());
         clear();
         assert_eq!(t.idle_timeout, Some(Duration::from_secs(300)));
+        assert_eq!(t.idle_ping_after, Some(Duration::from_secs(20)));
     }
 
     /// The settings must reach the pool, not merely parse. A lazy
