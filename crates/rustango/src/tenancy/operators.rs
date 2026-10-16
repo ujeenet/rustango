@@ -264,5 +264,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(values.len(), 1, "{values:?}");
+
+        // An int bool (SQLite/MySQL rows) counts; an inactive row is not re-stamped (pr-1408-r2 tests-004).
+        for (was, stamps) in [(serde_json::json!(1), true), (serde_json::json!(false), false)] {
+            let before = serde_json::json!({"active": was, "sessions_revoked_at": null});
+            let mut values = vec![("active", SqlValue::Bool(false))];
+            crate::admin::derived_fields::apply("rustango_operators", &mut values, Some(&before))
+                .await
+                .unwrap();
+            let stamped = values.iter().any(|(c, _)| *c == "sessions_revoked_at");
+            assert_eq!(stamped, stamps, "active was {was}: {values:?}");
+        }
     }
 }
