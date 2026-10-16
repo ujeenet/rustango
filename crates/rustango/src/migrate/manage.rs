@@ -3752,6 +3752,11 @@ async fn dumpdata_cmd<W: Write>(
         let pk_field = schema.primary_key();
         let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
         // Pages in pk order, so neither rows nor links are held whole (#1399).
+        // `pk > last` skips ties, so only a real one-column key pages.
+        let paged = match pk_field {
+            Some(pk) => is_sole_pk(pool, schema.table, pk.column).await?,
+            None => false,
+        };
         let mut after: Option<crate::core::SqlValue> = None;
         loop {
             let mut query = crate::core::SelectQuery::new(schema);
@@ -3761,6 +3766,8 @@ async fn dumpdata_cmd<W: Write>(
                     desc: false,
                 }
                 .into()];
+            }
+            if let Some(pk) = pk_field.filter(|_| paged) {
                 query.limit = Some(DUMP_PAGE);
                 if let Some(last) = after.take() {
                     query.where_clause = crate::core::WhereExpr::Predicate(crate::core::Filter {
@@ -3778,7 +3785,7 @@ async fn dumpdata_cmd<W: Write>(
                         schema.table
                     ))
                 })?;
-            let full = pk_field.is_some() && rows.len() == DUMP_PAGE as usize;
+            let full = paged && rows.len() == DUMP_PAGE as usize;
             let pks: Vec<crate::core::SqlValue> = match pk_field {
                 Some(pk) => rows
                     .iter()
@@ -3787,7 +3794,15 @@ async fn dumpdata_cmd<W: Write>(
                     .collect::<Result<_, _>>()?,
                 None => Vec::new(),
             };
-            let links = m2m_links(pool, schema, &pks).await?;
+            let mut links: Vec<(&str, LinksBySource)> = Vec::new();
+            for chunk in pks.chunks(DUMP_PAGE as usize) {
+                for (name, by_src) in m2m_links(pool, schema, chunk).await? {
+                    match links.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, all)) => all.extend(by_src),
+                        None => links.push((name, by_src)),
+                    }
+                }
+            }
 
             for mut row in rows {
                 // Pop the PK column off `fields` into the outer fixture
@@ -3823,6 +3838,16 @@ async fn dumpdata_cmd<W: Write>(
 
 /// Rows per dumpdata page.
 const DUMP_PAGE: i64 = 500;
+
+/// Whether `column` alone is `table`'s primary key in the database: inspectdb
+/// marks one column of a composite key, and a view has none.
+async fn is_sole_pk(pool: &Pool, table: &str, column: &str) -> Result<bool, MigrateError> {
+    let schema = super::ensure::creation_schema(pool)
+        .await?
+        .unwrap_or_default();
+    let pk = super::inspectdb::list_pk_columns(pool, &schema, table).await?;
+    Ok(matches!(pk.as_slice(), [c] if c == column))
+}
 
 /// Writes a fixture array an entry at a time, as `serde_json` would whole.
 struct FixtureWriter<'w, W: Write> {
@@ -7718,6 +7743,54 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .unwrap();
         let adds = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\"");
         assert!(out.contains(&adds), "{adds} missing from:\n{out}");
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(
+        table = "dl1399_post",
+        m2m(
+            name = "tags",
+            to = "dl1399_tag",
+            through = "dl1399_post_tags",
+            src = "post_id",
+            dst = "tag_id"
+        )
+    )]
+    pub struct DlPost {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    #[allow(dead_code)]
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "dl1399_tag")]
+    pub struct DlTag {
+        #[rustango(primary_key)]
+        pub id: i64,
+    }
+
+    /// A page reads only its own rows' links, not the whole junction (rel-0609 tests-002).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn m2m_links_reads_only_the_page() {
+        use crate::core::Model as _;
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        for sql in [
+            "CREATE TABLE dl1399_post_tags (post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)",
+            "INSERT INTO dl1399_post_tags VALUES (1, 10), (2, 20)",
+        ] {
+            crate::sql::raw_execute_pool(&pool, sql, Vec::new())
+                .await
+                .unwrap();
+        }
+        let page = [crate::core::SqlValue::I64(1)];
+        let links = m2m_links(&pool, DlPost::SCHEMA, &page).await.unwrap();
+        let [(_, by_src)] = links.as_slice() else {
+            panic!("one relation: {links:?}");
+        };
+        let srcs: Vec<&String> = by_src.keys().collect();
+        assert_eq!(srcs, ["1"], "read links of rows outside the page");
     }
 
     /// #1311 — once a squash is applied, the file it replaced is not pending.
