@@ -1447,7 +1447,7 @@ fn render_changes_split_inner(
                     }
                 }
                 // A serial's sequence keeps its old type, so i32 → i64 still stops at 2^31 (#2245).
-                if field.is_some_and(|f| f.auto) && matches!(to.as_str(), "i16" | "i32" | "i64") {
+                if field.is_some_and(|f| f.auto) && super::snapshot::is_integer_ty(to) {
                     // A tagged body, so a `$$` in a name cannot end it.
                     const TAG: &str = "$rustango_seq$";
                     if target.contains(TAG) || column.contains(TAG) {
@@ -1990,7 +1990,7 @@ pub(super) fn create_table_sql_as(
         // type token for `Auto<T>` PKs — `PRIMARY KEY` is part of the
         // type, not a separate clause. Skip the standalone append.
         let serial_pk_inline = f.auto
-            && matches!(f.ty.as_str(), "i16" | "i32" | "i64")
+            && super::snapshot::is_integer_ty(&f.ty)
             && dialect.serial_type_includes_primary_key();
         if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
@@ -2194,7 +2194,7 @@ fn m2m_fk_sql(
 }
 
 /// A junction column's type and the pk it references in `table` (#1404).
-/// Integer pks stay BIGINT, as `M2MManager` decodes `i64`; a table outside
+/// Typed by [`crate::sql::m2m::junction_column_type`], the runtime's rule; a table outside
 /// `current` keeps the old `BIGINT` to `id`.
 fn m2m_end<'a>(
     current: &'a SchemaSnapshot,
@@ -2209,7 +2209,8 @@ fn m2m_end<'a>(
     let Some(pk) = pks.next().filter(|_| pks.next().is_none()) else {
         return (bigint(), "id");
     };
-    if matches!(pk.ty.as_str(), "i16" | "i32" | "i64") {
+    let end = super::snapshot::field_type_from_name(&pk.ty).map(crate::sql::m2m::junction_column_type);
+    if end == Some(crate::core::FieldType::I64) {
         return (bigint(), &pk.column);
     }
     let column = FieldSnapshot {
@@ -2439,37 +2440,7 @@ fn sql_type(f: &FieldSnapshot) -> String {
 /// AUTO_INCREMENT`; PG's stays `BIGSERIAL`.
 fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
     use crate::core::FieldType;
-    // Map snapshot's lowercase ty string to FieldType.
-    let ty = match f.ty.as_str() {
-        "i16" => Some(FieldType::I16),
-        "i32" => Some(FieldType::I32),
-        "i64" => Some(FieldType::I64),
-        "f32" => Some(FieldType::F32),
-        "f64" => Some(FieldType::F64),
-        "bool" => Some(FieldType::Bool),
-        "string" => Some(FieldType::String),
-        "datetime" => Some(FieldType::DateTime),
-        "date" => Some(FieldType::Date),
-        "time" => Some(FieldType::Time),
-        "uuid" => Some(FieldType::Uuid),
-        "json" => Some(FieldType::Json),
-        "decimal" => Some(FieldType::Decimal),
-        "binary" => Some(FieldType::Binary),
-        // #341 — PG array element kinds; route through `column_type`
-        // (→ `text[]` / `integer[]` / `bigint[]` on PG).
-        "array_text" => Some(FieldType::Array(crate::core::ArrayElem::Text)),
-        "array_int" => Some(FieldType::Array(crate::core::ArrayElem::Int)),
-        "array_bigint" => Some(FieldType::Array(crate::core::ArrayElem::BigInt)),
-        // #343 — PG range element kinds.
-        "range_int" => Some(FieldType::Range(crate::core::RangeElem::Int)),
-        "range_bigint" => Some(FieldType::Range(crate::core::RangeElem::BigInt)),
-        "range_numeric" => Some(FieldType::Range(crate::core::RangeElem::Numeric)),
-        "range_date" => Some(FieldType::Range(crate::core::RangeElem::Date)),
-        "range_datetime" => Some(FieldType::Range(crate::core::RangeElem::DateTime)),
-        // #342 — PG hstore.
-        "hstore" => Some(FieldType::HStore),
-        _ => None,
-    };
+    let ty = super::snapshot::field_type_from_name(&f.ty);
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"
     // for integer types; field-mixin auto (auto_now_add etc.) on
     // non-integer types falls through to the regular column_type

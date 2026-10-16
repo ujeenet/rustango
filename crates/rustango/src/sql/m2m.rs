@@ -243,13 +243,18 @@ pub(crate) fn junction(through: &'static str, cols: &[&'static str]) -> &'static
     typed_junction(through, &cols)
 }
 
-/// The type of a junction column referencing `target`'s pk, as the migration
-/// writer makes it: integers widen to BIGINT (#1404).
+/// The type of a junction column referencing `target`'s pk.
 pub(crate) fn end_type(target: &ModelSchema) -> Option<FieldType> {
-    target.primary_key().map(|pk| match pk.ty {
+    target.primary_key().map(|pk| junction_column_type(pk.ty))
+}
+
+/// A junction column's type for a pk of type `pk`: integers widen to BIGINT
+/// (#1404). The one rule for the runtime and the migration writer.
+pub(crate) fn junction_column_type(pk: FieldType) -> FieldType {
+    match pk {
         FieldType::I16 | FieldType::I32 => FieldType::I64,
         ty => ty,
-    })
+    }
 }
 
 /// `column`'s type in an auto-created junction `through`: its end's pk type,
