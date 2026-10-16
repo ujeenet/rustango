@@ -166,9 +166,8 @@ cache = ["_async_trait", "dep:sha2", "dep:fs4", "dep:libc", "dep:bytes", "dep:ba
 
 # Per-view caching tower layer (`rustango::cache_page`) — caches a
 # whole successful response, plus `Cache-Control` / `Vary` builders.
-# Implies `cache` (cache backend) + `admin` (axum types) + base64 for
-# the QUERY body digest.
-cache-page = ["cache", "admin", "dep:base64"]
+# Implies `cache` (cache backend) + `admin` (axum types).
+cache-page = ["cache", "admin"]
 
 # Signals layer (`rustango::signals`) — pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
