@@ -128,8 +128,8 @@ pub(crate) async fn apply_idempotent(
     apply_changes_idempotent(pool, snapshot, &changes).await
 }
 
-/// The statements [`apply_idempotent`] runs for `snapshot`, FK targets
-/// unqualified, for a `--dry-run` (#1411).
+/// The statements [`apply_idempotent`] runs for `snapshot`, guards
+/// included, FK targets unqualified, for a `--dry-run` (#1411).
 ///
 /// # Errors
 /// A render failure.
@@ -141,8 +141,9 @@ pub(crate) fn idempotent_ddl(
     let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
     Ok(batch
         .immediate
-        .into_iter()
-        .chain(batch.deferred_fks)
+        .iter()
+        .chain(&batch.deferred_fks)
+        .map(|s| idempotent(s, dialect.name()).into_owned())
         .collect())
 }
 
@@ -515,6 +516,23 @@ mod tests {
     fn a_statement_holding_the_do_tag_runs_bare() {
         let s = r#"ALTER TABLE "a" ADD CONSTRAINT "ck" CHECK ("b" <> '$rustango$')"#;
         assert_eq!(idempotent(s, "postgres"), s);
+    }
+
+    /// The dry-run prints the statements as they run, guards included.
+    #[test]
+    fn dry_run_ddl_is_the_rewritten_ddl() {
+        use crate::core::Model as _;
+        let snapshot = crate::migrate::SchemaSnapshot::from_models(&[
+            crate::contenttypes::ContentType::SCHEMA,
+        ]);
+        let ddl = super::idempotent_ddl(&snapshot, &crate::sql::Postgres).unwrap();
+        let creates: Vec<_> = ddl.iter().filter(|s| s.contains("CREATE TABLE")).collect();
+        assert!(!creates.is_empty());
+        for s in creates {
+            assert!(s.starts_with("CREATE TABLE IF NOT EXISTS"), "{s}");
+        }
+        let mysql = super::idempotent_ddl(&snapshot, &crate::sql::MySql).unwrap();
+        assert!(mysql.iter().all(|s| !s.contains("IF NOT EXISTS")), "{mysql:?}");
     }
 
     #[test]
