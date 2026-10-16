@@ -93,11 +93,6 @@ pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 #[cfg(feature = "postgres")]
 pub use executor::row_to_json;
 
-#[cfg(feature = "postgres")]
-pub use executor::{
-    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
-    update_on,
-};
 /// Query operations that take a **borrowed executor** rather than a
 /// pool — for running against one connection you have already scoped,
 /// which is how tenancy schema-mode applies `SET search_path`.
@@ -110,13 +105,17 @@ pub use executor::{
 /// aggregate or a prefetch against a specific connection. The guard in
 /// `macro_internals_stays_internal` now walks `src/` as well (#1516).
 ///
-/// The macro never emits `fetch_aggregate_on` or
-/// `annotate_count_children{,_on}`. Audited `save_on` calls
-/// `select_rows_on` for its BEFORE read.
+/// The macro never emits `annotate_count_children`. Audited `save_on`
+/// calls `select_rows_on` for its BEFORE read.
 ///
-/// `annotate_count_children_on` and `fetch_aggregate_on` take any
-/// [`SqlExecutor`] (#1395). The rest are **PostgreSQL only**, typed
-/// `E: sqlx::Executor<Database = Postgres>`; see #1293.
+/// These are **PostgreSQL only**, typed `E: sqlx::Executor<Database =
+/// Postgres>`; see #1293.
+#[cfg(feature = "postgres")]
+pub use executor::{
+    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
+    update_on,
+};
+/// Take any [`SqlExecutor`] (#1395).
 pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor

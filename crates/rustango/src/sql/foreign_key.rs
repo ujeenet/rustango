@@ -38,11 +38,9 @@
 //!   `#[rustango(on = "user_uuid")]` on the FK field.
 
 use crate::core::SqlValue;
-// PG-typed surfaces below import these. Pulled in only when the
-// `postgres` feature is on; sqlite/mysql-only builds get just the
-// tri-dialect `get_pool` entry point further down.
 use crate::core::{Model, Op};
 use crate::query::QuerySet;
+// For the PG-only `get`.
 #[cfg(feature = "postgres")]
 use sqlx::postgres::{PgPool, PgRow};
 #[cfg(feature = "postgres")]
