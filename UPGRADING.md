@@ -166,6 +166,8 @@ In a tenancy project they cover registry models only; pass `--tenant <slug>` for
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
 
+On MySQL, an auto-created junction whose two pk columns exceed 3072 bytes (4 per VARCHAR char) is refused when the migration renders; shorten the string pks' `max_length`.
+
 ### SQLite JSON-path equality with null or an object (#1398)
 
 `json_path(..) = Json(null)` now matches stored JSON nulls, and object literals match whatever their key order. Such filters return more rows on SQLite than before; they no longer use an index on `json_extract`.

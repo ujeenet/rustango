@@ -30,9 +30,15 @@ The manager types an auto-created junction's columns by each end's pk, so a `Str
 
 A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
 
+### Fixed — MySQL refuses a junction whose primary key exceeds 3072 bytes
+
+Two long string pks gave ERROR 1071 at migrate time; rendering now fails with an error that names the junction and the limit.
+
 ### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL (#1398)
 
 A JSON `null` literal matched nothing, and objects compared as text, so key order mattered. They now compare by value; arrays keep their order.
+
+### Fixed — SQLite `json_path = <object>` treats 1 and 1.0 as equal, as PG and MySQL do
 
 ### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
 
@@ -61,6 +67,10 @@ It used to bind to the head branch, so the branch matched the wrong rows or fail
 ### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
 
 The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
+
+### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target (rel-0609)
+
+A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows).
 
 ### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
 
