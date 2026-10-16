@@ -150,9 +150,9 @@ untouched.
 
 ## Unreleased
 
-### `_on` reads are tri-dialect (#2675)
+### `fetch_on` / `count_on` reads work on every backend (#2675)
 
-`fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
 ## 0.60.7
 

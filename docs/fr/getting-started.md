@@ -499,7 +499,7 @@ Ce qui se passe ici, en termes simples :
 - `main` renvoie un `Result`, le type succès-ou-erreur de Rust, ce qui explique pourquoi `?` et le `Ok(())` final fonctionnent.
 - Pour enregistrer une ligne, appelez `.save_pool(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — sans filtre, cela renvoie toutes les lignes de la table.
 - `.fetch(…)` provient du trait `FetcherPool`, c'est pourquoi les imports l'incluent. Sans cette ligne, la méthode n'existe pas et le compilateur vous le signale sans expliquer pourquoi.
-- Ce sont là les appels multi-backend, et tout ce qui précède compile sans modification sur les trois bases de données. Il existe aussi `.save(&pool)` et `.fetch_on(&pool)`, qui prennent un `sqlx::PgPool` propre au pilote et n'existent que lorsque la feature `postgres` est activée. Préférez la paire multi-backend, sauf si vous visez délibérément une seule base de données. Voir le [guide de l'ORM](orm.md).
+- Ce sont là les appels multi-backend, et tout ce qui précède compile sans modification sur les trois bases de données. Il existe aussi `.save(&pool)`, qui prend un `sqlx::PgPool` propre au pilote et n'existe que lorsque la feature `postgres` est activée. Préférez la paire multi-backend, sauf si vous visez délibérément une seule base de données. Voir le [guide de l'ORM](orm.md).
 
 Exécutez-le :
 

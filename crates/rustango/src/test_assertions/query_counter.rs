@@ -56,10 +56,13 @@
 //! - `count_rows_pool`, `fetch_aggregate_pool`, `fetch_paginated_pool`
 //! - `insert_pool` / `update_pool` / `delete_pool` — single-row writes
 //! - the `_tx` counterparts of all of the above
-//! - the PostgreSQL `_on` reads: `QuerySet::fetch_on` / `count_on` /
-//!   `fetch_paginated_on` / `explain_on`, `select_rows_on`,
-//!   `fetch_aggregate_on`, `annotate_count_children_on`, and
-//!   `fetch_with_prefetch` (two queries) (#1561)
+//! - every `_on` read through `SqlExecutor`, on any backend (#2675):
+//!   `fetch_on` / `first_on` / `count_on` / `exists_on` and the values
+//!   and aggregate `fetch_on`
+//! - the PostgreSQL-only `_on` reads: `fetch_paginated_on` /
+//!   `explain_on`, `select_rows_on`, `fetch_aggregate_on`,
+//!   `annotate_count_children_on`, and `fetch_with_prefetch` (two
+//!   queries) (#1561)
 //!
 //! Each call increments by 1 regardless of how many rows the query
 //! returns: one SQL statement is one count, even when it returns

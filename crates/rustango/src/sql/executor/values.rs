@@ -123,8 +123,8 @@ async fn fetch_values_dict_on<'c, E: SqlExecutor<'c>>(
 /// [`crate::query::AggregateBuilder::fetch`].
 ///
 /// It goes through [`Pool`], so `.annotate(…)` works on every
-/// backend. [`super::fetch_aggregate_on`] does the same on a
-/// borrowed Postgres executor.
+/// backend. [`crate::query::AggregateBuilder::fetch_on`] does the same
+/// on any [`SqlExecutor`].
 ///
 /// # Errors
 /// SQL compilation or driver failure.
@@ -1023,8 +1023,6 @@ impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
     where
         U: FlatScalar,
     {
-        // Rebuild with `LIMIT 1`. `compile()` consumes `self.qs`, so
-        // the limit has to go on through the builder.
         self.first_on(pool).await
     }
 

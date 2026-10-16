@@ -485,7 +485,7 @@ What's happening here, in plain terms:
 - `main` returns a `Result`, Rust's success-or-error type, which is why `?` and the closing `Ok(())` work.
 - To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — with no filters, that reads every row.
 - `.fetch(…)` comes from the `FetcherPool` trait, which is why the imports bring it in. Without that line the method does not exist and the compiler says so without explaining why.
-- These are the multi-backend calls, and everything above compiles unchanged on all three databases. There are also `.save(&pool)` and `.fetch_on(&pool)`, which take a driver-specific `sqlx::PgPool` and exist only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
+- These are the multi-backend calls, and everything above compiles unchanged on all three databases. There is also `.save(&pool)`, which takes a driver-specific `sqlx::PgPool` and exists only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
 
 Run it:
 
