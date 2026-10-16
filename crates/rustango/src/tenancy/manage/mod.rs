@@ -407,7 +407,7 @@ where
         "migrate" => {
             migrations::migrate_all_cmd(pools, registry_url, dir, &args[1..], writer).await
         }
-        // Everything else (makemigrations, showmigrations, downgrade,
+        // Everything else (makemigrations, sqlmigrate, downgrade,
         // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
         // v0.38 — `manage::run_with_writer` now accepts `&crate::sql::Pool`
