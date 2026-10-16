@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
+
+The idempotent `ensure_*` and testkit paths send `ADD CONSTRAINT` inside a `DO` block that catches the duplicate, so an existing FK no longer writes an ERROR to the server log on every boot.
+
 ### Fixed — M2M `add` takes text keys on a junction that is no model (#1405)
 
 The manager types an auto-created junction's columns by each end's pk, so a `String` or `Uuid` key no longer fails with `TypeMismatch`.
