@@ -426,9 +426,11 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
-        // Own scope frame so subqueries in this branch resolve
-        // `OuterRef` against it.
-        b.scope_stack.push(Scope::plain(branch.query.model));
+        // A branch is the head's sibling: its frame replaces the head's,
+        // so its own `OuterRef` reaches the enclosing query (#1409).
+        let head_frame = b.scope_stack.pop();
+        let frame = b.correlated_scope(branch.query.model);
+        b.scope_stack.push(frame);
         // Plain branches emit inline; `SELECT … UNION SELECT …` is
         // valid everywhere and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
@@ -459,6 +461,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
             r
         };
         b.scope_stack.pop();
+        b.scope_stack.extend(head_frame);
         r?;
     }
 

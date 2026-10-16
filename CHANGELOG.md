@@ -16,6 +16,10 @@ A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_byt
 
 `PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
 
+### Fixed — `OuterRef` in a set-operation branch points at the enclosing query (#1409)
+
+It used to bind to the head branch, so the branch matched the wrong rows or failed with an unknown column.
+
 ### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
 
 The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
