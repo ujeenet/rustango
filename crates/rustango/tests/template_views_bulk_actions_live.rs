@@ -108,14 +108,10 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
             // v0.38 — bulk-action handlers receive the unified
             // `crate::sql::Pool` enum. Tests pinned to PG unwrap
             // explicitly; real handlers route through `_pool`
-            // helpers and stay dialect-agnostic. The `let else`
-            // shape (vs the older direct `let` binding) is required
-            // when CI builds `--all-features` — Pool then has
-            // postgres + mysql + sqlite variants and the pattern
-            // becomes refutable.
-            let rustango::sql::Pool::Postgres(pg) = &pool else {
-                panic!("this PG-only test must receive a Postgres pool");
-            };
+            // helpers and stay dialect-agnostic.
+            let pg = pool
+                .as_postgres()
+                .expect("this PG-only test must receive a Postgres pool");
             // Translate SqlValue::I64 back to bind values; the
             // framework guarantees they're typed correctly per the
             // schema's PK type.
@@ -358,9 +354,9 @@ async fn confirmation_does_not_gate_custom_actions() {
         let pool = pool.clone();
         let pks = pks.to_vec();
         Box::pin(async move {
-            let rustango::sql::Pool::Postgres(pg) = &pool else {
-                panic!("this PG-only test must receive a Postgres pool");
-            };
+            let pg = pool
+                .as_postgres()
+                .expect("this PG-only test must receive a Postgres pool");
             let ids: Vec<i64> = pks
                 .iter()
                 .filter_map(|v| match v {
