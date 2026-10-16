@@ -508,8 +508,16 @@ async fn finish_groups(
     Ok(groups)
 }
 
+/// A line of a `--dry-run` preview.
+pub(crate) enum PreviewLine {
+    Sql(String),
+    /// What the preview cannot show as SQL.
+    Note(String),
+}
+
 /// The SQL `migrate` converges framework tables with after both chains, for
-/// a `--dry-run` (#1411). `steps` is the system chain as `migrate` runs it.
+/// a `--dry-run` (#1411), planned as [`ensure::converge_groups`] plans it.
+/// `steps` is the system chain as `migrate` runs it.
 ///
 /// # Errors
 /// An unreadable migrations dir, or a failed catalog or ledger read.
@@ -518,26 +526,50 @@ pub(crate) async fn converge_preview(
     steps: &[Migration],
     scope: MigrationScope,
     project_dir: &Path,
-) -> Result<Vec<String>, MigrateError> {
+) -> Result<Vec<PreviewLine>, MigrateError> {
     let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
     let tables = ProjectTables::of(&file::list_dir(project_dir)?, &applied);
     let wanted: Vec<Migration> = steps.iter().filter(|m| m.scope == scope).cloned().collect();
     let Some(last) = wanted.last() else {
         return Ok(Vec::new());
     };
-    let groups = finish_groups(pool, &wanted, &tables.owned, &tables.claimed).await?;
-    // FKs last, as `converge_groups` runs them.
-    let (mut out, mut fks) = (Vec::new(), Vec::new());
-    for g in &groups {
-        match super::diff::render_changes_split_in_schema(g, &last.snapshot, pool.dialect(), None) {
-            Ok(b) if b.rebuild.is_none() => {
-                out.extend(b.immediate);
-                fks.extend(b.deferred_fks);
+    // The catalog shows the tables before pending steps run, not after:
+    // project ones, and system ones that create a table the project dropped.
+    let system_applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
+    let mut pending = tables.pending.clone();
+    for m in wanted.iter().filter(|m| !system_applied.contains(&m.name)) {
+        pending.extend(created(m).filter(|t| !tables.owned.contains(t)));
+    }
+    let converged = |t: &String| tables.owned.contains(t) || tables.claimed.contains(t);
+    let mut out: Vec<PreviewLine> = wanted
+        .iter()
+        .flat_map(created)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|t| converged(t) && pending.contains(t))
+        .map(|t| {
+            PreviewLine::Note(format!(
+                "`{t}`: pending migrations change it; `migrate` converges it after they run"
+            ))
+        })
+        .collect();
+    let mut groups = finish_groups(pool, &wanted, &tables.owned, &tables.claimed).await?;
+    groups.retain(|g| !pending.contains(g[0].table()));
+    let schema = ensure::creation_schema(pool).await?;
+    let mut fks = Vec::new();
+    for p in ensure::plan_groups(pool, &last.snapshot, &groups, schema.as_deref()).await? {
+        match p.batch {
+            Ok(b) => {
+                out.extend(b.immediate.into_iter().map(PreviewLine::Sql));
+                fks.extend(b.deferred_fks.into_iter().map(PreviewLine::Sql));
             }
-            Ok(_) => out.push(format!("-- `{}` needs a table rebuild", g[0].table())),
-            Err(e) => out.push(format!("-- `{}`: {e}", g[0].table())),
+            Err(e) => out.push(PreviewLine::Note(format!(
+                "{}: `migrate` fails here: {e}",
+                p.label
+            ))),
         }
     }
+    // FKs last, as `converge_groups` runs them.
     out.extend(fks);
     Ok(out)
 }

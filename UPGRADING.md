@@ -158,6 +158,10 @@ A fresh project's dry-run now lists the framework's system tables and the bootst
 
 Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
 
+### Tenancy `dumpdata` / `loaddata` are scoped (#1424)
+
+In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry.
+
 ### M2M junction DDL follows the target pk (#1404)
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
@@ -176,7 +180,7 @@ After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_time
 
 ### More `_on` methods work on every backend (#1395)
 
-`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only.
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only. This corrects the 0.60.8 note that the other `_on` methods stay Postgres-only.
 
 ### MySQL `dbshell` refuses unknown URL options (#1410)
 
@@ -198,7 +202,7 @@ A user deactivated in the admin must sign in again after reactivation; old cooki
 
 ### `fetch_on` / `count_on` reads work on every backend (#2675)
 
-`fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
 ### Admin treats credential columns as secret (#1158)
 

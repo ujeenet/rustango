@@ -4,13 +4,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
+
 ### Fixed — `migrate --dry-run` shows everything `migrate` runs (#1411)
 
-The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table.
+The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table. The converge part uses `migrate`'s own planner, so it shows its NOT NULL refusals, and names a table pending migrations change instead of guessing its SQL.
+
+### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
+
+With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry.
 
 ### Performance — `dumpdata` streams rows and M2M links by page (#1399)
 
-Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory.
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before.
 
 ### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
 
@@ -40,7 +46,7 @@ sqlx returns a connection with its `SET` state intact; call it after changing se
 
 A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.
 
-### Fixed — the last Postgres-only `_on` query methods run on every backend (#1395)
+### Fixed — more `_on` query methods run on every backend (#1395)
 
 `fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.
 

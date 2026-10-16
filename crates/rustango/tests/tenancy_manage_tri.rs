@@ -185,9 +185,14 @@ impl Env {
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
+        self.run_out(dir, args).await.map(drop)
+    }
+
+    async fn run_out(&self, dir: &Path, args: &[&str]) -> Result<String, TenancyError> {
         let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
         let mut out = Vec::new();
-        typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)
+        typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 }
 
@@ -550,10 +555,64 @@ async fn provision_releases_its_schema_on_a_failed_insert(pool: &Pool) {
     }
 }
 
+/// #1424 — dumpdata / loaddata run on the `--tenant` pool and touch only
+/// that tenant; without it they cover registry models only.
+async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    for (tag, user) in [("a", "alice"), ("b", "bob")] {
+        let opts = env.tenant_opts(tag).await;
+        let slug = format!("mt-{tag}");
+        env.create(&dir, &slug, opts).await.expect("tenant");
+        env.run(
+            &dir,
+            &["create-user", &slug, user, "--skip-validation", "--password", "pw"],
+        )
+        .await
+        .expect("user");
+    }
+    let dump = |slug: Option<&'static str>, model: &'static str| {
+        let mut args = vec!["dumpdata", "--model", model, "--indent", "0"];
+        args.extend(slug.map(|s| ["--tenant", s]).into_iter().flatten());
+        let env = &env;
+        let dir = dir.clone();
+        async move { env.run_out(&dir, &args).await }
+    };
+
+    let a = dump(Some("mt-a"), "User").await.expect("dump mt-a");
+    assert!(a.contains("alice") && !a.contains("bob"), "{a}");
+    let orgs = dump(None, "Org").await.expect("registry dump");
+    assert!(orgs.contains("mt-a") && orgs.contains("mt-b"), "{orgs}");
+    let err = dump(None, "User").await.expect_err("a tenant model on the registry");
+    assert!(err.to_string().contains("--tenant"), "{err}");
+
+    // Alice's row, renamed, into mt-b only.
+    let mut rows: serde_json::Value = serde_json::from_str(a.trim()).unwrap();
+    let row = &mut rows[0];
+    row["pk"] = 99.into();
+    row["fields"]["username"] = "carol".into();
+    let fixture = env.tmp.path().join("carol.json");
+    std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
+    let fixture = fixture.to_str().unwrap();
+    let err = env
+        .run(&dir, &["loaddata", fixture, "--fail-fast"])
+        .await
+        .expect_err("a tenant fixture on the registry");
+    assert!(err.to_string().contains("--tenant"), "{err}");
+    env.run(&dir, &["loaddata", fixture, "--tenant", "mt-b"])
+        .await
+        .expect("load into mt-b");
+    let b = dump(Some("mt-b"), "User").await.expect("dump mt-b");
+    assert!(b.contains("carol") && b.contains("bob"), "{b}");
+    let a = dump(Some("mt-a"), "User").await.expect("dump mt-a");
+    assert!(!a.contains("carol"), "the load reached another tenant: {a}");
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        data_verbs_stay_in_their_tenant,
         create_tenant_returns_a_failed_migration,
         create_tenant_if_missing_finishes_a_failed_create,
         create_tenant_if_missing_leaves_a_suspended_tenant,

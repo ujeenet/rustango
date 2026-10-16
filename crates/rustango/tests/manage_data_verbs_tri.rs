@@ -202,6 +202,15 @@ pub struct TextLabel {
     pub code: String,
 }
 
+/// One column of a two-column key marked, as inspectdb writes it (rel-0609).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cli1399_line", app = "cli1399")]
+pub struct Line {
+    #[rustango(primary_key)]
+    pub order_id: i64,
+    pub line_no: i64,
+}
+
 // Two tables that reference each other through nullable links.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli2318_a", app = "cli2318")]
@@ -639,11 +648,20 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
     };
     tag.insert_pool(pool).await.expect("tag");
     let tag_id = tag.id.get().copied().expect("pk");
+    // Scans come back out of pk order unless sorted: PG in heap (insert)
+    // order, MySQL through the covering index on `n`.
+    raw_execute_pool(
+        pool,
+        "CREATE INDEX cli2317_post_n ON cli2317_post (n)",
+        vec![],
+    )
+    .await
+    .expect("index");
     // One past the 500-row page: two pages.
-    for n in 0..501 {
+    for id in (1..=501).rev() {
         let mut post = M2mPost {
-            id: Auto::default(),
-            n,
+            id: Auto::from(id),
+            n: 1000 - id,
         };
         post.insert_pool(pool).await.expect("post");
         post.tags_m2m().add(tag_id, pool).await.expect("link");
@@ -655,12 +673,43 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
     let dumped = dumped.expect("dumpdata");
     let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 501);
+    let pks: Vec<i64> = rows.iter().filter_map(|r| r["pk"].as_i64()).collect();
+    assert_eq!(pks, (1..=501).collect::<Vec<_>>(), "rows skipped or repeated");
     assert!(
         rows.iter()
             .all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
         "a row lost its link"
     );
+}
+
+/// A marked pk that is only part of the key does not page: `pk > last`
+/// would drop the rows tied on it (rel-0609 correctness-001).
+async fn dumpdata_keeps_rows_tied_on_a_partial_pk(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    drop_table(pool, Line::SCHEMA.table).await;
+    raw_execute_pool(
+        pool,
+        "CREATE TABLE cli1399_line (order_id BIGINT NOT NULL, line_no BIGINT NOT NULL, \
+         PRIMARY KEY (order_id, line_no))",
+        vec![],
+    )
+    .await
+    .expect("table");
+    for line_no in 0..501 {
+        let l = Line {
+            order_id: 7,
+            line_no,
+        };
+        l.insert_pool(pool).await.expect("line");
+    }
+    let out = manage(
+        pool,
+        &["dumpdata", "--model", "cli1399.Line", "--indent", "0"],
+    )
+    .await;
+    drop_table(pool, Line::SCHEMA.table).await;
+    let rows: serde_json::Value = serde_json::from_str(out.expect("dumpdata").trim()).unwrap();
+    assert_eq!(rows.as_array().expect("array").len(), 501, "rows dropped");
 }
 
 /// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
@@ -820,6 +869,7 @@ tri_dialect_test! {
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
         dumpdata_pages_rows_and_links,
+        dumpdata_keeps_rows_tied_on_a_partial_pk,
         dump_and_load_keeps_m2m_links,
         dump_and_load_keeps_text_pk_m2m_links,
         a_bad_m2m_link_skips_only_its_row,
