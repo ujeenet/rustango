@@ -164,8 +164,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..]),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
-        "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
-        "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
+        "dumpdata" => dumpdata_cmd(pool, &args[1..], None, writer).await,
+        "loaddata" => loaddata_cmd(pool, &args[1..], None, writer).await,
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
         // #253 slice B — bootstrap an AdminUser row for projects
@@ -3667,9 +3667,11 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
     Ok(out)
 }
 
-async fn dumpdata_cmd<W: Write>(
+/// `dumpdata` over every model, or only those of `scope` (#1424).
+pub(crate) async fn dumpdata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
+    scope: Option<crate::core::ModelScope>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_dumpdata_args(args)?;
@@ -3714,11 +3716,18 @@ async fn dumpdata_cmd<W: Write>(
     let indent = parsed.indent;
     // A typo would otherwise dump `[]` and exit 0 (#1312).
     for name in model_filters.iter().chain(&parsed.excludes) {
-        let known = inventory::iter::<crate::core::ModelEntry>()
-            .any(|e| model_matches(name, &dotted_model_name(e), e.schema));
-        if !known {
+        let mut named = inventory::iter::<crate::core::ModelEntry>()
+            .filter(|e| model_matches(name, &dotted_model_name(e), e.schema))
+            .peekable();
+        let Some(owner) = named.peek().map(|e| e.schema.scope) else {
             return Err(MigrateError::Validation(format!(
                 "dumpdata: unknown model `{name}` (use `app.Model` or `Model`)"
+            )));
+        };
+        if !named.any(|e| in_scope(e.schema, scope)) {
+            return Err(MigrateError::Validation(format!(
+                "dumpdata: {}",
+                out_of_scope(name, owner)
             )));
         }
     }
@@ -3727,6 +3736,9 @@ async fn dumpdata_cmd<W: Write>(
     let mut out = FixtureWriter::new(w, indent);
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
+        if !in_scope(schema, scope) {
+            continue;
+        }
         let dotted_name = dotted_model_name(entry);
         let matches = |f: &String| model_matches(f, &dotted_name, schema);
 
@@ -3838,6 +3850,20 @@ async fn dumpdata_cmd<W: Write>(
 
 /// Rows per dumpdata page.
 const DUMP_PAGE: i64 = 500;
+
+/// Whether a data verb run for `scope` covers `s`; `None` is every model.
+fn in_scope(s: &crate::core::ModelSchema, scope: Option<crate::core::ModelScope>) -> bool {
+    scope.is_none_or(|sc| s.scope == sc)
+}
+
+/// The refusal for a model that lives on the other side of the registry.
+fn out_of_scope(name: &str, owner: crate::core::ModelScope) -> String {
+    let hint = match owner {
+        crate::core::ModelScope::Registry => "a registry model: run without `--tenant`",
+        _ => "a tenant model: pass `--tenant <slug>`",
+    };
+    format!("`{name}` is {hint}")
+}
 
 /// Whether `column` alone is `table`'s primary key in the database: inspectdb
 /// marks one column of a composite key, and a view has none.
@@ -4108,9 +4134,11 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 ///   Time / Uuid / Binary [hex] / String)
 /// - null → `SqlValue::Null`
 /// - object / array → `SqlValue::Json`
-async fn loaddata_cmd<W: Write>(
+/// `loaddata` into every model, or only those of `scope` (#1424).
+pub(crate) async fn loaddata_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
+    scope: Option<crate::core::ModelScope>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let parsed = parse_loaddata_args(args)?;
@@ -4147,13 +4175,18 @@ async fn loaddata_cmd<W: Write>(
     // Build a lookup map: "app.Model" + bare "Model" → &'static ModelSchema.
     let mut schemas: std::collections::HashMap<String, &'static crate::core::ModelSchema> =
         std::collections::HashMap::new();
+    // Models of the other scope, refused rather than written to this pool.
+    let mut elsewhere = std::collections::HashMap::new();
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let app = entry.resolved_app_label().unwrap_or("");
-        if !app.is_empty() {
-            schemas.insert(format!("{app}.{}", schema.name), schema);
+        let names = std::iter::once(schema.name.to_owned())
+            .chain((!app.is_empty()).then(|| format!("{app}.{}", schema.name)));
+        if in_scope(schema, scope) {
+            schemas.extend(names.map(|n| (n, schema)));
+        } else {
+            elsewhere.extend(names.map(|n| (n, schema.scope)));
         }
-        schemas.insert(schema.name.to_owned(), schema);
     }
 
     // Parents first: fixtures come in registration order, and a child
@@ -4180,10 +4213,16 @@ async fn loaddata_cmd<W: Write>(
         let schema = match schemas.get(model_name) {
             Some(s) => *s,
             None => {
-                let msg = format!(
-                    "loaddata: entry #{line}: unknown model `{model_name}` (registered: {} models)",
-                    schemas.len() / 2, // dotted + bare keys
-                );
+                let msg = match elsewhere.get(model_name) {
+                    Some(owner) => format!(
+                        "loaddata: entry #{line}: {}",
+                        out_of_scope(model_name, *owner)
+                    ),
+                    None => format!(
+                        "loaddata: entry #{line}: unknown model `{model_name}` (registered: {} models)",
+                        schemas.len() / 2, // dotted + bare keys
+                    ),
+                };
                 if parsed.fail_fast {
                     abort = Some(msg);
                     break;

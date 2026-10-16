@@ -158,6 +158,10 @@ A fresh project's dry-run now lists the framework's system tables and the bootst
 
 Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
 
+### Tenancy `dumpdata` / `loaddata` are scoped (#1424)
+
+In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry.
+
 ### M2M junction DDL follows the target pk (#1404)
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.

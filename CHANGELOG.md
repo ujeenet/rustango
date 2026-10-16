@@ -8,9 +8,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table.
 
+### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
+
+With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry.
+
 ### Performance — `dumpdata` streams rows and M2M links by page (#1399)
 
-Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory.
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before.
 
 ### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
 
