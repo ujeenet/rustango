@@ -150,6 +150,18 @@ untouched.
 
 ## Unreleased
 
+### `migrate --dry-run` prints more (#1411)
+
+A fresh project's dry-run now lists the framework's system tables and the bootstrap tables, under `-- … (system, …)` and `-- bootstrap <table> (idempotent)` headers. Scripts that took "nothing to migrate" for granted on a new database will see SQL instead.
+
+### `dumpdata` writes rows in pk order (#1399)
+
+Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
+
+### M2M junction DDL follows the target pk (#1404)
+
+New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
+
 ## 0.60.8
 
 ### Pools no longer ping before every checkout (#2674)

@@ -82,11 +82,17 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
 /// 165 -> 568 us, to silence a log line MySQL never wrote.
 ///
 /// `ALTER TABLE … ADD COLUMN` gets `IF NOT EXISTS` the same way.
-/// `ADD CONSTRAINT` is left alone everywhere: no backend has
-/// `IF NOT EXISTS` for it, so those still rely on [`is_already_exists`].
+/// `ADD CONSTRAINT` has no `IF NOT EXISTS`, so PG runs it in a `DO` block
+/// that catches the duplicate, which logs nothing (#1406).
 fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
+    }
+    if stmt.starts_with("ALTER TABLE ") && stmt.contains(" ADD CONSTRAINT ") {
+        return std::borrow::Cow::Owned(format!(
+            "DO $rustango$ BEGIN {stmt}; \
+             EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
+        ));
     }
     if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
         if !rest.starts_with("IF NOT EXISTS") {
@@ -116,6 +122,20 @@ pub(crate) async fn apply_idempotent(
 ) -> Result<(), sqlx::Error> {
     let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
     apply_changes_idempotent(pool, snapshot, &changes).await
+}
+
+/// The statements [`apply_idempotent`] runs for `snapshot`, FK targets
+/// unqualified, for a `--dry-run` (#1411).
+///
+/// # Errors
+/// A render failure.
+pub(crate) fn idempotent_ddl(
+    snapshot: &super::SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Vec<String>, String> {
+    let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
+    Ok(batch.immediate.into_iter().chain(batch.deferred_fks).collect())
 }
 
 /// Add each `(table, column)` of `snapshot` that a table created by an
@@ -461,11 +481,14 @@ mod tests {
 
     #[test]
     fn non_create_table_statements_are_untouched() {
-        // No backend has `ADD CONSTRAINT IF NOT EXISTS`, so this one
-        // still reaches the server and still relies on the code check.
+        // PG catches a duplicate constraint in a `DO` block; the others
+        // still rely on the code check.
         let s =
             r#"ALTER TABLE "a" ADD CONSTRAINT "a_b_fkey" FOREIGN KEY ("b") REFERENCES "b" ("id")"#;
-        assert_eq!(idempotent(s, "postgres"), s);
+        let wrapped = idempotent(s, "postgres");
+        assert!(wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"), "{wrapped}");
+        assert!(wrapped.contains("WHEN duplicate_object"), "{wrapped}");
+        assert_eq!(idempotent(s, "mysql"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
         assert_eq!(idempotent(idx, "postgres"), idx);
     }

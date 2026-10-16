@@ -84,11 +84,14 @@ pub struct WebauthnCredential {
 /// Driver / SQL failures (other than the duplicate-object errors this
 /// swallows to stay idempotent).
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
-    use crate::core::Model as _;
-    let snapshot =
-        crate::migrate::SchemaSnapshot::from_models_forced(&[WebauthnCredential::SCHEMA]);
-    crate::migrate::apply_idempotent(pool, &snapshot).await?;
+    crate::migrate::apply_idempotent(pool, &bootstrap_snapshot()).await?;
     Ok(())
+}
+
+/// The table as [`ensure_table`] creates it.
+pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
+    use crate::core::Model as _;
+    crate::migrate::SchemaSnapshot::from_models_forced(&[WebauthnCredential::SCHEMA])
 }
 
 /// Every credential registered to `user_id` — the allow-list the

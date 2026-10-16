@@ -607,21 +607,59 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
     assert_eq!(links, want, "the reload lost the M2M links: {dumped}");
 }
 
-/// Empty shelf and label tables and a text-keyed junction. Written by
-/// hand: the migration DDL types every auto junction BIGINT.
+/// Empty shelf and label tables and the text-keyed junction migrations build (#1404).
 async fn fresh_text_m2m(pool: &Pool) {
+    use rustango::migrate::{render_changes_split_with_dialect, SchemaChange, SchemaSnapshot};
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "cli1393_shelf_labels").await;
     fresh_table::<TextShelf>(pool).await;
     fresh_table::<TextLabel>(pool).await;
-    raw_execute_pool(
-        pool,
-        "CREATE TABLE cli1393_shelf_labels (shelf_code VARCHAR(32) NOT NULL, \
-         label_code VARCHAR(32) NOT NULL, PRIMARY KEY (shelf_code, label_code))",
-        vec![],
-    )
-    .await
-    .expect("junction ddl");
+    let create = SchemaChange::CreateM2MTable {
+        through: "cli1393_shelf_labels".into(),
+        src_table: TextShelf::SCHEMA.table.into(),
+        src_col: "shelf_code".into(),
+        dst_table: TextLabel::SCHEMA.table.into(),
+        dst_col: "label_code".into(),
+    };
+    let snap = SchemaSnapshot::from_models(&[TextShelf::SCHEMA, TextLabel::SCHEMA]);
+    let ddl = render_changes_split_with_dialect(&[create], &snap, pool.dialect()).expect("ddl");
+    for sql in ddl.immediate.iter().chain(&ddl.deferred_fks) {
+        raw_execute_pool(pool, sql, vec![])
+            .await
+            .expect("junction ddl");
+    }
+}
+
+/// dumpdata reads rows and their links a page at a time (#1399).
+async fn dumpdata_pages_rows_and_links(pool: &Pool) {
+    fresh_m2m(pool).await;
+    let mut tag = M2mTag {
+        id: Auto::default(),
+        n: 1,
+    };
+    tag.insert_pool(pool).await.expect("tag");
+    let tag_id = tag.id.get().copied().expect("pk");
+    // One past the 500-row page: two pages.
+    for n in 0..501 {
+        let mut post = M2mPost {
+            id: Auto::default(),
+            n,
+        };
+        post.insert_pool(pool).await.expect("post");
+        post.tags_m2m().add(tag_id, pool).await.expect("link");
+    }
+    let args = ["dumpdata", "--model", "cli2317.M2mPost", "--indent", "0"];
+    // Per page: one select of posts, one of their links.
+    let dumped = rustango::test_assertions::assert_num_queries(4, manage(pool, &args)).await;
+    rustango::testkit::matrix::drop_table(pool, "cli2317_post_tags").await;
+    let dumped = dumped.expect("dumpdata");
+    let rows: serde_json::Value = serde_json::from_str(dumped.trim()).expect("json");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 501);
+    assert!(
+        rows.iter().all(|r| r["fields"]["tags"] == serde_json::json!([tag_id])),
+        "a row lost its link"
+    );
 }
 
 /// Text pks keep their M2M links through dumpdata → loaddata (rel-0608).
@@ -780,6 +818,7 @@ tri_dialect_test! {
         self_fk_child_before_parent_loads,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
+        dumpdata_pages_rows_and_links,
         dump_and_load_keeps_m2m_links,
         dump_and_load_keeps_text_pk_m2m_links,
         a_bad_m2m_link_skips_only_its_row,

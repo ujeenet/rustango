@@ -4,6 +4,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `migrate --dry-run` shows everything `migrate` runs (#1411)
+
+The preview now includes the system step `migrate` would generate from changed framework models, the columns and indexes it converges on framework tables the project created, and the bootstrap DDL for each missing `managed = false` table.
+
+### Performance — `dumpdata` streams rows and M2M links by page (#1399)
+
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory.
+
+### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
+
+The idempotent `ensure_*` and testkit paths send `ADD CONSTRAINT` inside a `DO` block that catches the duplicate, so an existing FK no longer writes an ERROR to the server log on every boot.
+
+### Fixed — M2M `add` takes text keys on a junction that is no model (#1405)
+
+The manager types an auto-created junction's columns by each end's pk, so a `String` or `Uuid` key no longer fails with `TypeMismatch`.
+
+### Fixed — auto-created M2M junctions follow the pk they reference (#1404)
+
+A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
+
 ## [0.60.8] — 2026-10-17
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.
