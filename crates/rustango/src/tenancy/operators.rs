@@ -154,6 +154,44 @@ pub async fn set_active(
     Ok(Outcome::Changed)
 }
 
+/// The registry admin writes `active` itself; a deactivation there ends the
+/// operator's sessions in the same UPDATE, at `set_active`'s cut-off.
+#[cfg(feature = "admin")]
+fn admin_revoke_on_deactivate<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    use crate::core::SqlValue;
+    use crate::session::SESSIONS_REVOKED_AT;
+    Box::pin(async move {
+        let was_active = before.and_then(|r| r.get("active")).is_some_and(|v| {
+            v.as_bool() == Some(true) || v.as_i64().is_some_and(|n| n != 0)
+        });
+        let deactivates = values
+            .iter()
+            .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(false)));
+        if !(was_active && deactivates) {
+            return Ok(());
+        }
+        let prev = before
+            .and_then(|r| r.get(SESSIONS_REVOKED_AT)?.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+        let cutoff = crate::session::logout_cutoff(prev, 0);
+        let cutoff = chrono::DateTime::from_timestamp(cutoff, 0).unwrap_or_else(chrono::Utc::now);
+        values.retain(|(c, _)| *c != SESSIONS_REVOKED_AT);
+        values.push((SESSIONS_REVOKED_AT, SqlValue::DateTime(cutoff)));
+        Ok::<(), String>(())
+    })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_operators",
+        derive: admin_revoke_on_deactivate,
+    }
+}
+
 #[cfg(all(test, feature = "sqlite", feature = "testkit"))]
 mod tests {
     use super::*;
@@ -202,5 +240,29 @@ mod tests {
             .remove(0);
         assert!(!now.active);
         assert_eq!(now.password_hash, "NEW", "deactivate undid the reset");
+    }
+
+    /// rel-0608 — an admin edit that deactivates an operator ends its
+    /// sessions, as `set_active` does; other edits leave them alone.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn admin_deactivation_revokes_sessions() {
+        use crate::core::SqlValue;
+        let before = serde_json::json!({"active": true, "sessions_revoked_at": null});
+        let mut values = vec![("active", SqlValue::Bool(false))];
+        crate::admin::derived_fields::apply("rustango_operators", &mut values, Some(&before))
+            .await
+            .unwrap();
+        let stamp = values.iter().find(|(c, _)| *c == "sessions_revoked_at");
+        assert!(
+            matches!(stamp, Some((_, SqlValue::DateTime(t))) if *t >= chrono::Utc::now() - chrono::Duration::seconds(5)),
+            "{values:?}"
+        );
+
+        let mut values = vec![("active", SqlValue::Bool(true))];
+        crate::admin::derived_fields::apply("rustango_operators", &mut values, Some(&before))
+            .await
+            .unwrap();
+        assert_eq!(values.len(), 1, "{values:?}");
     }
 }
