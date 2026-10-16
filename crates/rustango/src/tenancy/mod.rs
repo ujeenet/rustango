@@ -196,6 +196,8 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
+#[cfg(test)]
+pub(crate) use pools::build_database_pool;
 pub(crate) use resolver::host_is_apex;
 pub use resolver::{
     invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, ListenerPort,

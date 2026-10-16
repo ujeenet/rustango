@@ -184,8 +184,17 @@ macro_rules! tuned {
         if t.max_lifetime.is_some() {
             o = o.max_lifetime(t.max_lifetime);
         }
-        o.test_before_acquire(t.test_before_acquire)
+        checkout_check(o, &t)
     }};
+}
+
+/// How a connection is checked before checkout. Every pool goes through
+/// here, tenant pools included (rel-0608 tenancy-001).
+pub(crate) fn checkout_check<DB: sqlx::Database>(
+    o: sqlx::pool::PoolOptions<DB>,
+    t: &PoolTuning,
+) -> sqlx::pool::PoolOptions<DB> {
+    o.test_before_acquire(t.test_before_acquire)
 }
 
 impl Pool {
@@ -728,7 +737,7 @@ pub fn configure_pools(from_settings: PoolTuning) -> bool {
 /// an app connecting in `main()`, a second test in the same binary —
 /// permanently froze env-only tuning for the whole process, silently.
 /// Now a read falls back without writing, and notes that it happened.
-fn tuning() -> PoolTuning {
+pub(crate) fn tuning() -> PoolTuning {
     match TUNING.get() {
         Some(t) => *t,
         None => {
@@ -1123,6 +1132,15 @@ mod tuning_tests {
             let (ping, idle, life) = got.expect("build a lazy pool");
             assert_eq!(ping, want, "test_before_acquire");
             assert!(idle.is_some() && life.is_some(), "{idle:?} {life:?}");
+        }
+        // Tenant pools too (rel-0608 tenancy-001).
+        #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+        {
+            let config = crate::tenancy::TenantPoolsConfig::default();
+            let p = crate::tenancy::build_database_pool::<sqlx::Sqlite>("sqlite::memory:", &config)
+                .await
+                .expect("build a tenant pool");
+            assert_eq!(p.options().get_test_before_acquire(), want, "tenant pool");
         }
     }
 

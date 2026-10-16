@@ -1237,6 +1237,7 @@ impl TenantPools<sqlx::Postgres> {
         if let Some(lifetime) = self.config.database_pool_max_lifetime {
             builder = builder.max_lifetime(lifetime);
         }
+        let builder = crate::sql::checkout_check(builder, &crate::sql::pool_tuning());
         Ok(builder.connect_with(opts).await?)
     }
 }
@@ -1245,7 +1246,7 @@ impl TenantPools<sqlx::Postgres> {
 /// keepalive / lifetime settings from `config`. Generic over the
 /// backend — uses sqlx's generic `PoolOptions<DB>` so PG / MySQL /
 /// SQLite all build through the same code path.
-async fn build_database_pool<DB: Database>(
+pub(crate) async fn build_database_pool<DB: Database>(
     url: &str,
     config: &TenantPoolsConfig,
 ) -> Result<sqlx::Pool<DB>, TenancyError> {
@@ -1259,6 +1260,7 @@ async fn build_database_pool<DB: Database>(
     if let Some(lifetime) = config.database_pool_max_lifetime {
         opts = opts.max_lifetime(lifetime);
     }
+    let opts = crate::sql::checkout_check(opts, &crate::sql::pool_tuning());
     let url = ensure_sqlite_creates(url);
     Ok(opts.connect(&url).await?)
 }
