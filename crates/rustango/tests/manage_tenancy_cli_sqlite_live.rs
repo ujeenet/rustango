@@ -124,6 +124,7 @@ async fn migrate_target_and_dry_run_stay_registry_scoped() {
         !preview.contains("0002_ten"),
         "tenant migration listed as pending on the registry: {preview}"
     );
+    assert!(preview.contains("-- 0001_reg ("), "{preview}");
 
     let _ = b.run(&["migrate", "0002_ten"]).await;
     assert!(
@@ -135,6 +136,28 @@ async fn migrate_target_and_dry_run_stay_registry_scoped() {
         .await
         .expect("registry target");
     assert!(b.has_table("reg_t").await);
+}
+
+/// The registry dry-run previews a pending registry-scope system step.
+#[tokio::test]
+async fn migrate_dry_run_previews_the_registry_system_chain() {
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    let step = file::list_dir(&b.migrations.path().join("system").join("migrations"))
+        .expect("system chain")
+        .into_iter()
+        .find(|m| m.scope == MigrationScope::Registry)
+        .expect("a registry system step");
+    sqlx::query("DELETE FROM __rustango_system_migrations__ WHERE name = ?")
+        .bind(&step.name)
+        .execute(&b.raw)
+        .await
+        .expect("forget the step");
+    let preview = b.run(&["migrate", "--dry-run"]).await.expect("dry-run");
+    assert!(
+        preview.contains(&format!("-- {} (system,", step.name)),
+        "{preview}"
+    );
 }
 
 impl Booted {
