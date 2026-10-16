@@ -3896,9 +3896,13 @@ async fn require_tenant_tables(
         return Ok(());
     };
     // Unmanaged tables and views may live elsewhere on purpose.
-    let tables = models.iter().filter(|s| s.managed && !s.is_view).flat_map(|s| {
-        std::iter::once(s.table).chain(s.m2m.iter().filter(|r| r.auto_create).map(|r| r.through))
-    });
+    let tables = models
+        .iter()
+        .filter(|s| s.managed && !s.is_view)
+        .flat_map(|s| {
+            std::iter::once(s.table)
+                .chain(s.m2m.iter().filter(|r| r.auto_create).map(|r| r.through))
+        });
     for table in tables {
         if super::inspectdb::list_tables(pool, schema, Some(table))
             .await?

@@ -363,7 +363,10 @@ async fn nested_in_wraps_once(pool: &Pool) {
     assert_eq!(run(correlated, "co").await, 2);
     assert_eq!(ids_tagged(pool, "co").await, vec![1, 3]);
     // Outer IN over the target holding an IN over Link.
-    let linked = Link::objects().values_list_flat("item_id").compile().unwrap();
+    let linked = Link::objects()
+        .values_list_flat("item_id")
+        .compile()
+        .unwrap();
     let reverse = Item::objects()
         .where_in_subquery("id", linked)
         .values_list_flat("id")

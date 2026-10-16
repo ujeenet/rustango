@@ -644,24 +644,43 @@ async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
             .await
             .expect("tenant");
     }
-    let user = ["create-user", "mt-b", "bob", "--skip-validation", "--password", "pw"];
+    let user = [
+        "create-user",
+        "mt-b",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ];
     env.run(&dir, &user).await.expect("user");
     let b = env
-        .run_out(&dir, &["dumpdata", "--tenant", "mt-b", "--model", "User", "--indent", "0"])
+        .run_out(
+            &dir,
+            &[
+                "dumpdata", "--tenant", "mt-b", "--model", "User", "--indent", "0",
+            ],
+        )
         .await
         .expect("dump mt-b");
     let fixture = env.tmp.path().join("bob.json");
     std::fs::write(&fixture, b.trim()).unwrap();
-    rustango::sql::raw_execute_pool(&env.registry, "DROP TABLE mt_a.rustango_users CASCADE", Vec::new())
-        .await
-        .unwrap();
+    rustango::sql::raw_execute_pool(
+        &env.registry,
+        "DROP TABLE mt_a.rustango_users CASCADE",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     for args in [
         &["dumpdata", "--tenant", "mt-a", "--model", "User"][..],
         &["dumpdata", "--tenant", "mt-a"][..],
         &["loaddata", fixture.to_str().unwrap(), "--tenant", "mt-a"][..],
     ] {
-        let err = env.run(&dir, args).await.expect_err("fell through to public");
+        let err = env
+            .run(&dir, args)
+            .await
+            .expect_err("fell through to public");
         assert!(err.to_string().contains("mt_a"), "{args:?}: {err}");
     }
     let public: Vec<rustango::tenancy::auth::User> = rustango::tenancy::auth::User::objects()

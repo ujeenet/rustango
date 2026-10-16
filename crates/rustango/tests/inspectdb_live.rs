@@ -171,16 +171,17 @@ async fn inspectdb_finds_the_pk_as_a_select_only_role() {
     rustango::migrate::manage::run_with_writer(
         &ro,
         std::path::Path::new("/tmp/_inspectdb_unused"),
-        vec!["inspectdb".into(), "--table".into(), "inspectdb_author".into()],
+        vec![
+            "inspectdb".into(),
+            "--table".into(),
+            "inspectdb_author".into(),
+        ],
         &mut buf,
     )
     .await
     .expect("inspectdb as a read-only role");
     ro.close().await;
-    for sql in [
-        "DROP OWNED BY rustango_ro_pk",
-        "DROP ROLE rustango_ro_pk",
-    ] {
+    for sql in ["DROP OWNED BY rustango_ro_pk", "DROP ROLE rustango_ro_pk"] {
         sqlx::query(sql).execute(&pool).await.unwrap();
     }
     let out = String::from_utf8(buf).unwrap();

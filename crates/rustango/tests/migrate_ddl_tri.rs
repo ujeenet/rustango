@@ -446,7 +446,10 @@ async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
     let e = raw_execute_pool(pool, &wider, Vec::new())
         .await
         .expect_err("MySQL took a key over 3072 bytes");
-    assert!(e.to_string().contains("1071") || e.to_string().contains("too long"), "{e}");
+    assert!(
+        e.to_string().contains("1071") || e.to_string().contains("too long"),
+        "{e}"
+    );
     drop_all().await;
 }
 

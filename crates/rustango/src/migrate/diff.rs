@@ -2958,18 +2958,50 @@ mod sql_type_tests {
         use crate::migrate::snapshot::{field_type_from_name, field_type_name};
         use crate::sql::Dialect as _;
         let all = [
-            T::I16, T::I32, T::I64, T::F32, T::F64, T::Bool, T::String, T::DateTime,
-            T::Date, T::Time, T::Uuid, T::Json, T::Decimal, T::Binary,
-            T::Array(A::Text), T::Array(A::Int), T::Array(A::BigInt),
-            T::Range(R::Int), T::Range(R::BigInt), T::Range(R::Numeric),
-            T::Range(R::Date), T::Range(R::DateTime), T::HStore,
+            T::I16,
+            T::I32,
+            T::I64,
+            T::F32,
+            T::F64,
+            T::Bool,
+            T::String,
+            T::DateTime,
+            T::Date,
+            T::Time,
+            T::Uuid,
+            T::Json,
+            T::Decimal,
+            T::Binary,
+            T::Array(A::Text),
+            T::Array(A::Int),
+            T::Array(A::BigInt),
+            T::Range(R::Int),
+            T::Range(R::BigInt),
+            T::Range(R::Numeric),
+            T::Range(R::Date),
+            T::Range(R::DateTime),
+            T::HStore,
         ];
         for t in all {
             // A new variant fails to compile here: add it to `all`.
             match t {
-                T::I16 | T::I32 | T::I64 | T::F32 | T::F64 | T::Bool | T::String
-                | T::DateTime | T::Date | T::Time | T::Uuid | T::Json | T::Decimal
-                | T::Binary | T::Array(_) | T::Range(_) | T::HStore => {}
+                T::I16
+                | T::I32
+                | T::I64
+                | T::F32
+                | T::F64
+                | T::Bool
+                | T::String
+                | T::DateTime
+                | T::Date
+                | T::Time
+                | T::Uuid
+                | T::Json
+                | T::Decimal
+                | T::Binary
+                | T::Array(_)
+                | T::Range(_)
+                | T::HStore => {}
                 T::Vector(_) | T::Geometry(_) => unreachable!("names carry no size"),
             }
             let name = field_type_name(t);
