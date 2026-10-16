@@ -495,7 +495,7 @@ Qué está pasando aquí, en términos sencillos:
 - `main` devuelve un `Result`, el tipo éxito-o-error de Rust, que es por lo que funcionan `?` y el `Ok(())` de cierre.
 - Para guardar una fila, llama a `.save_pool(&pool)` sobre ella. Para leer filas, construye una consulta con `Post::objects()` y ejecútala con `.fetch(&pool)` — sin filtros, eso devuelve todas las filas de la tabla.
 - `.fetch(…)` viene del trait `FetcherPool`, y por eso los imports lo traen. Sin esa línea el método no existe y el compilador lo dice sin explicar por qué.
-- Estas son las llamadas multi-backend, y todo lo anterior compila sin cambios en las tres bases de datos. También existen `.save(&pool)` y `.fetch_on(&pool)`, que reciben un `sqlx::PgPool` específico del driver y solo existen cuando la característica `postgres` está activada. Prefiere el par multi-backend salvo que quieras deliberadamente una sola base de datos. Consulta la [guía del ORM](orm.md).
+- Estas son las llamadas multi-backend, y todo lo anterior compila sin cambios en las tres bases de datos. También existe `.save(&pool)`, que recibe un `sqlx::PgPool` específico del driver y solo existe cuando la característica `postgres` está activada. Prefiere el par multi-backend salvo que quieras deliberadamente una sola base de datos. Consulta la [guía del ORM](orm.md).
 
 Ejecútalo:
 

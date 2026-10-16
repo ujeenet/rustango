@@ -495,7 +495,7 @@ Was hier geschieht, in einfachen Worten:
 - `main` gibt ein `Result` zurück, Rusts Erfolg-oder-Fehler-Typ, weshalb `?` und das abschließende `Ok(())` funktionieren.
 - Um eine Zeile zu speichern, rufe `.save_pool(&pool)` darauf auf. Um Zeilen zu lesen, baue eine Abfrage mit `Post::objects()` und führe sie mit `.fetch(&pool)` aus — ohne Filter liefert das jede Zeile der Tabelle.
 - `.fetch(…)` stammt aus dem `FetcherPool`-Trait, weshalb die Imports es hereinholen. Ohne diese Zeile existiert die Methode nicht, und der Compiler sagt dir das, ohne zu erklären, warum.
-- Das sind die Multi-Backend-Aufrufe, und alles oben kompiliert unverändert auf allen drei Datenbanken. Es gibt außerdem `.save(&pool)` und `.fetch_on(&pool)`, die einen treiberspezifischen `sqlx::PgPool` nehmen und nur existieren, wenn das `postgres`-Feature aktiviert ist. Bevorzuge das Multi-Backend-Paar, sofern du dich nicht bewusst auf eine einzelne Datenbank festlegen willst. Siehe den [ORM-Leitfaden](orm.md).
+- Das sind die Multi-Backend-Aufrufe, und alles oben kompiliert unverändert auf allen drei Datenbanken. Es gibt außerdem `.save(&pool)`, das einen treiberspezifischen `sqlx::PgPool` nimmt und nur existiert, wenn das `postgres`-Feature aktiviert ist. Bevorzuge das Multi-Backend-Paar, sofern du dich nicht bewusst auf eine einzelne Datenbank festlegen willst. Siehe den [ORM-Leitfaden](orm.md).
 
 Führe es aus:
 

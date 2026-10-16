@@ -30,7 +30,7 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
 ### Functions
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — the bare name takes a `rustango::sql::Pool` and is the everyday path. It works on Postgres, MySQL and SQLite, picking the dialect internally. This is what nearly all app code wants.
-- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. **`_on` methods are Postgres-only** (`#[cfg(feature = "postgres")]`).
+- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `aggregate` `fetch_on` take any `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) on all three backends; the rest of the `_on` family is still Postgres-only.
 - **Writes invert this, and it is the one place the rule does not hold.** `save(&pool)`, `insert(&pool)` and `delete(&pool)` take a driver-specific `sqlx::PgPool`, so on a build without the `postgres` feature they **do not exist at all** — selecting `sqlite` makes the method vanish rather than fail with anything that names the cause. The multi-backend versions carry the `_pool` suffix: `save_pool`, `insert_pool`, `delete_pool`, each taking `rustango::sql::Pool`.
 
   | | bare name | multi-backend version |

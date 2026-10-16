@@ -158,6 +158,10 @@ untouched.
 
 `CachePageLayer` writes a binary frame through the new `Cache::set_bytes`; entries in the old JSON format are a miss and get overwritten, so the first request per page after the deploy recomputes (during a rolling deploy, old and new replicas each see the other's entries as misses). `get` on a key written with `set_bytes` is an error when the bytes are not UTF-8. A custom `Cache` backend keeps compiling (the new methods have base64 defaults); override them to store raw bytes.
 
+### `fetch_on` / `count_on` reads work on every backend (#2675)
+
+Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
