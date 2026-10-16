@@ -1271,12 +1271,18 @@ async fn showmigrations<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     showmigrations_with(pool, dir, &SystemView::tenant(dir), None, w).await
 }
 
-/// Each tenant's slug and applied project migrations.
+/// Each tenant's slug and the names one of its ledgers records.
 pub(crate) type TenantLedgers = [(String, std::collections::HashSet<String>)];
+
+/// Every tenant's project and system ledgers.
+pub(crate) struct TenantChains<'a> {
+    pub(crate) project: &'a TenantLedgers,
+    pub(crate) system: &'a TenantLedgers,
+}
 
 /// `showmigrations` as `migrate` reads the ledgers: squashed files count as
 /// applied, and `system`'s chain is listed too (#1311). With `tenants`,
-/// tenant-scoped files are marked from their ledgers, not `pool`'s.
+/// tenant-scoped files of both chains are marked from their ledgers.
 ///
 /// # Errors
 /// File I/O or a ledger read.
@@ -1284,11 +1290,10 @@ pub(crate) async fn showmigrations_with<W: Write>(
     pool: &Pool,
     dir: &Path,
     system: &SystemView,
-    tenants: Option<&TenantLedgers>,
+    tenants: Option<&TenantChains<'_>>,
     w: &mut W,
 ) -> Result<(), MigrateError> {
     use super::MigrationScope;
-    use runner::MigrationState as S;
     let all = file::list_dir(dir)?;
     let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
     if all.is_empty() {
@@ -1296,14 +1301,47 @@ pub(crate) async fn showmigrations_with<W: Write>(
     } else {
         writeln!(w, "Migrations in {}:", dir.display())?;
     }
+    chain_lines(w, &all, &applied, tenants.map(|t| t.project), |_| true)?;
+
+    let Some(files) = system.files()? else {
+        writeln!(w, "System migrations: {NOT_GENERATED}")?;
+        return Ok(());
+    };
+    let applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
+    writeln!(w, "System migrations in {}:", system.dir.display())?;
+    // A tenancy registry lists the tenant steps from the tenants' ledgers.
+    let tenant_steps = tenants.is_some();
+    chain_lines(w, &files, &applied, tenants.map(|t| t.system), |m| {
+        m.scope == system.scope || (tenant_steps && m.scope == MigrationScope::Tenant)
+    })
+}
+
+/// One chain's `shown` files: tenant-scoped ones from `tenants` when given,
+/// the rest from `applied`.
+fn chain_lines<W: Write>(
+    w: &mut W,
+    all: &[Migration],
+    applied: &std::collections::HashSet<String>,
+    tenants: Option<&TenantLedgers>,
+    shown: impl Fn(&Migration) -> bool,
+) -> Result<(), MigrateError> {
+    use runner::MigrationState as S;
     let per_tenant: Vec<Vec<S>> = tenants
         .unwrap_or_default()
         .iter()
-        .map(|(_, done)| runner::migration_states(&all, done).map(|(_, s)| s).collect())
+        .map(|(_, done)| runner::migration_states(all, done).map(|(_, s)| s).collect())
         .collect();
-    for (i, (m, state)) in runner::migration_states(&all, &applied).enumerate() {
-        if tenants.is_some() && m.scope == MigrationScope::Tenant {
+    for (i, (m, state)) in runner::migration_states(all, applied).enumerate() {
+        if !shown(m) {
+            continue;
+        }
+        if tenants.is_some() && m.scope == super::MigrationScope::Tenant {
             let n = per_tenant.len();
+            if n == 0 {
+                // Nothing is owed with no tenant to apply it to.
+                writeln!(w, "  [-] {} (no tenants)", m.name)?;
+                continue;
+            }
             let done = per_tenant.iter().filter(|t| t[i] != S::Pending).count();
             let mark = match done {
                 0 => "[ ]",
@@ -1312,18 +1350,6 @@ pub(crate) async fn showmigrations_with<W: Write>(
             };
             writeln!(w, "  {mark} {} ({done}/{n} tenants)", m.name)?;
         } else {
-            writeln!(w, "  {}", state_line(m, state))?;
-        }
-    }
-
-    let Some(files) = system.files()? else {
-        writeln!(w, "System migrations: {NOT_GENERATED}")?;
-        return Ok(());
-    };
-    let applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
-    writeln!(w, "System migrations in {}:", system.dir.display())?;
-    for (m, state) in runner::migration_states(&files, &applied) {
-        if m.scope == system.scope {
             writeln!(w, "  {}", state_line(m, state))?;
         }
     }

@@ -278,6 +278,50 @@ async fn showmigrations_reads_the_tenant_ledgers() {
     assert!(out.contains("[X] 0002_ten (1/1 tenants)"), "{out}");
 }
 
+/// Framework tenant steps are marked from the tenants' system ledgers.
+#[tokio::test]
+async fn showmigrations_lists_tenant_system_steps() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let step = file::list_dir(&b.migrations.path().join("system").join("migrations"))
+        .expect("system chain")
+        .into_iter()
+        .find(|m| m.scope == MigrationScope::Tenant)
+        .expect("a tenant system step");
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(
+        out.contains(&format!("[X] {} (1/1 tenants)", step.name)),
+        "{out}"
+    );
+
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        b._tmp.path().join("acme.db").display()
+    );
+    let tenant = sqlx::SqlitePool::connect(&url).await.expect("tenant db");
+    sqlx::query("DELETE FROM __rustango_system_migrations__ WHERE name = ?")
+        .bind(&step.name)
+        .execute(&tenant)
+        .await
+        .expect("forget the step");
+    tenant.close().await;
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(
+        out.contains(&format!("[ ] {} (0/1 tenants)", step.name)),
+        "{out}"
+    );
+}
+
+/// With no tenant, nothing tenant-scoped reads as pending.
+#[tokio::test]
+async fn showmigrations_without_tenants_owes_nothing() {
+    let b = boot().await;
+    b.run(&["migrate-registry"]).await.expect("registry");
+    let out = b.run(&["showmigrations"]).await.expect("showmigrations");
+    assert!(out.contains("[-] 0002_ten (no tenants)"), "{out}");
+    assert!(!out.contains("[ ]"), "{out}");
+}
+
 /// An unreachable tenant fails `prewarm-pools` and `audit-cleanup` (#1312).
 #[tokio::test]
 async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {

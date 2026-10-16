@@ -390,7 +390,7 @@ where
             dir,
             &args[1..],
             writer,
-            migrations::tenant_ledgers(pools),
+            migrations::tenant_ledgers(pools, rustango::migrate::LEDGER_TABLE),
         )
         .await
         .map_err(TenancyError::Migrate),

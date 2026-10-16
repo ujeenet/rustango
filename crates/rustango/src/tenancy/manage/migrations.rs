@@ -173,16 +173,17 @@ fn write_tenant_report<W: Write>(
     tenant_failures(report.failure_count(), report.tenants.len())
 }
 
-/// Every tenant's applied project migrations, inactive tenants included.
+/// Every tenant's names in `ledger`, inactive tenants included.
 /// A tenant that can't be read fails the whole call, so nothing is assumed (#2393).
 pub(super) async fn tenant_ledgers<DB: Database>(
     pools: &TenantPools<DB>,
+    ledger: &str,
 ) -> Result<Vec<(String, std::collections::HashSet<String>)>, rustango::migrate::MigrateError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use crate::sql::FetcherPool as _;
-    use rustango::migrate::{MigrateError, LEDGER_TABLE};
+    use rustango::migrate::MigrateError;
 
     let unreadable = |slug: &str, e: &dyn std::fmt::Display| {
         MigrateError::Validation(format!(
@@ -198,26 +199,18 @@ where
             .existing_pool_dyn(&org)
             .await
             .map_err(|e| unreadable(&org.slug, &e))?;
-        let has_ledger = rustango::migrate::try_table_exists_here(&pool, LEDGER_TABLE)
-            .await
-            .map_err(|e| unreadable(&org.slug, &e))?;
-        let applied = if has_ledger {
-            rustango::migrate::applied_set_pool(&pool)
-                .await
-                .map_err(|e| unreadable(&org.slug, &e))?
-        } else {
-            std::collections::HashSet::new()
-        };
+        let applied = rustango::migrate::applied_or_empty(&pool, ledger).await;
         if own {
             pool.close().await;
         }
+        let applied = applied.map_err(|e| unreadable(&org.slug, &e))?;
         out.push((org.slug, applied));
     }
     Ok(out)
 }
 
 /// `showmigrations`: registry-scoped files from the registry ledger,
-/// tenant-scoped ones from every tenant's (#1311).
+/// tenant-scoped ones, framework steps too, from every tenant's (#1311).
 pub(super) async fn showmigrations_cmd<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -226,12 +219,19 @@ pub(super) async fn showmigrations_cmd<W: Write, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let ledgers = tenant_ledgers(pools).await.map_err(TenancyError::Migrate)?;
+    use rustango::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
+    let project = tenant_ledgers(pools, LEDGER_TABLE).await;
+    let project = project.map_err(TenancyError::Migrate)?;
+    let system = tenant_ledgers(pools, SYSTEM_LEDGER_TABLE).await;
+    let system = system.map_err(TenancyError::Migrate)?;
     rustango::migrate::manage::showmigrations_with(
         &pools.registry_pool(),
         dir,
         &rustango::migrate::manage::SystemView::registry(dir),
-        Some(&ledgers),
+        Some(&rustango::migrate::manage::TenantChains {
+            project: &project,
+            system: &system,
+        }),
         w,
     )
     .await
