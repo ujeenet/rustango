@@ -308,7 +308,7 @@ pub(crate) struct Planned<'g> {
 }
 
 /// How [`converge_groups`] renders `groups` into `schema`; reads only, so a
-/// `--dry-run` prints the same plan (rel-0609).
+/// `--dry-run` prints the same plan.
 ///
 /// # Errors
 /// Only the row probe for a NOT NULL column.

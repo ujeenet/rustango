@@ -202,7 +202,7 @@ pub struct TextLabel {
     pub code: String,
 }
 
-/// One column of a two-column key marked, as inspectdb writes it (rel-0609).
+/// One column of a two-column key marked, as inspectdb writes it.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "cli1399_line", app = "cli1399")]
 pub struct Line {
@@ -687,7 +687,7 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
 }
 
 /// A marked pk that is only part of the key does not page: `pk > last`
-/// would drop the rows tied on it (rel-0609 correctness-001).
+/// would drop the rows tied on it.
 async fn dumpdata_keeps_rows_tied_on_a_partial_pk(pool: &Pool) {
     use rustango::testkit::matrix::drop_table;
     drop_table(pool, Line::SCHEMA.table).await;

@@ -7779,7 +7779,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .await
             .unwrap();
         assert!(creates_audit(&out), "{out}");
-        // A preview creates nothing: no table, no ledger (rel-0609 tests-004).
+        // A preview creates nothing: no table, no ledger.
         let tables: Vec<(i64,)> =
             crate::sql::raw_query_pool("SELECT COUNT(*) FROM sqlite_master", Vec::new(), &pool)
                 .await
@@ -7858,7 +7858,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(out.contains(&adds), "{adds} missing from:\n{out}");
     }
 
-    /// A dump reaches the caller's writer in large chunks, not per entry (rel-0609 performance-001).
+    /// A dump reaches the caller's writer in large chunks, not per entry.
     #[test]
     fn fixture_writer_buffers() {
         struct Counting(usize, Vec<u8>);
@@ -7930,7 +7930,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         pub id: i64,
     }
 
-    /// A page reads only its own rows' links, not the whole junction (rel-0609 tests-002).
+    /// A page reads only its own rows' links, not the whole junction.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn m2m_links_reads_only_the_page() {
