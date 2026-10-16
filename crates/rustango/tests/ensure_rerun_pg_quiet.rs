@@ -90,3 +90,38 @@ async fn bootstrap_rerun_fails_no_statement() {
         seen - 1
     );
 }
+
+/// The `DO` block catches only duplicates: an FK over orphan rows still fails.
+#[tokio::test]
+async fn a_real_add_constraint_failure_still_surfaces() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping: DATABASE_URL unset");
+        return;
+    };
+    if !url.starts_with("postgres") {
+        return;
+    }
+    let pool = Pool::connect(&url).await.expect("connect");
+    let drop = "DROP TABLE IF EXISTS erq_child, erq_parent";
+    raw_execute_pool(&pool, drop, Vec::new()).await.unwrap();
+    let models = [
+        <Parent as rustango::core::Model>::SCHEMA,
+        <Child as rustango::core::Model>::SCHEMA,
+    ];
+    rustango::testkit::create_tables(&pool, &models)
+        .await
+        .expect("model tables");
+    let unfk = r#"ALTER TABLE "erq_child" DROP CONSTRAINT "erq_child_parent_id_fkey""#;
+    raw_execute_pool(&pool, unfk, Vec::new()).await.unwrap();
+    Child {
+        id: 1,
+        parent_id: 999,
+    }
+    .insert_pool(&pool)
+    .await
+    .expect("orphan row");
+    let err = rustango::testkit::create_tables(&pool, &models).await;
+    raw_execute_pool(&pool, drop, Vec::new()).await.unwrap();
+    let err = format!("{:?}", err.expect_err("the FK over an orphan row must fail"));
+    assert!(err.contains("23503") || err.contains("foreign key"), "{err}");
+}

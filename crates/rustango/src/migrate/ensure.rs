@@ -83,12 +83,16 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
 ///
 /// `ALTER TABLE … ADD COLUMN` gets `IF NOT EXISTS` the same way.
 /// `ADD CONSTRAINT` has no `IF NOT EXISTS`, so PG runs it in a `DO` block
-/// that catches the duplicate, which logs nothing (#1406).
+/// that catches the duplicate, which logs nothing (#1406). A statement
+/// holding the tag runs bare, and the client-side check catches it.
 fn idempotent<'a>(stmt: &'a str, dialect: &str) -> std::borrow::Cow<'a, str> {
     if dialect != "postgres" {
         return std::borrow::Cow::Borrowed(stmt);
     }
-    if stmt.starts_with("ALTER TABLE ") && stmt.contains(" ADD CONSTRAINT ") {
+    if stmt.starts_with("ALTER TABLE ")
+        && stmt.contains(" ADD CONSTRAINT ")
+        && !stmt.contains("$rustango$")
+    {
         return std::borrow::Cow::Owned(format!(
             "DO $rustango$ BEGIN {stmt}; \
              EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
@@ -494,10 +498,23 @@ mod tests {
             wrapped.starts_with("DO $rustango$ BEGIN ALTER TABLE"),
             "{wrapped}"
         );
-        assert!(wrapped.contains("WHEN duplicate_object"), "{wrapped}");
+        // Exactly the duplicate codes: a broader catch hides real failures.
+        assert!(
+            wrapped.ends_with(
+                "EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rustango$"
+            ),
+            "{wrapped}"
+        );
         assert_eq!(idempotent(s, "mysql"), s);
         let idx = r#"CREATE UNIQUE INDEX "i" ON "t" ("a")"#;
         assert_eq!(idempotent(idx, "postgres"), idx);
+    }
+
+    /// A statement holding the tag would end the `DO` body early.
+    #[test]
+    fn a_statement_holding_the_do_tag_runs_bare() {
+        let s = r#"ALTER TABLE "a" ADD CONSTRAINT "ck" CHECK ("b" <> '$rustango$')"#;
+        assert_eq!(idempotent(s, "postgres"), s);
     }
 
     #[test]
