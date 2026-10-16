@@ -216,6 +216,11 @@ mod tests {
         let mut near_cap = SessionPayload::new(1, 30, fp());
         near_cap.iat = now - SESSION_TTL_SECS + 10;
         assert!(near_cap.renewed().unwrap().exp <= now + 10);
+
+        // A pre-#1344 week-long cookie is cut to the idle limit.
+        let old = SessionPayload::new(1, 7 * 24 * 3600, fp());
+        let cut = old.renewed().expect("a far exp is pulled in");
+        assert!(cut.exp <= chrono::Utc::now().timestamp() + SESSION_IDLE_SECS);
     }
 
     /// #1344 — a session older than the absolute cap is refused, whatever its `exp`.
