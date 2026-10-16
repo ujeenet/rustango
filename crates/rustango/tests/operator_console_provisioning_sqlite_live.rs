@@ -1355,3 +1355,63 @@ async fn the_stream_ends_when_the_session_does() {
         .expect("the stream must end with the session");
     assert!(body.contains("session ended"), "{body}");
 }
+
+/// rel-0608 — a failed session lookup skips a poll; it does not end the stream.
+#[tokio::test]
+async fn a_registry_blip_does_not_end_the_stream() {
+    use rustango::sql::raw_execute_pool;
+    use rustango::tenancy::provision_store::{finish_run_text, open_run, RunState};
+    let b = boot().await;
+    let registry = b.pools.registry_pool();
+    let run = open_run(
+        &registry,
+        &unique("blip"),
+        "database",
+        "sqlite",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("open run");
+    let id = run.id.get().copied().unwrap();
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/orgs/provision/{id}/stream"))
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Hide the operators table, so the per-poll session lookup errors.
+    raw_execute_pool(
+        &registry,
+        "ALTER TABLE rustango_operators RENAME TO blip_operators",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let body = tokio::spawn(body_of(resp));
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    finish_run_text(&registry, id, RunState::Succeeded, None)
+        .await
+        .unwrap();
+    raw_execute_pool(
+        &registry,
+        "ALTER TABLE blip_operators RENAME TO rustango_operators",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let body = tokio::time::timeout(std::time::Duration::from_secs(10), body)
+        .await
+        .expect("the stream must end with the run")
+        .unwrap();
+    assert!(!body.contains("session ended"), "{body}");
+    assert!(body.contains("event: done"), "{body}");
+}
