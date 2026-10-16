@@ -26,7 +26,7 @@ An operator console session ends after `SESSION_IDLE_SECS` (30 min) unused and `
 
 ### Fixed — deactivating an operator ends their sessions; no self-reset in the console (#1342)
 
-`tenancy::operators::set_active(false)` stamps `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
+`tenancy::operators::set_active(false)`, and unticking `active` in the registry admin, stamp `sessions_revoked_at`, so a reactivation does not revive old console cookies. `POST /operators/{own id}/reset-password` is refused: your own password goes through `/change-password`, which checks the current one.
 
 ### Fixed — JWT `/refresh` re-runs the claims hook (#1150)
 

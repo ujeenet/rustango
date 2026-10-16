@@ -172,7 +172,7 @@ Console sessions now end after 30 minutes idle or 12 hours after sign-in (`tenan
 
 ### Operator deactivation signs out; self-reset moved (#1342)
 
-Deactivating an operator (console or CLI) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
+Deactivating an operator (console, CLI or registry admin) now ends their sessions for good; after reactivation they sign in again. The console's reset-password form no longer works on your own account; use change-password.
 
 ### The JWT claims hook runs on refresh too (#1150)
 
