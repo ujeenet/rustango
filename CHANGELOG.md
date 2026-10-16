@@ -16,6 +16,10 @@ A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_byt
 
 `PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
 
+### Fixed — MySQL `update()` / `delete()` with an `IN` subquery on the same table (#1361)
+
+The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
+
 ### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
 
 Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.

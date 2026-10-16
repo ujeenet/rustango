@@ -70,8 +70,8 @@ impl Dialect for MySql {
         Some(" LIMIT 18446744073709551615")
     }
 
-    /// The derived table also lifts error 1093 when the subquery reads
-    /// the UPDATE/DELETE target table.
+    /// A materialized derived table also lifts error 1093, so the
+    /// subquery of an UPDATE/DELETE may read the target table (#1361).
     fn in_subquery_limit_needs_derived_table(&self) -> bool {
         true
     }
