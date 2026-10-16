@@ -260,7 +260,7 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
 fn shell_command(url: &str) -> Result<(&'static str, Command), String> {
     let target = parse_target(url)?;
     if let DbTarget::Postgres { .. } = target {
-        return Ok(("psql", LibpqConn::new(url.trim()).command("psql")));
+        return Ok(("psql", LibpqConn::new(url.trim())?.command("psql")));
     }
     let (program, args, env) = command_for(&target);
     let mut cmd = Command::new(program);
@@ -279,10 +279,12 @@ pub(crate) struct LibpqConn {
 }
 
 impl LibpqConn {
-    pub(crate) fn new(url: &str) -> Self {
+    /// # Errors
+    /// A URL whose userinfo cannot be told apart from its query.
+    pub(crate) fn new(url: &str) -> Result<Self, String> {
         use crate::url_codec::percent_decode_path as decode;
         let mut password = None;
-        let url = match crate::sql::connect_diagnosis::split_userinfo(url) {
+        let url = match crate::sql::connect_diagnosis::split_userinfo_exact(url)? {
             Some((scheme, userinfo, host)) => match userinfo.split_once(':') {
                 Some((user, pw)) => {
                     password = Some(decode(pw));
@@ -309,7 +311,7 @@ impl LibpqConn {
         } else {
             format!("{base}?{}", kept.join("&"))
         };
-        Self { url, password }
+        Ok(Self { url, password })
     }
 
     /// The same server and credentials, database `db`.
@@ -349,28 +351,37 @@ mod tests {
     /// #1864 — the password goes to `PGPASSWORD`, never argv.
     #[test]
     fn conn_keeps_the_password_out_of_the_url() {
-        let c = LibpqConn::new("postgres://al:p%40ss@w/rd@h:5432/app?sslmode=require");
+        let conn = |url| LibpqConn::new(url).unwrap();
+        let c = conn("postgres://al:p%40ss@w/rd@h:5432/app?sslmode=require");
         assert_eq!(c.url, "postgres://al@h:5432/app?sslmode=require");
         assert_eq!(c.password.as_deref(), Some("p@ss@w/rd"));
-        let c = LibpqConn::new("postgres://al@h/app?password=s%3Dx&sslmode=disable");
+        let c = conn("postgres://al@h/app?password=s%3Dx&sslmode=disable");
         assert_eq!(c.url, "postgres://al@h/app?sslmode=disable");
         assert_eq!(c.password.as_deref(), Some("s=x"));
-        let c = LibpqConn::new("postgres://h/app").database("stage");
+        let c = conn("postgres://h/app").database("stage");
         assert_eq!((c.url.as_str(), c.password), ("postgres://h/stage", None));
-        let c = LibpqConn::new("postgres://al:pw@h/app?sslmode=require").database("stage");
+        let c = conn("postgres://al:pw@h/app?sslmode=require").database("stage");
         assert_eq!(c.url, "postgres://al@h/stage?sslmode=require");
         let argv: Vec<_> = c.command("psql").get_args().map(|a| a.to_owned()).collect();
         assert!(!argv.iter().any(|a| a.to_string_lossy().contains("pw")));
     }
 
-    /// rel-0608 — a raw `#` or `?` in the password stays out of argv too.
+    /// pr-1408-r2 security-001/002: an `@` after a raw `?`/`#` could be
+    /// userinfo or a query value, so it is refused, never guessed.
     #[test]
-    fn conn_strips_a_password_holding_hash_or_question_mark() {
-        for pw in ["pa#ss", "pa?ss", "p?a#s@s"] {
-            let c = LibpqConn::new(&format!("postgres://app:{pw}@db:5432/app"));
-            assert_eq!(c.url, "postgres://app@db:5432/app", "{pw}");
-            assert_eq!(c.password.as_deref(), Some(pw));
+    fn conn_refuses_an_at_after_a_query_or_fragment() {
+        for url in [
+            "postgres://db:5432?password=s3cr3t&user=admin@myserver",
+            "postgres://app:p/a#ss@db/app",
+            "postgres://app:pa#ss@db:5432/app",
+            "postgres://app:pa?ss@db:5432/app",
+        ] {
+            let err = shell_command(url).map(|_| ()).unwrap_err();
+            assert!(err.contains("percent-encode"), "{url}: {err}");
         }
+        let c = LibpqConn::new("postgres://app:pa%23ss@db:5432/app").unwrap();
+        assert_eq!(c.url, "postgres://app@db:5432/app");
+        assert_eq!(c.password.as_deref(), Some("pa#ss"));
     }
 
     /// #1310 — sqlite3 opens the file sqlx opens, not `app.db?mode=rwc`.

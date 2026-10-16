@@ -70,7 +70,7 @@ No ORM write sends `pre_save` / `post_save` / `pre_delete` / `post_delete`; the 
 
 ### Fixed — `dbshell` opens the database sqlx opens (#1310)
 
-`sqlite3` gets the path without its `?query` and percent-decoded, so `sqlite://./app.db?mode=rwc` no longer opens a new empty `app.db?mode=rwc`. `psql` gets the URL, so `sslmode` and friends survive; `mysql` credentials and database names are percent-decoded.
+`sqlite3` gets the path without its `?query` and percent-decoded, so `sqlite://./app.db?mode=rwc` no longer opens a new empty `app.db?mode=rwc`. `psql` gets the URL, so `sslmode` and friends survive; `mysql` credentials and database names are percent-decoded. A URL with a raw `@` after `?`/`#` is refused rather than guessed, so a password never goes to the wrong host.
 
 ### Fixed — `prewarm-pools`, `audit-cleanup`, `check` and `dumpdata` fail loudly (#1312)
 

@@ -3181,10 +3181,12 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
 }
 
 /// `pg_dump` for `url`; the password goes in its env, not argv (#2324).
-fn pg_dump_command(parsed: &DbDumpArgs, url: &str) -> std::process::Command {
-    let mut cmd = crate::dbshell::LibpqConn::new(url).command("pg_dump");
+fn pg_dump_command(parsed: &DbDumpArgs, url: &str) -> Result<std::process::Command, MigrateError> {
+    let mut cmd = crate::dbshell::LibpqConn::new(url)
+        .map_err(MigrateError::Validation)?
+        .command("pg_dump");
     cmd.args(build_pg_dump_argv(parsed));
-    cmd
+    Ok(cmd)
 }
 
 /// pg_dump's flags, after `--dbname`.
@@ -3221,7 +3223,7 @@ fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
                 .into(),
         )
     })?;
-    let mut cmd = pg_dump_command(&parsed, &url);
+    let mut cmd = pg_dump_command(&parsed, &url)?;
     eprintln!("running: pg_dump {}", shown_args(&cmd));
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run pg_dump (is it on PATH?): {e}"))
@@ -3337,10 +3339,15 @@ fn answered_yes(answer: std::io::Result<Option<String>>) -> bool {
 }
 
 /// `psql` for `url`; the password goes in its env, not argv (#2324).
-fn psql_restore_command(parsed: &RestorePlan, url: &str) -> std::process::Command {
-    let mut cmd = crate::dbshell::LibpqConn::new(url).command("psql");
+fn psql_restore_command(
+    parsed: &RestorePlan,
+    url: &str,
+) -> Result<std::process::Command, MigrateError> {
+    let mut cmd = crate::dbshell::LibpqConn::new(url)
+        .map_err(MigrateError::Validation)?
+        .command("psql");
     cmd.args(build_psql_argv(parsed));
-    cmd
+    Ok(cmd)
 }
 
 /// psql's flags, after `--dbname`.
@@ -3379,7 +3386,7 @@ fn run_psql_restore<W: Write>(
     url: &str,
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    let mut cmd = psql_restore_command(parsed, url);
+    let mut cmd = psql_restore_command(parsed, url)?;
     writeln!(w, "running: psql {}", shown_args(&cmd))?;
     let status = cmd.status().map_err(|e| {
         MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
@@ -8104,7 +8111,7 @@ mod db_cmd_tests {
             schema_only: false,
             no_owner: false,
         };
-        let cmd = pg_dump_command(&parsed, "postgres://u:s3cret@h/db");
+        let cmd = pg_dump_command(&parsed, "postgres://u:s3cret@h/db").unwrap();
         let argv: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
         assert_eq!(argv[..2], ["--dbname", "postgres://u@h/db"]);
     }
@@ -8124,8 +8131,8 @@ mod db_cmd_tests {
             clean: false,
         };
         for cmd in [
-            pg_dump_command(&dump, url),
-            psql_restore_command(&plan, url),
+            pg_dump_command(&dump, url).unwrap(),
+            psql_restore_command(&plan, url).unwrap(),
         ] {
             assert!(
                 !cmd.get_args()

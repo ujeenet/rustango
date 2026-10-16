@@ -272,6 +272,23 @@ pub(crate) fn split_userinfo(url: &str) -> Option<(&str, &str, &str)> {
     Some((scheme, &rest[..at], &rest[at + 1..]))
 }
 
+/// [`split_userinfo`] for a URL handed to a client, where a wrong guess
+/// sends the password to the wrong host: an `@` after a raw `?`/`#` is refused.
+pub(crate) fn split_userinfo_exact(url: &str) -> Result<Option<(&str, &str, &str)>, String> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Ok(None);
+    };
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    if rest[end..].contains('@') {
+        return Err("the URL has an `@` after a `?` or `#`, so its userinfo is ambiguous: \
+             percent-encode `@`, `?` and `#` in the password and query (`%40`, `%3F`, `%23`)"
+            .to_owned());
+    }
+    Ok(rest[..end]
+        .rfind('@')
+        .map(|at| (scheme, &rest[..at], &rest[at + 1..])))
+}
+
 /// The userinfo `@` of `user:pa#ss@host/db`, whose raw `?`/`#` hid it: no
 /// path before the `?`/`#`, and a plain host after the `@`.
 fn raw_query_char_at(rest: &str) -> Option<usize> {

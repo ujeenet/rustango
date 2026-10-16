@@ -202,6 +202,8 @@ A subquery over the same table as its outer query now reads `FROM "t" AS "__rust
 
 `psql` now runs as `psql --dbname <url>` with the password in `PGPASSWORD`, so libpq reads every URL option; an option libpq does not know (a sqlx-only one) now fails the shell. `command_for` is unchanged.
 
+`dbshell`, `db:dump`, `db:restore` and `migrate-tenant-storage` refuse a Postgres URL with a raw `@` after a `?` or `#`: it could be the password or a query value. Percent-encode it (`%40`, `%3F`, `%23`).
+
 ### CLI verbs that used to pass now fail (#1312)
 
 `prewarm-pools` and `audit-cleanup` exit non-zero when any tenant fails; `check` with any argument but `--deploy`, and `dumpdata --model` / `--exclude` with a name no model has, are errors.
