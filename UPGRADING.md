@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `dumpdata` writes rows in pk order (#1399)
+
+Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
+
 ### M2M junction DDL follows the target pk (#1404)
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.

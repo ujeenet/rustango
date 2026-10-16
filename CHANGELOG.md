@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Performance — `dumpdata` streams rows and M2M links by page (#1399)
+
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory.
+
 ### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
 
 The idempotent `ensure_*` and testkit paths send `ADD CONSTRAINT` inside a `DO` block that catches the duplicate, so an existing FK no longer writes an ERROR to the server log on every boot.

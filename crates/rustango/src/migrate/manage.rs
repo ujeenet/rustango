@@ -3601,8 +3601,8 @@ async fn dumpdata_cmd<W: Write>(
         }
     }
 
-    // Walk every registered model, fetching rows from each.
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    // Walk every registered model, writing its rows a page at a time.
+    let mut out = FixtureWriter::new(w, indent);
     for entry in inventory::iter::<crate::core::ModelEntry>() {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
@@ -3628,56 +3628,126 @@ async fn dumpdata_cmd<W: Write>(
 
         // Identify the PK column for fixture `pk` extraction.
         let pk_field = schema.primary_key();
-
-        // Build a minimal "select every column" SelectQuery.
-        // #562 — the empty-WHERE/full-table dump is exactly
-        // SelectQuery::new(model).
         let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-        let query = crate::core::SelectQuery::new(schema);
-
-        let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
-            .await
-            .map_err(|e| {
-                MigrateError::Validation(format!(
-                    "dumpdata: select from `{}` failed: {e}",
-                    schema.table
-                ))
-            })?;
-        let links = m2m_links(pool, schema).await?;
-
-        for mut row in rows {
-            // Pop the PK column off `fields` into the outer fixture
-            // entry's `pk` slot: a fixture separates identity from
-            // payload.
-            let pk_value = match pk_field {
-                Some(pk) => row
-                    .as_object_mut()
-                    .and_then(|m| m.remove(pk.name))
-                    .unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
-            };
-            if let Some(map) = row.as_object_mut() {
-                for (name, by_src) in &links {
-                    let dsts = by_src.get(&pk_value.to_string()).cloned();
-                    map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+        // Pages in pk order, so neither rows nor links are held whole (#1399).
+        let mut after: Option<crate::core::SqlValue> = None;
+        loop {
+            let mut query = crate::core::SelectQuery::new(schema);
+            if let Some(pk) = pk_field {
+                query.order_by = vec![crate::core::OrderClause {
+                    column: pk.column,
+                    desc: false,
+                }
+                .into()];
+                query.limit = Some(DUMP_PAGE);
+                if let Some(last) = after.take() {
+                    query.where_clause = crate::core::WhereExpr::Predicate(crate::core::Filter {
+                        column: pk.column,
+                        op: crate::core::Op::Gt,
+                        value: last,
+                    });
                 }
             }
-            out.push(serde_json::json!({
-                "model": dotted_name,
-                "pk": pk_value,
-                "fields": row,
-            }));
+            let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
+                .await
+                .map_err(|e| {
+                    MigrateError::Validation(format!(
+                        "dumpdata: select from `{}` failed: {e}",
+                        schema.table
+                    ))
+                })?;
+            let full = pk_field.is_some() && rows.len() == DUMP_PAGE as usize;
+            let pks: Vec<crate::core::SqlValue> = match pk_field {
+                Some(pk) => rows
+                    .iter()
+                    .filter_map(|r| r.get(pk.name))
+                    .map(|v| json_to_sql_value(v, pk).map_err(MigrateError::Validation))
+                    .collect::<Result<_, _>>()?,
+                None => Vec::new(),
+            };
+            let links = m2m_links(pool, schema, &pks).await?;
+
+            for mut row in rows {
+                // Pop the PK column off `fields` into the outer fixture
+                // entry's `pk` slot: a fixture separates identity from
+                // payload.
+                let pk_value = match pk_field {
+                    Some(pk) => row
+                        .as_object_mut()
+                        .and_then(|m| m.remove(pk.name))
+                        .unwrap_or(serde_json::Value::Null),
+                    None => serde_json::Value::Null,
+                };
+                if let Some(map) = row.as_object_mut() {
+                    for (name, by_src) in &links {
+                        let dsts = by_src.get(&pk_value.to_string()).cloned();
+                        map.insert((*name).to_owned(), dsts.unwrap_or_default().into());
+                    }
+                }
+                out.entry(&serde_json::json!({
+                    "model": dotted_name,
+                    "pk": pk_value,
+                    "fields": row,
+                }))?;
+            }
+            if !full {
+                break;
+            }
+            after = pks.last().cloned();
+        }
+    }
+    out.finish()
+}
+
+/// Rows per dumpdata page.
+const DUMP_PAGE: i64 = 500;
+
+/// Writes a fixture array an entry at a time, as `serde_json` would whole.
+struct FixtureWriter<'w, W: Write> {
+    w: &'w mut W,
+    pretty: bool,
+    started: bool,
+}
+
+impl<'w, W: Write> FixtureWriter<'w, W> {
+    fn new(w: &'w mut W, indent: usize) -> Self {
+        Self {
+            w,
+            pretty: indent != 0,
+            started: false,
         }
     }
 
-    let rendered = if indent == 0 {
-        serde_json::to_string(&out)
-    } else {
-        serde_json::to_string_pretty(&out)
+    fn entry(&mut self, v: &serde_json::Value) -> Result<(), MigrateError> {
+        let json = |e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}"));
+        let sep = match (self.started, self.pretty) {
+            (false, false) => "[",
+            (false, true) => "[\n",
+            (true, false) => ",",
+            (true, true) => ",\n",
+        };
+        self.started = true;
+        self.w.write_all(sep.as_bytes())?;
+        if self.pretty {
+            // JSON strings escape newlines, so every line is structure.
+            let text = serde_json::to_string_pretty(v).map_err(json)?;
+            let lines: Vec<String> = text.lines().map(|l| format!("  {l}")).collect();
+            self.w.write_all(lines.join("\n").as_bytes())?;
+        } else {
+            serde_json::to_writer(&mut *self.w, v).map_err(json)?;
+        }
+        Ok(())
     }
-    .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
-    writeln!(w, "{rendered}")?;
-    Ok(())
+
+    fn finish(self) -> Result<(), MigrateError> {
+        let end = match (self.started, self.pretty) {
+            (false, _) => "[]",
+            (true, false) => "]",
+            (true, true) => "\n]",
+        };
+        writeln!(self.w, "{end}")?;
+        Ok(())
+    }
 }
 
 /// `app.Model`, or the bare name for a model with no app.
@@ -3733,16 +3803,20 @@ fn junction_of(
     Ok((junction, [end(rel.src_col)?, end(rel.dst_col)?]))
 }
 
-/// Each auto-created M2M relation of `schema` and its links. Those
-/// junctions are no model, so the links ride on the source rows (#1226).
+/// Each auto-created M2M relation of `schema` and the links of `src_pks`.
+/// Those junctions are no model, so the links ride on the source rows (#1226).
 async fn m2m_links(
     pool: &Pool,
     schema: &'static crate::core::ModelSchema,
+    src_pks: &[crate::core::SqlValue],
 ) -> Result<Vec<(&'static str, LinksBySource)>, MigrateError> {
     let mut out = Vec::new();
+    if src_pks.is_empty() {
+        return Ok(out);
+    }
     for rel in schema.m2m.iter().filter(|r| r.auto_create) {
         let (junction, [src, dst]) = junction_of(schema, rel)?;
-        let query = crate::core::SelectQuery::new(junction);
+        let query = crate::core::SelectQuery::by_pk_in(junction, rel.src_col, src_pks.to_vec());
         let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
             .await
             .map_err(|e| {
@@ -6406,6 +6480,33 @@ mod gen_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+        }
+    }
+
+    /// The streamed fixture is byte for byte what `serde_json` writes whole (#1399).
+    #[test]
+    fn fixture_writer_matches_serde_json() {
+        let entries = vec![
+            serde_json::json!({"model": "a.B", "pk": 1, "fields": {"s": "x\ny", "l": [1, 2]}}),
+            serde_json::json!({"model": "a.B", "pk": 2, "fields": {}}),
+        ];
+        for n in 0..=entries.len() {
+            let some = &entries[..n];
+            for indent in [0, 2] {
+                let mut buf = Vec::new();
+                let mut w = FixtureWriter::new(&mut buf, indent);
+                for e in some {
+                    w.entry(e).unwrap();
+                }
+                w.finish().unwrap();
+                let whole = if indent == 0 {
+                    serde_json::to_string(some)
+                } else {
+                    serde_json::to_string_pretty(some)
+                }
+                .unwrap();
+                assert_eq!(String::from_utf8(buf).unwrap(), format!("{whole}\n"));
+            }
         }
     }
 
