@@ -166,6 +166,8 @@ Rows of a model with an auto-created M2M relation get a `"<relation>": [pk, ...]
 
 Both also list the framework's system chain, and `--dry-run` labels its steps `(system, …)`. A file replaced by an applied squash shows `[X] … (replaced by a squash)`. Tenancy `showmigrations` shows tenant-scoped files as `[X]` / `[~]` / `[ ]` with a `(k/n tenants)` count.
 
+The framework's tenant steps now show the same `(d/n tenants)` count. With zero tenants a tenant-scoped file prints `[-] name (no tenants)`; scripts that parse the output need both forms.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)
