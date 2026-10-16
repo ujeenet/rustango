@@ -1914,34 +1914,10 @@ fn writes_ci_text(change: &SchemaChange, current: &SchemaSnapshot) -> bool {
 /// returns `TEXT` — `AlterColumnMaxLength` is the dedicated
 /// `VARCHAR(N)` rename op.
 fn pg_type_for_ty_name(ty: &str) -> String {
-    match ty {
-        "i16" => "SMALLINT".into(),
-        "i32" => "INTEGER".into(),
-        "i64" => "BIGINT".into(),
-        "f32" => "REAL".into(),
-        "f64" => "DOUBLE PRECISION".into(),
-        "bool" => "BOOLEAN".into(),
-        "string" => "TEXT".into(),
-        "datetime" => "TIMESTAMPTZ".into(),
-        "date" => "DATE".into(),
-        "time" => "TIME".into(),
-        "uuid" => "UUID".into(),
-        "json" => "JSONB".into(),
-        "decimal" => "NUMERIC".into(),
-        "binary" => "BYTEA".into(),
-        // #341 — PG array element kinds.
-        "array_text" => "text[]".into(),
-        "array_int" => "integer[]".into(),
-        "array_bigint" => "bigint[]".into(),
-        // #343 — PG range element kinds.
-        "range_int" => "int4range".into(),
-        "range_bigint" => "int8range".into(),
-        "range_numeric" => "numrange".into(),
-        "range_date" => "daterange".into(),
-        "range_datetime" => "tstzrange".into(),
-        // #342 — PG hstore.
-        "hstore" => "hstore".into(),
-        other => other.to_uppercase(),
+    use crate::sql::Dialect as _;
+    match super::snapshot::field_type_from_name(ty) {
+        Some(t) => crate::sql::Postgres.column_type(t, None),
+        None => ty.to_uppercase(),
     }
 }
 
@@ -2972,6 +2948,39 @@ mod sql_type_tests {
             table("tags", dst_ty, (dst_ty == "string").then_some(src_len)),
         ] }))
         .unwrap()
+    }
+
+    /// Every snapshot type name maps back to its type, and PG ALTERs use
+    /// the dialect's own type for it.
+    #[test]
+    fn field_type_names_round_trip() {
+        use crate::core::{ArrayElem as A, FieldType as T, RangeElem as R};
+        use crate::migrate::snapshot::{field_type_from_name, field_type_name};
+        use crate::sql::Dialect as _;
+        let all = [
+            T::I16, T::I32, T::I64, T::F32, T::F64, T::Bool, T::String, T::DateTime,
+            T::Date, T::Time, T::Uuid, T::Json, T::Decimal, T::Binary,
+            T::Array(A::Text), T::Array(A::Int), T::Array(A::BigInt),
+            T::Range(R::Int), T::Range(R::BigInt), T::Range(R::Numeric),
+            T::Range(R::Date), T::Range(R::DateTime), T::HStore,
+        ];
+        for t in all {
+            // A new variant fails to compile here: add it to `all`.
+            match t {
+                T::I16 | T::I32 | T::I64 | T::F32 | T::F64 | T::Bool | T::String
+                | T::DateTime | T::Date | T::Time | T::Uuid | T::Json | T::Decimal
+                | T::Binary | T::Array(_) | T::Range(_) | T::HStore => {}
+                T::Vector(_) | T::Geometry(_) => unreachable!("names carry no size"),
+            }
+            let name = field_type_name(t);
+            assert_eq!(field_type_from_name(name), Some(t), "{name}");
+            assert_eq!(
+                pg_type_for_ty_name(name),
+                crate::sql::Postgres.column_type(t, None),
+                "{name}"
+            );
+        }
+        assert_eq!(pg_type_for_ty_name("vector"), "VECTOR");
     }
 
     /// MySQL caps a key at 3072 bytes (1071) and utf8mb4 VARCHAR(n) counts 4n.
