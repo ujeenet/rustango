@@ -18,7 +18,7 @@ With `--tenant` they run on that tenant's pool over tenant models; without it, o
 
 ### Performance — `dumpdata` streams rows and M2M links by page (#1399)
 
-Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before.
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before. PostgreSQL reads the pk from `pg_catalog`, so a SELECT-only role (and `inspectdb` run by one) sees it too.
 
 ### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
 

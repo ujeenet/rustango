@@ -530,15 +530,16 @@ async fn list_pk_columns_pg(
     table: &str,
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
+    // pg_catalog: information_schema hides constraints from a SELECT-only role.
     let rows = sqlx::query(
-        r#"SELECT kcu.column_name
-           FROM information_schema.table_constraints tc
-           JOIN information_schema.key_column_usage kcu
-             ON tc.constraint_name = kcu.constraint_name
-            AND tc.table_schema = kcu.table_schema
-           WHERE tc.constraint_type = 'PRIMARY KEY'
-             AND tc.table_schema = $1 AND tc.table_name = $2
-           ORDER BY kcu.ordinal_position"#,
+        r#"SELECT a.attname::text AS column_name
+           FROM pg_index x
+           JOIN pg_class t ON t.oid = x.indrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+           CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+           WHERE x.indisprimary AND n.nspname = $1 AND t.relname = $2
+           ORDER BY k.ord"#,
     )
     .bind(schema)
     .bind(table)
