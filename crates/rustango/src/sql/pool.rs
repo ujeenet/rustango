@@ -759,7 +759,27 @@ pub const IDLE_PING_ENV: &str = "RUSTANGO_DB_IDLE_PING_SECS";
 ///
 /// [`configure_pools`] installs it once at boot from `[database]`,
 /// and every [`Pool`] constructor reads it.
+///
+/// Build one from the default and assign; a struct literal does not
+/// compile outside rustango, so a new field never breaks yours:
+///
+/// ```
+/// let mut t = rustango::sql::PoolTuning::default();
+/// t.max_connections = Some(20);
+/// rustango::sql::configure_pools(t);
+/// ```
+///
+/// ```compile_fail
+/// let _ = rustango::sql::PoolTuning {
+///     max_connections: Some(20),
+///     min_connections: None,
+///     acquire_timeout: None,
+///     idle_timeout: None,
+///     max_lifetime: None,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PoolTuning {
     /// Most connections to keep. sqlx's 10 is usually too few for a
     /// web server and far too many for SQLite.

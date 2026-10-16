@@ -239,6 +239,18 @@ CreateView::for_model(Post::SCHEMA, &["title", "body"])
 UpdateView::for_model(Post::SCHEMA, &["title", "body"])
 ```
 
+### `PoolTuning` and `DatabaseSettings` are `#[non_exhaustive]`
+
+Struct literals, `..Default::default()` included, no longer compile outside rustango. Start from the default and assign.
+
+```rust
+// before
+let t = PoolTuning { max_connections: Some(20), ..Default::default() };
+// after
+let mut t = PoolTuning::default();
+t.max_connections = Some(20);
+```
+
 ## 0.60.12
 
 ### `makemigrations --merge` refuses conflicts
