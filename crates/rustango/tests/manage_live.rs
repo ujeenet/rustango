@@ -411,8 +411,7 @@ async fn migrate_tenants_seeds_reserved_perms_in_a_database_mode_tenant() {
 
 #[tokio::test]
 async fn unrecognized_subcommand_delegates_to_migrate_manage() {
-    // `showmigrations` is a rustango_migrate verb, NOT tenancy. The
-    // dispatcher must delegate gracefully.
+    // `sqlmigrate` is a migrate verb tenancy does not own; it must delegate.
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -424,10 +423,9 @@ async fn unrecognized_subcommand_delegates_to_migrate_manage() {
     let dir = fresh_dir("delegate");
     let pools = TenantPools::new(pool.clone());
 
-    let (out, res) = run(&pools, &url, &dir, &["showmigrations"]).await;
+    let (out, res) = run(&pools, &url, &dir, &["sqlmigrate", "--help"]).await;
     res.unwrap();
-    // showmigrations on an empty dir prints "(no migrations in <dir>)"
-    assert!(out.contains("no migrations"), "{out}");
+    assert!(out.contains("print the SQL the named migration"), "{out}");
 
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);

@@ -1215,6 +1215,9 @@ pub struct InsertQuery {
     /// Optional `ON CONFLICT` clause. `None` = a plain INSERT that
     /// fails on a constraint violation.
     pub on_conflict: Option<ConflictClause>,
+    /// Bound `Auto` columns whose value the writer just generated
+    /// (a fresh `default_uuid_v7`), so they cannot clash (#1407).
+    pub generated: Vec<&'static str>,
 }
 
 impl InsertQuery {
@@ -1231,7 +1234,15 @@ impl InsertQuery {
             values,
             returning: Vec::new(),
             on_conflict: None,
+            generated: Vec::new(),
         }
+    }
+
+    /// Mark `columns` as holding values the writer generated (the `generated` field).
+    #[must_use]
+    pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
+        self.generated = columns;
+        self
     }
 
     /// Read `columns` back from the inserted row.
@@ -1301,6 +1312,8 @@ pub struct BulkInsertQuery {
     pub returning: Vec<&'static str>,
     /// Optional `ON CONFLICT` clause applied to every row in the batch.
     pub on_conflict: Option<ConflictClause>,
+    /// As `InsertQuery`'s `generated`: only columns generated on every row.
+    pub generated: Vec<&'static str>,
 }
 
 impl BulkInsertQuery {
@@ -1317,7 +1330,15 @@ impl BulkInsertQuery {
             rows,
             returning: Vec::new(),
             on_conflict: None,
+            generated: Vec::new(),
         }
+    }
+
+    /// Mark `columns` as generated on every row (the `generated` field).
+    #[must_use]
+    pub fn generated(mut self, columns: Vec<&'static str>) -> Self {
+        self.generated = columns;
+        self
     }
 
     /// Read `columns` back from every inserted row.
@@ -1339,8 +1360,8 @@ impl BulkInsertQuery {
     ///
     /// The writer emits:
     /// * Postgres / SQLite (3.24+): `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
-    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)` — no
-    ///   target, because MySQL matches every UNIQUE index by itself.
+    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)`. It matches
+    ///   every UNIQUE index, so a target that is not the only one is refused.
     #[must_use]
     pub fn on_conflict_do_update(
         mut self,

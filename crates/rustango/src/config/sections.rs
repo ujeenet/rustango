@@ -309,6 +309,12 @@ pub struct DatabaseSettings {
     /// hold connections to the old server, or with revoked
     /// credentials. `None` keeps sqlx's default.
     pub pool_max_lifetime_secs: Option<u64>,
+    /// Ping each connection before a checkout. `None` means off (#2674):
+    /// a connection dropped while idle then fails one query and is discarded.
+    pub pool_test_before_acquire: Option<bool>,
+    /// With the ping off, ping a connection idle at least this many
+    /// seconds before handing it out. `None` means 30.
+    pub pool_idle_ping_secs: Option<u64>,
 }
 
 impl DatabaseSettings {
@@ -326,6 +332,8 @@ impl DatabaseSettings {
             acquire_timeout: self.pool_acquire_timeout_secs.map(Duration::from_secs),
             idle_timeout: self.pool_idle_timeout_secs.map(Duration::from_secs),
             max_lifetime: self.pool_max_lifetime_secs.map(Duration::from_secs),
+            test_before_acquire: self.pool_test_before_acquire.unwrap_or(false),
+            idle_ping_after: self.pool_idle_ping_secs.map(Duration::from_secs),
         }
     }
 }
@@ -942,6 +950,8 @@ impl std::fmt::Debug for DatabaseSettings {
             .field("pool_acquire_timeout_secs", &self.pool_acquire_timeout_secs)
             .field("pool_idle_timeout_secs", &self.pool_idle_timeout_secs)
             .field("pool_max_lifetime_secs", &self.pool_max_lifetime_secs)
+            .field("pool_test_before_acquire", &self.pool_test_before_acquire)
+            .field("pool_idle_ping_secs", &self.pool_idle_ping_secs)
             .finish()
     }
 }
@@ -1000,6 +1010,28 @@ impl std::fmt::Debug for DiskSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2674: `[database].pool_test_before_acquire` reaches the pool tuning, off when unset.
+    #[test]
+    fn pool_test_before_acquire_parses_into_the_tuning() {
+        let unset: DatabaseSettings = toml::from_str("").expect("valid TOML");
+        assert!(!unset.pool_tuning().test_before_acquire);
+        let on: DatabaseSettings =
+            toml::from_str("pool_test_before_acquire = true").expect("valid TOML");
+        assert!(on.pool_tuning().test_before_acquire);
+    }
+
+    /// pr-1408-r2 conventions-004: the idle ping threshold has a `[database]` key too.
+    #[test]
+    fn pool_idle_ping_secs_parses_into_the_tuning() {
+        let unset: DatabaseSettings = toml::from_str("").expect("valid TOML");
+        assert_eq!(unset.pool_tuning().idle_ping_after, None);
+        let set: DatabaseSettings = toml::from_str("pool_idle_ping_secs = 90").expect("valid TOML");
+        assert_eq!(
+            set.pool_tuning().idle_ping_after,
+            Some(std::time::Duration::from_secs(90))
+        );
+    }
 
     /// `{:?}` of the whole settings prints no secret.
     #[test]

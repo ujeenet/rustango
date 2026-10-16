@@ -1094,3 +1094,120 @@ async fn invalidate_purges_the_cached_page() {
     assert_eq!(status(app.clone()).await, "MISS", "page still cached");
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
+
+/// An `InMemoryCache` that counts the text and bytes calls (#2656).
+#[derive(Default)]
+struct Counting {
+    inner: InMemoryCache,
+    text_calls: AtomicU32,
+    bytes_calls: AtomicU32,
+    last_key: std::sync::Mutex<String>,
+}
+
+#[async_trait::async_trait]
+impl rustango::cache::Cache for Counting {
+    async fn get(&self, key: &str) -> Result<Option<String>, rustango::cache::CacheError> {
+        self.text_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(key).await
+    }
+    async fn set(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), rustango::cache::CacheError> {
+        self.text_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.set(key, value, ttl).await
+    }
+    async fn get_bytes(
+        &self,
+        key: &str,
+    ) -> Result<Option<axum::body::Bytes>, rustango::cache::CacheError> {
+        self.bytes_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_bytes(key).await
+    }
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), rustango::cache::CacheError> {
+        self.bytes_calls.fetch_add(1, Ordering::SeqCst);
+        key.clone_into(&mut self.last_key.lock().unwrap());
+        self.inner.set_bytes(key, value, ttl).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), rustango::cache::CacheError> {
+        self.inner.delete(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, rustango::cache::CacheError> {
+        self.inner.exists(key).await
+    }
+    async fn clear(&self) -> Result<(), rustango::cache::CacheError> {
+        self.inner.clear().await
+    }
+}
+
+fn bytes_app(cache: Arc<Counting>, hits: Arc<AtomicU32>) -> Router {
+    Router::new()
+        .route(
+            "/bin",
+            get(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async {
+                    (
+                        [(header::CONTENT_TYPE, "application/octet-stream")],
+                        vec![0xff_u8, 0, 0xfe],
+                    )
+                }
+            }),
+        )
+        .layer(CachePageLayer::new(cache).tenant_agnostic(true))
+}
+
+/// #2656: a page is stored and served through the bytes API only, and a
+/// non-UTF-8 body comes back byte for byte.
+#[tokio::test]
+async fn pages_use_the_bytes_api_only() {
+    let cache = Arc::new(Counting::default());
+    let hits = Arc::new(AtomicU32::new(0));
+    let app = bytes_app(cache.clone(), hits.clone());
+    for want in ["MISS", "HIT"] {
+        let resp = app.clone().oneshot(get_req("/bin", &[])).await.unwrap();
+        assert_eq!(cache_status(&resp), Some(want));
+        assert_eq!(
+            resp.headers()[header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &[0xff, 0, 0xfe]);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        cache.text_calls.load(Ordering::SeqCst),
+        0,
+        "no String get/set"
+    );
+    assert_eq!(cache.bytes_calls.load(Ordering::SeqCst), 3, "get, set, get");
+}
+
+/// #2656: an entry in the old JSON format is a miss, then overwritten.
+#[tokio::test]
+async fn an_old_json_entry_is_a_miss_then_replaced() {
+    let cache = Arc::new(Counting::default());
+    let hits = Arc::new(AtomicU32::new(0));
+    let app = bytes_app(cache.clone(), hits.clone());
+    app.clone().oneshot(get_req("/bin", &[])).await.unwrap();
+    let key = cache.last_key.lock().unwrap().clone();
+    let old = r#"{"status":200,"headers":[["content-type","text/plain"]],"body_b64":"b2xk"}"#;
+    rustango::cache::Cache::set(&cache.inner, &key, old, None)
+        .await
+        .unwrap();
+
+    let resp = app.clone().oneshot(get_req("/bin", &[])).await.unwrap();
+    assert_eq!(cache_status(&resp), Some("MISS"));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &[0xff, 0, 0xfe]);
+    let resp = app.oneshot(get_req("/bin", &[])).await.unwrap();
+    assert_eq!(cache_status(&resp), Some("HIT"));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}

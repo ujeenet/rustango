@@ -122,7 +122,8 @@ impl Dialect for MySql {
 
     /// MySQL's CAST targets differ from the ANSI names: integers
     /// cast to `SIGNED`, floats to `FLOAT` or `DOUBLE`, booleans to
-    /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME`.
+    /// `UNSIGNED`, strings to `CHAR`, and timestamps to `DATETIME(6)`
+    /// (bare `DATETIME` / `TIME` drop the microseconds, #1359).
     ///
     /// UUID has no CAST target, so it returns `None`; cast a
     /// string-shaped value to `CHAR` yourself.
@@ -133,9 +134,9 @@ impl Dialect for MySql {
             FieldType::F64 => "DOUBLE",
             FieldType::Bool => "UNSIGNED",
             FieldType::String => "CHAR",
-            FieldType::DateTime => "DATETIME",
+            FieldType::DateTime => "DATETIME(6)",
             FieldType::Date => "DATE",
-            FieldType::Time => "TIME",
+            FieldType::Time => "TIME(6)",
             FieldType::Decimal => "DECIMAL(65, 28)",
             FieldType::Binary => "BINARY",
             FieldType::Json => "JSON",
@@ -630,8 +631,8 @@ impl Dialect for MySql {
     }
 
     /// MySQL's `ON DUPLICATE KEY UPDATE` takes no target column
-    /// list; it fires on any unique violation, so a `DoUpdate` target
-    /// is ignored:
+    /// list; it fires on any unique violation, so a `DoUpdate` is
+    /// refused unless its target is the only unique key a row can hit:
     ///
     /// ```sql
     /// INSERT INTO `t` (a, b) VALUES (?, ?)
@@ -650,6 +651,7 @@ impl Dialect for MySql {
         &self,
         sql: &mut String,
         model: &ModelSchema,
+        caller_set: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -661,12 +663,16 @@ impl Dialect for MySql {
                 target,
                 update_columns,
             } => {
-                // MySQL has no conflict target; the clause matches
-                // every unique index. A target is accepted and
-                // ignored, so one call site works on every backend.
-                let _ = target;
                 if update_columns.is_empty() {
                     return Err(SqlError::EmptyUpdateSet);
+                }
+                // The clause fires on every unique key, so another key
+                // that can clash would update the wrong row (#1357).
+                if !my_target_is_only_unique_key(model, caller_set, target) {
+                    return Err(SqlError::ConflictNotSupportedInDialect {
+                        shape: "DO UPDATE on a target that is not the only unique key",
+                        dialect: "mysql",
+                    });
                 }
                 sql.push_str(" ON DUPLICATE KEY UPDATE ");
                 // The id rides inside the first assignment: assigning the
@@ -785,6 +791,37 @@ fn write_my_ident(sql: &mut String, name: &str) {
         }
     }
     sql.push('`');
+}
+
+/// True when every unique key a new row can clash on is `target`. A key
+/// with an `Auto` column the caller did not set holds a generated value,
+/// so it never clashes; a caller-set one can (rel-0608 correctness-003, #1407).
+fn my_target_is_only_unique_key(model: &ModelSchema, caller_set: &[&str], target: &[&str]) -> bool {
+    let fits = |cols: &[&str]| {
+        let generated = cols.iter().any(|c| {
+            model
+                .field_by_column(c)
+                .is_some_and(|f| f.auto && !caller_set.contains(c))
+        });
+        generated || (cols.len() == target.len() && cols.iter().all(|c| target.contains(c)))
+    };
+    let pk: Vec<&str> = model
+        .fields
+        .iter()
+        .filter(|f| f.primary_key)
+        .map(|f| f.column)
+        .collect();
+    (pk.is_empty() || fits(&pk))
+        && model
+            .fields
+            .iter()
+            .filter(|f| f.unique && !f.primary_key)
+            .all(|f| fits(&[f.column]))
+        && model
+            .indexes
+            .iter()
+            .filter(|i| i.unique)
+            .all(|i| fits(i.columns))
 }
 
 /// `<col> = IF(LAST_INSERT_ID(<id>), <col>, <col>)`: a no-op write that
@@ -1070,7 +1107,7 @@ mod tests {
         );
         let mut sql = String::new();
         MySql
-            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, model, &[], &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(
             sql,
@@ -1090,6 +1127,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec![],
                     update_columns: vec!["a"],
@@ -1112,7 +1150,7 @@ mod tests {
         );
         let mut sql = String::new();
         MySql
-            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, model, &[], &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(
             sql,
@@ -1128,6 +1166,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec![],
                     update_columns: vec!["a", "b"],
@@ -1142,21 +1181,113 @@ mod tests {
 
     #[test]
     fn conflict_do_update_with_target_silently_ignores_target() {
-        // The conflict target is ignored: MySQL matches on every
-        // unique index anyway.
+        // No other unique key can clash, so the target needs no clause.
         let model = empty_model_with("t", &[("id", FieldType::I64), ("a", FieldType::String)]);
         let mut sql = String::new();
         MySql
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec!["id"],
                     update_columns: vec!["a"],
                 },
             )
-            .expect("MySQL should accept target and silently ignore it");
+            .expect("no other unique key, so the target is accepted");
         assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
+    }
+
+    /// rel-0608 correctness-003: a bound `Auto` PK can clash like any key.
+    #[test]
+    fn conflict_do_update_refuses_a_bound_auto_pk() {
+        use crate::core::{InsertQuery, SqlValue};
+        let base = with_pk(
+            empty_model_with(
+                "acct",
+                &[("id", FieldType::I64), ("email", FieldType::String)],
+            ),
+            "id",
+            true,
+        );
+        let fields: Vec<crate::core::FieldSchema> = base
+            .fields
+            .iter()
+            .map(|f| crate::core::FieldSchema {
+                unique: f.column == "email",
+                ..*f
+            })
+            .collect();
+        let model: &'static crate::core::ModelSchema =
+            Box::leak(Box::new(crate::core::ModelSchema {
+                fields: Box::leak(fields.into_boxed_slice()),
+                ..*base
+            }));
+        let upsert = |columns: Vec<&'static str>, values| {
+            InsertQuery::new(model, columns, values).on_conflict(ConflictClause::DoUpdate {
+                target: vec!["email"],
+                update_columns: vec!["email"],
+            })
+        };
+        let email = || SqlValue::String("a@x".into());
+        MySql
+            .compile_insert(&upsert(vec!["email"], vec![email()]))
+            .expect("an omitted Auto PK is generated, so it never clashes");
+        let bound = MySql.compile_insert(&upsert(
+            vec!["id", "email"],
+            vec![SqlValue::I64(5), email()],
+        ));
+        assert!(
+            matches!(bound, Err(SqlError::ConflictNotSupportedInDialect { .. })),
+            "{bound:?}"
+        );
+    }
+
+    /// A bound uuid PK clashes unless the writer marks it generated (#1407).
+    #[test]
+    fn conflict_do_update_trusts_only_a_generated_uuid_pk() {
+        use crate::core::{InsertQuery, SqlValue};
+        let base = with_pk(
+            empty_model_with(
+                "item",
+                &[("id", FieldType::Uuid), ("name", FieldType::String)],
+            ),
+            "id",
+            true,
+        );
+        let fields: Vec<crate::core::FieldSchema> = base
+            .fields
+            .iter()
+            .map(|f| crate::core::FieldSchema {
+                unique: f.column == "name",
+                ..*f
+            })
+            .collect();
+        let model: &'static crate::core::ModelSchema =
+            Box::leak(Box::new(crate::core::ModelSchema {
+                fields: Box::leak(fields.into_boxed_slice()),
+                ..*base
+            }));
+        let q = InsertQuery::new(
+            model,
+            vec!["id", "name"],
+            vec![
+                SqlValue::Uuid(uuid::Uuid::nil()),
+                SqlValue::String("a".into()),
+            ],
+        )
+        .on_conflict(ConflictClause::DoUpdate {
+            target: vec!["name"],
+            update_columns: vec!["name"],
+        });
+        let set = MySql.compile_insert(&q);
+        assert!(
+            matches!(set, Err(SqlError::ConflictNotSupportedInDialect { .. })),
+            "{set:?}"
+        );
+        MySql
+            .compile_insert(&q.generated(vec!["id"]))
+            .expect("a generated uuid PK never clashes");
     }
 
     #[test]
@@ -1560,6 +1691,7 @@ mod tests {
             values: vec![SqlValue::String("alice".into())],
             returning: vec!["id"],
             on_conflict: None,
+            generated: vec![],
         };
         let err = MySql.compile_insert(&q).unwrap_err();
         assert!(matches!(

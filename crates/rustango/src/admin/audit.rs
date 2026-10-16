@@ -611,4 +611,24 @@ mod tests {
         assert_eq!(out.get("username").map(String::as_str), Some("alice"));
         assert!(!out.contains_key("sessions_revoked_at"), "{out:?}");
     }
+
+    /// #1158 — a typed password is never audited, even without the widget.
+    #[test]
+    fn the_audit_form_masks_a_password_without_the_widget() {
+        use crate::core::Model as _;
+        let model = crate::admin::user::AdminUser::SCHEMA;
+        let form: HashMap<String, String> = [("password_hash", "typed-plaintext")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let written = vec![(
+            "password_hash",
+            crate::core::SqlValue::String("$argon2id$h".into()),
+        )];
+        let out = audit_form(model, &crate::core::AdminConfig::DEFAULT, &form, &written);
+        assert_eq!(
+            out.get("password_hash").map(String::as_str),
+            Some(SECRET_CHANGED)
+        );
+    }
 }

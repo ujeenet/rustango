@@ -174,7 +174,7 @@ where
         w,
         "audit-cleanup done: tenants={swept} failed={failed} total_deleted={total_deleted}"
     )?;
-    Ok(())
+    super::migrations::tenant_failures(failed, swept + failed)
 }
 
 fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {

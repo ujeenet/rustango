@@ -224,7 +224,8 @@ fn published_docs_show_the_version_that_is_shipping() {
 
     let mut pages: Vec<String> = Vec::new();
     for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
-        for page in &published {
+        // Benchmark results name the version that was measured, on purpose.
+        for page in published.iter().filter(|p| *p != "benchmarks.md") {
             pages.push(format!("{locale_dir}/{page}"));
         }
     }

@@ -183,6 +183,22 @@ async fn bulk_writes_fill_the_pk(pool: &Pool) {
     assert_eq!(distinct_ids(pool).await, 3);
 }
 
+/// A caller-set id that exists clashes on the PK, not the target: no backend may update that row (#1407).
+async fn bulk_upsert_of_a_set_existing_id_updates_no_row(pool: &Pool) {
+    let mut a = item("a", 1);
+    a.insert_pool(pool).await.expect("insert");
+    let clash = Item {
+        id: a.id.clone(),
+        name: "b".into(),
+        score: 9,
+    };
+    let res = Item::bulk_upsert_pool(&[clash], &["name"], &["score"], pool).await;
+    assert!(res.is_err(), "a PK clash must not be an update: {res:?}");
+    let stored = Item::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(stored.len(), 1);
+    assert_eq!((stored[0].name.as_str(), stored[0].score), ("a", 1));
+}
+
 /// The PG-only `bulk_insert_on` also writes the ids back into the rows.
 async fn pg_bulk_insert_writes_ids_back(pool: &Pool) {
     #[cfg(feature = "postgres")]
@@ -268,6 +284,7 @@ tri_dialect_test! {
         skipped_insert_or_ignore_keeps_the_pk_unset,
         unsaved_insert_or_ignore_resets_rust_filled_fields,
         bulk_writes_fill_the_pk,
+        bulk_upsert_of_a_set_existing_id_updates_no_row,
         pg_bulk_insert_writes_ids_back,
         db_pk_is_read_back_beside_a_rust_filled_auto,
         pg_bulk_insert_set_pk_fills_unset_timestamps,

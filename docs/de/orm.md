@@ -1775,6 +1775,8 @@ Führe einen Callback aus, wenn etwas passiert — Signale. Es gibt zwei unabhä
 
 Feure einen Hook vor oder nach dem Speichern oder Löschen eines Models: `pre_save`, `post_save`, `pre_delete`, `post_delete`. Registriere einen mit `connect_post_save::<Post, _, _>(...)`.
 
+Speichern sendet sie nicht: Kein ORM-Schreibzugriff feuert diese Signale, also rufe `send_post_save(&post, PostSaveContext { created })` (und die anderen) nach dem Schreiben selbst auf.
+
 ```rust
 use rustango::signals::{connect_post_save, PostSaveContext};
 

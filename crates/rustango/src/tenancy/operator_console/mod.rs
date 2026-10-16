@@ -92,7 +92,7 @@ use tera::{Context, Tera};
 // `session` (HMAC-signed cookies, SessionSecret) lives one level up at
 // `tenancy::session` so other callers can reach it too.
 pub use super::session::{self, SessionPayload, SessionSecret, SessionSecretError};
-use super::session::{COOKIE_NAME, SESSION_TTL_SECS};
+use super::session::{COOKIE_NAME, SESSION_IDLE_SECS};
 
 use super::auth;
 use super::branding::{self, BrandAssetKind};
@@ -978,8 +978,6 @@ async fn require_session(
     mut req: axum::http::Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let payload = crate::cookies::cookie_from_headers(&headers, COOKIE_NAME)
-        .and_then(|v| session::decode(&state.session_secret, v).ok());
     // A 303 back from login turns the original POST into a GET, which
     // then 405s on POST-only routes. Trim `next` down to the parent GET
     // URL first. Unsaved form data is lost either way, but the operator
@@ -987,29 +985,9 @@ async fn require_session(
     let method = req.method().clone();
     let raw_next = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let safe_next = sanitize_next_for_method(&method, raw_next);
-    let Some(payload) = payload else {
-        return redirect_to_login(&safe_next).into_response();
-    };
-    match auth::Operator::objects()
-        .where_(auth::Operator::id.eq(payload.oid))
-        .fetch(&state.registry)
-        .await
-    {
-        Ok(rows) => {
-            let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
-                return redirect_to_login(&safe_next).into_response();
-            };
-            // Drop sessions issued before the last password change or logout.
-            if !session::session_survives(
-                &state.session_secret,
-                &payload.pwf,
-                payload.iat,
-                &op.password_hash,
-                op.password_changed_at,
-                op.sessions_revoked_at,
-            ) {
-                return redirect_to_login(&safe_next).into_response();
-            }
+    match active_session(&state, &headers).await {
+        Ok(None) => redirect_to_login(&safe_next).into_response(),
+        Ok(Some((op, payload))) => {
             // Chrome for `op_layout.html`, so a generic view mounted
             // here renders with the console layout. Gated because
             // `tenancy` does not depend on `template_views`.
@@ -1025,7 +1003,15 @@ async fn require_session(
                     .insert(crate::template_views::ExtraContext(chrome));
             }
             req.extensions_mut().insert(op);
-            next.run(req).await
+            let mut resp = next.run(req).await;
+            // Activity slides the idle deadline (#1344).
+            if let Some(renewed) = payload.renewed() {
+                resp.headers_mut().append(
+                    header::SET_COOKIE,
+                    session_cookie(&state.session_secret, &renewed),
+                );
+            }
+            resp
         }
         Err(e) => {
             tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "registry lookup");
@@ -1248,24 +1234,14 @@ async fn login_submit(
     attempt.succeeded().await;
     let mut payload = SessionPayload::new(
         oid,
-        SESSION_TTL_SECS,
+        SESSION_IDLE_SECS,
         session::PasswordFingerprint::of(&state.session_secret, &principal.password_hash),
     );
     payload.iat = crate::session::issued_at(principal.sessions_revoked_at);
-    let cookie_value = session::encode(&state.session_secret, &payload);
-    let cookie = Cookie::build((COOKIE_NAME, cookie_value))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        // Audit H2 — Secure on the prod tier (HTTPS); off in dev so
-        // local plain-HTTP login still works.
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(SESSION_TTL_SECS))
-        .build();
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii"),
+        session_cookie(&state.session_secret, &payload),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
@@ -1292,12 +1268,12 @@ async fn logout(
     let oid = decode_operator_session(&headers, &state.session_secret);
     let meta = meta_from_parts(&extensions, &headers, Some("/logout"));
     // End the operator's sessions everywhere, impersonation ones included.
-    let revoked = match live_operator_session(&state, &headers).await {
-        Ok(Some((op, iat))) => crate::session::revoke_sessions::<auth::Operator>(
+    let revoked = match live_session(&state, &headers).await {
+        Ok(Some((op, payload))) => crate::session::revoke_sessions::<auth::Operator>(
             &state.registry,
             op.id.get().copied().unwrap_or_default(),
             op.sessions_revoked_at,
-            iat,
+            payload.iat,
         )
         .await
         .map(drop),
@@ -1333,12 +1309,38 @@ async fn logout(
     resp
 }
 
-/// The operator and cookie `iat` behind a still-valid session cookie, so a
-/// stale cookie cannot end the newer sessions. `Err` when the lookup fails.
-async fn live_operator_session(
+/// The `Set-Cookie` for `payload`; the browser drops it at the idle deadline.
+fn session_cookie(secret: &SessionSecret, payload: &SessionPayload) -> HeaderValue {
+    let left = payload.exp - chrono::Utc::now().timestamp();
+    let cookie = Cookie::build((COOKIE_NAME, session::encode(secret, payload)))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        // Audit H2 — Secure on the prod tier (HTTPS); off in dev so
+        // local plain-HTTP login still works.
+        .secure(crate::session::secure_cookies())
+        .max_age(CookieDuration::seconds(left.max(0)))
+        .build();
+    HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii")
+}
+
+/// The signed-in, active operator: the check every console request and
+/// each poll of a long-lived stream runs (#1344).
+async fn active_session(
     state: &ConsoleState,
     headers: &axum::http::HeaderMap,
-) -> Result<Option<(auth::Operator, i64)>, crate::sql::ExecError> {
+) -> Result<Option<(auth::Operator, SessionPayload)>, crate::sql::ExecError> {
+    Ok(live_session(state, headers)
+        .await?
+        .filter(|(op, _)| op.active))
+}
+
+/// The operator and payload behind a still-valid session cookie, so a
+/// stale cookie cannot end the newer sessions. `Err` when the lookup fails.
+async fn live_session(
+    state: &ConsoleState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(auth::Operator, SessionPayload)>, crate::sql::ExecError> {
     let Some(payload) = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)
         .and_then(|val| session::decode(&state.session_secret, val).ok())
     else {
@@ -1361,7 +1363,7 @@ async fn live_operator_session(
                 op.sessions_revoked_at,
             )
         })
-        .map(|op| (op, payload.iat)))
+        .map(|op| (op, payload)))
 }
 
 /// Best-effort: decode the operator session cookie to recover the

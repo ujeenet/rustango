@@ -83,6 +83,7 @@ pub use auth::{protect_with_basic_auth, protect_with_csrf};
 pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRenderFn};
 pub use custom_views::{AdminCustomView, CustomViewFuture, CustomViewHandler};
 pub use errors::AdminError;
+pub(crate) use helpers::current_csrf_input;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };

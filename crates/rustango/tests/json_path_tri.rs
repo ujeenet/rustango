@@ -173,9 +173,73 @@ async fn json_as_text_is_text(pool: &Pool) {
     );
 }
 
+async fn count_path(pool: &Pool, key: &str, as_text: bool, op: Op, v: SqlValue) -> i64 {
+    use rustango::sql::CounterPool as _;
+    rustango::query::QuerySet::<Demo>::default()
+        .where_raw(WhereExpr::ExprCompare {
+            lhs: json_path(F("data"), &[key], as_text),
+            op,
+            rhs: Expr::Literal(v),
+        })
+        .count(pool)
+        .await
+        .expect("count")
+}
+
+async fn seed_counts(pool: &Pool) {
+    for data in [
+        serde_json::json!({"c": 7, "s": "foo", "b": true}),
+        serde_json::json!({"c": 10}),
+        serde_json::json!({"c": 3}),
+    ] {
+        Demo {
+            id: Auto::Unset,
+            data,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed");
+    }
+}
+
+/// #1346: SQLite compared the as_text path with a number as text vs integer.
+async fn json_as_text_compares_with_a_number(pool: &Pool) {
+    if pool.dialect().name() == "postgres" {
+        return; // PG has no `text > bigint`.
+    }
+    seed_counts(pool).await;
+    assert_eq!(
+        count_path(pool, "c", true, Op::Gt, SqlValue::I64(5)).await,
+        2
+    );
+    assert_eq!(
+        count_path(pool, "c", true, Op::Lt, SqlValue::I64(5)).await,
+        1
+    );
+    assert_eq!(
+        count_path(pool, "c", true, Op::Eq, SqlValue::F64(10.0)).await,
+        1
+    );
+}
+
+/// #1346: SQLite compared the extracted SQL value with the JSON text.
+async fn json_path_equals_a_json_scalar(pool: &Pool) {
+    seed_counts(pool).await;
+    for (key, v) in [
+        ("c", serde_json::json!(7)),
+        ("s", serde_json::json!("foo")),
+        ("b", serde_json::json!(true)),
+    ] {
+        let n = count_path(pool, key, false, Op::Eq, SqlValue::Json(v.clone())).await;
+        assert_eq!(n, 1, "{key} = {v}");
+    }
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        json_as_text_compares_with_a_number,
+        json_path_equals_a_json_scalar,
         a_single_key_path_executes,
         a_nested_key_path_executes,
         an_array_indexed_path_executes,

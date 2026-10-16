@@ -102,6 +102,19 @@ impl Cache for ScopedCache {
         self.inner.set(&self.k(key), value, ttl).await
     }
 
+    async fn get_bytes(&self, key: &str) -> Result<Option<bytes::Bytes>, CacheError> {
+        self.inner.get_bytes(&self.k(key)).await
+    }
+
+    async fn set_bytes(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        self.inner.set_bytes(&self.k(key), value, ttl).await
+    }
+
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.inner.set_forever(&self.k(key), value).await
     }

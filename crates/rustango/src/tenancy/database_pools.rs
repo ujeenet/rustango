@@ -341,26 +341,17 @@ impl<DB: Database> DatabasePools<DB> {
         cache.remove(slug);
     }
 
-    /// Build a fresh pool for `url`. Generic across backends — sqlx
-    /// dispatches on the `DB` parameter.
-    /// Build a fresh pool for `url` honoring every knob in
-    /// `TenantPoolsConfig` — min/max connections, acquire timeout,
-    /// idle timeout, max lifetime. Generic across backends; sqlx
-    /// dispatches on the `DB` parameter. The Postgres-side
-    /// `TenantPools` runs the same tuning; this brings MySQL and
-    /// SQLite to parity.
-    async fn build_pool(&self, url: &str) -> Result<Pool<DB>, TenancyError> {
-        let mut opts = sqlx::pool::PoolOptions::<DB>::new()
-            .max_connections(self.config.database_pool_max_connections)
-            .min_connections(self.config.database_pool_min_connections)
-            .acquire_timeout(self.config.database_pool_acquire_timeout);
-        if let Some(idle) = self.config.database_pool_idle_timeout {
-            opts = opts.idle_timeout(idle);
-        }
-        if let Some(lifetime) = self.config.database_pool_max_lifetime {
-            opts = opts.max_lifetime(lifetime);
-        }
-        opts.connect(url).await.map_err(TenancyError::from)
+    /// Build a fresh pool for `url` with the same tuning as
+    /// `TenantPools`. Unlike it, a missing SQLite file is not created.
+    pub(crate) async fn build_pool(&self, url: &str) -> Result<Pool<DB>, TenancyError> {
+        super::pools::tenant_pool_options::<DB>(
+            &self.config,
+            self.config.database_pool_max_connections,
+            self.config.database_pool_min_connections,
+        )
+        .connect(url)
+        .await
+        .map_err(TenancyError::from)
     }
 }
 

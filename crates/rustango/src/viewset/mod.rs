@@ -3241,6 +3241,7 @@ async fn insert_and_fetch_one(
         values,
         returning: vec![pk_field.column],
         on_conflict: None,
+        generated: vec![],
     };
     let pk_val = acq
         .insert_returning_pk(&query, pk_field)
@@ -3380,6 +3381,7 @@ async fn create_many(
             values,
             returning: vec![pk_field.column],
             on_conflict: None,
+            generated: vec![],
         };
         match crate::audit::insert_tx(&mut tx, &query, pk_field).await {
             Ok(pk) => pks.push(pk),

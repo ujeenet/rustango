@@ -1604,13 +1604,14 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.60.7"
+version = "0.60.8"
 dependencies = [
  "argon2",
  "async-stream",
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "chrono",
  "cookie",
  "dotenvy",
@@ -1649,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.60.7"
+version = "0.60.8"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

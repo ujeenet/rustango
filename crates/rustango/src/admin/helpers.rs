@@ -75,7 +75,6 @@ pub(crate) fn csrf_input_for(csrf_token: &str) -> String {
 }
 
 /// The hidden CSRF field for the current request.
-#[cfg(feature = "totp")]
 pub(crate) fn current_csrf_input() -> String {
     csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
 }
@@ -298,19 +297,24 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
-/// `true` for a column with a `password` widget override. Its value is
-/// never echoed: forms render it empty, lists and detail show only whether it is set.
+/// Credential columns, secret whatever the model's widgets say (#1158).
+const SECRET_COLUMNS: &[&str] = &["password_hash", "password", "database_url"];
+
+/// `true` for a credential column or one with a `password` widget override.
+/// Its value is never echoed: forms render it empty, lists and detail show
+/// only whether it is set, and the audit log records only that it changed.
 #[must_use]
 pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) -> bool {
-    admin_cfg
-        .formfield_overrides
-        .iter()
-        .any(|(f, w)| *f == name && *w == "password")
+    SECRET_COLUMNS.contains(&name)
+        || admin_cfg
+            .formfield_overrides
+            .iter()
+            .any(|(f, w)| *f == name && *w == "password")
 }
 
 /// Columns `?q=` searches, for the list and autocomplete alike:
 /// `search_fields` when set, else the searchable fields. Never a secret (#2228).
-/// "Secret" means the `password` widget: a `token` field without it stays searchable.
+/// "Secret" is [`is_secret_field`]: a `token` field without the widget stays searchable.
 #[must_use]
 pub(crate) fn search_columns(
     model: &'static ModelSchema,
@@ -1029,6 +1033,15 @@ pub(crate) fn render_form_with_inlines_and_picker(
 mod tests {
     use super::*;
     use crate::core::FieldType;
+
+    /// #1158 — credential columns are secret without a `password` widget.
+    #[test]
+    fn credential_columns_are_secret_without_a_widget() {
+        let cfg = crate::core::AdminConfig::DEFAULT;
+        assert!(is_secret_field(&cfg, "password_hash"));
+        assert!(is_secret_field(&cfg, "database_url"));
+        assert!(!is_secret_field(&cfg, "username"));
+    }
 
     /// List and detail FK cells link under the mounted prefix (#1916).
     #[test]

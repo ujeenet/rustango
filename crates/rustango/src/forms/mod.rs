@@ -953,6 +953,7 @@ impl PreparedSave {
             values,
             returning: vec![self.pk_field.column],
             on_conflict: None,
+            generated: vec![],
         };
         // Audited models write their `create` row in the insert's transaction (#1821).
         Ok(crate::audit::insert(pool, &query, self.pk_field).await?)
@@ -1688,6 +1689,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             values: self.values,
             returning: Vec::new(),
             on_conflict: None,
+            generated: Vec::new(),
         }
     }
 

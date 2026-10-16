@@ -169,7 +169,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.60.7`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.60.8`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -485,7 +485,7 @@ What's happening here, in plain terms:
 - `main` returns a `Result`, Rust's success-or-error type, which is why `?` and the closing `Ok(())` work.
 - To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — with no filters, that reads every row.
 - `.fetch(…)` comes from the `FetcherPool` trait, which is why the imports bring it in. Without that line the method does not exist and the compiler says so without explaining why.
-- These are the multi-backend calls, and everything above compiles unchanged on all three databases. There are also `.save(&pool)` and `.fetch_on(&pool)`, which take a driver-specific `sqlx::PgPool` and exist only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
+- These are the multi-backend calls, and everything above compiles unchanged on all three databases. There is also `.save(&pool)`, which takes a driver-specific `sqlx::PgPool` and exists only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
 
 Run it:
 
@@ -505,14 +505,18 @@ The helper puts the admin behind a login. The `admin_prefix` must match the path
 
 ```rust
 use rustango::admin;
-use rustango::session::SessionSecret;
+use rustango::session::{load_session_secret_for_tier, tier_from_env};
 use rustango::sql::Pool;
 
 pub fn admin_router(pool: Pool) -> Router {
+    let secret = load_session_secret_for_tier(
+        &tier_from_env(),
+        std::path::Path::new("./var/.rustango_session.key"),
+    );
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest_with("/admin", …)` below
-        .with_session_auth(SessionSecret::from_env_or_random())
+        .with_session_auth(secret)
         .build()
 }
 ```

@@ -628,7 +628,7 @@ pub(crate) fn random_jti() -> String {
 }
 
 /// Reject custom payloads that try to set framework-reserved claim names.
-fn check_reserved(
+pub(crate) fn check_reserved(
     custom: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), JwtIssueError> {
     for reserved in RESERVED_CLAIM_NAMES {

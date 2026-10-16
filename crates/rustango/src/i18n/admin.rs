@@ -129,9 +129,13 @@ pub fn render_editor(
     h.push_str(r#"<p class="export"><a href="export.json">Export JSON</a></p>"#);
 
     h.push_str(&format!(
-        "<form method=\"post\" action=\"{}\"><table><thead><tr><th>key</th>",
+        "<form method=\"post\" action=\"{}\">",
         escape(action)
     ));
+    // The editor mounts under the admin's CSRF layer (#1259).
+    #[cfg(feature = "admin")]
+    h.push_str(&crate::admin::current_csrf_input());
+    h.push_str("<table><thead><tr><th>key</th>");
     for loc in locales {
         h.push_str(&format!("<th>{}</th>", escape(loc)));
     }

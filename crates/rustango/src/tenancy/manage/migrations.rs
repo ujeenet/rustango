@@ -173,16 +173,18 @@ fn write_tenant_report<W: Write>(
     tenant_failures(report.failure_count(), report.tenants.len())
 }
 
-/// Every tenant's applied project migrations, inactive tenants included.
-/// A tenant that can't be read fails the whole call, so nothing is assumed (#2393).
-pub(super) async fn tenant_ledgers<DB: Database>(
+/// Every tenant's names in each of `ledgers`, inactive tenants included,
+/// opening each tenant pool once. A tenant that can't be read fails the
+/// whole call, so nothing is assumed (#2393).
+pub(super) async fn tenant_ledgers<DB: Database, const N: usize>(
     pools: &TenantPools<DB>,
-) -> Result<Vec<(String, std::collections::HashSet<String>)>, rustango::migrate::MigrateError>
+    ledgers: [&str; N],
+) -> Result<[TenantLedger; N], rustango::migrate::MigrateError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use crate::sql::FetcherPool as _;
-    use rustango::migrate::{MigrateError, LEDGER_TABLE};
+    use rustango::migrate::MigrateError;
 
     let unreadable = |slug: &str, e: &dyn std::fmt::Display| {
         MigrateError::Validation(format!(
@@ -192,28 +194,59 @@ where
     let orgs: Vec<crate::tenancy::org::Org> = crate::tenancy::org::Org::objects()
         .fetch(&pools.registry_pool())
         .await?;
-    let mut out = Vec::with_capacity(orgs.len());
+    let mut out: [TenantLedger; N] = std::array::from_fn(|_| Vec::with_capacity(orgs.len()));
     for org in orgs {
         let (pool, own) = pools
             .existing_pool_dyn(&org)
             .await
             .map_err(|e| unreadable(&org.slug, &e))?;
-        let has_ledger = rustango::migrate::try_table_exists_here(&pool, LEDGER_TABLE)
-            .await
-            .map_err(|e| unreadable(&org.slug, &e))?;
-        let applied = if has_ledger {
-            rustango::migrate::applied_set_pool(&pool)
-                .await
-                .map_err(|e| unreadable(&org.slug, &e))?
-        } else {
-            std::collections::HashSet::new()
-        };
+        let mut read = Ok(());
+        for (ledger, out) in ledgers.iter().zip(&mut out) {
+            match rustango::migrate::applied_or_empty(&pool, ledger).await {
+                Ok(applied) => out.push((org.slug.clone(), applied)),
+                Err(e) => {
+                    read = Err(e);
+                    break;
+                }
+            }
+        }
         if own {
             pool.close().await;
         }
-        out.push((org.slug, applied));
+        read.map_err(|e| unreadable(&org.slug, &e))?;
     }
     Ok(out)
+}
+
+/// `(slug, applied names)` per tenant, for one ledger.
+pub(super) type TenantLedger = Vec<(String, std::collections::HashSet<String>)>;
+
+/// `showmigrations`: registry-scoped files from the registry ledger,
+/// tenant-scoped ones, framework steps too, from every tenant's (#1311).
+pub(super) async fn showmigrations_cmd<W: Write, DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use rustango::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
+    let [project, system] = tenant_ledgers(pools, [LEDGER_TABLE, SYSTEM_LEDGER_TABLE])
+        .await
+        .map_err(TenancyError::Migrate)?;
+    rustango::migrate::manage::showmigrations_with(
+        &pools.registry_pool(),
+        dir,
+        &rustango::migrate::manage::SystemView::registry(dir),
+        Some(&rustango::migrate::manage::TenantChains {
+            project: &project,
+            system: &system,
+        }),
+        w,
+    )
+    .await
+    .map_err(TenancyError::Migrate)
 }
 
 /// A non-zero exit for any failed tenant, so a deploy can't go on half-migrated (#1844).
@@ -415,7 +448,21 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use rustango::migrate::MigrationScope;
-    if let Some(target) = args.iter().find(|a| !a.starts_with('-')) {
+    let target = args.iter().find(|a| !a.starts_with('-'));
+    if target.is_none() && args.iter().any(|a| a == "--dry-run") {
+        // The registry's system chain is registry-scoped (#1311).
+        let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
+        let system = rustango::migrate::manage::SystemView::registry(dir);
+        return rustango::migrate::manage::migrate_dry_run_cmd(
+            &pools.registry_pool(),
+            scoped.path(dir),
+            &system,
+            w,
+        )
+        .await
+        .map_err(TenancyError::Migrate);
+    }
+    if let Some(target) = target {
         let all = rustango::migrate::file::list_dir(dir)?;
         if all
             .iter()

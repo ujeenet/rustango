@@ -153,9 +153,14 @@ async fn acquire(slot: &Arc<Slot>) -> Result<OwnedMutexGuard<TxState>, ExecError
 /// Refuses ORM statements on a transaction a statement error ended.
 pub(crate) struct Gate(Option<Arc<Slot>>);
 
+impl Gate {
+    /// No transaction to guard: a pool or a held connection.
+    pub(crate) const OPEN: Self = Self(None);
+}
+
 /// Look up the `atomic` transaction `tx` belongs to, and refuse to run on it
 /// once the server ended it. Called by every `_tx` statement helper.
-pub(crate) async fn gate(tx: &PoolTx<'_>) -> Result<Gate, ExecError> {
+pub(crate) fn gate(tx: &PoolTx<'_>) -> Result<Gate, ExecError> {
     let key = std::ptr::from_ref::<PoolTx<'_>>(tx) as usize;
     let slot = BLOCK
         .try_with(|b| {

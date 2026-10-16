@@ -47,7 +47,12 @@ async fn send_as(
     if let Some(perms) = perms {
         builder = builder.with_user_perms(perms.iter().map(|p| (*p).to_owned()));
     }
-    let app = if uri.starts_with("/rustango_shared_sso_providers") {
+    let registry = [
+        "/rustango_shared_sso_providers",
+        "/rustango_operators",
+        "/rustango_orgs",
+    ];
+    let app = if registry.iter().any(|t| uri.starts_with(t)) {
         builder.registry_mode()
     } else {
         builder
@@ -225,6 +230,45 @@ async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
         }),
         "{text:?}"
     );
+}
+
+/// #1158 — the registry admin shows neither an operator's hash nor a
+/// tenant's database URL; neither model has a `password` widget.
+async fn registry_admin_hides_credentials(pool: &Pool) {
+    use rustango::tenancy::{Operator, Org};
+    let mut op = Operator {
+        id: rustango::sql::Auto::default(),
+        username: unique("op"),
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$HASH1158MARK".into(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    op.insert_pool(pool).await.expect("seed operator");
+    let mut org = Org {
+        slug: unique("o"),
+        database_url: Some("postgres://app:URL1158MARK@db/t".into()),
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(pool).await.expect("seed org");
+    let op_pk = op.id.get().copied().unwrap();
+    let org_pk = org.id.get().copied().unwrap();
+    for uri in [
+        format!("/rustango_operators?q={}", op.username),
+        format!("/rustango_operators/{op_pk}"),
+        format!("/rustango_orgs?q={}", org.slug),
+        format!("/rustango_orgs/{org_pk}"),
+    ] {
+        let (status, html) = send(pool, Method::GET, &uri, String::new()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {html}");
+        assert!(
+            html.contains(&op.username) || html.contains(&org.slug),
+            "{uri} lacks the row: {html}"
+        );
+        assert!(!html.contains("HASH1158MARK"), "{uri} shows the hash");
+        assert!(!html.contains("URL1158MARK"), "{uri} shows the URL");
+    }
 }
 
 async fn admin_created_provider_secret_is_encrypted(pool: &Pool) {
@@ -478,6 +522,7 @@ tri_dialect_test! {
         admin_created_user_can_log_in,
         a_login_upgrades_a_weak_hash,
         editing_a_user_keeps_or_rotates_the_password,
+        registry_admin_hides_credentials,
         admin_created_provider_secret_is_encrypted,
         api_keys_are_not_added_through_the_admin,
         api_key_owner_is_superuser_only,
