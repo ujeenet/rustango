@@ -651,6 +651,7 @@ impl Dialect for MySql {
         &self,
         sql: &mut String,
         model: &ModelSchema,
+        columns: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -667,7 +668,7 @@ impl Dialect for MySql {
                 }
                 // The clause fires on every unique key, so another key
                 // that can clash would update the wrong row (#1357).
-                if !my_target_is_only_unique_key(model, target) {
+                if !my_target_is_only_unique_key(model, columns, target) {
                     return Err(SqlError::ConflictNotSupportedInDialect {
                         shape: "DO UPDATE on a target that is not the only unique key",
                         dialect: "mysql",
@@ -793,12 +794,13 @@ fn write_my_ident(sql: &mut String, name: &str) {
 }
 
 /// True when every unique key a new row can clash on is `target`. A key
-/// with an `Auto` column holds a generated value, so it never clashes.
-fn my_target_is_only_unique_key(model: &ModelSchema, target: &[&str]) -> bool {
+/// with an `Auto` column the insert leaves out holds a generated value,
+/// so it never clashes; a bound one can (rel-0608 correctness-003).
+fn my_target_is_only_unique_key(model: &ModelSchema, bound: &[&str], target: &[&str]) -> bool {
     let fits = |cols: &[&str]| {
-        let generated = cols
-            .iter()
-            .any(|c| model.field_by_column(c).is_some_and(|f| f.auto));
+        let generated = cols.iter().any(|c| {
+            model.field_by_column(c).is_some_and(|f| f.auto) && !bound.contains(c)
+        });
         generated || (cols.len() == target.len() && cols.iter().all(|c| target.contains(c)))
     };
     let pk: Vec<&str> = model
@@ -1103,7 +1105,7 @@ mod tests {
         );
         let mut sql = String::new();
         MySql
-            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, model, &[], &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(
             sql,
@@ -1123,6 +1125,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec![],
                     update_columns: vec!["a"],
@@ -1145,7 +1148,7 @@ mod tests {
         );
         let mut sql = String::new();
         MySql
-            .write_conflict_clause(&mut sql, model, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, model, &[], &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(
             sql,
@@ -1161,6 +1164,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec![],
                     update_columns: vec!["a", "b"],
@@ -1182,6 +1186,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 model,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec!["id"],
                     update_columns: vec!["a"],
@@ -1189,6 +1194,47 @@ mod tests {
             )
             .expect("no other unique key, so the target is accepted");
         assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
+    }
+
+    /// rel-0608 correctness-003: a bound `Auto` PK can clash like any key.
+    #[test]
+    fn conflict_do_update_refuses_a_bound_auto_pk() {
+        use crate::core::{InsertQuery, SqlValue};
+        let base = with_pk(
+            empty_model_with(
+                "acct",
+                &[("id", FieldType::I64), ("email", FieldType::String)],
+            ),
+            "id",
+            true,
+        );
+        let fields: Vec<crate::core::FieldSchema> = base
+            .fields
+            .iter()
+            .map(|f| crate::core::FieldSchema {
+                unique: f.column == "email",
+                ..*f
+            })
+            .collect();
+        let model: &'static crate::core::ModelSchema = Box::leak(Box::new(crate::core::ModelSchema {
+            fields: Box::leak(fields.into_boxed_slice()),
+            ..*base
+        }));
+        let upsert = |columns: Vec<&'static str>, values| {
+            InsertQuery::new(model, columns, values).on_conflict(ConflictClause::DoUpdate {
+                target: vec!["email"],
+                update_columns: vec!["email"],
+            })
+        };
+        let email = || SqlValue::String("a@x".into());
+        MySql
+            .compile_insert(&upsert(vec!["email"], vec![email()]))
+            .expect("an omitted Auto PK is generated, so it never clashes");
+        let bound = MySql.compile_insert(&upsert(vec!["id", "email"], vec![SqlValue::I64(5), email()]));
+        assert!(
+            matches!(bound, Err(SqlError::ConflictNotSupportedInDialect { .. })),
+            "{bound:?}"
+        );
     }
 
     #[test]

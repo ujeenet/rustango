@@ -1545,7 +1545,7 @@ pub(super) fn write_insert_rows(b: &mut Sql<'_>, query: &InsertQuery) -> Result<
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, conflict)?;
+        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
     }
     Ok(())
 }
@@ -1627,7 +1627,7 @@ pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Res
     }
 
     if let Some(conflict) = &query.on_conflict {
-        b.d.write_conflict_clause(&mut b.sql, query.model, conflict)?;
+        b.d.write_conflict_clause(&mut b.sql, query.model, &query.columns, conflict)?;
     }
 
     write_returning(b, &query.returning)?;

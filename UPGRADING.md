@@ -154,6 +154,10 @@ untouched.
 
 On MySQL, `ConflictClause::DoUpdate` / `bulk_upsert_pool` now return `SqlError::ConflictNotSupportedInDialect` when the model has another unique key (PK, `unique`, unique index) without an `Auto` column. Upsert on that key, or split the write.
 
+### `Dialect::write_conflict_clause` takes the insert's columns (rel-0608)
+
+A custom `Dialect` adds a `columns: &[&str]` argument after `model`. On MySQL, a `DoUpdate` insert that binds an `Auto` PK now counts the PK as a key that can clash, so a target other than the PK is refused.
+
 ## 0.60.7
 
 ### API keys are keyed by the session secret (#2617)

@@ -502,6 +502,7 @@ impl Dialect for Sqlite {
         &self,
         sql: &mut String,
         _model: &ModelSchema,
+        _columns: &[&str],
         conflict: &ConflictClause,
     ) -> Result<(), SqlError> {
         match conflict {
@@ -712,7 +713,7 @@ mod tests {
     fn conflict_clause_do_nothing() {
         let mut sql = String::new();
         Sqlite
-            .write_conflict_clause(&mut sql, &MODEL, &ConflictClause::DoNothing)
+            .write_conflict_clause(&mut sql, &MODEL, &[], &ConflictClause::DoNothing)
             .unwrap();
         assert_eq!(sql, " ON CONFLICT DO NOTHING");
     }
@@ -724,6 +725,7 @@ mod tests {
             .write_conflict_clause(
                 &mut sql,
                 &MODEL,
+                &[],
                 &ConflictClause::DoUpdate {
                     target: vec!["user_id", "codename"],
                     update_columns: vec!["granted"],
