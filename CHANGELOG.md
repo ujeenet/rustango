@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL (#1398)
+
+A JSON `null` literal matched nothing, and objects compared as text, so key order mattered. They now compare by value; arrays keep their order.
+
 ### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
 
 `docs/orm.md` and the `PoolConn` docs say to pass the held connection to every query in the handler.

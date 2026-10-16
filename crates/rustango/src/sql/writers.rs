@@ -2077,28 +2077,9 @@ fn write_json_path(
     as_text: bool,
 ) -> Result<(), SqlError> {
     use crate::core::{JsonPathStep, SqlValue};
-    if path.is_empty() {
-        return Err(SqlError::OpNotSupportedInDialect {
-            op: "JsonPath requires at least one path step",
-            dialect: b.d.name(),
-        });
-    }
-    // MySQL and SQLite inline the key, so it must be safe. PG binds
-    // it, but use the same rule everywhere.
-    let key_safe =
-        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    for step in path {
-        if let JsonPathStep::Key(k) = step {
-            if !key_safe(k) {
-                return Err(SqlError::OpNotSupportedInDialect {
-                    op: "JsonPath key contains characters outside the safe set [A-Za-z0-9_]",
-                    dialect: b.d.name(),
-                });
-            }
-        }
-    }
     let dialect = b.d.name();
     if dialect == "postgres" {
+        check_json_path(path, dialect)?;
         // Chained `->` … `->>`. PG counts a negative index from the
         // end on its own.
         write_expr(b, source, None)?;
@@ -2122,36 +2103,7 @@ fn write_json_path(
         }
         return Ok(());
     }
-    // MySQL and SQLite: build a `$.<k>.<k>[<n>]` path string.
-    let mut json_path = String::from("$");
-    for step in path {
-        match step {
-            JsonPathStep::Key(k) => {
-                json_path.push('.');
-                json_path.push_str(k);
-            }
-            JsonPathStep::Index(n) => {
-                if *n < 0 {
-                    // SQLite 3.31+ counts from the end with `$[#-1]`.
-                    // MySQL's path grammar has no negative form.
-                    if dialect == "sqlite" {
-                        json_path.push_str("[#");
-                        json_path.push_str(&n.to_string());
-                        json_path.push(']');
-                    } else {
-                        return Err(SqlError::OpNotSupportedInDialect {
-                            op: "JsonPath negative indices are unsupported on MySQL (the $[N] path grammar has no negative form; PG + SQLite support them)",
-                            dialect,
-                        });
-                    }
-                } else {
-                    json_path.push('[');
-                    json_path.push_str(&n.to_string());
-                    json_path.push(']');
-                }
-            }
-        }
-    }
+    let json_path = json_path_text(path, dialect)?;
     if dialect == "mysql" {
         if as_text {
             // A JSON null reads as SQL NULL, as PG's `->>` gives.
@@ -2191,6 +2143,130 @@ fn write_json_path(
     b.sql.push_str(&json_path);
     b.sql.push_str("')");
     Ok(())
+}
+
+/// Refuse an empty path or an unsafe key. MySQL and SQLite inline the
+/// key, so it must be safe; PG binds it but uses the same rule.
+fn check_json_path(
+    path: &[crate::core::JsonPathStep],
+    dialect: &'static str,
+) -> Result<(), SqlError> {
+    use crate::core::JsonPathStep;
+    if path.is_empty() {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "JsonPath requires at least one path step",
+            dialect,
+        });
+    }
+    let key_safe =
+        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    for step in path {
+        if let JsonPathStep::Key(k) = step {
+            if !key_safe(k) {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "JsonPath key contains characters outside the safe set [A-Za-z0-9_]",
+                    dialect,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The checked MySQL / SQLite `$.<k>.<k>[<n>]` path string.
+fn json_path_text(
+    path: &[crate::core::JsonPathStep],
+    dialect: &'static str,
+) -> Result<String, SqlError> {
+    use crate::core::JsonPathStep;
+    check_json_path(path, dialect)?;
+    let mut json_path = String::from("$");
+    for step in path {
+        match step {
+            JsonPathStep::Key(k) => {
+                json_path.push('.');
+                json_path.push_str(k);
+            }
+            JsonPathStep::Index(n) => {
+                if *n < 0 {
+                    // SQLite 3.31+ counts from the end with `$[#-1]`.
+                    // MySQL's path grammar has no negative form.
+                    if dialect == "sqlite" {
+                        json_path.push_str("[#");
+                        json_path.push_str(&n.to_string());
+                        json_path.push(']');
+                    } else {
+                        return Err(SqlError::OpNotSupportedInDialect {
+                            op: "JsonPath negative indices are unsupported on MySQL (the $[N] path grammar has no negative form; PG + SQLite support them)",
+                            dialect,
+                        });
+                    }
+                } else {
+                    json_path.push('[');
+                    json_path.push_str(&n.to_string());
+                    json_path.push(']');
+                }
+            }
+        }
+    }
+    Ok(json_path)
+}
+
+/// SQLite `json_path = <JSON null, object or array>` by value, as PG's
+/// `jsonb` compares: `json_extract` gives NULL for a JSON null and the
+/// stored text for an object, key order included (#1398). `Ok(false)`
+/// when the comparison is not one of those.
+fn write_sqlite_json_value_eq(
+    b: &mut Sql<'_>,
+    lhs: &crate::core::Expr,
+    op: Op,
+    rhs: &crate::core::Expr,
+) -> Result<bool, SqlError> {
+    use crate::core::Expr;
+    let (
+        Expr::JsonPath {
+            source,
+            path,
+            as_text: false,
+        },
+        Expr::Literal(SqlValue::Json(v)),
+        Op::Eq | Op::Ne,
+        "sqlite",
+    ) = (lhs, rhs, op, b.d.name())
+    else {
+        return Ok(false);
+    };
+    if !(v.is_null() || v.is_object() || v.is_array()) {
+        return Ok(false);
+    }
+    let p = json_path_text(path, "sqlite")?;
+    let ne = matches!(op, Op::Ne);
+    if !v.is_null() {
+        b.sql.push('(');
+    }
+    b.sql.push_str("json_type(");
+    write_expr(b, source, None)?;
+    if v.is_null() {
+        b.sql.push_str(&format!(", '{p}') "));
+        b.sql.push_str(if ne { "<> 'null'" } else { "= 'null'" });
+        return Ok(true);
+    }
+    // Same (relative key, type, atom) rows both ways; arrays keep order.
+    let col = format!("SELECT substr(fullkey, {}), type, atom FROM json_tree(", p.len() + 1);
+    let lit = "SELECT substr(fullkey, 2), type, atom FROM json_tree(";
+    b.sql.push_str(&format!(", '{p}') IS NOT NULL AND "));
+    b.sql.push_str(if ne { "NOT (" } else { "(" });
+    b.sql.push_str("NOT EXISTS (");
+    b.sql.push_str(&col);
+    write_expr(b, source, None)?;
+    b.sql.push_str(&format!(", '{p}') EXCEPT {lit}"));
+    b.push_param(SqlValue::Json(v.clone()));
+    b.sql.push_str(&format!(")) AND NOT EXISTS ({lit}"));
+    b.push_param(SqlValue::Json(v.clone()));
+    b.sql.push_str(&format!(") EXCEPT {col}"));
+    write_expr(b, source, None)?;
+    b.sql.push_str(&format!(", '{p}'))))"));
+    Ok(true)
 }
 
 /// Emit `<fn>(args) OVER (PARTITION BY … ORDER BY … [frame])`. This
@@ -4104,6 +4180,9 @@ fn write_expr_compare(
         Op::Gte => Some(" >= "),
         _ => None,
     };
+    if write_sqlite_json_value_eq(b, lhs, op, rhs)? {
+        return Ok(());
+    }
     if let Some(kw) = binary_op_str {
         write_expr(b, lhs, None)?;
         b.sql.push_str(kw);

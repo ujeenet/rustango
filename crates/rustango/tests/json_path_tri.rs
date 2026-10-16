@@ -235,9 +235,37 @@ async fn json_path_equals_a_json_scalar(pool: &Pool) {
     }
 }
 
+/// #1398: SQLite matched no JSON null and compared objects as text.
+async fn json_path_equals_null_and_reordered_object(pool: &Pool) {
+    for data in [
+        serde_json::json!({"z": null, "o": {"a": 1, "b": [1, 2]}}),
+        serde_json::json!({"o": {"a": 1}}),
+    ] {
+        Demo {
+            id: Auto::Unset,
+            data,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("seed");
+    }
+    let json = |v: serde_json::Value| SqlValue::Json(v);
+    let null = || json(serde_json::Value::Null);
+    assert_eq!(count_path(pool, "z", false, Op::Eq, null()).await, 1, "= null");
+    assert_eq!(count_path(pool, "z", false, Op::Ne, null()).await, 0, "<> null");
+    let reordered = || json(serde_json::json!({"b": [1, 2], "a": 1}));
+    assert_eq!(count_path(pool, "o", false, Op::Eq, reordered()).await, 1, "key order");
+    assert_eq!(count_path(pool, "o", false, Op::Ne, reordered()).await, 1, "<> object");
+    let swapped = json(serde_json::json!({"a": 1, "b": [2, 1]}));
+    assert_eq!(count_path(pool, "o", false, Op::Eq, swapped).await, 0, "array order");
+    let empty = json(serde_json::json!({}));
+    assert_eq!(count_path(pool, "o", false, Op::Eq, empty).await, 0, "empty object");
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
+        json_path_equals_null_and_reordered_object,
         json_as_text_compares_with_a_number,
         json_path_equals_a_json_scalar,
         a_single_key_path_executes,

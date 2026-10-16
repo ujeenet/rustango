@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### SQLite JSON-path equality with null or an object (#1398)
+
+`json_path(..) = Json(null)` now matches stored JSON nulls, and object literals match whatever their key order. Such filters return more rows on SQLite than before; they no longer use an index on `json_extract`.
+
 ### Session state on a `PoolConn` reaches the next borrower (#1397)
 
 Nothing resets it on release. If you `SET` anything on a held connection, call `conn.close_on_drop()` before dropping it.
