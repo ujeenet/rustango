@@ -772,7 +772,12 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
             // the server keeps the transaction open by default (innodb_rollback_on_timeout=OFF).
             let lock = || Note::objects().filter("id", 5_i64).select_for_update();
             lock().fetch_on(&mut held).await?;
-            raw_execute_tx(&mut guard, "SET SESSION innodb_lock_wait_timeout = 1", vec![]).await?;
+            raw_execute_tx(
+                &mut guard,
+                "SET SESSION innodb_lock_wait_timeout = 1",
+                vec![],
+            )
+            .await?;
             let timed_out = lock().fetch_on(&mut *guard).await;
             assert!(
                 matches!(timed_out, Err(ExecError::Driver(_))),
@@ -809,9 +814,18 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         };
         assert!(refused);
         let count = Note::objects().count_on(&mut *guard).await;
-        assert!(matches!(count, Err(ExecError::AtomicAborted)), "got {count:?}");
-        let values = Note::objects().values_list(&["id"]).fetch_on(&mut *guard).await;
-        assert!(matches!(values, Err(ExecError::AtomicAborted)), "got {values:?}");
+        assert!(
+            matches!(count, Err(ExecError::AtomicAborted)),
+            "got {count:?}"
+        );
+        let values = Note::objects()
+            .values_list(&["id"])
+            .fetch_on(&mut *guard)
+            .await;
+        assert!(
+            matches!(values, Err(ExecError::AtomicAborted)),
+            "got {values:?}"
+        );
         Ok(())
     }))
     .await;

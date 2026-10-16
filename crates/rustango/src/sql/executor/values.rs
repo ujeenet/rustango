@@ -115,7 +115,13 @@ async fn fetch_values_dict_on<'c, E: SqlExecutor<'c>>(
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_select(query)?;
     let mut reader = RowReader::new(|| select_model_cols(query), values_width(query));
-    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.dict(row))).await
+    run_on(
+        exec,
+        &stmt.sql,
+        stmt.params,
+        move |row| Ok(reader.dict(row)),
+    )
+    .await
 }
 
 /// [`fetch_values_dict`] for an [`AggregateQuery`]: each row comes
@@ -141,7 +147,13 @@ pub(super) async fn fetch_aggregate_dict_on<'c, E: SqlExecutor<'c>>(
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_aggregate(query)?;
     let mut reader = RowReader::new(|| aggregate_cols(query), usize::MAX);
-    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.dict(row))).await
+    run_on(
+        exec,
+        &stmt.sql,
+        stmt.params,
+        move |row| Ok(reader.dict(row)),
+    )
+    .await
 }
 
 /// Run a [`SelectQuery`] with a projection and return each row as a
@@ -163,7 +175,13 @@ async fn fetch_values_list_on<'c, E: SqlExecutor<'c>>(
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let stmt = exec.dialect().compile_select(query)?;
     let mut reader = RowReader::new(|| select_model_cols(query), values_width(query));
-    run_on(exec, &stmt.sql, stmt.params, move |row| Ok(reader.list(row))).await
+    run_on(
+        exec,
+        &stmt.sql,
+        stmt.params,
+        move |row| Ok(reader.list(row)),
+    )
+    .await
 }
 
 /// The bound `.values_list_flat::<U>(…)` needs on Postgres. With the

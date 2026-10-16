@@ -2400,7 +2400,8 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 out.rust_filled_idents.push(ident.clone());
             }
             if info.default_uuid_v7 {
-                out.uuid_v7_fields.push((ident.clone(), info.column.clone()));
+                out.uuid_v7_fields
+                    .push((ident.clone(), info.column.clone()));
             }
             let rust_fill = if info.default_uuid_v7 {
                 Some(quote!(#root::__uuid::Uuid::now_v7()))
@@ -6622,7 +6623,8 @@ fn inherent_impl_tokens(
         let upsert_cols = &fields.upsert_update_columns;
         let upsert_pushes = &fields.insert_pushes;
         // Read before the pushes, which fill each unset id.
-        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) = fields.uuid_v7_fields.iter().cloned().unzip();
+        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
+            fields.uuid_v7_fields.iter().cloned().unzip();
         let upsert_returning = &fields.returning_cols;
         let upsert_auto_assigns = &fields.auto_assigns;
         // Conflict target: prefer the first declared `unique_together`
@@ -7501,7 +7503,8 @@ fn inherent_impl_tokens(
         },
     };
     let bulk_upsert_pool_method = {
-        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) = fields.uuid_v7_fields.iter().cloned().unzip();
+        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
+            fields.uuid_v7_fields.iter().cloned().unzip();
         // Pick the "no Auto" columns when the model has Auto fields,
         // else every column.
         let (upsert_cols, upsert_pushes): (Vec<_>, Vec<_>) = if fields.has_auto {

@@ -1218,10 +1218,11 @@ mod tests {
                 ..*f
             })
             .collect();
-        let model: &'static crate::core::ModelSchema = Box::leak(Box::new(crate::core::ModelSchema {
-            fields: Box::leak(fields.into_boxed_slice()),
-            ..*base
-        }));
+        let model: &'static crate::core::ModelSchema =
+            Box::leak(Box::new(crate::core::ModelSchema {
+                fields: Box::leak(fields.into_boxed_slice()),
+                ..*base
+            }));
         let upsert = |columns: Vec<&'static str>, values| {
             InsertQuery::new(model, columns, values).on_conflict(ConflictClause::DoUpdate {
                 target: vec!["email"],
@@ -1232,7 +1233,10 @@ mod tests {
         MySql
             .compile_insert(&upsert(vec!["email"], vec![email()]))
             .expect("an omitted Auto PK is generated, so it never clashes");
-        let bound = MySql.compile_insert(&upsert(vec!["id", "email"], vec![SqlValue::I64(5), email()]));
+        let bound = MySql.compile_insert(&upsert(
+            vec!["id", "email"],
+            vec![SqlValue::I64(5), email()],
+        ));
         assert!(
             matches!(bound, Err(SqlError::ConflictNotSupportedInDialect { .. })),
             "{bound:?}"
@@ -1259,14 +1263,18 @@ mod tests {
                 ..*f
             })
             .collect();
-        let model: &'static crate::core::ModelSchema = Box::leak(Box::new(crate::core::ModelSchema {
-            fields: Box::leak(fields.into_boxed_slice()),
-            ..*base
-        }));
+        let model: &'static crate::core::ModelSchema =
+            Box::leak(Box::new(crate::core::ModelSchema {
+                fields: Box::leak(fields.into_boxed_slice()),
+                ..*base
+            }));
         let q = InsertQuery::new(
             model,
             vec!["id", "name"],
-            vec![SqlValue::Uuid(uuid::Uuid::nil()), SqlValue::String("a".into())],
+            vec![
+                SqlValue::Uuid(uuid::Uuid::nil()),
+                SqlValue::String("a".into()),
+            ],
         )
         .on_conflict(ConflictClause::DoUpdate {
             target: vec!["name"],

@@ -2750,7 +2750,11 @@ async fn pg_table_exists(
 
 /// The ledger insert and tombstone delete of a fake apply, for `name`: a
 /// placeholder when run, a literal when previewed.
-fn fake_statements(dialect: &dyn crate::sql::Dialect, ledger: &str, name: &str) -> (String, String) {
+fn fake_statements(
+    dialect: &dyn crate::sql::Dialect,
+    ledger: &str,
+    name: &str,
+) -> (String, String) {
     let table = dialect.quote_ident(ledger);
     let name_col = dialect.quote_ident("name");
     let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);

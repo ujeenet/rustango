@@ -61,7 +61,10 @@ async fn fetch_decodes_each_row_before_the_next_arrives() {
         .fetch(&pool)
         .await;
     assert!(
-        matches!(res, Err(ExecError::Driver(sqlx::Error::ColumnDecode { .. }))),
+        matches!(
+            res,
+            Err(ExecError::Driver(sqlx::Error::ColumnDecode { .. }))
+        ),
         "row 1's decode error must win over row 2's overflow: {res:?}"
     );
 }

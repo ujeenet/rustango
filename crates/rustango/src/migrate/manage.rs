@@ -1329,7 +1329,11 @@ fn chain_lines<W: Write>(
     let per_tenant: Vec<Vec<S>> = tenants
         .unwrap_or_default()
         .iter()
-        .map(|(_, done)| runner::migration_states(all, done).map(|(_, s)| s).collect())
+        .map(|(_, done)| {
+            runner::migration_states(all, done)
+                .map(|(_, s)| s)
+                .collect()
+        })
         .collect();
     for (i, (m, state)) in runner::migration_states(all, applied).enumerate() {
         if !shown(m) {
@@ -7317,9 +7321,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                                 "nullable": false, "primary_key": true}]}]
             }))
             .unwrap(),
-            forward: vec![Operation::Schema(
-                super::super::SchemaChange::CreateTable(table.into()),
-            )],
+            forward: vec![Operation::Schema(super::super::SchemaChange::CreateTable(
+                table.into(),
+            ))],
         }
     }
 
@@ -7344,7 +7348,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let out = out.unwrap();
         assert!(out.contains("not on disk yet"), "{out}");
 
-        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
         let step = file::list_dir(&root.path().join("system").join("migrations"))
             .unwrap()
             .into_iter()
@@ -7376,7 +7382,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let dir = root.path().join("migrations");
         std::fs::create_dir_all(&dir).unwrap();
         let scratch = Pool::connect("sqlite::memory:").await.unwrap();
-        manage_out(&scratch, &dir, &["migrate"]).await.expect("migrate");
+        manage_out(&scratch, &dir, &["migrate"])
+            .await
+            .expect("migrate");
         let table = file::list_dir(&root.path().join("system").join("migrations"))
             .unwrap()
             .into_iter()
@@ -7390,7 +7398,11 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 })
             })
             .expect("a system table");
-        file::write(&dir.join("0001_own.json"), &create_mig("0001_own", None, &table)).unwrap();
+        file::write(
+            &dir.join("0001_own.json"),
+            &create_mig("0001_own", None, &table),
+        )
+        .unwrap();
 
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await;
@@ -7413,7 +7425,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         std::fs::create_dir_all(&dir).unwrap();
         let first = create_mig("0001_a", None, "sq1311_a");
         file::write(&dir.join("0001_a.json"), &first).unwrap();
-        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
+        manage_out(&pool, &dir, &["migrate"])
+            .await
+            .expect("migrate");
         let mut squash = create_mig("0002_sq", Some("0001_a"), "sq1311_a");
         squash.replaces = vec!["0001_a".into()];
         file::write(&dir.join("0002_sq.json"), &squash).unwrap();

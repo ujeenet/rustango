@@ -91,7 +91,10 @@ async fn drop_idle_then_query(pool: &Pool) {
     kill_idle(&fresh, pool).await;
     past_threshold().await;
     let alive = raw_execute_pool(&fresh, "SELECT 1", vec![]).await;
-    assert!(alive.is_ok(), "the dead idle connection was handed out: {alive:?}");
+    assert!(
+        alive.is_ok(),
+        "the dead idle connection was handed out: {alive:?}"
+    );
 }
 
 /// Kill, server-side via `pool`, the one connection `fresh` keeps idle,
@@ -118,7 +121,10 @@ async fn kill_idle(fresh: &Pool, pool: &Pool) {
             wait_idle!(f);
             let kill = format!("SELECT pg_terminate_backend({id})");
             p.execute(sqlx::raw_sql(&kill)).await.expect("kill");
-            (id.into(), format!("SELECT COUNT(*) FROM pg_stat_activity WHERE pid = {id}"))
+            (
+                id.into(),
+                format!("SELECT COUNT(*) FROM pg_stat_activity WHERE pid = {id}"),
+            )
         }
         #[cfg(feature = "mysql")]
         (Pool::Mysql(f), Pool::Mysql(p)) => {
@@ -127,8 +133,11 @@ async fn kill_idle(fresh: &Pool, pool: &Pool) {
                 .await
                 .unwrap();
             wait_idle!(f);
-            p.execute(sqlx::raw_sql(&format!("KILL {id}"))).await.expect("kill");
-            let listed = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
+            p.execute(sqlx::raw_sql(&format!("KILL {id}")))
+                .await
+                .expect("kill");
+            let listed =
+                format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
             (i64::try_from(id).unwrap(), listed)
         }
         #[allow(unreachable_patterns)]

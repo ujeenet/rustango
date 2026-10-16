@@ -1153,7 +1153,12 @@ fn bytes_app(cache: Arc<Counting>, hits: Arc<AtomicU32>) -> Router {
             "/bin",
             get(move || {
                 hits.fetch_add(1, Ordering::SeqCst);
-                async { ([(header::CONTENT_TYPE, "application/octet-stream")], vec![0xff_u8, 0, 0xfe]) }
+                async {
+                    (
+                        [(header::CONTENT_TYPE, "application/octet-stream")],
+                        vec![0xff_u8, 0, 0xfe],
+                    )
+                }
             }),
         )
         .layer(CachePageLayer::new(cache).tenant_agnostic(true))
@@ -1169,12 +1174,19 @@ async fn pages_use_the_bytes_api_only() {
     for want in ["MISS", "HIT"] {
         let resp = app.clone().oneshot(get_req("/bin", &[])).await.unwrap();
         assert_eq!(cache_status(&resp), Some(want));
-        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/octet-stream");
+        assert_eq!(
+            resp.headers()[header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], &[0xff, 0, 0xfe]);
     }
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert_eq!(cache.text_calls.load(Ordering::SeqCst), 0, "no String get/set");
+    assert_eq!(
+        cache.text_calls.load(Ordering::SeqCst),
+        0,
+        "no String get/set"
+    );
     assert_eq!(cache.bytes_calls.load(Ordering::SeqCst), 3, "get, set, get");
 }
 

@@ -171,7 +171,11 @@ where
     U: Send + 'e,
     F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
 {
-    let rows = exec.fetch(params.into_iter().fold(sqlx::query(sql), super::bind_query_my));
+    let rows = exec.fetch(
+        params
+            .into_iter()
+            .fold(sqlx::query(sql), super::bind_query_my),
+    );
     Box::pin(drain(rows, move |r| decode(RowRef::Mysql(r))))
 }
 

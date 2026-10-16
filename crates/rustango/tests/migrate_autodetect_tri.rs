@@ -2150,7 +2150,10 @@ async fn dry_run_follows_a_squash(pool: &Pool) {
     let plan = dry_run(pool, chain.dir.path(), &chain.ledger)
         .await
         .expect("dry-run");
-    assert!(plan.is_empty(), "a replaced file previewed as pending: {plan:?}");
+    assert!(
+        plan.is_empty(),
+        "a replaced file previewed as pending: {plan:?}"
+    );
 }
 
 // ---------------------------------------------------------------- #1676

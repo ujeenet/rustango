@@ -73,29 +73,63 @@ fn by_id() -> QuerySet<Author> {
 async fn on_conn_matches_pool(pool: &Pool) {
     let mut conn = pool.acquire().await.expect("acquire");
     let c = &mut conn;
-    assert_eq!(by_id().fetch_on(&mut *c).await.unwrap(), by_id().fetch(pool).await.unwrap());
+    assert_eq!(
+        by_id().fetch_on(&mut *c).await.unwrap(),
+        by_id().fetch(pool).await.unwrap()
+    );
     assert_eq!(by_id().fetch_on(pool).await.unwrap().len(), 2);
     assert_eq!(by_id().count_on(&mut *c).await.unwrap(), 2);
     assert!(by_id().exists_on(&mut *c).await.unwrap());
-    assert!(!by_id().filter("id", 9_i64).exists_on(&mut *c).await.unwrap());
-    assert_eq!(by_id().first_on(&mut *c).await.unwrap().map(|a| a.name), Some("Ada".into()));
+    assert!(!by_id()
+        .filter("id", 9_i64)
+        .exists_on(&mut *c)
+        .await
+        .unwrap());
     assert_eq!(
-        by_id().values_dict(&["name"]).fetch_on(&mut *c).await.unwrap(),
+        by_id().first_on(&mut *c).await.unwrap().map(|a| a.name),
+        Some("Ada".into())
+    );
+    assert_eq!(
+        by_id()
+            .values_dict(&["name"])
+            .fetch_on(&mut *c)
+            .await
+            .unwrap(),
         by_id().values_dict(&["name"]).fetch(pool).await.unwrap()
     );
     assert_eq!(
-        by_id().values_list(&["id", "name"]).fetch_on(&mut *c).await.unwrap(),
-        by_id().values_list(&["id", "name"]).fetch(pool).await.unwrap()
+        by_id()
+            .values_list(&["id", "name"])
+            .fetch_on(&mut *c)
+            .await
+            .unwrap(),
+        by_id()
+            .values_list(&["id", "name"])
+            .fetch(pool)
+            .await
+            .unwrap()
     );
     assert_eq!(
-        by_id().values_list_flat("name").fetch_on::<String>(&mut *c).await.unwrap(),
+        by_id()
+            .values_list_flat("name")
+            .fetch_on::<String>(&mut *c)
+            .await
+            .unwrap(),
         ["Ada", "Bob"]
     );
     assert_eq!(
-        by_id().values_list_flat("name").first_on::<String>(&mut *c).await.unwrap(),
+        by_id()
+            .values_list_flat("name")
+            .first_on::<String>(&mut *c)
+            .await
+            .unwrap(),
         Some("Ada".into())
     );
-    let agg = || Author::objects().aggregate().annotate("n", AggregateExpr::Count(None));
+    let agg = || {
+        Author::objects()
+            .aggregate()
+            .annotate("n", AggregateExpr::Count(None))
+    };
     assert_eq!(
         agg().fetch_on(&mut *c).await.unwrap(),
         agg().fetch(pool).await.unwrap()
@@ -122,15 +156,29 @@ async fn queries_run_on_the_held_session(pool: &Pool) {
     assert_eq!(by_id().count_on(&mut *c).await.unwrap(), 0);
     assert!(!by_id().exists_on(&mut *c).await.unwrap());
     assert_eq!(by_id().first_on(&mut *c).await.unwrap(), None);
-    assert!(by_id().values_dict(&["name"]).fetch_on(&mut *c).await.unwrap().is_empty());
-    assert!(by_id().values_list(&["name"]).fetch_on(&mut *c).await.unwrap().is_empty());
+    assert!(by_id()
+        .values_dict(&["name"])
+        .fetch_on(&mut *c)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(by_id()
+        .values_list(&["name"])
+        .fetch_on(&mut *c)
+        .await
+        .unwrap()
+        .is_empty());
     assert!(by_id()
         .values_list_flat("name")
         .fetch_on::<String>(&mut *c)
         .await
         .unwrap()
         .is_empty());
-    let agg = || Author::objects().aggregate().annotate("n", AggregateExpr::Count(None));
+    let agg = || {
+        Author::objects()
+            .aggregate()
+            .annotate("n", AggregateExpr::Count(None))
+    };
     assert!(agg().fetch_on(&mut *c).await.unwrap().is_empty());
     assert!(!agg().fetch(pool).await.unwrap().is_empty());
     assert_eq!(by_id().count(pool).await.unwrap(), 2);
@@ -149,7 +197,11 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
     assert_eq!(by_id().count_on(&mut tx).await.unwrap(), 3);
     assert_eq!(by_id().fetch_on(&mut tx).await.unwrap().len(), 3);
     assert_eq!(
-        by_id().values_list_flat("name").fetch_on::<String>(&mut tx).await.unwrap(),
+        by_id()
+            .values_list_flat("name")
+            .fetch_on::<String>(&mut tx)
+            .await
+            .unwrap(),
         ["Ada", "Bob", "Cy"]
     );
     tx.rollback().await.expect("rollback");
@@ -158,7 +210,11 @@ async fn on_tx_sees_its_writes(pool: &Pool) {
 
     let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
     cy.insert_tx(&mut tx).await.expect("insert");
-    assert!(by_id().filter("id", 3_i64).exists_on(&mut tx).await.unwrap());
+    assert!(by_id()
+        .filter("id", 3_i64)
+        .exists_on(&mut tx)
+        .await
+        .unwrap());
     tx.rollback().await.expect("rollback");
 }
 

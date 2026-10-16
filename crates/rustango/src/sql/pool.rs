@@ -1043,13 +1043,21 @@ mod tuning_tests {
             test_before_acquire: true,
             ..PoolTuning::default()
         };
-        for (raw, want) in [("off", false), ("0", false), ("FALSE", false), ("junk", true)] {
+        for (raw, want) in [
+            ("off", false),
+            ("0", false),
+            ("FALSE", false),
+            ("junk", true),
+        ] {
             std::env::set_var(TEST_BEFORE_ACQUIRE_ENV, raw);
             assert_eq!(merge_env_over(on).test_before_acquire, want, "{raw:?}");
         }
         for raw in ["true", "1", "on", "yes"] {
             std::env::set_var(TEST_BEFORE_ACQUIRE_ENV, raw);
-            assert!(merge_env_over(PoolTuning::default()).test_before_acquire, "{raw:?}");
+            assert!(
+                merge_env_over(PoolTuning::default()).test_before_acquire,
+                "{raw:?}"
+            );
         }
         clear();
     }
@@ -1142,19 +1150,35 @@ mod tuning_tests {
         let want = tuning().test_before_acquire;
         let mut seen = Vec::new();
         #[cfg(feature = "postgres")]
-        seen.push(Pool::connect_postgres_lazy("postgres://u@localhost:1/x").map(|p| {
-            let o = p.options();
-            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
-        }));
+        seen.push(
+            Pool::connect_postgres_lazy("postgres://u@localhost:1/x").map(|p| {
+                let o = p.options();
+                (
+                    o.get_test_before_acquire(),
+                    o.get_idle_timeout(),
+                    o.get_max_lifetime(),
+                )
+            }),
+        );
         #[cfg(feature = "mysql")]
-        seen.push(Pool::connect_mysql_lazy("mysql://u@localhost:1/x").map(|p| {
-            let o = p.options();
-            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
-        }));
+        seen.push(
+            Pool::connect_mysql_lazy("mysql://u@localhost:1/x").map(|p| {
+                let o = p.options();
+                (
+                    o.get_test_before_acquire(),
+                    o.get_idle_timeout(),
+                    o.get_max_lifetime(),
+                )
+            }),
+        );
         #[cfg(feature = "sqlite")]
         seen.push(Pool::connect_sqlite_lazy("sqlite::memory:").map(|p| {
             let o = p.options();
-            (o.get_test_before_acquire(), o.get_idle_timeout(), o.get_max_lifetime())
+            (
+                o.get_test_before_acquire(),
+                o.get_idle_timeout(),
+                o.get_max_lifetime(),
+            )
         }));
         for got in seen {
             let (ping, idle, life) = got.expect("build a lazy pool");
@@ -1172,8 +1196,15 @@ mod tuning_tests {
             let pools = crate::tenancy::DatabasePools::<sqlx::Sqlite>::new(
                 crate::tenancy::BackendKind::Sqlite,
             );
-            let p = pools.build_pool("sqlite::memory:").await.expect("DatabasePools pool");
-            assert_eq!(p.options().get_test_before_acquire(), want, "DatabasePools pool");
+            let p = pools
+                .build_pool("sqlite::memory:")
+                .await
+                .expect("DatabasePools pool");
+            assert_eq!(
+                p.options().get_test_before_acquire(),
+                want,
+                "DatabasePools pool"
+            );
         }
         #[cfg(all(feature = "tenancy", feature = "postgres"))]
         {

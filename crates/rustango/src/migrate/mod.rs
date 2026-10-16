@@ -56,11 +56,11 @@ pub use make::{
 pub use manage::{append_data_op, make_data_migration};
 pub use progress::{MigrationEvent, MigrationObserver, Outcome};
 pub use rebuild::TableRebuild;
+pub use runner::migrate_dry_run_pool_with_ledger;
 #[cfg(all(feature = "postgres", any(feature = "manage", feature = "tenancy")))]
 pub(crate) use runner::migrate_locked;
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 pub(crate) use runner::migrate_pool_locked;
-pub use runner::migrate_dry_run_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
@@ -68,11 +68,11 @@ pub use runner::migrate_pool_with_progress;
 // Ungated like the fn itself: a caller list here drifts from the callers' gates.
 #[allow(unused_imports)]
 pub(crate) use runner::try_table_exists_here;
-#[cfg(feature = "tenancy")]
-pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
 #[cfg(all(feature = "tenancy", feature = "media", feature = "postgres"))]
 pub(crate) use runner::try_table_exists_in_schema;
 pub use runner::unapply_pool_with_ledger;
+#[cfg(feature = "tenancy")]
+pub(crate) use runner::{applied_or_empty, SYSTEM_LEDGER_TABLE};
 pub use runner::{ensure_ledger_pool_with_ledger, render_changes_between};
 pub(crate) use runner::{LockHeld, Signals};
 // Always on: entry points that work on PG, MySQL and SQLite through the

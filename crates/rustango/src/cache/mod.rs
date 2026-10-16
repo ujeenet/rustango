@@ -872,7 +872,9 @@ impl Cache for InMemoryCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         self.get_bytes(key)
             .await?
-            .map(|b| String::from_utf8(b.into()).map_err(|e| CacheError::Serialization(e.to_string())))
+            .map(|b| {
+                String::from_utf8(b.into()).map_err(|e| CacheError::Serialization(e.to_string()))
+            })
             .transpose()
     }
 
@@ -1364,7 +1366,12 @@ impl FileCache {
         }
     }
 
-    fn add_entry(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+    fn add_entry(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         let path = self.key_path(key);
         let tmp = self.write_tmp(&Self::encode(key, value, ttl))?;
         let _lock = self.lock_for(&tmp, &path)?;
@@ -2147,7 +2154,10 @@ mod bytes_tests {
         c.set_bytes("t", b"text", None).await.unwrap();
         assert_eq!(c.get("t").await.unwrap().as_deref(), Some("text"));
         c.set("s", "abc", None).await.unwrap();
-        assert_eq!(c.get_bytes("s").await.unwrap().as_deref(), Some(&b"abc"[..]));
+        assert_eq!(
+            c.get_bytes("s").await.unwrap().as_deref(),
+            Some(&b"abc"[..])
+        );
         c.set_bytes("gone", RAW, Some(Duration::from_millis(5)))
             .await
             .unwrap();
@@ -2175,6 +2185,10 @@ mod bytes_tests {
         stores_raw_bytes(&scoped).await;
         scoped.set_bytes("p", b"plain", None).await.unwrap();
         let raw = inner.get(&format!("{}p", scoped.prefix())).await.unwrap();
-        assert_eq!(raw.as_deref(), Some("plain"), "inner must hold raw bytes, not base64");
+        assert_eq!(
+            raw.as_deref(),
+            Some("plain"),
+            "inner must hold raw bytes, not base64"
+        );
     }
 }

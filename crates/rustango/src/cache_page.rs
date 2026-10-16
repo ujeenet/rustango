@@ -869,7 +869,9 @@ impl CachedPage {
     fn decode(mut frame: bytes::Bytes) -> Result<Self, FrameError> {
         use bytes::Buf as _;
         fn need(frame: &bytes::Bytes, n: usize) -> Result<(), FrameError> {
-            (frame.len() >= n).then_some(()).ok_or(FrameError::Truncated)
+            (frame.len() >= n)
+                .then_some(())
+                .ok_or(FrameError::Truncated)
         }
         fn len(frame: &mut bytes::Bytes) -> Result<usize, FrameError> {
             need(frame, 4)?;
@@ -890,7 +892,8 @@ impl CachedPage {
         let count = len(&mut frame)?;
         let mut headers = HeaderMap::with_capacity(count.min(64));
         for _ in 0..count {
-            let name = HeaderName::from_bytes(&part(&mut frame)?).map_err(|_| FrameError::BadHeader)?;
+            let name =
+                HeaderName::from_bytes(&part(&mut frame)?).map_err(|_| FrameError::BadHeader)?;
             let value = HeaderValue::from_maybe_shared(part(&mut frame)?)
                 .map_err(|_| FrameError::BadHeader)?;
             // `append`, not `insert`, so duplicates are preserved.

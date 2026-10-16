@@ -280,9 +280,11 @@ pub(crate) fn split_userinfo_exact(url: &str) -> Result<Option<(&str, &str, &str
     };
     let end = rest.find(['?', '#']).unwrap_or(rest.len());
     if rest[end..].contains('@') {
-        return Err("the URL has an `@` after a `?` or `#`, so its userinfo is ambiguous: \
+        return Err(
+            "the URL has an `@` after a `?` or `#`, so its userinfo is ambiguous: \
              percent-encode `@`, `?` and `#` in the password and query (`%40`, `%3F`, `%23`)"
-            .to_owned());
+                .to_owned(),
+        );
     }
     Ok(rest[..end]
         .rfind('@')
