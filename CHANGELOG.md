@@ -16,6 +16,10 @@ A hit no longer parses JSON or decodes base64. New `Cache::get_bytes` / `set_byt
 
 `PoolConn` holds one pooled connection; `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `values_list` / `values_list_flat` / `aggregate` `fetch_on` take it (or a `PoolTx`) on every backend through the sealed `SqlExecutor` trait. `values` and `aggregate` reads now count in `assert_num_queries`.
 
+### Fixed — MySQL `dbshell` keeps URL options like `ssl-mode` (#1410)
+
+`ssl-mode`, `ssl-ca`, `ssl-cert`, `ssl-key`, `charset`, `socket`, `timezone` and `collation` become `mysql` client flags; any other option is refused with its name instead of being dropped.
+
 ### Fixed — `OuterRef` in a set-operation branch points at the enclosing query (#1409)
 
 It used to bind to the head branch, so the branch matched the wrong rows or failed with an unknown column.

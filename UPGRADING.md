@@ -162,6 +162,10 @@ untouched.
 
 Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
+### MySQL `dbshell` refuses unknown URL options (#1410)
+
+`manage dbshell` now fails on a MySQL `DATABASE_URL` option it cannot pass to the `mysql` client (anything but the sqlx ones); it used to drop them all, `ssl-mode` included.
+
 ### Tenant-user deactivation in the admin signs out (#1412)
 
 A user deactivated in the admin must sign in again after reactivation; old cookies and refresh tokens no longer come back.
