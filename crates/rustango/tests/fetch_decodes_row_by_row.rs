@@ -20,15 +20,14 @@ pub struct Loose {
     pub n: i64,
 }
 
-/// The same table, read with `b` required.
+/// The same table, read with `b` as an integer: text there fails to decode.
 #[derive(Model, Debug)]
 #[rustango(table = "fdr_item")]
 #[allow(dead_code)]
 pub struct Strict {
     #[rustango(primary_key)]
     pub id: i64,
-    #[rustango(max_length = 20)]
-    pub b: String,
+    pub b: i64,
     pub n: i64,
 }
 
@@ -43,12 +42,12 @@ async fn fetch_decodes_each_row_before_the_next_arrives() {
     );
     rustango::testkit::matrix::fresh_table::<Loose>(&pool).await;
     let rows = vec![
-        vec![SqlValue::I64(1), SqlValue::Null, SqlValue::I64(1)],
         vec![
-            SqlValue::I64(2),
+            SqlValue::I64(1),
             SqlValue::String("x".into()),
-            SqlValue::I64(i64::MIN),
+            SqlValue::I64(1),
         ],
+        vec![SqlValue::I64(2), SqlValue::Null, SqlValue::I64(i64::MIN)],
     ];
     let q = BulkInsertQuery::new(Loose::SCHEMA, vec!["id", "b", "n"], rows);
     rustango::sql::bulk_insert_pool(&pool, &q).await.unwrap();
@@ -59,7 +58,6 @@ async fn fetch_decodes_each_row_before_the_next_arrives() {
             op: Op::Gte,
             rhs: F("id").into(),
         })
-        .order_by(&[("id", false)])
         .fetch(&pool)
         .await;
     assert!(
