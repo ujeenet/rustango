@@ -41,16 +41,13 @@ use crate::core::SqlValue;
 // PG-typed surfaces below import these. Pulled in only when the
 // `postgres` feature is on; sqlite/mysql-only builds get just the
 // tri-dialect `get_pool` entry point further down.
-#[cfg(feature = "postgres")]
 use crate::core::{Model, Op};
-#[cfg(feature = "postgres")]
 use crate::query::QuerySet;
 #[cfg(feature = "postgres")]
 use sqlx::postgres::{PgPool, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::FromRow;
 
-#[cfg(feature = "postgres")]
 use super::ExecError;
 
 /// Lazy-loaded reference to a parent row. See module docs.
@@ -330,21 +327,32 @@ where
     pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
         self.get_on(pool).await
     }
+}
 
-    /// Like [`Self::get`] but accepts any sqlx executor — needed for
-    /// tenant-scoped lookups, where the calling connection has the
-    /// `search_path` already set and a fresh checkout from `&PgPool`
-    /// would land in the wrong schema.
-    ///
-    /// PG-only by design (`sqlx::Executor<Database = Postgres>`) —
-    /// schema-mode tenancy is a Postgres feature.
+impl<T, K> ForeignKey<T, K>
+where
+    T: Model
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + Send
+        + Unpin
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated,
+    K: Clone + Into<SqlValue> + Send + Sync + 'static,
+{
+    /// Resolve the parent row on a [`crate::sql::SqlExecutor`] and cache
+    /// it on the field, e.g. on a tenant connection whose `search_path`
+    /// is already set.
     ///
     /// # Errors
-    /// As [`Self::get`].
-    pub async fn get_on<'c, E>(&mut self, executor: E) -> Result<&T, ExecError>
-    where
-        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-    {
+    /// [`ExecError::ForeignKeyTargetMissing`] when no target row has the
+    /// PK, [`ExecError::MissingPrimaryKey`], or the fetch's own errors.
+    pub async fn get_on<'c, E: crate::sql::SqlExecutor<'c>>(
+        &mut self,
+        executor: E,
+    ) -> Result<&T, ExecError> {
         if matches!(self, Self::Unloaded(_)) {
             let pk = self.pk_ref().clone();
             let pk_field = T::SCHEMA

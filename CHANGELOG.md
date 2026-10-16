@@ -24,6 +24,26 @@ The manager types an auto-created junction's columns by each end's pk, so a `Str
 
 A junction column takes the target pk's type (text, UUID) and its FK names the pk column, not `id`, so it applies on PostgreSQL and MySQL. Integer pks stay `BIGINT`.
 
+### Fixed — SQLite `json_path = <JSON null / object / array>` matches like PG and MySQL (#1398)
+
+A JSON `null` literal matched nothing, and objects compared as text, so key order mattered. They now compare by value; arrays keep their order.
+
+### Documentation — a held `PoolConn` plus a `&Pool` call can exhaust the pool (#1396)
+
+`docs/orm.md` and the `PoolConn` docs say to pass the held connection to every query in the handler.
+
+### Added — `PoolConn::close_on_drop` keeps session state out of the pool (#1397)
+
+sqlx returns a connection with its `SET` state intact; call it after changing session state so the next borrower gets a fresh connection.
+
+### Fixed — a terminated PG backend aborts the `atomic` block at once (#1403)
+
+A FATAL or PANIC error (e.g. 57P01 from `pg_terminate_backend`) marks the block ended, so the next statement returns `AtomicAborted` instead of an I/O error.
+
+### Fixed — the last Postgres-only `_on` query methods run on every backend (#1395)
+
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `delete_on`, `execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `PoolConn`, `PoolTx` or `&Pool` like `fetch_on`.
+
 ## [0.60.8] — 2026-10-17
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.

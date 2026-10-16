@@ -109,13 +109,14 @@ pub use executor::row_to_json;
 /// `annotate_count_children{,_on}`. Audited `save_on` calls
 /// `select_rows_on` for its BEFORE read.
 ///
-/// **PostgreSQL only.** They are typed `E: sqlx::Executor<Database =
-/// Postgres>`, so unlike the rest of the query surface they are not
-/// tri-dialect. That is a real gap, not a design choice; see #1293.
+/// `annotate_count_children_on` and `fetch_aggregate_on` take any
+/// [`SqlExecutor`] (#1395). The rest are **PostgreSQL only**, typed
+/// `E: sqlx::Executor<Database = Postgres>`; see #1293.
+pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 #[cfg(feature = "postgres")]
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert_on, fetch_aggregate_on,
-    fetch_with_prefetch, insert_on, select_rows_on, update_on,
+    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
+    update_on,
 };
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor

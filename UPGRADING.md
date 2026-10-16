@@ -162,6 +162,22 @@ Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
 
 New auto-created junctions to a text or UUID pk get that column type, and every junction FK names the real pk column. Snapshots are unchanged, so existing junctions get no new migration.
 
+### SQLite JSON-path equality with null or an object (#1398)
+
+`json_path(..) = Json(null)` now matches stored JSON nulls, and object literals match whatever their key order. Such filters return more rows on SQLite than before; they no longer use an index on `json_extract`.
+
+### Session state on a `PoolConn` reaches the next borrower (#1397)
+
+Nothing resets it on release. If you `SET` anything on a held connection, call `conn.close_on_drop()` before dropping it.
+
+### PG FATAL errors end an `atomic` block (#1403)
+
+After a FATAL/PANIC error (terminated backend, `idle_in_transaction_session_timeout`) later statements in the block return `ExecError::AtomicAborted`, not a driver I/O error.
+
+### More `_on` methods work on every backend (#1395)
+
+`fetch_paginated_on`, `in_bulk_on`, `annotate_count_children_on`, `explain_on`, `QuerySet::delete_on`, `UpdateBuilder::execute_on`, `ForeignKey::get_on` and `fetch_aggregate_on` take a `SqlExecutor`; Postgres executors still work. With more than one backend feature on, `fetch_paginated_on` and `annotate_count_children_on` need the model's MySQL/SQLite `FromRow` (`#[derive(Model)]` has it). These, `explain_pool`, `delete_on` and `execute_on` now count in `assert_num_queries`. `select_rows_on` and the free `insert_on` / `update_on` stay Postgres-only.
+
 ## 0.60.8
 
 ### Pools no longer ping before every checkout (#2674)
@@ -174,7 +190,7 @@ New auto-created junctions to a text or UUID pk get that column type, and every 
 
 ### `fetch_on` / `count_on` reads work on every backend (#2675)
 
-Other `_on` methods stay Postgres-only (#1395). `fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
+`fetch_on`, `count_on` and the `values` / `aggregate` `fetch_on` now take a `SqlExecutor`; any Postgres sqlx executor still works. With more than one backend feature on, `fetch_on`, `ForeignKey::get_on`, `in_bulk_on` and `fetch_with_prefetch` need the model's MySQL/SQLite `FromRow`, which `#[derive(Model)]` provides.
 
 ### Admin treats credential columns as secret (#1158)
 

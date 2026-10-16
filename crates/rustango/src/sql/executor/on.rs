@@ -18,8 +18,12 @@ use crate::sql::Pool;
 /// let total = Post::objects().count_on(&mut conn).await?;
 /// ```
 ///
-/// Session state set on it (`SET …`) stays with the connection when it
-/// goes back to the pool.
+/// Session state set on it (`SET …`, MySQL `@vars`, SQLite `PRAGMA`) stays
+/// with the connection when it goes back to the pool, so the next borrower
+/// gets it: call [`Self::close_on_drop`] after changing any (#1397).
+///
+/// Do not call a `&Pool` method while holding one: that takes a second
+/// connection, and `max_connections` such requests deadlock the pool (#1396).
 #[non_exhaustive]
 pub enum PoolConn {
     #[cfg(feature = "postgres")]
@@ -58,6 +62,20 @@ impl PoolConn {
             PoolConn::Mysql(_) => crate::sql::mysql::DIALECT,
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
+        }
+    }
+
+    /// Close the connection on drop instead of returning it to the pool, so
+    /// session state set on it cannot reach the next borrower. sqlx never
+    /// resets it, and a reset would also undo an `after_connect` setup.
+    pub fn close_on_drop(&mut self) {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolConn::Postgres(c) => c.close_on_drop(),
+            #[cfg(feature = "mysql")]
+            PoolConn::Mysql(c) => c.close_on_drop(),
+            #[cfg(feature = "sqlite")]
+            PoolConn::Sqlite(c) => c.close_on_drop(),
         }
     }
 
@@ -137,6 +155,16 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         'c: 'e,
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e;
+
+    /// Runs one statement and returns the rows it affected.
+    #[doc(hidden)]
+    fn execute_rows<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+        params: Vec<SqlValue>,
+    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    where
+        'c: 'e;
 }
 
 mod sealed {
@@ -198,6 +226,50 @@ where
     Box::pin(drain(rows, move |r| decode(RowRef::Sqlite(r))))
 }
 
+#[cfg(feature = "postgres")]
+fn pg_exec<'c: 'e, 'e, 'q: 'e, E>(
+    exec: E,
+    sql: &'q str,
+    params: Vec<SqlValue>,
+) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    let q = params.into_iter().fold(sqlx::query(sql), super::bind_query);
+    let done = exec.execute(q);
+    Box::pin(async move { Ok(done.await?.rows_affected()) })
+}
+
+#[cfg(feature = "mysql")]
+fn my_exec<'c: 'e, 'e, 'q: 'e, E>(
+    exec: E,
+    sql: &'q str,
+    params: Vec<SqlValue>,
+) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+where
+    E: sqlx::Executor<'c, Database = sqlx::MySql>,
+{
+    let q = params.into_iter().fold(sqlx::query(sql), super::bind_query_my);
+    let done = exec.execute(q);
+    Box::pin(async move { Ok(done.await?.rows_affected()) })
+}
+
+#[cfg(feature = "sqlite")]
+fn sq_exec<'c: 'e, 'e, 'q: 'e, E>(
+    exec: E,
+    sql: &'q str,
+    params: Vec<SqlValue>,
+) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
+{
+    let q = params
+        .into_iter()
+        .fold(sqlx::query(sql), super::bind_query_sqlite);
+    let done = exec.execute(q);
+    Box::pin(async move { Ok(done.await?.rows_affected()) })
+}
+
 impl<'c> sealed::Sealed<'c> for &'c Pool {}
 impl<'c> SqlExecutor<'c> for &'c Pool {
     fn dialect(&self) -> &'static dyn Dialect {
@@ -222,6 +294,24 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
             Pool::Mysql(p) => my_rows(p, sql, params, decode),
             #[cfg(feature = "sqlite")]
             Pool::Sqlite(p) => sq_rows(p, sql, params, decode),
+        }
+    }
+
+    fn execute_rows<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+        params: Vec<SqlValue>,
+    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => pg_exec(p, sql, params),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => my_exec(p, sql, params),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => sq_exec(p, sql, params),
         }
     }
 }
@@ -250,6 +340,24 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
             PoolConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "sqlite")]
             PoolConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
+        }
+    }
+
+    fn execute_rows<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+        params: Vec<SqlValue>,
+    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolConn::Postgres(c) => pg_exec(&mut **c, sql, params),
+            #[cfg(feature = "mysql")]
+            PoolConn::Mysql(c) => my_exec(&mut **c, sql, params),
+            #[cfg(feature = "sqlite")]
+            PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
     }
 }
@@ -284,6 +392,24 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
             PoolTx::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
         }
     }
+
+    fn execute_rows<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+        params: Vec<SqlValue>,
+    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(t) => pg_exec(&mut **t, sql, params),
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(t) => my_exec(&mut **t, sql, params),
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(t) => sq_exec(&mut **t, sql, params),
+        }
+    }
 }
 
 // Any Postgres sqlx executor, so `fetch_on(t.conn())` keeps compiling.
@@ -307,5 +433,16 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
         pg_rows(self, sql, params, decode)
+    }
+
+    fn execute_rows<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+        params: Vec<SqlValue>,
+    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    where
+        'c: 'e,
+    {
+        pg_exec(self, sql, params)
     }
 }
