@@ -97,7 +97,7 @@ load.
 | `pool_idle_timeout_secs` | `RUSTANGO_DB_IDLE_TIMEOUT_SECS` | driver default | Close a connection that has sat idle this long. |
 | `pool_max_lifetime_secs` | `RUSTANGO_DB_MAX_LIFETIME_SECS` | driver default | Close a connection this old regardless of use. |
 | `pool_test_before_acquire` | `RUSTANGO_DB_TEST_BEFORE_ACQUIRE` | `false` | Ping each connection before a checkout. Off, only connections idle past `RUSTANGO_DB_IDLE_PING_SECS` are pinged. |
-| — | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | With the ping off, ping a connection idle at least this long before handing it out. |
+| `pool_idle_ping_secs` | `RUSTANGO_DB_IDLE_PING_SECS` | 30 | With the ping off, ping a connection idle at least this long before handing it out. |
 
 Leaving a knob unset is not the same as setting it to zero. Unset means
 *the driver's own default applies* — the behaviour you had before the
