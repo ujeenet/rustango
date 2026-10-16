@@ -749,7 +749,7 @@ async fn join_lock_during_background_settle_is_refused(pool: &Pool) {
 /// transaction they refuse, and a read that ends it is recorded
 /// (rel-0608 tests-001).
 async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
-    use rustango::sql::{raw_execute_pool, raw_execute_tx, sqlx, transaction_pool, PoolTx};
+    use rustango::sql::{raw_execute_tx, transaction_pool};
     Note {
         id: 5,
         label: "n5".into(),
@@ -782,17 +782,17 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         #[allow(unreachable_patterns)]
         match &mut *guard {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => {
-                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            rustango::sql::PoolTx::Postgres(t) => {
+                let pid: i32 = rustango::sql::sqlx::query_scalar("SELECT pg_backend_pid()")
                     .fetch_one(&mut **t)
                     .await?;
-                raw_execute_pool(&registry, &format!("SELECT pg_terminate_backend({pid})"), vec![])
-                    .await?;
+                let kill = format!("SELECT pg_terminate_backend({pid})");
+                rustango::sql::raw_execute_pool(&registry, &kill, vec![]).await?;
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => {
-                use rustango::sql::sqlx::Executor as _;
+            rustango::sql::PoolTx::Sqlite(t) => {
+                use rustango::sql::{sqlx, sqlx::Executor as _};
                 (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
             }
             _ => {}
