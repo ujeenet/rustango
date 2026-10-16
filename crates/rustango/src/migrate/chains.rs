@@ -441,42 +441,8 @@ impl Run<'_> {
         let Some(last) = wanted.last() else {
             return Ok(());
         };
-        let snap = &last.snapshot;
-        let declared: BTreeSet<String> = wanted.iter().flat_map(created).collect();
-        let mut live = Vec::new();
-        let mut groups = Vec::new();
-        let (mut remade, mut junctions) = (BTreeSet::new(), Vec::new());
-        for t in &declared {
-            let exists = runner::table_exists_here(self.pool, t).await;
-            if self.owned.contains(t) {
-                if exists {
-                    live.push(t.clone());
-                }
-            } else if claimed.contains(t) && !exists && snap.table(t).is_some() {
-                let indexes = snap.indexes.iter().filter(|i| &i.table == t);
-                groups.push(
-                    std::iter::once(SchemaChange::CreateTable(t.clone()))
-                        .chain(indexes.map(super::diff::create_index))
-                        .collect(),
-                );
-                remade.insert(t.clone());
-            } else if let Some(m2m) = snap.m2m_table(t).filter(|_| claimed.contains(t) && !exists) {
-                // After the tables, which its FKs name (#2084).
-                junctions.push(vec![super::diff::create_m2m(m2m)]);
-            }
-        }
-        groups.extend(junctions);
-        groups.extend(lost_fks(self.pool, snap, &remade).await?);
-        groups.extend(missing_columns(self.pool, snap, &live).await?);
-        // `without_tables` strips owned tables' indexes; add the ones a later step declares.
-        let with_table = indexes_made_with_table(&wanted);
-        groups.extend(
-            snap.indexes
-                .iter()
-                .filter(|i| live.contains(&i.table) && !with_table.contains(i.name.as_str()))
-                .map(|i| vec![super::diff::create_index(i)]),
-        );
-        converge(self.pool, snap, groups).await
+        let groups = finish_groups(self.pool, &wanted, self.owned, claimed).await?;
+        converge(self.pool, &last.snapshot, groups).await
     }
 
     /// Run `steps` from a scratch dir; applied ones are skipped by the ledger.
@@ -491,6 +457,90 @@ impl Run<'_> {
     async fn apply_dir(&self, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
         runner::migrate_system_chain(self.held, self.pool, self.chain, dir, self.observer).await
     }
+}
+
+/// What [`Run::finish`] converges after `wanted`: owned tables' missing columns
+/// and later indexes, and claimed framework tables the project dropped. Reads only.
+async fn finish_groups(
+    pool: &Pool,
+    wanted: &[Migration],
+    owned: &BTreeSet<String>,
+    claimed: &BTreeSet<String>,
+) -> Result<Vec<Vec<SchemaChange>>, MigrateError> {
+    let Some(last) = wanted.last() else {
+        return Ok(Vec::new());
+    };
+    let snap = &last.snapshot;
+    let declared: BTreeSet<String> = wanted.iter().flat_map(created).collect();
+    let mut live = Vec::new();
+    let mut groups = Vec::new();
+    let (mut remade, mut junctions) = (BTreeSet::new(), Vec::new());
+    for t in &declared {
+        let exists = runner::table_exists_here(pool, t).await;
+        if owned.contains(t) {
+            if exists {
+                live.push(t.clone());
+            }
+        } else if claimed.contains(t) && !exists && snap.table(t).is_some() {
+            let indexes = snap.indexes.iter().filter(|i| &i.table == t);
+            groups.push(
+                std::iter::once(SchemaChange::CreateTable(t.clone()))
+                    .chain(indexes.map(super::diff::create_index))
+                    .collect(),
+            );
+            remade.insert(t.clone());
+        } else if let Some(m2m) = snap.m2m_table(t).filter(|_| claimed.contains(t) && !exists) {
+            // After the tables, which its FKs name (#2084).
+            junctions.push(vec![super::diff::create_m2m(m2m)]);
+        }
+    }
+    groups.extend(junctions);
+    groups.extend(lost_fks(pool, snap, &remade).await?);
+    groups.extend(missing_columns(pool, snap, &live).await?);
+    // `without_tables` strips owned tables' indexes; add the ones a later step declares.
+    let with_table = indexes_made_with_table(wanted);
+    groups.extend(
+        snap.indexes
+            .iter()
+            .filter(|i| live.contains(&i.table) && !with_table.contains(i.name.as_str()))
+            .map(|i| vec![super::diff::create_index(i)]),
+    );
+    Ok(groups)
+}
+
+/// The SQL `migrate` converges framework tables with after both chains, for
+/// a `--dry-run` (#1411). `steps` is the system chain as `migrate` runs it.
+///
+/// # Errors
+/// An unreadable migrations dir, or a failed catalog or ledger read.
+pub(crate) async fn converge_preview(
+    pool: &Pool,
+    steps: &[Migration],
+    scope: MigrationScope,
+    project_dir: &Path,
+) -> Result<Vec<String>, MigrateError> {
+    let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
+    let tables = ProjectTables::of(&file::list_dir(project_dir)?, &applied);
+    let wanted: Vec<Migration> = steps.iter().filter(|m| m.scope == scope).cloned().collect();
+    let Some(last) = wanted.last() else {
+        return Ok(Vec::new());
+    };
+    let groups = finish_groups(pool, &wanted, &tables.owned, &tables.claimed).await?;
+    // FKs last, as `converge_groups` runs them.
+    let (mut out, mut fks) = (Vec::new(), Vec::new());
+    for g in &groups {
+        match super::diff::render_changes_split_in_schema(g, &last.snapshot, pool.dialect(), None)
+        {
+            Ok(b) if b.rebuild.is_none() => {
+                out.extend(b.immediate);
+                fks.extend(b.deferred_fks);
+            }
+            Ok(_) => out.push(format!("-- `{}` needs a table rebuild", g[0].table())),
+            Err(e) => out.push(format!("-- `{}`: {e}", g[0].table())),
+        }
+    }
+    out.extend(fks);
+    Ok(out)
 }
 
 /// The tables, with their indexes, a waiting `step` creates and that need

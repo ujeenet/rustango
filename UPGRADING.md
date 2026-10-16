@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `migrate --dry-run` prints more (#1411)
+
+A fresh project's dry-run now lists the framework's system tables and the bootstrap tables, under `-- … (system, …)` and `-- bootstrap <table> (idempotent)` headers. Scripts that took "nothing to migrate" for granted on a new database will see SQL instead.
+
 ### `dumpdata` writes rows in pk order (#1399)
 
 Entries of each model now come sorted by pk; the JSON is otherwise unchanged.

@@ -854,6 +854,8 @@ async fn migrate<W: Write>(
 pub(crate) struct SystemView {
     dir: std::path::PathBuf,
     scope: super::MigrationScope,
+    /// The scopes `migrate` generates steps for before it runs.
+    generates: &'static [crate::core::ModelScope],
 }
 
 impl SystemView {
@@ -862,6 +864,10 @@ impl SystemView {
         Self {
             dir: super::make::SystemChain::dir_for(dir),
             scope: super::MigrationScope::Tenant,
+            generates: &[
+                crate::core::ModelScope::Registry,
+                crate::core::ModelScope::Tenant,
+            ],
         }
     }
 
@@ -871,7 +877,20 @@ impl SystemView {
         Self {
             dir: super::make::SystemChain::dir_for(dir),
             scope: super::MigrationScope::Registry,
+            generates: &[crate::core::ModelScope::Registry],
         }
+    }
+
+    /// The chain as `migrate` runs it: the files, then the steps it would
+    /// generate from today's models, unwritten (#1411).
+    fn planned(&self, files: Option<Vec<Migration>>) -> Result<Vec<Migration>, MigrateError> {
+        let mut all = files.unwrap_or_default();
+        for &scope in self.generates {
+            if let Some(step) = super::make::plan_system_step(scope, None, &all)? {
+                all.push(step);
+            }
+        }
+        Ok(all)
     }
 
     /// The chain's files, or `None` before `migrate` first generates them.
@@ -899,27 +918,44 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
 ) -> Result<(), MigrateError> {
     let mut previews = Vec::new();
     let system_files = system.files()?;
-    if let Some(all) = &system_files {
-        let ledger = runner::SYSTEM_LEDGER_TABLE;
-        let owned = super::chains::project_owned(dir)?;
-        let steps = runner::preview_pending(
-            pool,
-            &system.dir,
-            all,
-            Some(system.scope),
-            ledger,
-            true,
-            &owned,
-        )
-        .await?;
-        previews.extend(steps.into_iter().map(|p| (p, "system, ")));
-    }
+    let not_generated = system_files.is_none();
+    let all = system.planned(system_files)?;
+    let ledger = runner::SYSTEM_LEDGER_TABLE;
+    let owned = super::chains::project_owned(dir)?;
+    let steps = runner::preview_pending(
+        pool,
+        &system.dir,
+        &all,
+        Some(system.scope),
+        ledger,
+        true,
+        &owned,
+    )
+    .await?;
+    previews.extend(steps.into_iter().map(|p| (p, "system, ")));
     let project = runner::migrate_dry_run_pool(pool, dir).await?;
     previews.extend(project.into_iter().map(|p| (p, "")));
-    if system_files.is_none() {
+    // What `migrate` runs after both chains (#1411).
+    let mut after = Vec::new();
+    let converge = super::chains::converge_preview(pool, &all, system.scope, dir).await?;
+    if !converge.is_empty() {
+        after.push(("converge framework tables".to_owned(), converge));
+    }
+    let tenant = system.scope == super::MigrationScope::Tenant;
+    let bootstrap = shared_bootstrap()
+        .into_iter()
+        .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
+    for b in bootstrap {
+        if runner::try_table_exists_here(pool, b.table).await? {
+            continue;
+        }
+        let ddl = (b.ddl)(pool.dialect()).map_err(MigrateError::Validation)?;
+        after.push((format!("bootstrap {}", b.table), ddl));
+    }
+    if not_generated {
         writeln!(w, "-- {NOT_GENERATED}")?;
     }
-    if previews.is_empty() {
+    if previews.is_empty() && after.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
         return Ok(());
     }
@@ -933,6 +969,13 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
         let atomic = if p.atomic { "atomic" } else { "non-atomic" };
         writeln!(w, "-- {} ({chain}{atomic})", p.name)?;
         for stmt in &p.statements {
+            writeln!(w, "{stmt};")?;
+        }
+    }
+    for (label, stmts) in &after {
+        writeln!(w)?;
+        writeln!(w, "-- {label} (idempotent)")?;
+        for stmt in stmts {
             writeln!(w, "{stmt};")?;
         }
     }
@@ -1018,14 +1061,10 @@ where
 /// # Errors
 /// Driver or SQL failures from the DDL.
 pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    // Writes to `audit(track = ...)` models record from the first migrate.
-    crate::audit::ensure_table_pool(pool).await?;
-    // The admin login fails closed on a missing TOTP table (#1644), so a
-    // fresh install needs it before the first login, not at enrollment.
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    crate::admin::totp_store::ensure_table(pool).await?;
-    // The admin lists translations wherever they live (#2360).
-    crate::i18n::db::ensure_table_pool(pool).await
+    for b in shared_bootstrap() {
+        (b.ensure)(pool).await?;
+    }
+    Ok(())
 }
 
 /// The `managed = false` tables each tenant holds: the single database, or
@@ -1033,12 +1072,88 @@ pub(crate) async fn ensure_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Err
 ///
 /// # Errors
 /// Driver or SQL failures from the DDL.
-#[allow(clippy::unused_async, unused_variables)]
 pub(crate) async fn ensure_tenant_bootstrap_tables(pool: &Pool) -> Result<(), sqlx::Error> {
-    // Passkey sign-in reads it from the first login (#2364).
-    #[cfg(feature = "passkey")]
-    crate::passkey::ensure_table(pool).await?;
+    for b in tenant_bootstrap() {
+        (b.ensure)(pool).await?;
+    }
     Ok(())
+}
+
+type EnsureFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
+
+/// A bootstrap table: how `migrate` ensures it, and the DDL that creates it,
+/// which `--dry-run` shows while the table is missing (#1411).
+struct Bootstrap {
+    table: &'static str,
+    ensure: for<'a> fn(&'a Pool) -> EnsureFuture<'a>,
+    ddl: fn(&dyn crate::sql::Dialect) -> Result<Vec<String>, String>,
+}
+
+/// The `managed = false` framework tables of the database that holds them.
+fn shared_bootstrap() -> Vec<Bootstrap> {
+    use crate::core::Model as _;
+    fn audit(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::audit::ensure_table_pool(pool))
+    }
+    fn i18n(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::i18n::db::ensure_table_pool(pool))
+    }
+    #[cfg(all(feature = "admin", feature = "totp"))]
+    fn totp(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::admin::totp_store::ensure_table(pool))
+    }
+    vec![
+        // Writes to `audit(track = ...)` models record from the first migrate.
+        Bootstrap {
+            table: crate::audit::AuditLog::SCHEMA.table,
+            ensure: audit,
+            ddl: |d| super::ensure::idempotent_ddl(&crate::audit::bootstrap_snapshot(), d),
+        },
+        // The admin login fails closed on a missing TOTP table (#1644), so a
+        // fresh install needs it before the first login, not at enrollment.
+        #[cfg(all(feature = "admin", feature = "totp"))]
+        Bootstrap {
+            table: crate::admin::totp_store::AdminTotp::SCHEMA.table,
+            ensure: totp,
+            ddl: |d| {
+                super::ensure::idempotent_ddl(&crate::admin::totp_store::bootstrap_snapshot(), d)
+            },
+        },
+        // The admin lists translations wherever they live (#2360).
+        Bootstrap {
+            table: crate::i18n::db::Translation::SCHEMA.table,
+            ensure: i18n,
+            ddl: |d| {
+                Ok(crate::i18n::db::ddl(d)
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect())
+            },
+        },
+    ]
+}
+
+/// The `managed = false` tables each tenant holds.
+fn tenant_bootstrap() -> Vec<Bootstrap> {
+    #[cfg(feature = "passkey")]
+    fn passkey(pool: &Pool) -> EnsureFuture<'_> {
+        Box::pin(crate::passkey::ensure_table(pool))
+    }
+    vec![
+        // Passkey sign-in reads it from the first login (#2364).
+        #[cfg(feature = "passkey")]
+        Bootstrap {
+            table: {
+                use crate::core::Model as _;
+                crate::passkey::WebauthnCredential::SCHEMA.table
+            },
+            ensure: passkey,
+            ddl: |d| super::ensure::idempotent_ddl(&crate::passkey::bootstrap_snapshot(), d),
+        },
+    ]
 }
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
@@ -7501,6 +7616,77 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .count();
         assert_eq!(creates, 1, "{out}");
         assert!(out.contains("(system,"), "{out}");
+    }
+
+    /// #1411 — dry-run shows the bootstrap DDL `migrate` runs for a missing table.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_bootstrap_ddl() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let creates_audit = |out: &str| {
+            out.lines()
+                .any(|l| l.starts_with("CREATE TABLE") && l.contains("rustango_audit_log"))
+        };
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        assert!(creates_audit(&out), "{out}");
+        manage_out(&pool, &dir, &["migrate"]).await.expect("migrate");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        assert!(!creates_audit(&out), "{out}");
+        assert!(out.contains("nothing to migrate"), "{out}");
+    }
+
+    /// #1411 — dry-run shows the system step `migrate` would generate first.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_the_system_step_migrate_generates() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        assert!(out.contains("(system,"), "{out}");
+        assert!(
+            !root.path().join("system").exists(),
+            "a preview writes no system files"
+        );
+    }
+
+    /// #1411 — dry-run shows the columns `migrate` adds to a framework table
+    /// the project chain created.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dry_run_shows_the_converge_of_project_owned_tables() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Pool::connect("sqlite::memory:").await.unwrap();
+        manage_out(&scratch, &dir, &["migrate"]).await.expect("migrate");
+        let (table, column) = file::list_dir(&root.path().join("system").join("migrations"))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope == super::super::MigrationScope::Tenant)
+            .find_map(|m| {
+                m.forward.iter().find_map(|op| match op {
+                    Operation::Schema(super::super::SchemaChange::CreateTable(t)) => {
+                        let fields = &m.snapshot.table(t)?.fields;
+                        let id = fields.iter().find(|f| f.primary_key)?;
+                        let other = fields.iter().find(|f| !f.primary_key)?;
+                        (id.column == "id").then(|| (t.clone(), other.column.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .expect("a system table with an id pk");
+        file::write(&dir.join("0001_own.json"), &create_mig("0001_own", None, &table)).unwrap();
+
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        runner::migrate_pool(&pool, &dir).await.expect("project chain");
+        let out = manage_out(&pool, &dir, &["migrate", "--dry-run"]).await.unwrap();
+        let adds = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\"");
+        assert!(out.contains(&adds), "{adds} missing from:\n{out}");
     }
 
     /// #1311 — once a squash is applied, the file it replaced is not pending.

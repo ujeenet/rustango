@@ -124,6 +124,20 @@ pub(crate) async fn apply_idempotent(
     apply_changes_idempotent(pool, snapshot, &changes).await
 }
 
+/// The statements [`apply_idempotent`] runs for `snapshot`, FK targets
+/// unqualified, for a `--dry-run` (#1411).
+///
+/// # Errors
+/// A render failure.
+pub(crate) fn idempotent_ddl(
+    snapshot: &super::SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<Vec<String>, String> {
+    let changes = super::detect_changes(&super::SchemaSnapshot::default(), snapshot);
+    let batch = super::diff::render_changes_split_in_schema(&changes, snapshot, dialect, None)?;
+    Ok(batch.immediate.into_iter().chain(batch.deferred_fks).collect())
+}
+
 /// Add each `(table, column)` of `snapshot` that a table created by an
 /// older release lacks. Never creates the table.
 ///
