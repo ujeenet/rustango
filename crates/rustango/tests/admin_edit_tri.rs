@@ -1,5 +1,5 @@
 //! Admin edit forms on every backend: an untouched save keeps what was
-//! stored (#1273).
+//! stored (#1273); inline rows take no auto or generated input (#1271).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -26,8 +26,93 @@ pub struct Doc {
     pub status: String,
 }
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_order")]
+#[allow(dead_code)]
+pub struct Order {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_line")]
+#[allow(dead_code)]
+pub struct Line {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_order", on = "id")]
+    pub order_id: i64,
+    pub qty: i64,
+    #[rustango(generated_as = "qty * 2")]
+    pub twice: i64,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_order",
+    child = "aed_line",
+    fk = "order_id",
+    extra = 1,
+);
+
 async fn setup(pool: &Pool) {
-    rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    fresh_table::<Doc>(pool).await;
+    drop_table(pool, "aed_line").await;
+    fresh_table::<Order>(pool).await;
+    fresh_table::<Line>(pool).await;
+}
+
+async fn seed_order(pool: &Pool) -> i64 {
+    let mut o = Order {
+        id: Auto::default(),
+        name: "o".into(),
+    };
+    o.insert_pool(pool).await.expect("order");
+    *o.id.get().expect("pk")
+}
+
+async fn lines(pool: &Pool) -> Vec<Line> {
+    Line::objects().fetch(pool).await.expect("lines")
+}
+
+/// Inline rows render no input for auto and generated fields, and a
+/// row added or edited without them saves (#1271).
+async fn inline_rows_take_no_auto_or_generated_input(pool: &Pool) {
+    let o = seed_order(pool).await;
+    let add = "name=o&aed_line-TOTAL_FORMS=1&aed_line-INITIAL_FORMS=0&aed_line-0-qty=3";
+    let (status, body) = send(pool, "POST", &format!("/aed_order/{o}"), add).await;
+    assert!(status.is_redirection(), "add: {status} {body}");
+    let before = lines(pool).await.remove(0);
+    let lid = *before.id.get().expect("pk");
+    let stamp = *before.created_at.get().expect("stamped");
+
+    let (status, html) = send(pool, "GET", &format!("/aed_order/{o}"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    for f in ["created_at", "twice", "id"] {
+        for i in 0..2 {
+            let name = format!(r#"name="aed_line-{i}-{f}""#);
+            let hidden = format!(r#"type="hidden" {name}"#);
+            assert!(
+                !html.contains(&name) || (f == "id" && html.contains(&hidden)),
+                "input for {f} in row {i}"
+            );
+        }
+    }
+
+    let edit = format!(
+        "name=o&aed_line-TOTAL_FORMS=1&aed_line-INITIAL_FORMS=1\
+         &aed_line-0-id={lid}&aed_line-0-qty=5"
+    );
+    let (status, body) = send(pool, "POST", &format!("/aed_order/{o}"), &edit).await;
+    assert!(status.is_redirection(), "edit: {status} {body}");
+    let after = lines(pool).await.remove(0);
+    assert_eq!(after.qty, 5);
+    assert_eq!(after.twice, 10);
+    assert_eq!(after.created_at.get(), Some(&stamp), "created_at rewritten");
 }
 
 async fn send(pool: &Pool, method: &str, uri: &str, form: &str) -> (StatusCode, String) {
@@ -118,6 +203,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         untouched_json_and_unknown_choice_are_kept,
+        inline_rows_take_no_auto_or_generated_input,
     ],
 }
 

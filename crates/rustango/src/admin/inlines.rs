@@ -46,7 +46,7 @@
 
 use crate::core::{
     FieldSchema, Filter, ModelEntry, ModelSchema, NullsOrder, Op, OrderItem, SelectQuery, SqlValue,
-    WhereExpr,
+    WhereExpr, WriteKind,
 };
 use crate::sql::{select_rows_as_json, ExecError, Pool};
 use std::collections::{HashMap, HashSet};
@@ -812,7 +812,12 @@ pub(crate) async fn render_form_for_parent_in(
                     // `value_as_form_string` clone left e.g. a `DateTime`'s
                     // `+00:00` offset in place, which `datetime-local` rejects.
                     let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(&child_cfg, f, &raw_str, &prefix, idx);
+                    let input_html = render_prefixed_input(
+                        &child_cfg,
+                        f,
+                        &raw_str,
+                        (&prefix, idx, WriteKind::Update),
+                    );
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -847,7 +852,8 @@ pub(crate) async fn render_form_for_parent_in(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let input_html = render_prefixed_input(&child_cfg, f, "", &prefix, idx);
+                    let input_html =
+                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -897,9 +903,12 @@ fn render_prefixed_input(
     cfg: &crate::core::AdminConfig,
     field: &FieldSchema,
     value: &str,
-    prefix: &str,
-    idx: usize,
+    (prefix, idx, kind): (&str, usize, crate::core::WriteKind),
 ) -> String {
+    // An auto or generated column is shown, never input (#1271).
+    if !field.accepts_input(kind) {
+        return format!(r#"<span class="readonly">{}</span>"#, html_escape(value));
+    }
     // The child's widget overrides apply; a secret is never echoed (#1861).
     let base = if is_secret_field(cfg, field.name) {
         crate::admin::render::render_secret_input(field, false, false)
@@ -1031,7 +1040,8 @@ impl InlineTarget {
             .iter()
             .copied()
             .filter(|f| {
-                f.column != pk.column
+                f.accepts_input(WriteKind::Update)
+                    && f.column != pk.column
                     && !scope.pins(f.column)
                     && !inline_readonly.contains(&f.name)
                     && !add.contains(f.name)
@@ -1792,7 +1802,12 @@ pub(crate) async fn render_form_generic_for_parent_in(
                     // `value_as_form_string` clone left e.g. a `DateTime`'s
                     // `+00:00` offset in place, which `datetime-local` rejects.
                     let raw_str = crate::admin::render::render_value_for_input_json(row, f);
-                    let input_html = render_prefixed_input(&child_cfg, f, &raw_str, &prefix, idx);
+                    let input_html = render_prefixed_input(
+                        &child_cfg,
+                        f,
+                        &raw_str,
+                        (&prefix, idx, WriteKind::Update),
+                    );
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,
@@ -1823,7 +1838,8 @@ pub(crate) async fn render_form_generic_for_parent_in(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let input_html = render_prefixed_input(&child_cfg, f, "", &prefix, idx);
+                    let input_html =
+                        render_prefixed_input(&child_cfg, f, "", (&prefix, idx, WriteKind::Insert));
                     serde_json::json!({
                         "label": f.display_label(),
                         "input_html": input_html,

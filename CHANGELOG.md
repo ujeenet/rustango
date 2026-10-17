@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — admin inline rows take no auto or generated input (#1271)
+
+`auto_now_add` / `auto_now` / `auto_uuid` and `generated_as` columns, and an existing row's PK, show as text in inline rows and are never written from them. Adding a child no longer fails on an empty timestamp, and editing one no longer truncates it to whole seconds.
+
 ### Fixed — ViewSet and template views answer refused writes without a 500 (#1134)
 
 Deleting a row other rows still point at is a 409 from ViewSet `destroy`, `DeleteView` and `delete_selected`. A missing FK target, NOT NULL or CHECK refusal on `CreateView` / `UpdateView` re-renders the form (422) with a plain `__all__` error. `delete_selected` no longer shows the driver's text.
