@@ -3607,6 +3607,11 @@ async fn handle_destroy(
     match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
         Ok(_) => no_content(),
+        // Rows still pointing at it: the client's conflict, not a 500 (#1134).
+        Err(e) if e.is_still_referenced() => {
+            tracing::warn!(target: "rustango::viewset", error = %e, "destroy refused");
+            json_error(StatusCode::CONFLICT, crate::sql::STILL_REFERENCED)
+        }
         Err(e) => json_server_error("viewset::destroy", &e),
     }
 }

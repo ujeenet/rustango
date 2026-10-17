@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Refused deletes are 409, refused CBV writes 422 (#1134)
+
+ViewSet `destroy`, `DeleteView` and `delete_selected` answer an FK refusal with 409 (was 500, or 400 for `delete_selected`). `CreateView` / `UpdateView` answer FK / NOT NULL / CHECK refusals with the form and 422 (was 500).
+
 ### Admin edit writes only changed fields (#1273)
 
 A field the form sends back as shown is left out of the UPDATE, so a concurrent change to it is no longer overwritten. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.

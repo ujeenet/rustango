@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — ViewSet and template views answer refused writes without a 500 (#1134)
+
+Deleting a row other rows still point at is a 409 from ViewSet `destroy`, `DeleteView` and `delete_selected`. A missing FK target, NOT NULL or CHECK refusal on `CreateView` / `UpdateView` re-renders the form (422) with a plain `__all__` error. `delete_selected` no longer shows the driver's text.
+
 ### Fixed — an untouched admin edit keeps what was stored (#1273)
 
 The edit form shows PG array, range, hstore, vector and geometry values, a nullable JSON `{}`, and a stored value outside `choices`; a field submitted as it was shown is not rewritten. The dynamic JSON rows (viewset, admin) now carry those PG values instead of `null`.

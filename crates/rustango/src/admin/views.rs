@@ -2073,9 +2073,7 @@ fn write_error(model: &'static crate::core::ModelSchema, e: &crate::sql::ExecErr
                 )
             }
         }
-        Some(Refusal::ForeignKey) => "A related object it points to does not exist.".to_owned(),
-        Some(Refusal::NotNull) => "A required value is missing.".to_owned(),
-        Some(Refusal::Check) => "A value is outside what this table allows.".to_owned(),
+        Some(r) => r.message().to_owned(),
         None => "The change could not be saved.".to_owned(),
     };
     format!("{msg} (error id {id})")
