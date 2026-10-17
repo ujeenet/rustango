@@ -160,7 +160,7 @@ A key absent from a fixture entry now takes the column default instead of NULL. 
 
 ### `auto_now` fields change in memory on save (#1173)
 
-After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before.
+After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before. `upsert` / `upsert_on` now do the same, and no longer write a hand-set `auto_now` value (#1438).
 
 ### `inspectdb` output changes (#1230)
 

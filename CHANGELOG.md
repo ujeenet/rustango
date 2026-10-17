@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — `upsert` stamps `auto_now` (#1438)
+
+On a saved row it bound the old in-memory timestamp, so the conflict UPDATE wrote it back; now it binds the clock and keeps it in the struct, like `save`.
+
 ### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.

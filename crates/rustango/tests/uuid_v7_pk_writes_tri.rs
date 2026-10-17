@@ -316,6 +316,30 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     assert!(near(mem, stored(pool).await), "the row's stamp moved");
 }
 
+/// `upsert` on a saved row stamps `auto_now` instead of sending the old value (#1438).
+async fn pg_upsert_stamps_auto_now(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = pool.as_postgres() {
+        let mut b = Badge {
+            id: Auto::Unset,
+            name: "u".into(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
+        };
+        b.insert_pool(pool).await.expect("insert");
+        let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
+        b.updated_at = Auto::Set(old);
+        b.upsert(pg).await.expect("upsert");
+        let mem = *b.updated_at.get().expect("stamp");
+        assert_ne!(mem, old, "upsert sent the stale stamp");
+        let id = *b.id.get().expect("id");
+        let row = Badge::objects().filter("id", id).fetch(pool).await.expect("fetch");
+        let stored = *row[0].updated_at.get().expect("stored stamp");
+        assert!((stored - mem).num_milliseconds().abs() < 1000, "{stored} vs {mem}");
+    }
+    let _ = pool;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -328,5 +352,6 @@ tri_dialect_test! {
         db_pk_is_read_back_beside_a_rust_filled_auto,
         pg_bulk_insert_set_pk_fills_unset_timestamps,
         save_writes_the_auto_now_stamp_back,
+        pg_upsert_stamps_auto_now,
     ],
 }
