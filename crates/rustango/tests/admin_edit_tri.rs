@@ -212,7 +212,7 @@ async fn inline_rows_take_no_auto_or_generated_input(pool: &Pool) {
     let lid = *before.id.get().expect("pk");
     let stamp = *before.created_at.get().expect("stamped");
 
-    let (status, html) = send(pool, "GET", &format!("/aed_order/{o}"), "").await;
+    let (status, html) = send(pool, "GET", &format!("/aed_order/{o}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     for f in ["created_at", "twice", "id"] {
         for i in 0..2 {
@@ -306,7 +306,7 @@ async fn untouched_json_and_unknown_choice_are_kept(pool: &Pool) {
     };
     d.insert_pool(pool).await.expect("insert");
     let id = *d.id.get().expect("pk");
-    let (status, html) = send(pool, "GET", &format!("/aed_doc/{id}"), "").await;
+    let (status, html) = send(pool, "GET", &format!("/aed_doc/{id}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     let form = encode(&[
         ("name", "renamed".to_owned()),
@@ -385,7 +385,7 @@ mod pg_only {
         };
         row.insert_pool(&pool).await.expect("insert");
         let id = *row.id.get().expect("pk");
-        let (status, html) = send(&pool, "GET", &format!("/aed_pgkinds/{id}"), "").await;
+        let (status, html) = send(&pool, "GET", &format!("/aed_pgkinds/{id}/edit"), "").await;
         assert_eq!(status, StatusCode::OK, "{html}");
         let mut pairs = vec![("name", "renamed".to_owned())];
         for f in ["tags", "seats", "attrs", "emb", "opt_emb"] {
