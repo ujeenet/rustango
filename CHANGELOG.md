@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Performance — admin inline saves and ViewSet bulk create read rows in one select (#1340)
+
+An inline save reads every submitted child row in one `pk IN` select (plus one for PKs not under the parent), not one or two per row. A ViewSet bulk create reads its rows back in one `pk IN` select per 500, in submission order.
+
 ### Performance — the admin detail page bounds inline rows and history (#1339)
 
 Each inline panel lists its first 100 rows with a link to the child list for the rest, and the audit trail shows the newest 20 entries beside its "View full history" link.

@@ -142,6 +142,51 @@ async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
     assert_eq!(html.matches(r#"class="audit-changes""#).count(), 20, "audit rows");
 }
 
+/// Queries one admin POST runs.
+async fn post_counting(pool: &Pool, uri: &str, form: &str) -> (StatusCode, usize) {
+    use rustango::test_assertions::QueryCounter;
+    QueryCounter::scope(async {
+        let (status, _) = send(pool, "POST", uri, form).await;
+        (status, QueryCounter::current())
+    })
+    .await
+}
+
+/// Saving K unchanged inline rows reads them in one select, not K (#1340).
+async fn inline_save_reads_children_in_one_select(pool: &Pool) {
+    let mut o = SOrder {
+        id: Auto::default(),
+        name: "o".into(),
+    };
+    o.insert_pool(pool).await.expect("order");
+    let o = *o.id.get().expect("pk");
+    let mut form_rows = Vec::new();
+    for qty in 0..10 {
+        let mut l = SLine {
+            id: Auto::default(),
+            order_id: o,
+            qty,
+        };
+        l.insert_pool(pool).await.expect("line");
+        form_rows.push((*l.id.get().expect("pk"), qty));
+    }
+    let form = |rows: &[(i64, i64)]| {
+        let mut f = format!(
+            "name=o&aed_sline-TOTAL_FORMS={n}&aed_sline-INITIAL_FORMS={n}",
+            n = rows.len()
+        );
+        for (i, (id, qty)) in rows.iter().enumerate() {
+            f.push_str(&format!("&aed_sline-{i}-id={id}&aed_sline-{i}-qty={qty}"));
+        }
+        f
+    };
+    let uri = format!("/aed_sorder/{o}");
+    let (s1, one) = post_counting(pool, &uri, &form(&form_rows[..1])).await;
+    let (s10, ten) = post_counting(pool, &uri, &form(&form_rows)).await;
+    assert!(s1.is_redirection() && s10.is_redirection(), "{s1} {s10}");
+    assert_eq!(one, ten, "child reads scale with the rows");
+}
+
 /// Signal receivers are process-global; the SQLite arm takes no live lock.
 fn signal_lock() -> &'static tokio::sync::Mutex<()> {
     static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -373,6 +418,7 @@ tri_dialect_test! {
         inline_rows_take_no_auto_or_generated_input,
         inline_child_writes_send_admin_signals,
         detail_page_bounds_inline_rows_and_history,
+        inline_save_reads_children_in_one_select,
     ],
 }
 

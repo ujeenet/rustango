@@ -1122,45 +1122,47 @@ impl InlineTarget {
             .collect()
     }
 
-    /// The child row under this parent; `None` when no row has this PK.
-    ///
-    /// # Errors
-    /// [`AdminError::RowNotFound`] when the PK belongs to another parent
-    /// or the `view` hook refuses the row.
-    async fn fetch_own(
+    /// The stored rows for `pks` in two reads at most (#1340): those under
+    /// this parent, then which of the rest exist under another.
+    async fn fetch_own_many(
         &self,
         pool: &Pool,
         parts: &Parts,
-        pk: &SqlValue,
-        raw_pk: &str,
-    ) -> Result<Option<serde_json::Value>, AdminError> {
-        let not_found = || AdminError::RowNotFound {
-            table: self.child.table.to_owned(),
-            pk: raw_pk.to_owned(),
-        };
+        pks: Vec<SqlValue>,
+    ) -> Result<OwnRows, ExecError> {
+        let mut out = OwnRows(HashMap::new());
+        if pks.is_empty() {
+            return Ok(out);
+        }
+        let in_pks = |pks: Vec<SqlValue>| Filter::new(self.pk.column, Op::In, SqlValue::List(pks));
+        let mut filters = vec![in_pks(pks.clone())];
+        filters.extend(self.scope.filters());
         let fields: Vec<&'static FieldSchema> = self.child.scalar_fields().collect();
         let query = SelectQuery {
-            where_clause: self.row_where(pk.clone()),
+            where_clause: self.rows.constrain(WhereExpr::and_predicates(filters)),
             ..SelectQuery::new(self.child)
         };
-        if let Some(row) = crate::sql::select_one_row_as_json(pool, &query, &fields).await? {
-            let visible = crate::admin::object_permissions::is_allowed(
-                self.child.table,
-                "view",
-                parts,
-                Some(&row),
-            );
-            return if visible {
-                Ok(Some(row))
-            } else {
-                Err(not_found())
-            };
+        for row in select_rows_as_json(pool, &query, &fields).await? {
+            let visible =
+                crate::admin::object_permissions::is_allowed(self.child.table, "view", parts, Some(&row));
+            let key = pk_key(&row, self.pk);
+            out.0.insert(key, if visible { Own::Row(row) } else { Own::Foreign });
         }
-        let any_parent = SelectQuery::by_pk(self.child, self.pk.column, pk.clone());
-        match crate::sql::select_one_row_as_json(pool, &any_parent, &[self.pk]).await? {
-            Some(_) => Err(not_found()),
-            None => Ok(None),
+        let rest: Vec<SqlValue> = pks
+            .into_iter()
+            .filter(|pk| !out.0.contains_key(&pk.to_display_string()))
+            .collect();
+        if rest.is_empty() {
+            return Ok(out);
         }
+        let any_parent = SelectQuery {
+            where_clause: WhereExpr::Predicate(in_pks(rest)),
+            ..SelectQuery::new(self.child)
+        };
+        for row in select_rows_as_json(pool, &any_parent, &[self.pk]).await? {
+            out.0.insert(pk_key(&row, self.pk), Own::Foreign);
+        }
+        Ok(out)
     }
 
     /// `true` when every submitted value equals the stored one, read
@@ -1178,6 +1180,47 @@ impl InlineTarget {
             crate::forms::parse_form_value(f, Some(&stored)).is_ok_and(|v| v == *submitted)
         })
     }
+}
+
+/// A child PK's stored row as [`InlineTarget::fetch_own_many`] read it.
+enum Own {
+    Row(serde_json::Value),
+    /// Under another parent, or hidden by the `view` hook.
+    Foreign,
+}
+
+/// Prefetched child rows keyed by PK text; an absent key is a gone row.
+struct OwnRows(HashMap<String, Own>);
+
+impl OwnRows {
+    /// The child row under this parent; `None` when no row has this PK.
+    ///
+    /// # Errors
+    /// [`AdminError::RowNotFound`] when the PK belongs to another parent
+    /// or the `view` hook refuses the row.
+    fn get(
+        &self,
+        child: &'static ModelSchema,
+        pk: &SqlValue,
+        raw_pk: &str,
+    ) -> Result<Option<serde_json::Value>, AdminError> {
+        match self.0.get(&pk.to_display_string()) {
+            Some(Own::Row(row)) => Ok(Some(row.clone())),
+            Some(Own::Foreign) => Err(AdminError::RowNotFound {
+                table: child.table.to_owned(),
+                pk: raw_pk.to_owned(),
+            }),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A fetched row's PK as [`SqlValue::to_display_string`] spells it.
+fn pk_key(row: &serde_json::Value, pk: &FieldSchema) -> String {
+    row.get(pk.name)
+        .or_else(|| row.get(pk.column))
+        .map(stringify_pk)
+        .unwrap_or_default()
 }
 
 /// Why [`plan_post`] refused the inline rows.
@@ -1490,6 +1533,21 @@ async fn plan_target(
         inserts: Vec::new(),
         deletes_needed: 0,
     };
+    let is_new = |idx: usize, raw_pk: &str| initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n);
+    // Every existing row's stored state in one read, not one per row (#1340).
+    let existing_pks: Vec<SqlValue> = (0..total_forms)
+        .filter_map(|idx| {
+            let row = crate::forms::formset::row_payload(form, table, idx);
+            let raw_pk = row.get(target.pk.name)?;
+            if is_new(idx, raw_pk) {
+                return None;
+            }
+            crate::forms::parse_pk_string(target.pk, raw_pk).ok()
+        })
+        .collect();
+    let own = target
+        .fetch_own_many(&state.pool, parts, existing_pks)
+        .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
     for idx in 0..total_forms {
@@ -1499,7 +1557,7 @@ async fn plan_target(
             .get("DELETE")
             .is_some_and(|s| s == "on" || s == "true" || s == "1");
 
-        if initial.map_or(raw_pk.trim().is_empty(), |n| idx >= n) {
+        if is_new(idx, &raw_pk) {
             // Blank extra rows stay blank.
             let has_content = target
                 .writable
@@ -1570,7 +1628,7 @@ async fn plan_target(
             if !deleted.insert(pk.to_display_string()) {
                 continue;
             }
-            let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
+            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
                 continue;
             };
             if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
@@ -1607,7 +1665,7 @@ async fn plan_target(
         if values.is_empty() {
             continue;
         }
-        let Some(before) = target.fetch_own(&state.pool, parts, &pk, &raw_pk).await? else {
+        let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
             return Err(InlinePlanError::Rejected(format!(
                 "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
             )));

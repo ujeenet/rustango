@@ -1,5 +1,5 @@
 //! ViewSet and template views answer FK / NOT NULL / CHECK refusals with
-//! a 409 or 422, never a 500 (#1134).
+//! a 409 or 422, never a 500 (#1134); a bulk create reads back in one select (#1340).
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -156,10 +156,58 @@ async fn a_bad_fk_is_a_form_error(pool: &Pool) {
     }
 }
 
+/// Queries and response of one JSON bulk create.
+async fn bulk_create(pool: &Pool, names: &[&str]) -> (StatusCode, String, usize) {
+    use rustango::test_assertions::QueryCounter;
+    let body = serde_json::to_string(
+        &names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    QueryCounter::scope(async {
+        let resp = app(pool)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/authors")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        (status, text, QueryCounter::current())
+    })
+    .await
+}
+
+/// A bulk create reads its rows back in one select, in order (#1340).
+async fn bulk_create_reads_back_in_one_select(pool: &Pool) {
+    let (s1, _, one) = bulk_create(pool, &["a"]).await;
+    let (s5, body, five) = bulk_create(pool, &["b", "c", "d", "e", "f"]).await;
+    assert_eq!((s1, s5), (StatusCode::CREATED, StatusCode::CREATED), "{body}");
+    let names: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(&body)
+        .expect("JSON array")
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(names, ["b", "c", "d", "e", "f"]);
+    // Only the four extra INSERTs may add queries.
+    assert_eq!(five - one, 4, "read-back scales with the rows");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         deleting_a_referenced_row_is_a_409,
         a_bad_fk_is_a_form_error,
+        bulk_create_reads_back_in_one_select,
     ],
 }
