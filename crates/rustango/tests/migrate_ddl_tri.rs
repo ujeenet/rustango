@@ -391,9 +391,72 @@ async fn a_column_can_be_renamed(pool: &Pool) {
         .unwrap_or_else(|e| panic!("the renamed column should exist on {}: {e}", d.name()));
 }
 
+/// MySQL's 3072-byte key cap, checked against the server: the widest
+/// junction the renderer allows is created, one char more gets 1071.
+async fn mysql_junction_key_limit_matches_the_server(pool: &Pool) {
+    if pool.dialect().name() != "mysql" {
+        return;
+    }
+    let snap = |len: u32| -> SchemaSnapshot {
+        let table = |name: &str| {
+            serde_json::json!({ "name": name, "model": name, "fields": [
+                { "name": "id", "column": "id", "ty": "string", "nullable": false,
+                  "primary_key": true, "max_length": len }] })
+        };
+        serde_json::from_value(serde_json::json!({ "tables": [
+            table("dc_tri_jpost"),
+            table("dc_tri_jtag"),
+        ] }))
+        .unwrap()
+    };
+    let changes = [
+        SchemaChange::CreateTable("dc_tri_jpost".into()),
+        SchemaChange::CreateTable("dc_tri_jtag".into()),
+        SchemaChange::CreateM2MTable {
+            through: "dc_tri_jpost_tags".into(),
+            src_table: "dc_tri_jpost".into(),
+            src_col: "post_id".into(),
+            dst_table: "dc_tri_jtag".into(),
+            dst_col: "tag_id".into(),
+        },
+    ];
+    let drop_all = || async {
+        for t in ["dc_tri_jpost_tags", "dc_tri_jpost", "dc_tri_jtag"] {
+            rustango::testkit::matrix::drop_table(pool, t).await;
+        }
+    };
+    drop_all().await;
+    let err = render_changes_split_with_dialect(&changes, &snap(385), pool.dialect())
+        .expect_err("385 + 385 chars is over 3072 bytes");
+    assert!(err.contains("3072"), "{err}");
+    let b = render_changes_split_with_dialect(&changes, &snap(384), pool.dialect())
+        .expect("384 + 384 chars is exactly 3072 bytes");
+    let junction = b
+        .immediate
+        .iter()
+        .find(|s| s.contains("dc_tri_jpost_tags"))
+        .expect("junction DDL")
+        .clone();
+    run(pool, &b.immediate).await;
+    run(pool, &b.deferred_fks).await;
+    drop_all().await;
+    // One char wider: the server itself refuses the key.
+    let wider = junction.replacen("VARCHAR(384)", "VARCHAR(385)", 1);
+    assert_ne!(wider, junction, "{junction}");
+    let e = raw_execute_pool(pool, &wider, Vec::new())
+        .await
+        .expect_err("MySQL took a key over 3072 bytes");
+    assert!(
+        e.to_string().contains("1071") || e.to_string().contains("too long"),
+        "{e}"
+    );
+    drop_all().await;
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        mysql_junction_key_limit_matches_the_server,
         check_constraint_can_be_added_and_dropped,
         composite_fk_can_be_added_and_dropped,
         a_table_can_be_renamed,

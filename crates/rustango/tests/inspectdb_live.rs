@@ -143,6 +143,51 @@ async fn inspectdb_emits_models_for_fixture_tables() {
     );
 }
 
+/// PG's information_schema hides constraints from a SELECT-only role;
+/// the pk must still be found (dumpdata pages by it).
+#[tokio::test]
+async fn inspectdb_finds_the_pk_as_a_select_only_role() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    fresh_fixture(&pool).await;
+    for sql in [
+        "DROP OWNED BY rustango_ro_pk",
+        "DROP ROLE IF EXISTS rustango_ro_pk",
+    ] {
+        let _ = sqlx::query(sql).execute(&pool).await;
+    }
+    for sql in [
+        "CREATE ROLE rustango_ro_pk LOGIN PASSWORD 'ro'",
+        "GRANT SELECT ON inspectdb_author TO rustango_ro_pk",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let host = url.rsplit_once('@').map_or(url.as_str(), |(_, h)| h);
+    let ro = rustango::sql::Pool::connect(&format!("postgres://rustango_ro_pk:ro@{host}"))
+        .await
+        .unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &ro,
+        std::path::Path::new("/tmp/_inspectdb_unused"),
+        vec![
+            "inspectdb".into(),
+            "--table".into(),
+            "inspectdb_author".into(),
+        ],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb as a read-only role");
+    ro.close().await;
+    for sql in ["DROP OWNED BY rustango_ro_pk", "DROP ROLE rustango_ro_pk"] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let out = String::from_utf8(buf).unwrap();
+    assert!(out.contains("primary_key"), "pk not found: {out}");
+}
+
 /// inspectdb on the FK-bearing table emits `fk = "..."` on the
 /// FK column + maps uuid + jsonb correctly.
 #[tokio::test]

@@ -162,7 +162,7 @@ Entries of each model now come sorted by pk; the JSON is otherwise unchanged.
 
 ### Tenancy `dumpdata` / `loaddata` are scoped (#1424)
 
-In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry.
+In a tenancy project they cover registry models only; pass `--tenant <slug>` for a tenant's models. A fixture entry for a model of the other scope is refused, not written to the registry. A PG schema-mode tenant missing one of the tables refuses the whole verb; migrate it first.
 
 ### M2M junction DDL follows the target pk (#1404)
 

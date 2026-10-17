@@ -255,8 +255,7 @@ async fn dry_run(pool: &Pool, dir: &Path) -> String {
     String::from_utf8(out).unwrap()
 }
 
-/// rel-0609 correctness-002 — a table a pending project migration changes is
-/// not previewed from today's catalog, and the dry run writes nothing.
+/// A table a pending project migration changes is not previewed from today's catalog, and the dry run writes nothing.
 async fn dry_run_defers_a_table_pending_migrations_change(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
     let Some((pool, _, _db)) = fresh(backend, tmp.path(), "dryadd").await else {
@@ -295,7 +294,7 @@ async fn dry_run_defers_a_table_pending_migrations_change(backend: Backend) {
     assert!(has_column(&pool, table, column).await);
 }
 
-/// rel-0609 correctness-002 — the dry run shows the NOT NULL refusal
+/// The dry run shows the NOT NULL refusal
 /// `migrate` hits on a table with rows, not an ADD COLUMN it never runs.
 async fn dry_run_shows_the_not_null_refusal(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();

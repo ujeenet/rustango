@@ -190,14 +190,36 @@ fn mysql_wraps_dml_in_subquery_only_when_it_reads_the_target() {
     // Depth 1: the subquery's own FROM.
     let (n, sql) = wraps(in_subquery("id", own()));
     assert_eq!(n, 1, "{sql}");
-    // Depth 2 through a nested IN: both levels read the target.
+    // Depth 2 through a nested IN: the wrapped inner hides its read.
     let nested = Book::objects()
         .where_in_subquery("author_id", own())
         .values_list_flat("author_id")
         .compile()
         .unwrap();
     let (n, sql) = wraps(in_subquery("id", nested));
-    assert_eq!(n, 2, "{sql}");
+    assert_eq!(n, 1, "{sql}");
+    // Correlated outer over Book: wrapping it too re-runs it per row.
+    let correlated_nested = Book::objects()
+        .where_(Book::author_id.eq_expr(outer_ref("id")))
+        .where_in_subquery("author_id", own())
+        .values_list_flat("author_id")
+        .compile()
+        .unwrap();
+    let (n, sql) = wraps(in_subquery("id", correlated_nested));
+    assert_eq!(n, 1, "{sql}");
+    // Outer over the target holding an IN over Book: the outer is wrapped.
+    let books = Book::objects()
+        .values_list_flat("author_id")
+        .compile()
+        .unwrap();
+    let reverse = Author::objects()
+        .where_in_subquery("id", books)
+        .values_list_flat("id")
+        .compile()
+        .unwrap();
+    let (n, sql) = wraps(in_subquery("id", reverse));
+    assert_eq!(n, 1, "{sql}");
+    assert!(sql.ends_with(") AS `_rustango_in`)"), "{sql}");
     // Depth 2 through an EXISTS.
     let via_exists = Book::objects()
         .where_exists(

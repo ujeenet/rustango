@@ -615,6 +615,90 @@ async fn data_verbs_stay_in_their_tenant(pool: &Pool) {
     assert!(b.contains("carol") && b.contains("bob"), "{b}");
     let a = dump(Some("mt-a"), "User").await.expect("dump mt-a");
     assert!(!a.contains("carol"), "the load reached another tenant: {a}");
+
+    // No --model: only that side's models. Unmanaged tables (TOTP and the
+    // like) are made on first use, so they are left out.
+    let full = |tenant: Option<&'static str>| {
+        let mut args = vec!["dumpdata", "--indent", "0"];
+        args.extend(tenant.map(|s| ["--tenant", s]).into_iter().flatten());
+        let scope = match tenant {
+            Some(_) => rustango::core::ModelScope::Tenant,
+            None => rustango::core::ModelScope::Registry,
+        };
+        for m in rustango::migrate::registered_models() {
+            if !m.managed && m.scope == scope {
+                args.extend(["--exclude", m.name]);
+            }
+        }
+        let env = &env;
+        let dir = dir.clone();
+        async move { env.run_out(&dir, &args).await }
+    };
+    let all = full(Some("mt-a")).await.expect("full tenant dump");
+    assert!(all.contains("alice"), "{all}");
+    assert!(!all.contains("mt-b") && !all.contains("bob"), "{all}");
+    let reg = full(None).await.expect("full registry dump");
+    assert!(reg.contains("mt-b") && !reg.contains("alice"), "{reg}");
+}
+
+/// PG schema mode: a table missing from the tenant schema is refused, not
+/// read from or written to `public`.
+async fn schema_mode_data_verbs_skip_public(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    if env.backend() != BackendKind::Postgres {
+        return;
+    }
+    let dir = env.dir("migrations");
+    for tag in ["a", "b"] {
+        let opts = env.tenant_opts(tag).await;
+        env.create(&dir, &format!("mt-{tag}"), opts)
+            .await
+            .expect("tenant");
+    }
+    let user = [
+        "create-user",
+        "mt-b",
+        "bob",
+        "--skip-validation",
+        "--password",
+        "pw",
+    ];
+    env.run(&dir, &user).await.expect("user");
+    let b = env
+        .run_out(
+            &dir,
+            &[
+                "dumpdata", "--tenant", "mt-b", "--model", "User", "--indent", "0",
+            ],
+        )
+        .await
+        .expect("dump mt-b");
+    let fixture = env.tmp.path().join("bob.json");
+    std::fs::write(&fixture, b.trim()).unwrap();
+    rustango::sql::raw_execute_pool(
+        &env.registry,
+        "DROP TABLE mt_a.rustango_users CASCADE",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    for args in [
+        &["dumpdata", "--tenant", "mt-a", "--model", "User"][..],
+        &["dumpdata", "--tenant", "mt-a"][..],
+        &["loaddata", fixture.to_str().unwrap(), "--tenant", "mt-a"][..],
+    ] {
+        let err = env
+            .run(&dir, args)
+            .await
+            .expect_err("fell through to public");
+        assert!(err.to_string().contains("mt_a"), "{args:?}: {err}");
+    }
+    let public: Vec<rustango::tenancy::auth::User> = rustango::tenancy::auth::User::objects()
+        .fetch(&env.registry)
+        .await
+        .unwrap();
+    assert!(public.is_empty(), "loaddata wrote to public");
 }
 
 tri_dialect_test! {
@@ -622,6 +706,7 @@ tri_dialect_test! {
     sqlite: file,
     scenarios: [
         data_verbs_stay_in_their_tenant,
+        schema_mode_data_verbs_skip_public,
         create_tenant_returns_a_failed_migration,
         create_tenant_if_missing_finishes_a_failed_create,
         create_tenant_if_missing_leaves_a_suspended_tenant,

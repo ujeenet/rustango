@@ -289,7 +289,7 @@ async fn assert_no_passkey_admin(router: &axum::Router) {
 }
 
 /// Each bootstrap table's `--dry-run` DDL creates it, and `migrate` then
-/// takes the table as it is (rel-0609 tests-005).
+/// takes the table as it is.
 async fn bootstrap_previews_create_their_tables(backend: Backend) {
     let tmp = tempfile::tempdir().unwrap();
     let Some((pool, _, _db)) = fresh(backend, tmp.path(), "boot").await else {

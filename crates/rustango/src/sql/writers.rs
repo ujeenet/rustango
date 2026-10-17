@@ -4046,8 +4046,10 @@ pub(super) fn write_where_expr(
             let start = b.sql.len();
             write_select(b, subquery)?;
             let reads_target = b.read_dml_target;
-            b.read_dml_target |= outer_read;
-            if (limited || reads_target) && b.d.in_subquery_limit_needs_derived_table() {
+            let wrap = (limited || reads_target) && b.d.in_subquery_limit_needs_derived_table();
+            // A materialized derived table hides its read from the enclosing query.
+            b.read_dml_target = outer_read || (reads_target && !wrap);
+            if wrap {
                 b.sql.insert_str(start, "SELECT * FROM (");
                 b.sql.push_str(") AS ");
                 b.write_ident("_rustango_in");

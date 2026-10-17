@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.60.9] — 2026-10-18
+## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
 
@@ -14,11 +14,11 @@ The preview now includes the system step `migrate` would generate from changed f
 
 ### Fixed — tenancy `dumpdata` / `loaddata` take `--tenant <slug>` (#1424)
 
-With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry.
+With `--tenant` they run on that tenant's pool over tenant models; without it, on the registry over registry models. They used to send every model to the registry. On a PostgreSQL schema-mode tenant, a table missing from the tenant's schema is refused instead of read from or written to `public`.
 
 ### Performance — `dumpdata` streams rows and M2M links by page (#1399)
 
-Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before.
+Rows are read 500 at a time in pk order, with only those rows' junction links, and written as they come; a dump no longer holds a whole table or junction in memory. A table whose marked pk is not its whole key (an inspectdb composite key, a view) is read in one ordered select, as before. PostgreSQL reads the pk from `pg_catalog`, so a SELECT-only role (and `inspectdb` run by one) sees it too.
 
 ### Fixed — re-running the bootstrap DDL logs no ERROR on PostgreSQL (#1406)
 
@@ -70,15 +70,15 @@ It used to bind to the head branch, so the branch matched the wrong rows or fail
 
 The subquery is now wrapped in a derived table inside any UPDATE/DELETE on MySQL, so it no longer fails with error 1093.
 
-### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target (rel-0609)
+### Performance — MySQL wraps a write's `IN (subquery)` only when it reads the target
 
-A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows).
+A correlated subquery over another table runs as a plain `IN` again instead of a derived table rebuilt per row (240x slower on 50k rows). Nested `IN`s wrap only the level that reads the target.
 
 ### Fixed — deactivating a tenant user in the admin ends their sessions (#1412)
 
 Unticking `active` on a `rustango_users` row stamps `sessions_revoked_at`, as for operators, so cookies and JWT refresh tokens stop working at once and stay dead after a reactivation.
 
-## [0.60.8] — 2026-10-17
+## [0.60.8] — 2026-10-16
 
 **Breaking:** `Dialect::write_conflict_clause` takes the bound column list; `InsertQuery`/`BulkInsertQuery` gain a `generated` field (both `#[non_exhaustive]`). See UPGRADING.
 
