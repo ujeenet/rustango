@@ -121,6 +121,17 @@ mod scenarios {
         }
     }
 
+    /// `filter_op(.., Op::JsonHasKey, key)` takes a text key on a JSON column (#1435).
+    #[allow(dead_code)] // SQLite has no JSON key operators
+    pub async fn check_filter_op_has_key(pool: &Pool) {
+        let rows: Vec<Doc> = Doc::objects()
+            .filter_op("data", Op::JsonHasKey, "items")
+            .fetch(pool)
+            .await
+            .expect("filter_op JsonHasKey");
+        assert_eq!(ids(rows), vec![1, 2, 3]);
+    }
+
     /// JSON array length — docs with at least two tags.
     pub async fn check_json_array_length(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
@@ -323,6 +334,7 @@ mod pg_live {
     pg_case!(check_dates_truncation);
     pg_case!(check_datetimes_truncation);
     pg_case!(check_has_key_is_literal);
+    pg_case!(check_filter_op_has_key);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -432,4 +444,5 @@ mod mysql_live {
     mysql_case!(check_dates_truncation);
     mysql_case!(check_datetimes_truncation);
     mysql_case!(check_has_key_is_literal);
+    mysql_case!(check_filter_op_has_key);
 }
