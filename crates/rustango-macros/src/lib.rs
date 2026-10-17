@@ -2490,15 +2490,15 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // Immutable post-insert: skip from UPDATE entirely.
         } else if info.auto_now {
             // `auto_now` columns: bind `chrono::Utc::now()` on every
-            // UPDATE so the column is always overridden with the
-            // wall-clock at write time, regardless of what value the
-            // user left in the struct field.
+            // UPDATE, and write it back so `self` matches the row (#1173).
             out.update_assignments.push(quote! {
                 #root::core::Assignment::new(
                     #column,
-                    ::core::convert::Into::<#root::core::SqlValue>::into(
-                        #root::__chrono::Utc::now()
-                    ),
+                    {
+                        let _now = #root::__chrono::Utc::now();
+                        self.#ident = #root::sql::Auto::Set(_now);
+                        ::core::convert::Into::<#root::core::SqlValue>::into(_now)
+                    },
                 )
             });
             out.upsert_update_columns.push(quote!(#column));
@@ -3583,6 +3583,8 @@ fn inherent_impl_tokens(
                                 run: TokenStream2|
      -> TokenStream2 {
         let assignments = &fields.update_assignments;
+        // Pushed in step with `update_assignments`: one column each.
+        let assignment_cols = &fields.upsert_update_columns;
         quote! {
             /// Save (UPDATE) only the listed Rust-side fields,
             /// leaving every other column untouched. Issue #66.
@@ -3645,14 +3647,15 @@ fn inherent_impl_tokens(
                         }
                     }
                 }
-                // Build the full assignment vec, then keep only the
-                // assignments whose column is in `_wanted_cols`.
-                let _full: ::std::vec::Vec<#root::core::Assignment> =
-                    ::std::vec![ #( #assignments ),* ];
-                let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
-                    .into_iter()
-                    .filter(|a| _wanted_cols.contains(a.column))
-                    .collect();
+                // Build only the wanted assignments, so an unnamed
+                // `auto_now` field is not stamped (#1173).
+                let mut _filtered: ::std::vec::Vec<#root::core::Assignment> =
+                    ::std::vec::Vec::with_capacity(_wanted_cols.len());
+                #(
+                    if _wanted_cols.contains(#assignment_cols) {
+                        _filtered.push(#assignments);
+                    }
+                )*
                 if _filtered.is_empty() {
                     // All field names valid, but they all map to
                     // non-assignable slots (PK column, computed/

@@ -158,6 +158,10 @@ A key absent from a fixture entry now takes the column default instead of NULL. 
 
 `has_key("a.b")` now looks for the key `a.b`, as on PostgreSQL, not for `b` under `a`; `*` no longer matches any key.
 
+### `auto_now` fields change in memory on save (#1173)
+
+After `save` / `save_pool` / `save_on` / `save_tx` the `auto_now` field holds the stored timestamp, not the value it had before.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)
