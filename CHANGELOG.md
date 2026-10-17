@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — an untouched admin edit keeps what was stored (#1273)
+
+The edit form shows PG array, range, hstore, vector and geometry values, a nullable JSON `{}`, and a stored value outside `choices`; a field submitted as it was shown is not rewritten. The dynamic JSON rows (viewset, admin) now carry those PG values instead of `null`.
+
 ## [0.60.9] — 2026-10-16
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

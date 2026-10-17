@@ -2121,8 +2121,9 @@ fn default_locked_flags(
     }
 }
 
-/// On update: a timestamp the form echoed back (at the input's second
-/// precision) is not rewritten, and `auto_now` columns are restamped.
+/// On update: a value the form echoed back as it was shown is not
+/// rewritten, so a lossy prefill cannot change it (#1273); `auto_now`
+/// columns are restamped.
 fn keep_unchanged(
     model: &'static crate::core::ModelSchema,
     form: &HashMap<String, String>,
@@ -2131,12 +2132,15 @@ fn keep_unchanged(
 ) {
     for f in model.scalar_fields() {
         let submitted = form.get(f.name).map(String::as_str);
-        let unchanged = f.ty == crate::core::FieldType::DateTime
-            && before.zip(submitted).is_some_and(|(row, sent)| {
-                let shown = render::render_value_for_input_json(row, f);
+        let unchanged = before.zip(submitted).is_some_and(|(row, sent)| {
+            let shown = render::render_value_for_input_json(row, f);
+            // A textarea submits CRLF line breaks.
+            let sent = sent.replace("\r\n", "\n");
+            sent == shown
                 // Browsers may drop a zero seconds part.
-                sent == shown || shown.strip_suffix(":00") == Some(sent)
-            });
+                || (f.ty == crate::core::FieldType::DateTime
+                    && shown.strip_suffix(":00") == Some(sent.as_str()))
+        });
         if unchanged {
             values.retain(|(c, _)| *c != f.column);
         }

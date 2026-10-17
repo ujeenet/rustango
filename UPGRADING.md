@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### Admin edit writes only changed fields (#1273)
+
+A field the form sends back as shown is left out of the UPDATE, so a concurrent change to it is no longer overwritten. Dynamic JSON rows now hold PG array/range/hstore/vector/point values where they held `null`.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)

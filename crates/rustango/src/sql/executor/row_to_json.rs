@@ -67,6 +67,7 @@ fn row_to_json_generic<'r, R>(
     row: &'r R,
     fields: &[&'static crate::core::FieldSchema],
     uuid_cell: fn(&'r R, &str) -> Option<uuid::Uuid>,
+    pg_only: fn(&'r R, &crate::core::FieldSchema) -> serde_json::Value,
 ) -> serde_json::Value
 where
     R: sqlx::Row,
@@ -148,21 +149,12 @@ where
                 .try_get::<chrono::NaiveTime, _>(field.column)
                 .map(|t| json!(t.to_string()))
                 .unwrap_or(Value::Null),
-            // #341 — PG array columns. This cross-backend JSON path is
-            // generic over the row type and has no `Vec<T>: Decode`
-            // bound, so it can't decode the array here; emit null.
-            // (Typed `#[derive(Model)]` fetch decodes arrays via
-            // `Array<T>`; this affects only the dynamic admin/JSON view.)
-            FieldType::Array(_) => Value::Null,
-            // #343 — PG range columns. Same story as arrays: no generic
-            // `Range<T>: Decode` bound on this path; typed fetch decodes.
-            FieldType::Range(_) => Value::Null,
-            // #342 — PG hstore columns; same generic-decode story.
-            FieldType::HStore => Value::Null,
-            // #824 — pgvector columns; typed fetch decodes via `Vector`.
-            FieldType::Vector(_) => Value::Null,
-            // #443 — PostGIS geometry columns; typed fetch decodes via `Point`.
-            FieldType::Geometry(_) => Value::Null,
+            // #341 / #343 / #342 / #824 / #443 — PG-only column types.
+            FieldType::Array(_)
+            | FieldType::Range(_)
+            | FieldType::HStore
+            | FieldType::Vector(_)
+            | FieldType::Geometry(_) => pg_only(row, field),
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -175,9 +167,62 @@ pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields, |row, col| {
-        sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok()
-    })
+    row_to_json_generic(
+        row,
+        fields,
+        |row, col| sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok(),
+        pg_only_cell,
+    )
+}
+
+/// A PG-only column as the JSON the admin form parser reads back (#1273):
+/// arrays and vectors as arrays, hstore and points as objects, a range as
+/// its literal.
+#[cfg(feature = "postgres")]
+fn pg_only_cell(
+    row: &sqlx::postgres::PgRow,
+    field: &crate::core::FieldSchema,
+) -> serde_json::Value {
+    use crate::core::{ArrayElem, FieldType, RangeElem, SqlValue};
+    use serde_json::Value;
+    use sqlx::Row as _;
+    fn json<T: serde::Serialize, E>(r: Result<T, E>) -> Value {
+        r.ok()
+            .and_then(|v| serde_json::to_value(v).ok())
+            .unwrap_or(Value::Null)
+    }
+    fn literal<T, E>(r: Result<crate::sql::Range<T>, E>) -> Value
+    where
+        SqlValue: From<crate::sql::Range<T>>,
+    {
+        match r.map(SqlValue::from) {
+            Ok(SqlValue::RangeLiteral(s)) => Value::String(s),
+            _ => Value::Null,
+        }
+    }
+    let col = field.column;
+    match field.ty {
+        FieldType::Array(ArrayElem::Text) => json(row.try_get::<Vec<Option<String>>, _>(col)),
+        FieldType::Array(ArrayElem::Int) => json(row.try_get::<Vec<Option<i32>>, _>(col)),
+        FieldType::Array(ArrayElem::BigInt) => json(row.try_get::<Vec<Option<i64>>, _>(col)),
+        FieldType::Range(RangeElem::Int) => literal(row.try_get::<crate::sql::Range<i32>, _>(col)),
+        FieldType::Range(RangeElem::BigInt) => {
+            literal(row.try_get::<crate::sql::Range<i64>, _>(col))
+        }
+        FieldType::Range(RangeElem::Numeric) => {
+            literal(row.try_get::<crate::sql::Range<rust_decimal::Decimal>, _>(col))
+        }
+        FieldType::Range(RangeElem::Date) => {
+            literal(row.try_get::<crate::sql::Range<chrono::NaiveDate>, _>(col))
+        }
+        FieldType::Range(RangeElem::DateTime) => {
+            literal(row.try_get::<crate::sql::Range<chrono::DateTime<chrono::Utc>>, _>(col))
+        }
+        FieldType::HStore => json(row.try_get::<crate::sql::HStore, _>(col)),
+        FieldType::Vector(_) => json(row.try_get::<crate::sql::Vector, _>(col)),
+        FieldType::Geometry(_) => json(row.try_get::<crate::sql::Point, _>(col)),
+        _ => Value::Null,
+    }
 }
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
@@ -191,9 +236,13 @@ pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_generic(row, fields, |row, col| {
-        crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok()
-    })
+    row_to_json_generic(
+        row,
+        fields,
+        |row, col| crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok(),
+        // PG-only types never live on MySQL.
+        |_, _| serde_json::Value::Null,
+    )
 }
 
 /// SQLite counterpart of [`row_to_json`]. SQLite's storage is more

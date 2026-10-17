@@ -1496,7 +1496,12 @@ pub(crate) async fn update_one_with_row_diff_tx(
     emit: DiffEmit,
 ) -> Result<RowDiffWrite, crate::sql::ExecError> {
     query.validate()?;
-    let stmt = pool.dialect().compile_update(query)?;
+    // Nothing to SET (an untouched edit): only the locked read runs.
+    let stmt = if query.set.is_empty() {
+        None
+    } else {
+        Some(pool.dialect().compile_update(query)?)
+    };
     before.lock_mode = Some(crate::core::LockMode {
         silent_on_sqlite: true,
         ..crate::core::LockMode::default()
@@ -1505,7 +1510,10 @@ pub(crate) async fn update_one_with_row_diff_tx(
         return Ok(RowDiffWrite::Gone);
     };
     let entry = entry_of(&row);
-    let affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?;
+    let affected = match stmt {
+        Some(stmt) => crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params).await?,
+        None => 0,
+    };
     let entry = entry.filter(|_| affected > 0);
     if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
         emit_one_tx(tx, Via::Pool(pool), entry).await?;
