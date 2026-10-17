@@ -383,6 +383,31 @@ async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
     assert_eq!(rows, [(1, 2)]);
 }
 
+/// A UNION or `distinct_on` parent still gets its count column (#1437).
+async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
+    use rustango::sql::annotate_count_children_on;
+    let counts = |rows: Vec<(Author, i64)>| {
+        let mut v: Vec<(i64, i64)> = rows.into_iter().map(|(a, n)| (a.id, n)).collect();
+        v.sort_unstable();
+        v
+    };
+    let union = Author::objects()
+        .filter("id", 1_i64)
+        .union(Author::objects().filter("id", 2_i64));
+    let rows = annotate_count_children_on::<Author, _>(union, "pc_book", "author", pool)
+        .await
+        .expect("union parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+
+    let distinct = Author::objects()
+        .distinct_on(&["name"])
+        .order_by(&[("name", false)]);
+    let rows = annotate_count_children_on::<Author, _>(distinct, "pc_book", "author", pool)
+        .await
+        .expect("distinct_on parent");
+    assert_eq!(counts(rows), [(1, 2), (2, 1)]);
+}
+
 /// A one-connection pool on the same database, so a release is visible.
 async fn one_conn(pool: &Pool) -> Pool {
     match pool {
@@ -493,5 +518,6 @@ tri_dialect_test!(
         former_pg_only_on_methods_run_on_a_held_conn,
         close_on_drop_keeps_session_state_out_of_the_pool,
         annotate_count_children_honours_where_and_child_pk,
+        annotate_count_children_on_union_and_distinct_on,
     ]
 );

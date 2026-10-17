@@ -20,6 +20,10 @@ MySQL / SQLite path keys are quoted (`$."2fa"`), so `json_path(F("data"), &["2fa
 
 Tables made on first use, such as `rustango_admin_totp`, failed a full dump (and every `--tenant` dump) until then; a missing one now has no rows.
 
+### Fixed — `annotate_count_children` on a UNION or `distinct_on` parent (#1437)
+
+A set-operation parent failed with a column-count mismatch; off PostgreSQL a `distinct_on` parent lost the count column.
+
 ### Fixed — `annotate_count_children` keeps the parent queryset (#1415, #1288)
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.

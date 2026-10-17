@@ -556,6 +556,10 @@ fn write_distinct_on_via_window(
             b.write_ident(field.column);
         }
     }
+    // Counted over the survivors, which `sub` exposes (#1437).
+    if let Some(child) = b.child_count.take() {
+        write_child_count(b, "sub", child);
+    }
     b.sql.push_str(" FROM (");
 
     // Inner SELECT: the same projection plus __rn.
@@ -832,7 +836,7 @@ fn write_select_body_qualified(
         b.write_ident("__rustango_total");
     }
     if let Some(child) = b.child_count.take() {
-        write_child_count(b, scope, child);
+        write_child_count(b, scope.name, child);
     }
 
     b.sql.push_str(" FROM ");
@@ -4991,8 +4995,35 @@ pub(crate) fn compile_select_with_child_count(
     child: ChildCount,
 ) -> Result<CompiledStatement, SqlError> {
     let mut b = Sql::new(d);
-    b.child_count = Some(child);
-    write_select(&mut b, select)?;
+    if select.compound.is_empty() {
+        b.child_count = Some(child);
+        write_select(&mut b, select)?;
+        return Ok(b.finish());
+    }
+    // A set operation counts over its merged rows, or only the head would
+    // carry the column (#1437).
+    const PARENT: &str = "__rustango_parent";
+    let merged = SelectQuery {
+        compound_order_by: Vec::new(),
+        compound_limit: None,
+        compound_offset: None,
+        lock_mode: None,
+        ..select.clone()
+    };
+    b.sql.push_str("SELECT ");
+    b.write_ident(PARENT);
+    b.sql.push_str(".*");
+    write_child_count(&mut b, PARENT, child);
+    b.sql.push_str(" FROM (");
+    write_select(&mut b, &merged)?;
+    b.sql.push_str(") AS ");
+    b.write_ident(PARENT);
+    write_order_limit_offset(
+        &mut b,
+        &select.compound_order_by,
+        select.compound_limit,
+        select.compound_offset,
+    )?;
     Ok(b.finish())
 }
 
@@ -5006,7 +5037,7 @@ pub(crate) struct ChildCount {
 
 /// `, (SELECT COUNT(*) FROM child AS c WHERE c.fk = parent.pk) AS
 /// __annotated_count`. The alias keeps a self-referencing child apart.
-fn write_child_count(b: &mut Sql<'_>, parent: Scope, child: ChildCount) {
+fn write_child_count(b: &mut Sql<'_>, parent: &str, child: ChildCount) {
     const CHILD: &str = "__rustango_child";
     b.sql.push_str(", (SELECT COUNT(*) FROM ");
     b.write_ident(child.child_table);
@@ -5017,7 +5048,7 @@ fn write_child_count(b: &mut Sql<'_>, parent: Scope, child: ChildCount) {
     b.sql.push('.');
     b.write_ident(child.fk_column);
     b.sql.push_str(" = ");
-    b.write_ident(parent.name);
+    b.write_ident(parent);
     b.sql.push('.');
     b.write_ident(child.parent_pk);
     b.sql.push_str(") AS ");
