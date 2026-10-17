@@ -945,8 +945,9 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let bootstrap = shared_bootstrap()
         .into_iter()
         .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
+    let created = super::chains::pending_creates(pool, &all, system.scope, dir).await?;
     for b in bootstrap {
-        if runner::try_table_exists_here(pool, b.table).await? {
+        if created.contains(b.table) || runner::try_table_exists_here(pool, b.table).await? {
             continue;
         }
         let ddl = (b.ddl)(pool.dialect()).map_err(MigrateError::Validation)?;
@@ -7775,14 +7776,15 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("migrations");
         std::fs::create_dir_all(&dir).unwrap();
-        let creates_audit = |out: &str| {
+        // No chain creates translations, so only the bootstrap shows it.
+        let creates_translations = |out: &str| {
             out.lines()
-                .any(|l| l.starts_with("CREATE TABLE") && l.contains("rustango_audit_log"))
+                .any(|l| l.starts_with("CREATE TABLE") && l.contains("rustango_translations"))
         };
         let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
             .await
             .unwrap();
-        assert!(creates_audit(&out), "{out}");
+        assert!(creates_translations(&out), "{out}");
         // A preview creates nothing: no table, no ledger.
         let tables: Vec<(i64,)> =
             crate::sql::raw_query_pool("SELECT COUNT(*) FROM sqlite_master", Vec::new(), &pool)
@@ -7795,7 +7797,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let out = manage_out(&pool, &dir, &["migrate", "--dry-run"])
             .await
             .unwrap();
-        assert!(!creates_audit(&out), "{out}");
+        assert!(!creates_translations(&out), "{out}");
         assert!(out.contains("nothing to migrate"), "{out}");
     }
 

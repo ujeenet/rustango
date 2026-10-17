@@ -515,6 +515,27 @@ pub(crate) enum PreviewLine {
     Note(String),
 }
 
+/// Tables the pending steps of either chain create, so the bootstrap that
+/// runs after them finds them there. `steps` as in [`converge_preview`].
+///
+/// # Errors
+/// An unreadable migrations dir, or a failed ledger read.
+pub(crate) async fn pending_creates(
+    pool: &Pool,
+    steps: &[Migration],
+    scope: MigrationScope,
+    project_dir: &Path,
+) -> Result<BTreeSet<String>, MigrateError> {
+    let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
+    let system_applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
+    let project = file::list_dir(project_dir)?;
+    let project = project.iter().filter(|m| !applied.contains(&m.name));
+    let system = steps
+        .iter()
+        .filter(|m| m.scope == scope && !system_applied.contains(&m.name));
+    Ok(project.chain(system).flat_map(created).collect())
+}
+
 /// The SQL `migrate` converges framework tables with after both chains, for
 /// a `--dry-run` (#1411), planned as [`ensure::converge_groups`] plans it.
 /// `steps` is the system chain as `migrate` runs it.
