@@ -31,6 +31,7 @@ pub struct Book {
 async fn seeded(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "pc_book").await;
+    drop_table(pool, "pc_review").await;
     fresh_table::<Author>(pool).await;
     for (id, name) in [(1, "Ada"), (2, "Bob")] {
         Author {
