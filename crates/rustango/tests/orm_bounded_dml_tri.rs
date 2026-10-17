@@ -47,6 +47,8 @@ pub struct Log {
 }
 
 async fn seeded(pool: &Pool) {
+    // A run that panicked mid-scenario leaves `bdml_child`'s FK behind.
+    rustango::testkit::matrix::drop_table(pool, "bdml_child").await;
     rustango::testkit::matrix::fresh_table::<Item>(pool).await;
     for (id, rank) in [(1, 50), (2, 10), (3, 40), (4, 20), (5, 30)] {
         Item {
@@ -377,11 +379,13 @@ async fn nested_in_wraps_once(pool: &Pool) {
     // The target only in a related-field JOIN.
     let joined = Child::objects()
         .filter("item__rank__gt", 35_i64)
-        .values_list_flat("item_id")
+        .values_list_flat("item")
         .compile()
         .unwrap();
     assert_eq!(run(joined, "jn").await, 2);
     assert_eq!(ids_tagged(pool, "jn").await, vec![1, 3]);
+    // Its FK would block the next scenario's fresh `bdml_item`.
+    rustango::testkit::matrix::drop_table(pool, "bdml_child").await;
 }
 
 /// `difference` used to be dropped, so the excluded rows went too (#2452).
