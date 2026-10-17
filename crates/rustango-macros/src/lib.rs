@@ -10487,8 +10487,8 @@ struct FieldAttrs {
     /// `#[rustango(on_delete = "cascade" | "restrict" | "set_null" |
     /// "set_default" | "no_action")]` — what happens to this row when
     /// the row it points at is deleted.
-    /// Only meaningful when `fk` / `o2o` is
-    /// also set; the macro errors at compile time if applied to a
+    /// Only meaningful on a `ForeignKey<T>` field or with `fk` / `o2o`
+    /// set; the macro errors at compile time if applied to a
     /// non-FK field. Threaded into `FieldSchema::fk_on_delete`. The
     /// DDL writer renders `ON DELETE <action>` after the constraint
     /// clause when this is `Some`; `None` falls back to the database
@@ -11312,12 +11312,16 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
-    if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() {
+    if attrs.on_delete.is_some()
+        && attrs.fk.is_none()
+        && attrs.o2o.is_none()
+        && fk_inner.is_none()
+    {
         return Err(syn::Error::new_spanned(
             field,
-            "`#[rustango(on_delete = \"…\")]` requires either `fk = \"<table>\"` \
-             or `o2o = \"<table>\"` on the same field — it has no meaning on a \
-             non-FK column.",
+            "`#[rustango(on_delete = \"…\")]` requires a `ForeignKey<T>` field \
+             or `fk = \"<table>\"` / `o2o = \"<table>\"` on the same field — it \
+             has no meaning on a non-FK column.",
         ));
     }
     let fk_on_delete = match attrs.on_delete.as_deref() {

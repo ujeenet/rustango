@@ -49,6 +49,25 @@ pub struct PostDefault {
     pub author_id: i64,
 }
 
+/// A typed `ForeignKey<T>` takes `on_delete` without `fk = ".."` (#1172).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "fkod_post_typed")]
+#[allow(dead_code)]
+pub struct PostTyped {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(on_delete = "cascade")]
+    pub author: rustango::sql::ForeignKey<Author>,
+}
+
+#[test]
+fn a_typed_foreign_key_carries_on_delete() {
+    let schema = <PostTyped as rustango::core::Model>::SCHEMA;
+    let f = schema.field("author").expect("author field");
+    assert_eq!(f.fk_on_delete, Some(OnDeleteAction::Cascade));
+    assert!(matches!(f.relation, Some(Relation::Fk { to: "fkod_author", .. })));
+}
+
 #[test]
 fn schema_carries_fk_on_delete_action() {
     let cascade = <PostCascade as rustango::core::Model>::SCHEMA;
@@ -193,6 +212,7 @@ fn snapshot_ddl(dialect: &dyn rustango::sql::Dialect) -> Vec<String> {
         <PostCascade as rustango::core::Model>::SCHEMA,
         <PostSetNull as rustango::core::Model>::SCHEMA,
         <PostDefault as rustango::core::Model>::SCHEMA,
+        <PostTyped as rustango::core::Model>::SCHEMA,
     ];
     let current = SchemaSnapshot::from_models(&models);
     let changes = detect_changes(&SchemaSnapshot::default(), &current);
@@ -309,6 +329,10 @@ async fn sqlite_actually_cascades_the_delete() {
         .execute(&pool)
         .await
         .expect("post");
+    sqlx::query("INSERT INTO fkod_post_typed (id, author) VALUES (20, 1)")
+        .execute(&pool)
+        .await
+        .expect("typed post");
 
     sqlx::query("DELETE FROM fkod_author WHERE id = 1")
         .execute(&pool)
@@ -327,6 +351,11 @@ async fn sqlite_actually_cascades_the_delete() {
         "the parent was deleted but the child survived — the constraint reached the \
          database without its ON DELETE action"
     );
+    let typed: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM fkod_post_typed")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(typed.0, 0, "the typed ForeignKey child survived");
 
     let _ = Pool::Sqlite(pool);
 }

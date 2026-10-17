@@ -20,6 +20,10 @@ The key is quoted into the path, so `first-name` or `2fa` no longer fail with er
 
 Every save path sets the field to the timestamp it binds, so a returned row carries the stored `updated_at`; `save_partial` stamps it only when named.
 
+### Fixed — a typed `ForeignKey<T>` takes `on_delete` (#1172)
+
+`#[rustango(on_delete = "cascade")] author: ForeignKey<Author>` now compiles and renders `ON DELETE CASCADE`; before, only a raw `fk = ".."` column could declare an action.
+
 ## [0.60.9] — 2026-10-18
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.
