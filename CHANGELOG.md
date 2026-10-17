@@ -8,6 +8,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 It counts children in a correlated subquery, so a filtered, joined or limited parent queryset no longer fails with GROUP BY before WHERE, and a child pk not named `id` works.
 
+### Fixed — `loaddata` leaves keys a fixture omits to the column default (#1227)
+
+A missing `pk` or field is left out of the INSERT instead of bound as NULL, so PostgreSQL assigns the id and a column default applies.
+
 ## [0.60.9] — 2026-10-18
 
 **Breaking:** with several backend features on, `fetch_paginated_on` / `annotate_count_children_on` need the model's MySQL/SQLite `FromRow`; MySQL `dbshell` refuses unknown URL options. See UPGRADING.

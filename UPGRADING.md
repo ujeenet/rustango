@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+### `loaddata` omits missing fixture keys (#1227)
+
+A key absent from a fixture entry now takes the column default instead of NULL. Write `"field": null` to store NULL.
+
 ## 0.60.9
 
 ### `migrate --dry-run` prints more (#1411)
